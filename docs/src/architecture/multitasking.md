@@ -241,7 +241,10 @@ The arch-neutral half lives in `kernel/core` and is host-proven:
   dispatcher. The two would then resume each other's kernel contexts under the
   wrong page-table root, and the innocent task dies on a fault it never took
   (`plans/OPEN-DEFECTS.md` D44). Every wait loop therefore reads the CPU inside
-  the loop, at each park.
+  the loop, at each park, and `reschedule_current` itself refuses a CPU the
+  installed scheduler hook does not place the caller on, so a remembered id
+  fails closed at the suspend instead of reaching the victim's save area
+  (D1560).
 * **A suspension point is proven to be the task's own.** Before switching in,
   `dispatch_step` checks the saved kernel stack pointer against the task's own
   stack (`KernelStack::carries`, over `KernelStack::usable_bytes`) and fails the

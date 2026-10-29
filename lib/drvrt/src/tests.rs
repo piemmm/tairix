@@ -1489,3 +1489,55 @@ fn map_shared_surfaces_a_kernel_refusal_fail_closed() {
     .unwrap();
     assert_eq!(host.map_shared(), Err(DriverError::Unsupported));
 }
+
+/// Publishing a channel settles the driver's node once the channel is in the
+/// tree, so the device manager stops waiting on it; a refused publication
+/// settles nothing.
+#[test]
+fn publishing_a_channel_settles_the_driver_once_it_is_in_the_tree() {
+    use crate::tree::{publish_channel, TreeCalls};
+    use tairix_abi::HwDeviceClass;
+
+    struct Recorded {
+        calls: std::vec::Vec<&'static str>,
+        emitted: std::vec::Vec<u64>,
+        answer: i64,
+    }
+    impl TreeCalls for Recorded {
+        fn emit(&mut self, node: &tairix_abi::HwNode) -> i64 {
+            self.calls.push("emit");
+            self.emitted.extend(node.channel_endpoint(b"test,channel"));
+            self.answer
+        }
+        fn settle(&mut self) -> i64 {
+            self.calls.push("settle");
+            0
+        }
+    }
+    let recorded = |answer| Recorded {
+        calls: std::vec::Vec::new(),
+        emitted: std::vec::Vec::new(),
+        answer,
+    };
+
+    let mut tree = recorded(7);
+    assert_eq!(
+        publish_channel(&mut tree, HwDeviceClass::Other, b"test,channel", 0x55, &[]),
+        Some(7)
+    );
+    assert_eq!(tree.calls, ["emit", "settle"]);
+    assert_eq!(tree.emitted, [0x55]);
+
+    let mut refused = recorded(-1);
+    assert_eq!(
+        publish_channel(
+            &mut refused,
+            HwDeviceClass::Other,
+            b"test,channel",
+            0x55,
+            &[]
+        ),
+        None
+    );
+    assert_eq!(refused.calls, ["emit"], "nothing to settle for");
+}

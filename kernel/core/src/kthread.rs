@@ -670,13 +670,18 @@ where
 /// then to the caller — only when this task is dispatched again.
 ///
 /// Returns `true` if a kthread was running on `cpu` and was suspended;
-/// `false` if no resume handle is published for `cpu`. A `false` is the
-/// fail-closed signal that the caller was **not** a resumable task — the
-/// pre-dispatch boot flow, a host test, or an out-of-range `cpu`: the
-/// caller then falls back (ordinary syscall return, or a bounded CPU park)
-/// rather than perform an unsound switch.
+/// `false` if no resume handle is published for `cpu`, or the scheduler hook
+/// places the caller on another CPU. A `false` is the fail-closed signal
+/// that the caller was **not** the resumable task running there — the
+/// pre-dispatch boot flow, a host test, an out-of-range `cpu`, or a `cpu`
+/// read before the caller last parked and resumed elsewhere: the caller then
+/// falls back (ordinary syscall return, or a bounded CPU park) rather than
+/// perform an unsound switch.
 #[must_use = "a false return means no user task was suspended; the caller must fall back to an ordinary syscall return"]
 pub fn reschedule_current(cpu: CpuId, action: RescheduleAction) -> bool {
+    if !caller_runs_on(cpu) {
+        return false;
+    }
     let Some(state) = cpu_state::get(cpu) else {
         return false;
     };
@@ -689,13 +694,22 @@ pub fn reschedule_current(cpu: CpuId, action: RescheduleAction) -> bool {
         return false;
     };
     // SAFETY: `dispatch_step` published this handle for the task currently
-    // switched in on this CPU; the call runs from that task's own control
-    // flow, so the control block is live and exclusively owned (the kthread
-    // raw-pointer protocol).
+    // switched in on this CPU, and the caller runs on this CPU (checked
+    // above wherever a scheduler can say), so the call runs from that task's
+    // own control flow and the control block is live and exclusively owned
+    // (the kthread raw-pointer protocol).
     unsafe {
         handle.suspend(to_task_action(action));
     }
     true
+}
+
+/// Whether the caller runs on `cpu`, as far as the installed scheduler hook
+/// can say; with none installed, no task can have moved between CPUs.
+fn caller_runs_on(cpu: CpuId) -> bool {
+    crate::waitq::wait_arch()
+        .and_then(crate::waitq::WaitQueueArch::current_cpu)
+        .is_none_or(|current| current == cpu)
 }
 
 /// The per-kthread control block: everything the dispatcher-side shim and
@@ -2379,6 +2393,25 @@ mod tests {
         let cpu = crate::test_boot::claim_cpu();
         assert!(!reschedule_current(cpu, RescheduleAction::Yield));
         assert!(!reschedule_current(cpu, RescheduleAction::Exit));
+    }
+
+    /// A caller on another CPU cannot suspend the task switched in on `cpu`:
+    /// a CPU id read before the caller last parked may name one it has since
+    /// left, and suspending through it would run that task's dispatcher on
+    /// the caller's core.
+    #[test]
+    fn reschedule_current_refuses_a_cpu_the_caller_is_not_on() {
+        let _ = crate::test_boot::claim_scheduler();
+        let (here, elsewhere) = (crate::test_boot::claim_cpu(), crate::test_boot::claim_cpu());
+        crate::test_boot::run_claim_on(here);
+        crate::test_boot::with_park_probe(
+            elsewhere,
+            |_| unreachable!("suspended the task on another CPU"),
+            |probe| {
+                assert!(!reschedule_current(elsewhere, RescheduleAction::Park));
+                assert_eq!(probe.parks(), 0);
+            },
+        );
     }
 
     #[test]

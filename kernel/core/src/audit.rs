@@ -81,6 +81,7 @@
 
 use tairix_arch_api::fatal;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_sync::OnceCell;
 
 /// Audit event identifiers emitted by `kernel/core`.
 ///
@@ -520,6 +521,59 @@ pub enum AuditEvent {
     ///
     /// Emitted by the in-kernel device wait, in task context.
     IrqWakeLate,
+    /// A request outstanding on a device's `line` has gone `overdue_ms`
+    /// without its completion interrupt, and the wait goes on to its budget.
+    /// `pending`, `active` and `enabled` are the line at its controller and
+    /// `target` the CPU it is routed to, with that CPU's `target_activity`:
+    /// a line pending and enabled while its target idles was raised but never
+    /// delivered, where one not pending was never raised. Each is `null`
+    /// where the controller cannot say.
+    ///
+    /// Emitted by the in-kernel device wait, in task context.
+    IrqCompletionOverdue,
+    /// An operation on a device the kernel drives itself, `device` (`dev`),
+    /// took `elapsed_ms` to answer: an `op` at block `lba` of `bytes`, which
+    /// succeeded when `ok`. Timed on the device side of every cache, so it is
+    /// the device's own time.
+    ///
+    /// Emitted by the in-kernel device meter, in task context.
+    DeviceOperationSlow,
+    /// A contended acquire of the sleeping lock taken at `site` waited
+    /// `waited_ms` for it; `handoff_ms` is how late the task ran once the
+    /// prior holder had handed it the lock, and `from` the site that holder
+    /// took it at (`null` when it was found free rather than handed over).
+    /// A long wait with a prompt handoff is a lock held long; a late handoff
+    /// is a wake or the scheduler. `task` is the task the waiter waited as
+    /// (`null` when no scheduler could park it), `parks` how often it
+    /// parked, `unhanded` how many of those wakes brought no handoff, and
+    /// `unparkable` how often it could not park.
+    ///
+    /// Emitted by the sleeping lock, in task context.
+    LockAcquiredLate,
+    /// The holder of the sleeping lock taken at `site`, `task`, took
+    /// `release_ms` to hand it over to a waiter or free it.
+    ///
+    /// Emitted by the sleeping lock as the holder releases it, in task
+    /// context.
+    LockReleasedLate,
+    /// A kernel body yielded its CPU at `site` to let owed work run and was
+    /// resumed `late_ms` later — runnable, and not run.
+    ///
+    /// Emitted at the in-kernel preemption boundary, in task context.
+    KernelYieldLate,
+    /// `cpu` ran kernel code for `stalled_ms` without returning to its
+    /// dispatcher, holding every wake and housekeeping step that waits for
+    /// it; long before a soft lockup, and once per episode. A debug image
+    /// adds the sampled code's detail record.
+    ///
+    /// Emitted by the watchdog's cadence sample, in interrupt context.
+    CpuHeldInKernel,
+    /// A reschedule IPI raised on `cpu` went `pending_ms` without `cpu`
+    /// taking it, as `observer`'s scan found it; `activity` is what `cpu` was
+    /// doing. A task woken onto `cpu` waits for its next interrupt.
+    ///
+    /// Emitted by the watchdog's cross-CPU scan, in interrupt context.
+    IpiUndelivered,
     /// A bound IRQ line fired past its rate budget and was **quarantined**
     /// by the runaway-interrupt safety net (`kernel/irq`): the kernel kept
     /// it masked and stopped delivering it, so a never-quiesced or hostile
@@ -852,6 +906,13 @@ impl AuditEvent {
             Self::SecondaryCpuStartFailed => 4071,
             Self::SecondaryCpuOnline => 4072,
             Self::IrqWakeLate => 4073,
+            Self::IrqCompletionOverdue => 4074,
+            Self::DeviceOperationSlow => 4075,
+            Self::LockAcquiredLate => 4076,
+            Self::LockReleasedLate => 4069,
+            Self::KernelYieldLate => 4077,
+            Self::CpuHeldInKernel => 4078,
+            Self::IpiUndelivered => 4079,
             Self::CpuStallDetected => 4080,
             Self::CpuStallCleared => 4081,
             Self::CpuHardLockupDetected => 4082,
@@ -946,6 +1007,13 @@ impl AuditEvent {
             Self::SecondaryCpuStartFailed => "secondary cpu start failed",
             Self::SecondaryCpuOnline => "secondary cpu online",
             Self::IrqWakeLate => "device interrupt reached its waiter late",
+            Self::IrqCompletionOverdue => "device completion interrupt overdue",
+            Self::DeviceOperationSlow => "kernel-driven device operation slow",
+            Self::LockAcquiredLate => "sleeping lock acquired late",
+            Self::LockReleasedLate => "sleeping lock released late",
+            Self::KernelYieldLate => "in-kernel yield resumed late",
+            Self::CpuHeldInKernel => "cpu held by kernel code without dispatching",
+            Self::IpiUndelivered => "reschedule ipi not taken",
             Self::CpuStallDetected => "cpu stall detected",
             Self::CpuStallCleared => "cpu stall cleared",
             Self::CpuHardLockupDetected => "cpu hard lockup detected",
@@ -1004,6 +1072,23 @@ pub(crate) fn emit(sink: &dyn Sink, level: Level, event: AuditEvent, fields: &[F
     );
 }
 
+/// The boot's audit sink, for the kernel code that reports with no sink of
+/// its own: the lockup watchdog, the sleeping lock and the in-kernel yield.
+static KERNEL_SINK: OnceCell<&'static (dyn Sink + Sync)> = OnceCell::new();
+
+/// Install the sink the kernel's own reports go through. The boot path
+/// installs exactly one; a later call is a benign no-op.
+pub fn install_kernel_sink(sink: &'static (dyn Sink + Sync)) {
+    let _ = KERNEL_SINK.set(sink);
+}
+
+/// The installed kernel sink, or [`None`] before boot installs it — until
+/// then those records are not written.
+pub(crate) fn kernel_sink() -> Option<&'static dyn Sink> {
+    let sink: &'static (dyn Sink + Sync) = *KERNEL_SINK.get().ok().flatten()?;
+    Some(sink)
+}
+
 #[cfg(test)]
 mod tests {
     use super::AuditEvent;
@@ -1060,6 +1145,13 @@ mod tests {
         AuditEvent::SecondaryCpuStartFailed,
         AuditEvent::SecondaryCpuOnline,
         AuditEvent::IrqWakeLate,
+        AuditEvent::IrqCompletionOverdue,
+        AuditEvent::DeviceOperationSlow,
+        AuditEvent::LockAcquiredLate,
+        AuditEvent::LockReleasedLate,
+        AuditEvent::KernelYieldLate,
+        AuditEvent::CpuHeldInKernel,
+        AuditEvent::IpiUndelivered,
         AuditEvent::CpuStallDetected,
         AuditEvent::CpuStallCleared,
         AuditEvent::CpuHardLockupDetected,
@@ -1108,7 +1200,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 85, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 92, "a new event belongs in `ALL`");
     }
 
     #[test]

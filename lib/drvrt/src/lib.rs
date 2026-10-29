@@ -63,6 +63,8 @@ pub use syscalls::{GrantSyscalls, RtGrantSyscalls};
 
 #[cfg(target_os = "none")]
 pub mod serve;
+#[cfg(any(target_os = "none", test))]
+mod tree;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testkit;

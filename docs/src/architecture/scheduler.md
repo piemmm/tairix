@@ -467,6 +467,17 @@ immediately, schedules a deferred reschedule, or — on
 on the IPI; correctness only requires that the target CPU eventually
 calls [`step`].
 
+Each port notes a send to another CPU before raising it
+(`tairix_kernel_core::note_reschedule_ipi_sent`), keeping the oldest one
+outstanding, and the target's reschedule-IPI callback clears it. Where a port
+takes the lockup watchdog's cadence sample, the cross-CPU scan reports an IPI a
+running CPU has left untaken for 250 ms (`4079` `IPI_UNDELIVERED`, Warn, with
+that CPU's activity), once per send: a woken task placed there waits for the
+CPU's next interrupt. Nothing is noted until a cadence sample has run, since
+only its scan reads the mark, and a send behind one outstanding reads no
+clock. A send to the calling CPU is not noted, since a port may answer it
+without an interrupt.
+
 ## Deferred admission: `spawn_parked`
 
 `spawn` makes a task runnable the instant it returns — it is enqueued and
@@ -758,6 +769,12 @@ in-kernel device operation passes through (`SharedBlockHandle`'s `with_device`,
 which offers the turn before taking the shared device's sleeping lock — see
 `docs/src/drivers/block.md`) and the in-kernel `/System` store server's
 between-requests boundary, where nothing of the server's own is held.
+
+A body that yields here and is resumed 250 ms or more later is recorded
+(`4077` `KERNEL_YIELD_LATE`, Warn) under the call site that yielded: runnable,
+and not run. The clock is read only on a yield, never at a boundary that owes
+nothing. The return to user mode takes no such reading, since a preempted user
+task waiting its turn is scheduling, not a fault.
 
 A port whose console transmit is buffered (the aarch64 PL011 — §20) keeps
 its in-memory transmit ring draining through
@@ -1454,7 +1471,8 @@ never link the mock.
 
 * **Stuck CPU?** Check `Scheduler::live_task_count`. A non-zero count
   with no progress points at a missed IPI (`SchedulerArch::send_ipi`
-  delivered to a CPU that never calls `step`).
+  delivered to a CPU that never calls `step`); `IPI_UNDELIVERED` names
+  the CPU.
 * **Task never runs?** Confirm its `home_cpu` matches a CPU that is
   actually being driven, and that the task is not stuck in
   `TaskState::Parked` — `Scheduler::state_of` reports the last

@@ -104,14 +104,27 @@ mod program {
             Ok(service) => {
                 // Published only once both endpoints serve, so a service
                 // that finds the header can call it.
-                if let Some(id) = header_id {
-                    if publish_channel(HwDeviceClass::Other, GPIO_HEADER_NODE_COMPATIBLE, id, &[])
+                match header_id {
+                    Some(id) => {
+                        if publish_channel(
+                            HwDeviceClass::Other,
+                            GPIO_HEADER_NODE_COMPATIBLE,
+                            id,
+                            &[],
+                        )
                         .is_none()
-                    {
-                        return end(
-                            DriverExit::NoService,
-                            &[step("gpio: the header could not be published")],
-                        );
+                        {
+                            return end(
+                                DriverExit::NoService,
+                                &[step("gpio: the header could not be published")],
+                            );
+                        }
+                    }
+                    // Without a header there is nothing to publish, so the
+                    // node is settled as it stands; a refused settle only
+                    // leaves the device manager to wait out its bound.
+                    None => {
+                        let _ = tairix_rt::hw_node_settle();
                     }
                 }
                 log_event(Level::Info, EVENT_READY, "gpio: controller serving", &[]);

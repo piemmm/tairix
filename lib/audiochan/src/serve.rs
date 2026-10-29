@@ -115,9 +115,6 @@ impl<A: Audio> Channel<A> {
         {
             return Err(end(DriverExit::NoService, &[step("audiochan: the device-channel node could not be published to the hardware tree")]));
         }
-        // The channel is the one child this driver publishes. A refused
-        // settle only leaves the device manager to wait out its bound.
-        let _ = tairix_rt::hw_node_settle();
         log(
             &LogSink,
             &Event {

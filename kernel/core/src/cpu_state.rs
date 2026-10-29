@@ -204,6 +204,14 @@ pub(crate) struct CpuState {
     /// on this CPU, so detection reports each episode exactly once and its
     /// recovery exactly once (cross-CPU-safe via atomic swap).
     pub(crate) stall_reported: AtomicBool,
+    /// The [`Self::last_progress_ns`] of the no-dispatch episode the last
+    /// cadence sample found in kernel code, `0` when it found none. Touched
+    /// only by this CPU's own cadence sample.
+    pub(crate) kernel_hold_seen: AtomicU64,
+    /// The [`Self::last_progress_ns`] of the last kernel hold reported, so
+    /// each is reported once: a later dispatch stamps a new episode. Touched
+    /// only by this CPU's own cadence sample.
+    pub(crate) kernel_hold_reported: AtomicU64,
     /// Watchdog **liveness** heartbeat: the monotonic-ns timestamp of the
     /// last non-maskable watchdog sample taken *on* this CPU (the aarch64
     /// FIQ watchdog stamps it every cadence tick). `0` means "not yet
@@ -249,6 +257,12 @@ pub(crate) struct CpuState {
     /// cadence that is already firing on the CPU. Distinct from
     /// [`Self::preempt_pending`], which is gated on a runnable competitor.
     pub(crate) force_yield: AtomicBool,
+    /// When the oldest reschedule IPI raised on this CPU and not yet taken
+    /// was sent, `0` when none is outstanding.
+    pub(crate) ipi_pending_since: AtomicU64,
+    /// The [`Self::ipi_pending_since`] of the last IPI reported as not taken,
+    /// so each is reported once.
+    pub(crate) ipi_reported: AtomicU64,
     /// Live-core-frequency estimator: the Arch HAL `coreclock` core-cycle
     /// counter value read at this CPU's previous frequency sample (`0` = no
     /// prior sample yet). [`crate::cpufreq`] samples the core/reference
@@ -439,6 +453,8 @@ impl CpuState {
             preemptions: AtomicU64::new(0),
             last_progress_ns: AtomicU64::new(0),
             stall_reported: AtomicBool::new(false),
+            kernel_hold_seen: AtomicU64::new(0),
+            kernel_hold_reported: AtomicU64::new(0),
             last_seen_ns: AtomicU64::new(0),
             wd_activity: AtomicU8::new(0),
             hard_reported: AtomicBool::new(false),
@@ -447,6 +463,8 @@ impl CpuState {
             wd_ctx_aux: AtomicU64::new(0),
             wd_ctx_in_kernel: AtomicBool::new(false),
             force_yield: AtomicBool::new(false),
+            ipi_pending_since: AtomicU64::new(0),
+            ipi_reported: AtomicU64::new(0),
             freq_last_core: AtomicU64::new(0),
             freq_last_ref: AtomicU64::new(0),
             freq_hz: AtomicU64::new(0),

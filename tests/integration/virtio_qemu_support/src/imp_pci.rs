@@ -24,7 +24,7 @@ use tairix_kernel_virtio::{KernelMmioMapper, KernelVirtioHost};
 use tairix_log::{Event, EventId, Level, Sink};
 use tairix_virtio::{PoolId, VirtioHost};
 
-use crate::common::{drive_driver_lifecycle, QemuEnv, ScenarioConfig, IDENTITY_LIMIT};
+use crate::common::{drive_driver_lifecycle, FixtureLine, QemuEnv, ScenarioConfig, IDENTITY_LIMIT};
 
 /// Re-export so the verticals can name the concrete transport for the
 /// shared device-tail turbofish without their own `tairix-drv-bus-virtio`
@@ -306,16 +306,13 @@ where
     ) else {
         env.fail("DMA pool construct");
     };
-    let waiter = HltWaiter;
-    let vhost = KernelVirtioHost::new(
-        pool,
-        &caller,
-        &SERIAL_SINK,
-        PoolId::fresh(),
+    let wait = FixtureLine {
         table,
         handle,
-        &waiter,
-    );
+        owner: caller.process(),
+        park: HltWaiter,
+    };
+    let vhost = KernelVirtioHost::new(pool, &caller, &SERIAL_SINK, PoolId::fresh(), &wait);
 
     // 6. Drive the shared lifecycle with `body` against the reloaded driver.
     drive_driver_lifecycle(&env, cfg, transport, &vhost, body)

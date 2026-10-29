@@ -677,6 +677,15 @@ unless the scheduler is owed a turn, so an uncontended burst pays no context
 switch. Suspending here is sound by construction: the operation it wraps can
 already park the same body in the same place waiting for a slow device.
 
+`MeteredBlock` records an operation the device took 250 ms or more to answer
+(`4075` `DEVICE_OPERATION_SLOW`: the operation, its block and length, how long,
+and whether it succeeded) from the two clock readings its fold takes anyway,
+so the fast path pays nothing. A window kept waiting for the shared device is
+the sleeping lock's own record (`4076` `LOCK_ACQUIRED_LATE`,
+`docs/src/architecture/sync.md`), naming `with_device` as the site. A slow
+operation is the device or its interrupt; a late lock is a holder, the wake, or
+the scheduler.
+
 ## The persistent driver-store service
 
 Design D needs the `/System` driver store reachable for the life of the system

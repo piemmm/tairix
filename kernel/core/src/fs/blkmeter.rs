@@ -32,6 +32,7 @@ use tairix_abi::sysinfo::{BlkHealthTransition, MountAvailability};
 use tairix_log::{Field, FieldValue, Level, Sink};
 
 use crate::audit::AuditEvent;
+use crate::blockwait::SLOW_DEVICE_NS;
 use crate::waitq::{wait_arch, WaitQueueArch};
 
 /// Lock-free cumulative I/O-health tallies for one served block device.
@@ -527,17 +528,21 @@ impl<B: Block> MeteredBlock<B> {
 
     /// Run one device operation of `op`, folding the attempt.
     ///
-    /// `moved` is how many bytes the operation transfers when it succeeds;
-    /// a failed attempt moved none. A direct device call always answers, so
-    /// every attempt here is an [`Attempt::Answered`] one — including a
-    /// failure, which the device took time to report. The outcome is
-    /// classified through the shared `BlkStatus` mappings — the device's own
-    /// promise on success, the health signal its error carries otherwise — so
-    /// an in-kernel device's buckets mean exactly what a served device's do.
+    /// `request.bytes` is how many bytes the operation transfers when it
+    /// succeeds; a failed attempt moved none. A direct device call always
+    /// answers, so every attempt here is an [`Attempt::Answered`] one —
+    /// including a failure, which the device took time to report. The outcome
+    /// is classified through the shared `BlkStatus` mappings — the device's
+    /// own promise on success, the health signal its error carries otherwise —
+    /// so an in-kernel device's buckets mean exactly what a served device's do.
+    ///
+    /// One that took [`SLOW_DEVICE_NS`] or more is recorded
+    /// ([`AuditEvent::DeviceOperationSlow`]), from the two readings the fold
+    /// takes anyway.
     fn measured<T>(
         &mut self,
         op: BlkOp,
-        moved: u64,
+        request: Request,
         run: impl FnOnce(&mut B) -> Result<T, DriverError>,
     ) -> Result<T, DriverError> {
         let issued_ns = now_ns();
@@ -547,7 +552,7 @@ impl<B: Block> MeteredBlock<B> {
         let attempt = match &outcome {
             Ok(_) => Attempt::Answered {
                 status: BlkStatus::for_backing(self.device.backing_availability()),
-                bytes: moved,
+                bytes: request.bytes,
             },
             Err(err) => Attempt::Answered {
                 status: BlkStatus::for_errno(err.as_errno()),
@@ -555,7 +560,73 @@ impl<B: Block> MeteredBlock<B> {
             },
         };
         self.meter.completed(op, issued_ns, done_ns, attempt);
+        let elapsed_ns = done_ns.saturating_sub(issued_ns);
+        if elapsed_ns >= SLOW_DEVICE_NS {
+            self.note_slow(request, elapsed_ns, outcome.is_ok());
+        }
         outcome
+    }
+
+    /// Record `request`, answered `elapsed_ns` after it was issued.
+    fn note_slow(&self, request: Request, elapsed_ns: u64, ok: bool) {
+        crate::audit::emit(
+            self.meter.audit,
+            Level::Warn,
+            AuditEvent::DeviceOperationSlow,
+            &[
+                Field {
+                    key: "dev",
+                    value: FieldValue::UnsignedInt(self.meter.dev),
+                },
+                Field {
+                    key: "device",
+                    value: FieldValue::Str(self.meter.device.as_str()),
+                },
+                Field {
+                    key: "op",
+                    value: FieldValue::Str(request.kind),
+                },
+                Field {
+                    key: "lba",
+                    value: request
+                        .lba
+                        .map_or(FieldValue::Null, FieldValue::UnsignedInt),
+                },
+                Field {
+                    key: "bytes",
+                    value: FieldValue::UnsignedInt(request.bytes),
+                },
+                Field {
+                    key: "elapsed_ms",
+                    value: FieldValue::UnsignedInt(elapsed_ns / 1_000_000),
+                },
+                Field {
+                    key: "ok",
+                    value: FieldValue::Bool(ok),
+                },
+            ],
+        );
+    }
+}
+
+/// One operation as a slow-operation record names it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Request {
+    /// What the operation is.
+    kind: &'static str,
+    /// Its first block, for one that names blocks.
+    lba: Option<u64>,
+    /// What it transfers when it succeeds.
+    bytes: u64,
+}
+
+impl Request {
+    const fn blocks(kind: &'static str, lba: u64, bytes: u64) -> Self {
+        Self {
+            kind,
+            lba: Some(lba),
+            bytes,
+        }
     }
 }
 
@@ -565,17 +636,24 @@ impl<B: Block> Block for MeteredBlock<B> {
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        let moved = buf.len() as u64;
-        self.measured(BlkOp::Read, moved, |device| device.read_blocks(lba, buf))
+        let request = Request::blocks("read", lba, buf.len() as u64);
+        self.measured(BlkOp::Read, request, |device| device.read_blocks(lba, buf))
     }
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
-        let moved = buf.len() as u64;
-        self.measured(BlkOp::Write, moved, |device| device.write_blocks(lba, buf))
+        let request = Request::blocks("write", lba, buf.len() as u64);
+        self.measured(BlkOp::Write, request, |device| {
+            device.write_blocks(lba, buf)
+        })
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
-        self.measured(BlkOp::Flush, 0, Block::flush)
+        let request = Request {
+            kind: "flush",
+            lba: None,
+            bytes: 0,
+        };
+        self.measured(BlkOp::Flush, request, Block::flush)
     }
 
     fn read_blocks_with_class(
@@ -584,8 +662,8 @@ impl<B: Block> Block for MeteredBlock<B> {
         buf: &mut [u8],
         class: BufferClass,
     ) -> Result<(), DriverError> {
-        let moved = buf.len() as u64;
-        self.measured(BlkOp::Read, moved, |device| {
+        let request = Request::blocks("read", lba, buf.len() as u64);
+        self.measured(BlkOp::Read, request, |device| {
             device.read_blocks_with_class(lba, buf, class)
         })
     }
@@ -596,8 +674,8 @@ impl<B: Block> Block for MeteredBlock<B> {
         buf: &[u8],
         class: BufferClass,
     ) -> Result<(), DriverError> {
-        let moved = buf.len() as u64;
-        self.measured(BlkOp::Write, moved, |device| {
+        let request = Request::blocks("write", lba, buf.len() as u64);
+        self.measured(BlkOp::Write, request, |device| {
             device.write_blocks_with_class(lba, buf, class)
         })
     }
@@ -609,7 +687,9 @@ impl<B: Block> Block for MeteredBlock<B> {
     /// A discard moves no bytes of the caller's, but it occupies the device
     /// like any other operation, so it is folded as one.
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
-        self.measured(BlkOp::Flush, 0, |device| device.discard(lba, blocks))
+        self.measured(BlkOp::Flush, Request::blocks("discard", lba, 0), |device| {
+            device.discard(lba, blocks)
+        })
     }
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {

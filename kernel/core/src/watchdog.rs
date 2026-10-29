@@ -119,6 +119,7 @@ use tairix_util::fmt::{
 
 use crate::audit::{emit, AuditEvent};
 use crate::cpu_state::{self, CpuState};
+use crate::waitq::LATE_WAKE_NS;
 
 /// How long an `Active` CPU may run without any scheduler progress before
 /// it is reported **soft**-locked, in nanoseconds (10 seconds).
@@ -191,10 +192,25 @@ impl WatchdogActivity {
             _ => Self::Offline,
         }
     }
+
+    /// The stable tag a record names this class by.
+    #[must_use]
+    pub(crate) const fn tag(self) -> &'static str {
+        match self {
+            Self::Offline => "offline",
+            Self::Idle => "idle",
+            Self::Active => "active",
+        }
+    }
 }
 
-/// The installed report sink, or `None` before the boot path wires it.
-static REPORT_SINK: OnceCell<&'static (dyn Sink + Sync)> = OnceCell::new();
+/// `cpu`'s last published activity class, or [`None`] for a CPU with no
+/// state slot.
+#[must_use]
+pub(crate) fn activity_of(cpu: CpuId) -> Option<WatchdogActivity> {
+    cpu_state::get(cpu)
+        .map(|state| WatchdogActivity::from_u8(state.wd_activity.load(Ordering::Acquire)))
+}
 
 /// The installed non-maskable recovery handle, or `None` before boot wires
 /// it (a build with no pseudo-NMI channel never installs one).
@@ -202,8 +218,8 @@ static RECOVERY: OnceCell<&'static (dyn WatchdogArch + Sync)> = OnceCell::new();
 
 /// The installed **diagnostic** sink the debug-only lockup detail is
 /// emitted through, or `None` before the boot path wires it. Distinct from
-/// [`REPORT_SINK`]: the always-on lockup *summary* goes to the report sink
-/// (the persistent hash-chained audit log), while the address-bearing
+/// the kernel's audit sink ([`crate::audit::kernel_sink`]): the always-on lockup *summary* goes
+/// there (the persistent hash-chained audit log), while the address-bearing
 /// *detail* goes here, to the diagnostic (log/UART) stream — so no kernel
 /// address ever lands on the tamper-evident audit trail. Compiled in only
 /// with the debug-diagnostics facility.
@@ -281,23 +297,11 @@ static IRQ_OWNER: OnceCell<&'static (dyn StuckOwnerResolver + Sync)> = OnceCell:
 /// wires it (or on a port with no kernel-internal enabled lines to name).
 static KERNEL_LINE_NAMES: OnceCell<&'static (dyn KernelInternalLines + Sync)> = OnceCell::new();
 
-/// Install the sink the watchdog reports lockups through. Idempotent by
-/// policy: the boot path installs exactly one; a later call is a benign
-/// no-op.
-pub fn install_report_sink(sink: &'static (dyn Sink + Sync)) {
-    let _ = REPORT_SINK.set(sink);
-}
-
 /// Install the architecture recovery handle the watchdog drives to break a
 /// locked-up CPU out of its lockup. Idempotent; a port with no pseudo-NMI
 /// channel simply never calls this and hard-lockup recovery stays inert.
 pub fn install_recovery(arch: &'static (dyn WatchdogArch + Sync)) {
     let _ = RECOVERY.set(arch);
-}
-
-/// The report sink the watchdog currently emits through, if installed.
-fn report_sink() -> Option<&'static (dyn Sink + Sync)> {
-    REPORT_SINK.get().ok().flatten().copied()
 }
 
 /// The installed recovery handle, if any.
@@ -307,7 +311,7 @@ fn recovery() -> Option<&'static (dyn WatchdogArch + Sync)> {
 
 /// Install the **diagnostic** sink the debug-only lockup detail is emitted
 /// through — the log/UART stream, kept separate from the persistent audit
-/// [`REPORT_SINK`] so no kernel address ever lands on the tamper-evident
+/// sink ([`crate::audit::kernel_sink`]) so no kernel address ever lands on the tamper-evident
 /// audit trail. Idempotent; the boot path installs exactly one. Present
 /// only in a debug-diagnostics build.
 #[cfg(feature = "watchdog-diagnostics")]
@@ -992,6 +996,38 @@ pub fn note_alive(cpu: CpuId, now_ns: u64) {
     }
 }
 
+/// Set by the first cadence sample on any CPU. Only the scan the cadence
+/// drives reads the marks a reschedule IPI send leaves, so a port without
+/// one leaves none ([`crate::note_reschedule_ipi_sent`]).
+static CADENCE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Whether a cadence sample has run on any CPU.
+pub(crate) fn cadence_running() -> bool {
+    CADENCE_RUNNING.load(Ordering::Relaxed)
+}
+
+/// Latch [`cadence_running`], writing only the first time.
+pub(crate) fn note_cadence_running() {
+    if !cadence_running() {
+        CADENCE_RUNNING.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The task `sample` names, else the one `hook`'s scheduler has switched in
+/// on `cpu`: a port's sample cannot see the kernel's task ids. A single
+/// atomic read, so safe on the non-maskable path.
+fn sampled_task(
+    hook: Option<&dyn crate::waitq::WaitQueueArch>,
+    cpu: CpuId,
+    sample: &WatchdogSample,
+) -> u64 {
+    if sample.task != WatchdogSample::NO_TASK {
+        return sample.task;
+    }
+    hook.and_then(|hook| hook.current_task(cpu))
+        .unwrap_or(WatchdogSample::NO_TASK)
+}
+
 /// Stamp `state`'s liveness heartbeat at `now_ns` and record `sample` as
 /// its last-known context. Returns `Some(stalled_ns)` when the CPU was in
 /// a *reported* hard lockup and has now recovered.
@@ -1026,7 +1062,12 @@ fn record_liveness(state: &CpuState, now_ns: u64, sample: &WatchdogSample) -> Op
 /// non-maskable path. An out-of-range `cpu` still runs the scan (the CPU
 /// is simply not itself sampled), so a stray id never blinds the detector.
 pub fn on_watchdog_tick(cpu: CpuId, now_ns: u64, sample: &WatchdogSample) {
+    note_cadence_running();
     if let Some(state) = cpu_state::get(cpu) {
+        let sample = &WatchdogSample {
+            task: sampled_task(crate::waitq::wait_arch(), cpu, sample),
+            ..*sample
+        };
         if let Some(stalled_ns) = record_liveness(state, now_ns, sample) {
             report_lockup(
                 AuditEvent::CpuHardLockupCleared,
@@ -1047,8 +1088,38 @@ pub fn on_watchdog_tick(cpu: CpuId, now_ns: u64, sample: &WatchdogSample) {
         if monopolises_cpu(state, now_ns, sample.in_kernel) {
             crate::preempt::request_forced_yield(cpu);
         }
+        // Kernel code is never forced off, so a long hold is reported instead.
+        if let Some(held_ns) = kernel_hold(state, now_ns, sample.in_kernel) {
+            report_lockup(
+                AuditEvent::CpuHeldInKernel,
+                Level::Warn,
+                cpu,
+                None,
+                held_ns,
+                &Diag::snapshot(state),
+            );
+        }
     }
     scan(cpu, now_ns);
+}
+
+/// How long kernel code has kept `state`'s CPU from its dispatcher, once two
+/// consecutive samples of one episode (`in_kernel` is this one) have found it
+/// in kernel code, the second past the monopoly guard's window; [`None`]
+/// otherwise, or once that episode is reported. One sample is not enough: a
+/// task making system calls is in kernel code at any instant it happens to be
+/// sampled.
+fn kernel_hold(state: &CpuState, now_ns: u64, in_kernel: bool) -> Option<u64> {
+    if !in_kernel {
+        state.kernel_hold_seen.store(0, Ordering::Relaxed);
+        return None;
+    }
+    let since = state.last_progress_ns.load(Ordering::Acquire);
+    let seen_before = state.kernel_hold_seen.swap(since, Ordering::Relaxed) == since;
+    (seen_before
+        && progress_overdue(state, now_ns)
+        && state.kernel_hold_reported.swap(since, Ordering::Relaxed) != since)
+        .then(|| now_ns.saturating_sub(since))
 }
 
 /// Whether `state`'s CPU is an `Active` core that has withheld the CPU
@@ -1222,7 +1293,63 @@ fn scan(observer: CpuId, now_ns: u64) {
             }
             Verdict::Quiet => {}
         }
+        if let Some(pending_ns) = ipi_untaken(state, now_ns) {
+            report_ipi_untaken(target, observer, pending_ns, activity_of(target));
+        }
     }
+}
+
+/// How long the oldest reschedule IPI raised on `state`'s CPU has gone
+/// untaken, the first time a scan finds it [`LATE_WAKE_NS`] or older; a CPU
+/// not yet up cannot take one, so it is not judged.
+fn ipi_untaken(state: &CpuState, now_ns: u64) -> Option<u64> {
+    let since = state.ipi_pending_since.load(Ordering::Acquire);
+    let activity = WatchdogActivity::from_u8(state.wd_activity.load(Ordering::Acquire));
+    if since == 0
+        || activity == WatchdogActivity::Offline
+        || now_ns.saturating_sub(since) < LATE_WAKE_NS
+    {
+        return None;
+    }
+    (state.ipi_reported.swap(since, Ordering::AcqRel) != since).then(|| now_ns - since)
+}
+
+/// Record that `cpu` has not taken a reschedule IPI raised `pending_ns`
+/// ago, as `observer` found it.
+fn report_ipi_untaken(
+    cpu: CpuId,
+    observer: CpuId,
+    pending_ns: u64,
+    activity: Option<WatchdogActivity>,
+) {
+    let Some(sink) = crate::audit::kernel_sink() else {
+        return;
+    };
+    emit(
+        sink,
+        Level::Warn,
+        AuditEvent::IpiUndelivered,
+        &[
+            tairix_log::Field {
+                key: "cpu",
+                value: tairix_log::FieldValue::UnsignedInt(u64::from(cpu)),
+            },
+            tairix_log::Field {
+                key: "observer",
+                value: tairix_log::FieldValue::UnsignedInt(u64::from(observer)),
+            },
+            tairix_log::Field {
+                key: "pending_ms",
+                value: tairix_log::FieldValue::UnsignedInt(pending_ns / NANOS_PER_MILLI),
+            },
+            tairix_log::Field {
+                key: "activity",
+                value: activity.map_or(tairix_log::FieldValue::Null, |activity| {
+                    tairix_log::FieldValue::Str(activity.tag())
+                }),
+            },
+        ],
+    );
 }
 
 /// Break a CPU's monopoly and check it for a **soft** lockup, from its own
@@ -1305,7 +1432,7 @@ fn drive_recovery(target: CpuId, kind: WatchdogKind) {
     let outcome = recovery().map_or(RecoveryOutcome::Unsupported, |arch| {
         arch.request_recovery(target, kind)
     });
-    if let Some(sink) = report_sink() {
+    if let Some(sink) = crate::audit::kernel_sink() {
         recovery_to(sink, target, kind, outcome);
     }
 }
@@ -1713,8 +1840,8 @@ fn hex0x(value: u64, buf: &mut [u8; 18]) -> &str {
 /// only) and lock-free — safe on the non-maskable sample path and the
 /// dispatch hot path alike:
 ///
-/// * The **always-on summary** goes to the persistent audit [`report_sink`]
-///   and carries only non-disclosing state (`cpu`, `observer`,
+/// * The **always-on summary** goes to the persistent audit sink
+///   ([`crate::audit::kernel_sink`]) and carries only non-disclosing state (`cpu`, `observer`,
 ///   `stalled_ms`, `task`, `context`, `sampled`, `stuck_*`) — never a
 ///   kernel address, so the tamper-evident audit trail records *that* a
 ///   lockup happened and roughly where, with zero disclosure.
@@ -1734,7 +1861,7 @@ fn report_lockup(
     elapsed_ns: u64,
     diag: &Diag,
 ) {
-    if let Some(sink) = report_sink() {
+    if let Some(sink) = crate::audit::kernel_sink() {
         report_summary_to(sink, event, level, cpu, observer, elapsed_ns, diag);
     }
     #[cfg(feature = "watchdog-diagnostics")]
@@ -2129,6 +2256,10 @@ mod tests {
         let state = cpu_state::get(cpu).expect("test CPU slot exists");
         state.last_progress_ns.store(0, Ordering::Relaxed);
         state.stall_reported.store(false, Ordering::Relaxed);
+        state.kernel_hold_seen.store(0, Ordering::Relaxed);
+        state.kernel_hold_reported.store(0, Ordering::Relaxed);
+        state.ipi_pending_since.store(0, Ordering::Relaxed);
+        state.ipi_reported.store(0, Ordering::Relaxed);
         state.last_seen_ns.store(0, Ordering::Relaxed);
         state
             .wd_activity
@@ -2296,6 +2427,40 @@ mod tests {
         state.hard_reported.store(true, Ordering::Relaxed);
         assert_eq!(record_liveness(state, 1_500, &sample), Some(500));
         assert_eq!(record_liveness(state, 1_600, &sample), None);
+    }
+
+    /// A sample naming no task takes the one the scheduler has switched in
+    /// on that CPU; one that names a task keeps it, and with no scheduler
+    /// there is none.
+    #[test]
+    fn a_sample_naming_no_task_takes_the_switched_in_one() {
+        struct Running;
+        impl crate::waitq::WaitQueueArch for Running {
+            fn unpark(&self, _id: u64) -> bool {
+                false
+            }
+            fn now_ns(&self) -> u64 {
+                0
+            }
+            fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
+            fn current_task(&self, cpu: CpuId) -> Option<u64> {
+                (cpu == 1).then_some(42)
+            }
+        }
+        let named = WatchdogSample {
+            task: 7,
+            ..WatchdogSample::EMPTY
+        };
+        assert_eq!(sampled_task(Some(&Running), 1, &WatchdogSample::EMPTY), 42);
+        assert_eq!(sampled_task(Some(&Running), 1, &named), 7);
+        assert_eq!(
+            sampled_task(Some(&Running), 2, &WatchdogSample::EMPTY),
+            WatchdogSample::NO_TASK
+        );
+        assert_eq!(
+            sampled_task(None, 1, &WatchdogSample::EMPTY),
+            WatchdogSample::NO_TASK
+        );
     }
 
     #[test]
@@ -2659,6 +2824,79 @@ mod tests {
         };
         on_watchdog_tick(recent_cpu, 1_500, &usample);
         assert!(!recent.force_yield.load(Ordering::Relaxed));
+    }
+
+    /// A kernel hold is reported once, when two consecutive samples of one
+    /// episode found the CPU in kernel code and the second is past the guard:
+    /// a sample in user code starts the count again, a dispatch starts a new
+    /// episode, and the first sample may still be within the guard.
+    #[test]
+    fn a_kernel_hold_takes_two_kernel_samples_and_is_reported_once() {
+        const STAMPED_NS: u64 = 1_000;
+        let cpu = crate::test_boot::claim_cpu();
+        let state = active_with_progress(cpu, STAMPED_NS);
+        let due = STAMPED_NS + DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS;
+        assert_eq!(kernel_hold(state, due, true), None, "a lone sample");
+        assert_eq!(kernel_hold(state, due + 1, false), None, "user code");
+        assert_eq!(kernel_hold(state, due + 2, true), None, "counted afresh");
+        assert_eq!(
+            kernel_hold(state, due + 3, true),
+            Some(DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS + 3)
+        );
+        assert_eq!(kernel_hold(state, due + 4, true), None, "reported once");
+
+        let dispatched = due + 5;
+        state.last_progress_ns.store(dispatched, Ordering::Relaxed);
+        assert_eq!(
+            kernel_hold(state, dispatched + 1, true),
+            None,
+            "within the guard"
+        );
+        assert_eq!(
+            kernel_hold(
+                state,
+                dispatched + DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS,
+                true
+            ),
+            Some(DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS),
+            "a new episode, first seen within the guard"
+        );
+    }
+
+    /// A reschedule IPI a CPU has not taken is reported once it is a late
+    /// wake old, once per send; one taken, or to a CPU not yet up, is not.
+    #[test]
+    fn an_ipi_left_untaken_past_the_bar_is_reported_once() {
+        const SENT_NS: u64 = 10_000;
+        let cpu = crate::test_boot::claim_cpu();
+        let state = active_with_progress(cpu, 1_000);
+        state.ipi_pending_since.store(SENT_NS, Ordering::Relaxed);
+        assert_eq!(ipi_untaken(state, SENT_NS + LATE_WAKE_NS - 1), None);
+        assert_eq!(
+            ipi_untaken(state, SENT_NS + LATE_WAKE_NS),
+            Some(LATE_WAKE_NS)
+        );
+        assert_eq!(ipi_untaken(state, SENT_NS + 2 * LATE_WAKE_NS), None, "once");
+
+        state.ipi_pending_since.store(0, Ordering::Relaxed);
+        assert_eq!(ipi_untaken(state, SENT_NS * 100), None, "taken");
+
+        let resent = SENT_NS * 200;
+        state.ipi_pending_since.store(resent, Ordering::Relaxed);
+        assert_eq!(
+            ipi_untaken(state, resent + LATE_WAKE_NS),
+            Some(LATE_WAKE_NS)
+        );
+
+        state.ipi_pending_since.store(resent + 1, Ordering::Relaxed);
+        state
+            .wd_activity
+            .store(WatchdogActivity::Offline as u8, Ordering::Relaxed);
+        assert_eq!(
+            ipi_untaken(state, resent + 1 + LATE_WAKE_NS),
+            None,
+            "not up"
+        );
     }
 
     // --- Diagnostics rendering --------------------------------------

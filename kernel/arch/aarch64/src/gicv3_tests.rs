@@ -577,6 +577,29 @@ fn an_spi_route_names_its_cpu_and_a_private_interrupt_has_none() {
     );
 }
 
+/// The route is assembled from both words with its routing-mode bit cleared,
+/// so it compares equal to the affinity a CPU recorded; an SPI's state comes
+/// from the distributor and a private interrupt's from its own frame.
+#[test]
+fn an_spi_route_and_state_read_back_and_a_private_interrupt_reads_its_frame() {
+    let model = Model::new(1);
+    let cpu = Cpu::default();
+    let gic = Gicv3::new(&model, &cpu);
+    let mmio = &model;
+    let off = GICD_IROUTER + 8 * 40;
+    mmio.distributor_write(off, 0x8000_0201);
+    mmio.distributor_write(off + 4, 0x03);
+    assert_eq!(gic.route(40), Some(0x03_0000_0201));
+    assert_eq!(gic.route(MIN_SPI_INTID - 1), None, "a private interrupt");
+
+    mmio.distributor_write(ispendr_offset(40), isenabler_bit(40));
+    assert!(gic.is_pending(0, 40));
+    assert!(!gic.is_active(0, 40));
+    mmio.redistributor_write(0, SGI_FRAME + isactiver_offset(27), isenabler_bit(27));
+    assert!(gic.is_active(0, 27));
+    assert!(!gic.is_pending(0, 27));
+}
+
 #[test]
 fn an_acknowledgement_of_a_special_intid_is_nothing_and_an_lpi_is_its_own_id() {
     let model = Model::new(1);

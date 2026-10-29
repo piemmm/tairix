@@ -67,6 +67,10 @@ type WakeBatch = ArrayVec<Registration, WAKE_BATCH>;
 /// is armed only for a real pending deadline).
 pub const NO_DEADLINE: u64 = u64::MAX;
 
+/// How late a woken or yielding task may run before the kernel records it: a
+/// healthy kernel runs one in microseconds.
+pub(crate) const LATE_WAKE_NS: u64 = 250_000_000;
+
 /// The kernel-installed hook a [`WaitQueue`] uses to wake a parked waiter,
 /// read the monotonic clock, and arm the timed-wake one-shot, without the
 /// (global, `'static`) wait-queue naming the concrete `Scheduler<A>` / arch

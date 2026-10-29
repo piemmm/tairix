@@ -56,12 +56,12 @@ possible is that contention lives **in the lock word**: a contender sets a
 `LOCKED -> 0` compare-exchange fails precisely when a wake is owed. Flag and
 lock bit share one location, so their modification order is total and no
 store/load fence is needed — a contender that publishes before the release
-makes that release take the wake path, and one that publishes after it
-observes the lock already free and never parks. Holding "is anyone waiting?"
-anywhere else would have cost the wait-queue lock on every release just to
-learn that nobody was. The bit may linger over a handoff or over a contender
-that found the lock free; that costs one release which looks at the queue,
-finds it empty, and clears the word.
+makes that release take the wake path, and one that looks after it takes the
+lock and never parks. Holding "is anyone waiting?" anywhere else would have
+cost the wait-queue lock on every release just to learn that nobody was. The
+bit may linger over a handoff or over a contender that took a lock a release
+left free; that costs one release which looks at the queue, finds it empty, and
+clears the word.
 
 That reasoning holds for the fast path, which is itself a read-modify-write
 of the word and so cannot miss a bit set before it. It does **not** extend to
@@ -82,6 +82,37 @@ of it. A waiter that cannot take the handoff is passed over for the
 next-oldest rather than unlocking with the queue still occupied — doing that
 would clear the word with it, so no later release would owe the remaining
 contenders a wake and they would park for good.
+
+A contender registers once, before its first look at the word, and stays
+registered until it owns the lock; each look takes the lock if it is free and
+otherwise publishes `CONTENDED`, in one compare-exchange. So a release that
+finds a registration can always hand the lock over, and a spurious wake keeps
+the waiter's place in line. A contender that withdrew whenever it saw the lock
+free, against a release that retook the lock on seeing the registration, held
+two cores in a livelock until an interrupt broke the rhythm
+(`plans/OPEN-DEFECTS.md` D968).
+
+A contended acquire that waited 1 s or more, whose task ran 250 ms or more
+after the prior holder handed it the lock, or that waited 250 ms having been
+unable to park, is recorded (`4076` `LOCK_ACQUIRED_LATE`, Warn) with the site
+that took the lock, the site of the holder that handed it over, and how the
+waiter spent its wait: the task it waited as, how often it parked, how many of
+those wakes brought no handoff, and how often it could not park at all. Until a
+successor runs, the lock is held by a task that is not running, so a late
+handoff stalls every queued contender: a long wait with a prompt handoff is a
+lock held long, a late handoff is the wake or the scheduler. A waiter that
+cannot park keeps its CPU, and anything queued there, the holder included,
+waits with it. `lock` and `try_lock` take their caller's site
+(`#[track_caller]`) into the guard; a release that hands the lock over
+publishes its own site and the instant, under a spin lock taken only on that
+path, before it publishes ownership, and the claim reads them back after its
+`Acquire`.
+
+A contended release that took 250 ms or more is recorded (`4069`
+`LOCK_RELEASED_LATE`, Warn) with the site that took the lock, how long the
+release took, and the releasing task. A release hands over to one waiter, which
+is microseconds of work; the clock is read only once the fast path has failed,
+so an uncontended acquire and release stay one compare-exchange each.
 
 "Cannot take it" is the wake **landing**, not a row existing in the queue.
 Reading the row was a wedge: a task retired while still registered was handed

@@ -155,8 +155,6 @@ pub fn bring_up_virtio_pci(
         caller,
         audit,
         PoolId::fresh(),
-        armed.table(),
-        armed.handle(),
         waiter,
     )));
     Ok(FloorDevice { transport, host })

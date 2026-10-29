@@ -30,7 +30,7 @@ use tairix_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind, NodeSecurity,
 };
 use tairix_abi::driver::input::{Input, InputEvent, InputEventKind, POINTER_BUTTON_CODE_BASE};
-use tairix_abi::{CapabilityId, DriverHandle, Errno};
+use tairix_abi::{CapabilityId, DriverHandle, Errno, IrqHandle};
 use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_drv_accelerator_virtio_crypto::VirtioCrypto;
@@ -40,6 +40,10 @@ use tairix_drv_storage_virtio_blk::VirtioBlk;
 use tairix_drvhost::{
     DriverEntry, DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
+use tairix_kernel_irq::{
+    block_until_ready, IrqTable, IrqWaitAbort, IrqWaiter, LineWait, WaitOutcome,
+};
+use tairix_kernel_sec::captable::ProcessId;
 use tairix_virtio::{Transport, VirtioHost};
 use tairix_virtio_input::VirtioInput;
 
@@ -51,6 +55,40 @@ use tairix_virtio_input::VirtioInput;
 /// x86_64 boot maps `0..4 GiB`; the riscv64 `virt` board's RAM
 /// (`0x8000_0000..`) sits well inside it.
 pub const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
+
+/// A vertical's wait on its device's bound line: the shared wait loop over
+/// the binding, through the arch's own CPU park between polls. It records
+/// nothing; a vertical is bounded by its harness's progress budget.
+pub struct FixtureLine<'a, W> {
+    /// The table the line is bound in.
+    pub table: &'a IrqTable,
+    /// The binding's handle.
+    pub handle: IrqHandle,
+    /// The process that bound the line.
+    pub owner: ProcessId,
+    /// The arch's park between polls.
+    pub park: W,
+}
+
+impl<W: IrqWaiter> IrqWaiter for FixtureLine<'_, W> {
+    fn now_ns(&self) -> u64 {
+        self.park.now_ns()
+    }
+
+    fn yield_now(&self, deadline_ns: u64) -> Result<(), IrqWaitAbort> {
+        self.park.yield_now(deadline_ns)
+    }
+}
+
+impl<W: IrqWaiter> LineWait for FixtureLine<'_, W> {
+    fn await_completion(&self, budget_ns: u64) -> WaitOutcome {
+        block_until_ready(self.table, self.handle, self.owner, budget_ns, &self.park)
+    }
+
+    fn await_event(&self, timeout_ns: u64) -> WaitOutcome {
+        block_until_ready(self.table, self.handle, self.owner, timeout_ns, &self.park)
+    }
+}
 
 /// `EventId(4004)` — `AuditEvent::BootCompleted`. The arch boot harness
 /// drives its scenario once on observing this event.

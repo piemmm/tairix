@@ -30,8 +30,8 @@ mod wait;
 
 pub use error::{ActivationError, IrqError, MaskError};
 pub use table::{
-    BindOutcome, FireOutcome, IrqController, IrqDispatchObserver, IrqEntry, IrqTable,
+    BindOutcome, FireOutcome, IrqController, IrqDispatchObserver, IrqEntry, IrqTable, LineState,
     MonotonicClock, ObserverAlreadyInstalled, ReleaseOutcome, Trigger, UnsupportedController,
     WaitStep, UNSUPPORTED_CONTROLLER,
 };
-pub use wait::{block_until_ready, IrqWaitAbort, IrqWaiter, WaitOutcome};
+pub use wait::{block_until_ready, IrqWaitAbort, IrqWaiter, LineWait, WaitOutcome};

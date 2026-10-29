@@ -9,13 +9,13 @@ use tairix_abi::driver::thermal::{
 };
 use tairix_abi::driver::{named_register_window, sole_register_window, DeviceWake};
 use tairix_abi::hwlink::{LinkDuty, LinkRole};
-use tairix_abi::hwtree::{HwResource, NodeEndpointBlock, HW_NODE_ROOT};
+use tairix_abi::hwtree::{HwResource, NodeEndpointBlock};
 use tairix_abi::ipc::IPC_CALL_CAPACITY_MAX;
 use tairix_abi::rtc_ipc::{self, RTC_ENDPOINT};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
-    CapabilityId, Delay, Errno, HwDeviceClass, HwMatchKey, HwNode, MmioMapper, ProcId,
-    RegisterWindow, PROC_ID_HEX_LEN,
+    CapabilityId, Delay, Errno, HwDeviceClass, HwNode, MmioMapper, ProcId, RegisterWindow,
+    PROC_ID_HEX_LEN,
 };
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
@@ -386,6 +386,10 @@ impl DeviceChannel {
 /// it in the hardware tree only once it serves. The kernel parents it under
 /// the node the driver was loaded for. Answers the node's id; [`None`] on any
 /// refusal.
+///
+/// The channel is the one child a channel-serving driver publishes, so the
+/// driver's own node is then settled: the device manager waits on a node a
+/// publishing driver holds until it settles, and the boot with it.
 #[must_use]
 pub fn publish_channel(
     class: HwDeviceClass,
@@ -393,14 +397,20 @@ pub fn publish_channel(
     endpoint: u64,
     facts: &[HwResource],
 ) -> Option<u32> {
-    let mut node = HwNode::new(0, HW_NODE_ROOT, class);
-    node.push_match_key(HwMatchKey::compatible(compatible).ok()?)
-        .ok()?;
-    node.push_resource(HwResource::endpoint(endpoint)).ok()?;
-    for fact in facts {
-        node.push_resource(*fact).ok()?;
+    crate::tree::publish_channel(&mut RtTree, class, compatible, endpoint, facts)
+}
+
+/// The hardware-tree calls through the kernel.
+struct RtTree;
+
+impl crate::tree::TreeCalls for RtTree {
+    fn emit(&mut self, node: &HwNode) -> i64 {
+        tairix_rt::hw_emit_node(node)
     }
-    u32::try_from(tairix_rt::hw_emit_node(&node)).ok()
+
+    fn settle(&mut self) -> i64 {
+        tairix_rt::hw_node_settle()
+    }
 }
 
 /// Calls a sensor's channel queues: its consumer asks once a period, each

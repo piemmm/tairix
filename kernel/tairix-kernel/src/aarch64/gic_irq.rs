@@ -58,7 +58,7 @@ use tairix_arch_aarch64::gic::{GicController, GicOps};
 use tairix_arch_aarch64::irqmask::{DaifIrqControl, DaifState};
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use tairix_kernel_core::IrqRouting;
-use tairix_kernel_irq::{IrqController, IrqTable, MaskError, Trigger};
+use tairix_kernel_irq::{IrqController, IrqTable, LineState, MaskError, Trigger};
 use tairix_sync::once::OnceCell;
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use tairix_sync::{InterruptControl, IrqSafeSpinLock};
@@ -201,6 +201,30 @@ impl<O: GicOps + Send + Sync> IrqController for GicIrqController<O> {
         self.inner
             .set_trigger(line, trigger == Trigger::Edge)
             .map_err(|_| MaskError::Unsupported)
+    }
+
+    fn line_state(&self, line: u32) -> Option<LineState> {
+        let state = self.inner.line_state(line)?;
+        Some(LineState {
+            pending: state.pending,
+            active: state.active,
+            enabled: state.enabled,
+            target: state.route.and_then(routed_cpu),
+        })
+    }
+}
+
+/// The CPU an SPI's `route` reaches, through the topology the CPUs recorded
+/// as their interfaces came up; a host build has none.
+fn routed_cpu(route: u64) -> Option<u32> {
+    #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+    {
+        tairix_arch_aarch64::gic::cpu_routed(route)
+    }
+    #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+    {
+        let _ = route;
+        None
     }
 }
 
@@ -381,6 +405,14 @@ impl IrqController for CompositeIrqController {
             return Ok(());
         }
         GIC_IRQ_CONTROLLER.set_trigger(line, trigger)
+    }
+
+    /// A vector's message leaves no wire state at the distributor to read.
+    fn line_state(&self, line: u32) -> Option<LineState> {
+        if line > tairix_arch_aarch64::gic::MAX_INTID {
+            return None;
+        }
+        GIC_IRQ_CONTROLLER.line_state(line)
     }
 }
 
@@ -756,27 +788,10 @@ extern "C" fn production_watchdog_dispatch(cpu: tairix_arch_api::CpuId, frame: *
     };
     let spsr = tairix_arch_aarch64::watchdog::read_spsr_el1();
     let in_kernel = tairix_arch_aarch64::watchdog::spsr_in_kernel(spsr);
-    let sample = tairix_arch_api::WatchdogSample {
-        pc: tairix_arch_aarch64::watchdog::read_elr_el1(),
-        // The kernel-side running-task id is not exposed to the arch layer;
-        // the PC + processor state + kernel/user verdict below are the
-        // load-bearing "why", and the detector names the CPU.
-        task: tairix_arch_api::WatchdogSample::NO_TASK,
-        aux: spsr,
-        in_kernel,
-    };
-    tairix_kernel_core::on_watchdog_tick(cpu, now_ns, &sample);
-    // Capture the pre-silence backtrace: unwind the interrupted context from
-    // the saved frame so a later hard-lockup report names the whole call
-    // nest this CPU was in, not just the stale `pre_silence` PC. Only for a
-    // sample that interrupted **kernel** code — a hard lockup is always an
-    // in-kernel wedge (a user task is preemptible), and confining the walk
-    // to the kernel stack the CPU is running on keeps it off an untrusted
-    // user stack. The walk is bounded and fail-closed.
-    //
-    // This is a debug-diagnostics facility: a shippable image compiles the
-    // stack walk out entirely (the `frame` is then unused), so the ~1 Hz
-    // sample costs only the always-on liveness heartbeat above.
+    // Unwind the interrupted kernel context before the detector runs, so a
+    // lockup or kernel-hold report this sample raises names its whole call
+    // nest. Never a user stack, which is untrusted; bounded, fail-closed, and
+    // compiled out of a shippable image.
     #[cfg(feature = "watchdog-diagnostics")]
     if in_kernel {
         let mut bt = [0u64; tairix_kernel_core::WATCHDOG_BACKTRACE_MAX];
@@ -788,6 +803,16 @@ extern "C" fn production_watchdog_dispatch(cpu: tairix_arch_api::CpuId, frame: *
     }
     #[cfg(not(feature = "watchdog-diagnostics"))]
     let _ = frame;
+    let sample = tairix_arch_api::WatchdogSample {
+        pc: tairix_arch_aarch64::watchdog::read_elr_el1(),
+        // The kernel-side running-task id is not exposed to the arch layer;
+        // the PC + processor state + kernel/user verdict below are the
+        // load-bearing "why", and the detector names the CPU.
+        task: tairix_arch_api::WatchdogSample::NO_TASK,
+        aux: spsr,
+        in_kernel,
+    };
+    tairix_kernel_core::on_watchdog_tick(cpu, now_ns, &sample);
 }
 
 /// Set up tickless timer-driven preemption on the boot CPU: register the

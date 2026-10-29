@@ -824,6 +824,70 @@ fn a_cpu_is_addressable_only_once_it_records_itself() {
 }
 
 #[test]
+fn a_line_reads_back_its_pending_active_and_enabled_bits_and_its_route() {
+    let controller = GicController::new(Gicv2::new(MockGicMmio::new()), 255);
+    let mmio = &controller.gic.mmio;
+    let line = 126;
+    assert_eq!(
+        controller.line_state(line),
+        Some(GicLineState {
+            pending: false,
+            active: false,
+            enabled: false,
+            route: Some(0),
+        })
+    );
+    mmio.gicd_write(ispendr_offset(line), isenabler_bit(line));
+    mmio.gicd_write(isenabler_offset(line), isenabler_bit(line));
+    mmio.gicd_write(itargetsr_offset(line) & !3, 0x0004_0000);
+    assert_eq!(
+        controller.line_state(line),
+        Some(GicLineState {
+            pending: true,
+            active: false,
+            enabled: true,
+            route: Some(0x04),
+        })
+    );
+    mmio.gicd_write(isactiver_offset(line), isenabler_bit(line));
+    assert!(controller
+        .line_state(line)
+        .is_some_and(|state| state.active));
+    assert_eq!(controller.line_state(256), None, "past the controller");
+}
+
+/// Each of a word's four target bytes belongs to its own SPI, and a
+/// private interrupt's banked byte names only the CPU reading it.
+#[test]
+fn a_route_is_read_from_its_own_byte_lane() {
+    let gic = Gicv2::new(MockGicMmio::new());
+    gic.mmio.gicd_write(itargetsr_offset(40), 0x0804_0201);
+    assert_eq!(
+        [40, 41, 42, 43].map(|intid| gic.route(intid)),
+        [Some(0x01), Some(0x02), Some(0x04), Some(0x08)]
+    );
+    assert_eq!(gic.route(MIN_SPI_INTID - 1), None);
+}
+
+#[test]
+fn a_route_reaches_the_lowest_recorded_cpu_it_names() {
+    static CPUS: [GicCpu; 3] = [GicCpu::new(), GicCpu::new(), GicCpu::new()];
+    CPUS[1].record(0x02, 0);
+    CPUS[2].record(0x04, 0);
+    assert_eq!(first_reached(&CPUS, 0x06, false), Some(1));
+    assert_eq!(first_reached(&CPUS, 0x04, false), Some(2));
+    assert_eq!(
+        first_reached(&CPUS, 0x01, false),
+        None,
+        "an interface no CPU recorded"
+    );
+    assert_eq!(first_reached(&CPUS, 0, false), None, "a route to nobody");
+    // A GICv3 route is one CPU's affinity, never a mask of several.
+    assert_eq!(first_reached(&CPUS, 0x04, true), Some(2));
+    assert_eq!(first_reached(&CPUS, 0x06, true), None);
+}
+
+#[test]
 fn a_gicv3_topology_carries_its_redistributor_regions_and_stride() {
     static CPUS: [GicCpu; 1] = [GicCpu::new()];
     static REGIONS: [RedistributorRegion; 1] = [RedistributorRegion {

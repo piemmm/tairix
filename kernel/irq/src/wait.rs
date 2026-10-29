@@ -5,8 +5,8 @@
 //!
 //! * the `irq_wait` `abi-v1` syscall handler in
 //!   `kernel/core::syscalls`, and
-//! * the in-kernel `KernelVirtioHost::notify_wait` path in
-//!   `drivers/bus/virtio` (Stage 4.D Item 2-tail.3).
+//! * the kernel's waits on a device it drives itself, which a host lending
+//!   a driver its device's line reaches through [`LineWait`].
 //!
 //! Both run the same loop: compute a deadline once, poll
 //! [`IrqTable::try_wait_step`], and cooperatively yield between polls
@@ -21,6 +21,7 @@
 //! caller off the run queue and reads `KernelArch::monotonic_ns`; the
 //! virtio host wraps the kernel-binary's equivalent seam).
 
+use tairix_abi::driver::CompletionSignal;
 use tairix_abi::IrqHandle;
 use tairix_kernel_sec::ProcessId;
 
@@ -116,6 +117,35 @@ pub enum WaitOutcome {
     Quarantined,
     /// A cooperative yield aborted the wait before any of the above.
     Aborted(IrqWaitAbort),
+}
+
+/// What a wait's outcome tells a driver: a fire, or else a silence it fails
+/// the operation closed on. A released or quarantined binding and an aborted
+/// wait cannot be told from a dead device, and none is a reason to wait again.
+impl From<WaitOutcome> for CompletionSignal {
+    fn from(outcome: WaitOutcome) -> Self {
+        match outcome {
+            WaitOutcome::Ready => Self::Fired,
+            WaitOutcome::TimedOut
+            | WaitOutcome::NotFound
+            | WaitOutcome::Quarantined
+            | WaitOutcome::Aborted(_) => Self::TimedOut,
+        }
+    }
+}
+
+/// A wait on one bound line, as a kernel host lending a driver its device's
+/// interrupt makes it: [`block_until_ready`] over a binding the
+/// implementation holds, with whatever the kernel records about the wait.
+pub trait LineWait: IrqWaiter {
+    /// Wait at most `budget_ns` for the completion of a request outstanding
+    /// on the line, the only other thing that could end the wait: its
+    /// silence is a fault.
+    fn await_completion(&self, budget_ns: u64) -> WaitOutcome;
+
+    /// Wait at most `timeout_ns` ([`u64::MAX`]: without bound) for an event
+    /// that may never come, where a quiet line is no fault.
+    fn await_event(&self, timeout_ns: u64) -> WaitOutcome;
 }
 
 /// Block the calling task on `handle` until the bound line fires, the
@@ -398,5 +428,28 @@ mod tests {
             block_until_ready(&table, out.handle, ProcessId(1), u64::MAX, &waiter),
             WaitOutcome::Ready
         );
+    }
+
+    /// Only a fire signals the driver; every other outcome is a silence it
+    /// fails the operation closed on.
+    #[test]
+    fn only_a_fire_signals_and_every_other_outcome_is_silence() {
+        assert_eq!(
+            CompletionSignal::from(WaitOutcome::Ready),
+            CompletionSignal::Fired
+        );
+        for outcome in [
+            WaitOutcome::TimedOut,
+            WaitOutcome::NotFound,
+            WaitOutcome::Quarantined,
+            WaitOutcome::Aborted(IrqWaitAbort::Interrupted),
+            WaitOutcome::Aborted(IrqWaitAbort::Unparkable),
+        ] {
+            assert_eq!(
+                CompletionSignal::from(outcome),
+                CompletionSignal::TimedOut,
+                "{outcome:?}"
+            );
+        }
     }
 }

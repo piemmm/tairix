@@ -2482,13 +2482,11 @@ fn run_phases<A: KernelArch>(
     // keep this function within the line budget).
     publish_wait_queue_arch(state);
 
-    // Give the stall watchdog its report channel: a CPU that stops making
-    // scheduler progress is reported on the same serial/console sink the
-    // panic path uses, so a soft lockup is loud rather than a silent seize.
-    // Until this point the watchdog records heartbeats but stays quiet
-    // (fail-safe); the wait-queue hook installed just above supplies the
-    // monotonic clock its tick-driven check reads.
-    crate::watchdog::install_report_sink(audit_sink);
+    // Kernel code with no sink of its own — the watchdog, the sleeping lock,
+    // the in-kernel yield — reports through this one, which the panic path
+    // shares; until now it stays quiet. The wait-queue hook installed just
+    // above is its clock.
+    crate::audit::install_kernel_sink(audit_sink);
 
     // In a debug-diagnostics build, give the watchdog its separate
     // diagnostic channel: the address-bearing lockup detail

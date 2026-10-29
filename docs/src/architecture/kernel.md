@@ -251,10 +251,17 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4063 | Info  | `BOOT_ID_UNAVAILABLE`       | audit  |
 | 4064 | Info  | `HASH_KEY_PUBLISHED`        | audit  |
 | 4065 | Info  | `HASH_KEY_UNAVAILABLE`      | audit  |
+| 4069 | Warn  | `LOCK_RELEASED_LATE`        | audit  |
 | 4070 | Info  | `SECONDARY_CPU_STARTED`     | audit  |
 | 4071 | Error | `SECONDARY_CPU_START_FAILED`| audit  |
 | 4072 | Info  | `SECONDARY_CPU_ONLINE`      | audit  |
-| 4073 | Warn  | `IRQ_WAKE_LATE`             | diag   |
+| 4073 | Warn  | `IRQ_WAKE_LATE`             | audit  |
+| 4074 | Warn  | `IRQ_COMPLETION_OVERDUE`    | audit  |
+| 4075 | Warn  | `DEVICE_OPERATION_SLOW`     | audit  |
+| 4076 | Warn  | `LOCK_ACQUIRED_LATE`        | audit  |
+| 4077 | Warn  | `KERNEL_YIELD_LATE`         | audit  |
+| 4078 | Warn  | `CPU_HELD_IN_KERNEL`        | audit  |
+| 4079 | Warn  | `IPI_UNDELIVERED`           | audit  |
 | 4080 | Error | `CPU_STALL_DETECTED`        | audit  |
 | 4081 | Warn  | `CPU_STALL_CLEARED`         | audit  |
 | 4082 | Error | `CPU_HARD_LOCKUP_DETECTED`  | audit  |
@@ -410,6 +417,16 @@ dispatch-loop heartbeat (`watchdog::note_progress`) older than
 `watchdog::DEFAULT_SOFT_LOCKUP_THRESHOLD_NS` (10 s). `CPU_STALL_CLEARED` (a
 `Warn`) closes the record when that CPU dispatches again.
 
+`CPU_HELD_IN_KERNEL` (a `Warn`) is the early sign of that failure in kernel
+code, which the monopoly guard never forces off: two consecutive samples of
+the cadence described below, on a port that takes it, found the CPU in kernel
+code with no dispatch between them, the second past the 1 s guard. One sample
+is not enough, since a task making system calls is in kernel code whenever it
+happens to be sampled. Each episode is reported once, with the lockup
+summary's fields and, in a debug image, the detail record, whose backtrace is
+the reporting sample's own. The same scan reports a reschedule IPI a CPU has
+left untaken (`IPI_UNDELIVERED`, `docs/src/architecture/scheduler.md`).
+
 `CPU_HARD_LOCKUP_DETECTED` is a **hard lockup**: a CPU that has stopped
 taking even interrupts (spinning with IRQs masked, wedged, an interrupt
 storm). Its own tick never fires, so only *another* CPU can observe it — via
@@ -507,7 +524,8 @@ address. The lockup **summary** (`CpuHardLockupDetected` /
 `CpuStallDetected`) is always-on and goes to the persistent audit log, but
 carries only non-disclosing state — `cpu`, `observer`, `stalled_ms`, the
 `task` id, `context` (`kernel`/`user`), `sampled`, and `stuck_*` — never a
-kernel address. The address-bearing **detail** below is a separate
+kernel address. A port's sample cannot see the kernel's task ids, so the
+cadence sample takes the task the scheduler has switched in on that CPU. The address-bearing **detail** below is a separate
 `CpuLockupDiagnostic` record emitted to the diagnostic (log/UART) stream,
 never the tamper-evident audit trail, and every kernel address in it is
 rendered **image-base-relative** (`pc=+0x…`, `k_bt=+0x…`), never the
@@ -864,6 +882,13 @@ collapsed in place to just the filesystem label `ARXFS` (a carriage return,
 the label, and an erase-to-end-of-line clear the typed secret and its
 completed-input marker off the tail) followed by a blank line, so the login
 `Username:` that follows is cleanly separated.
+
+While the Supervisor window waits, a separate kernel task reads what the root
+mount will read (`root_mount::prefetch_root`, `plans/NEW-SUPERVISOR.md`). Its
+admission is recorded with its task (`4182` `ROOT_PREFETCH_ADMITTED`) and its
+end with how long it ran (`4183` `ROOT_PREFETCH_FINISHED`, `elapsed_ms`), so a
+boot log shows whether it overlapped the `/System` readers it shares the disk
+with.
 
 The `&'static LateUsersDb` dispatch-hook half is wired: the boot path hands
 the syscall dispatch hook `&tairix_kernel::root_mount::LATE_USERS_DB`

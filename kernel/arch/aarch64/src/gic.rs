@@ -380,6 +380,18 @@ pub const fn isenabler_bit(intid: u32) -> u32 {
     1 << (intid % 32)
 }
 
+/// The `GICD_ISPENDR` word holding `intid`.
+#[must_use]
+pub const fn ispendr_offset(intid: u32) -> usize {
+    gicd_bit_word_offset(GICD_ISPENDR, intid)
+}
+
+/// The `GICD_ISACTIVER` word holding `intid`.
+#[must_use]
+pub const fn isactiver_offset(intid: u32) -> usize {
+    gicd_bit_word_offset(GICD_ISACTIVER, intid)
+}
+
 /// The `GICD_ITARGETSR` byte of `intid`.
 #[must_use]
 pub const fn itargetsr_offset(intid: u32) -> usize {
@@ -515,6 +527,30 @@ impl<M: GicMmio> Gicv2<M> {
     #[must_use]
     pub fn is_enabled(&self, intid: u32) -> bool {
         self.mmio.gicd_read(isenabler_offset(intid)) & isenabler_bit(intid) != 0
+    }
+
+    /// Whether `intid` is pending.
+    #[must_use]
+    pub fn is_pending(&self, intid: u32) -> bool {
+        self.mmio.gicd_read(ispendr_offset(intid)) & isenabler_bit(intid) != 0
+    }
+
+    /// Whether `intid` is active.
+    #[must_use]
+    pub fn is_active(&self, intid: u32) -> bool {
+        self.mmio.gicd_read(isactiver_offset(intid)) & isenabler_bit(intid) != 0
+    }
+
+    /// SPI `intid`'s CPU-interface mask, or [`None`] for a private
+    /// interrupt, whose banked byte names only the reader.
+    #[must_use]
+    pub fn route(&self, intid: u32) -> Option<u8> {
+        if intid < MIN_SPI_INTID {
+            return None;
+        }
+        let byte = itargetsr_offset(intid);
+        let word = self.mmio.gicd_read(byte & !3);
+        u8::try_from((word >> (8 * (byte % 4))) & 0xFF).ok()
     }
 
     /// Whether `intid` is edge-triggered.
@@ -661,6 +697,14 @@ pub trait GicOps {
     fn disable(&self, intid: u32);
     /// Whether `intid` is enabled.
     fn is_enabled(&self, intid: u32) -> bool;
+    /// Whether `intid` is pending.
+    fn is_pending(&self, intid: u32) -> bool;
+    /// Whether `intid` is active.
+    fn is_active(&self, intid: u32) -> bool;
+    /// SPI `intid`'s route as the distributor holds it — a GICv2
+    /// CPU-interface mask, a GICv3 affinity — or [`None`] for a private
+    /// interrupt, which has none.
+    fn route(&self, intid: u32) -> Option<u64>;
     /// Whether `intid` is edge-triggered.
     fn is_edge_triggered(&self, intid: u32) -> bool;
     /// Make `intid` edge- or level-triggered.
@@ -680,6 +724,15 @@ impl<M: GicMmio> GicOps for Gicv2<M> {
     }
     fn is_enabled(&self, intid: u32) -> bool {
         Gicv2::is_enabled(self, intid)
+    }
+    fn is_pending(&self, intid: u32) -> bool {
+        Gicv2::is_pending(self, intid)
+    }
+    fn is_active(&self, intid: u32) -> bool {
+        Gicv2::is_active(self, intid)
+    }
+    fn route(&self, intid: u32) -> Option<u64> {
+        Gicv2::route(self, intid).map(u64::from)
     }
     fn is_edge_triggered(&self, intid: u32) -> bool {
         Gicv2::is_edge_triggered(self, intid)
@@ -717,6 +770,15 @@ impl<M: Gicv3Mmio, C: CpuInterface> GicOps for Gicv3Local<'_, M, C> {
     }
     fn is_enabled(&self, intid: u32) -> bool {
         self.gic.is_enabled(self.rd, intid)
+    }
+    fn is_pending(&self, intid: u32) -> bool {
+        self.gic.is_pending(self.rd, intid)
+    }
+    fn is_active(&self, intid: u32) -> bool {
+        self.gic.is_active(self.rd, intid)
+    }
+    fn route(&self, intid: u32) -> Option<u64> {
+        self.gic.route(intid)
     }
     fn is_edge_triggered(&self, intid: u32) -> bool {
         self.gic.is_edge_triggered(self.rd, intid)
@@ -798,9 +860,34 @@ impl<O: GicOps> GicController<O> {
         self.max_intid
     }
 
+    /// `line` as the distributor holds it now, or [`None`] for a line past
+    /// the controller.
+    #[must_use]
+    pub fn line_state(&self, line: u32) -> Option<GicLineState> {
+        self.in_range(line).then(|| GicLineState {
+            pending: self.gic.is_pending(line),
+            active: self.gic.is_active(line),
+            enabled: self.gic.is_enabled(line),
+            route: self.gic.route(line),
+        })
+    }
+
     const fn in_range(&self, intid: u32) -> bool {
         intid <= self.max_intid
     }
+}
+
+/// A line as the distributor holds it ([`GicController::line_state`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct GicLineState {
+    /// Raised and not yet taken.
+    pub pending: bool,
+    /// Taken and not yet completed.
+    pub active: bool,
+    /// Unmasked.
+    pub enabled: bool,
+    /// An SPI's route ([`GicOps::route`]); [`None`] for a private interrupt.
+    pub route: Option<u64>,
 }
 
 impl<O: GicOps + Send + Sync> tairix_arch_api::IrqController for GicController<O> {
@@ -989,6 +1076,32 @@ fn target_of(cpu: CpuId) -> Result<u64, GicError> {
     topology()?.cpu(cpu)?.target().ok_or(GicError::UnknownCpu)
 }
 
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+/// The lowest of `cpus` an SPI holding `route` reaches: one whose GICv2
+/// interface the mask names, or, by `affinity`, whose GICv3 affinity it is.
+fn first_reached(cpus: &[GicCpu], route: u64, affinity: bool) -> Option<CpuId> {
+    cpus.iter()
+        .position(|cpu| {
+            cpu.target().is_some_and(|target| {
+                if affinity {
+                    target == route
+                } else {
+                    target & route != 0
+                }
+            })
+        })
+        .and_then(|index| CpuId::try_from(index).ok())
+}
+
+/// The lowest CPU an SPI holding `route` ([`GicLineState::route`]) reaches,
+/// or [`None`] when it reaches none that has brought its interface up.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub fn cpu_routed(route: u64) -> Option<CpuId> {
+    let affinity = matches!(version(), GicVersion::V3);
+    first_reached(topology().ok()?.cpus, route, affinity)
+}
+
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 /// The GICv2 interface mask a recorded target holds.
 fn interface_mask(target: u64) -> u8 {
@@ -1101,6 +1214,15 @@ impl GicOps for ActiveGic {
     }
     fn is_enabled(&self, intid: u32) -> bool {
         Self::with(intid, false, |gic| gic.is_enabled(intid))
+    }
+    fn is_pending(&self, intid: u32) -> bool {
+        Self::with(intid, false, |gic| gic.is_pending(intid))
+    }
+    fn is_active(&self, intid: u32) -> bool {
+        Self::with(intid, false, |gic| gic.is_active(intid))
+    }
+    fn route(&self, intid: u32) -> Option<u64> {
+        Self::with(intid, None, |gic| gic.route(intid))
     }
     fn is_edge_triggered(&self, intid: u32) -> bool {
         Self::with(intid, false, |gic| gic.is_edge_triggered(intid))

@@ -246,6 +246,7 @@ impl<F> DriverLock<F> {
 
 impl<F: ?Sized> DriverLock<F> {
     /// Hold the driver, parking until it is free.
+    #[track_caller]
     pub fn lock(&self) -> DriverGuard<'_, F> {
         DriverGuard {
             guard: self.lock.lock(),
@@ -254,6 +255,7 @@ impl<F: ?Sized> DriverLock<F> {
     }
 
     /// Hold the driver if it is free this instant.
+    #[track_caller]
     pub fn try_lock(&self) -> Option<DriverGuard<'_, F>> {
         self.lock.try_lock().map(|guard| DriverGuard {
             guard,

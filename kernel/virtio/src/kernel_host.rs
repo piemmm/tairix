@@ -25,13 +25,10 @@
 //!    `(*const(), slot, len)` — can recover the originating
 //!    [`DmaBuffer`] without further state in the slab.
 //!
-//! [`KernelVirtioHost::notify_wait`] blocks the calling driver task on
-//! a per-host pre-bound [`IrqHandle`] until the device raises its
-//! interrupt line, driving the shared
-//! [`tairix_kernel_irq::block_until_ready`] poll-and-yield loop
-//! through an injected [`IrqWaiter`] (Stage 4.D Item 2-tail.3). The
-//! polled in-process `notify_log` is retained only on the test-only
-//! `tairix_virtio::MockHost`; the production wake-up is the IRQ path.
+//! [`KernelVirtioHost::notify_wait`] blocks the calling driver task until
+//! the device raises its interrupt line, through the kernel's [`LineWait`]
+//! on the line its bus bring-up bound, so the kernel records how the wait
+//! went exactly as it does for every device it drives itself.
 //!
 //! # Safety
 //!
@@ -56,8 +53,8 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use tairix_abi::driver::CompletionSignal;
-use tairix_abi::{DriverError, IrqHandle};
-use tairix_kernel_irq::{block_until_ready, IrqTable, IrqWaiter, WaitOutcome};
+use tairix_abi::DriverError;
+use tairix_kernel_irq::LineWait;
 use tairix_kernel_mem::{DmaBuffer, DmaPool, PageTable};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::dma::{alloc_dma, free_dma, DmaGateError};
@@ -105,20 +102,10 @@ pub struct KernelVirtioHost<'a, P: PageTable, S: Sink + Sync + ?Sized> {
     /// [`DmaBuffer`] by removing the entry under `slot`. Behind a
     /// [`SpinLock`] for the same [`Sync`] reason as `pool`.
     live: SpinLock<BTreeMap<usize, DmaBuffer>>,
-    /// Kernel IRQ table the device's line is bound in. Borrowed for
-    /// the host's lifetime; [`Self::notify_wait`] waits on it.
-    irq: &'a IrqTable,
-    /// Handle minted when the bus driver bound this device's
-    /// interrupt line (Stage 4.D Item 3 supplies the GSI). Stable
-    /// for the life of the host.
-    irq_handle: IrqHandle,
-    /// Clock + blocking-wait seam the completion wait loop drives.
-    /// Supplied by the kernel binary (it wraps the scheduler +
-    /// architecture clock); `kernel/*` stays out of this crate's
-    /// default build (gated behind `kernel-host`). The
-    /// `+ Sync` bound keeps the host [`Sync`] (a shared `&'static` host is
-    /// reached from more than one task).
-    waiter: &'a (dyn IrqWaiter + Sync),
+    /// The wait on the device's bound line, and the clock it is timed on.
+    /// `Sync`, because a shared `&'static` host is reached from more than
+    /// one task.
+    line: &'a (dyn LineWait + Sync),
 }
 
 impl<'a, P: PageTable, S: Sink + Sync + ?Sized> KernelVirtioHost<'a, P, S> {
@@ -135,24 +122,16 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> KernelVirtioHost<'a, P, S> {
     /// and every drop-frees the buffer is audited against this
     /// capability set.
     ///
-    /// `irq` is the kernel IRQ table the device's line is bound in,
-    /// `irq_handle` is the handle the bus driver minted for that
-    /// line, and `waiter` is the clock + yield seam
-    /// [`Self::notify_wait`] drives. The handle is waited on against
-    /// the owning **process** (`caller.process()`), so a host can only wake on
-    /// a line its own process bound — the forgery defence lives in
-    /// [`IrqTable::try_wait_step`]. Process-scoped deliberately: an interrupt
-    /// binding is a process resource, so any thread of a multi-threaded driver
-    /// may drive the completion wait, while another process still cannot.
+    /// `line` is the wait on the device's interrupt line, bound to the
+    /// process that bound it, so the host can only wake on a line that
+    /// process holds.
     #[must_use]
     pub fn new(
         pool: DmaPool<'a, P>,
         caller: &'a TaskCapabilities,
         audit: &'a S,
         id: PoolId,
-        irq: &'a IrqTable,
-        irq_handle: IrqHandle,
-        waiter: &'a (dyn IrqWaiter + Sync),
+        line: &'a (dyn LineWait + Sync),
     ) -> Self {
         Self {
             pool: SpinLock::new(pool),
@@ -161,9 +140,7 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> KernelVirtioHost<'a, P, S> {
             id,
             next_slot: AtomicUsize::new(0),
             live: SpinLock::new(BTreeMap::new()),
-            irq,
-            irq_handle,
-            waiter,
+            line,
         }
     }
 
@@ -181,12 +158,6 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> KernelVirtioHost<'a, P, S> {
     #[must_use]
     pub fn outstanding(&self) -> usize {
         self.live.lock().len()
-    }
-
-    /// The pre-bound [`IrqHandle`] this host waits on.
-    #[must_use]
-    pub fn irq_handle(&self) -> IrqHandle {
-        self.irq_handle
     }
 }
 
@@ -307,46 +278,19 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for KernelVirtioHost<'_, P, 
 
 impl<P: PageTable, S: Sink + Sync + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S> {
     fn notify_wait(&self, _queue_index: u16, timeout_ns: u64) -> CompletionSignal {
-        // Block on the device's pre-bound interrupt line. A virtio
-        // device signals completion on its single MSI / MMIO line
-        // (not per-queue), so the driver re-scans every used ring on
-        // wake-up; `queue_index` is therefore not part of the wait
-        // key. The shared [`block_until_ready`] loop performs the
-        // forgery check and consumes the ready flag that
-        // [`IrqTable::fire`] sets *after* masking the line, so the
-        // mask-before-wake invariant (`docs/src/security/irq.md`) is
-        // observed before this returns.
-        //
-        // The caller's `timeout_ns` bounds the wait, and every park inside
-        // the loop registers that bound with the timed sweep, so a device
-        // that goes silent — a lost or coalesced completion interrupt, an
-        // unresponsive controller — releases the task at the deadline
-        // instead of parking it forever inside the device operation while
-        // it holds that device's lock.
-        match block_until_ready(
-            self.irq,
-            self.irq_handle,
-            self.caller.process(),
-            timeout_ns,
-            self.waiter,
-        ) {
-            WaitOutcome::Ready => CompletionSignal::Fired,
-            // Every non-fire outcome is reported as silence, so the driver
-            // fails the outstanding transfer closed: the budget elapsed, the
-            // binding was released underneath us, the line was quarantined
-            // by the runaway-interrupt net, or the wait was aborted because
-            // the task is being torn down. None of them can be distinguished
-            // from a dead device by a driver, and none of them is a reason to
-            // wait again.
-            WaitOutcome::TimedOut
-            | WaitOutcome::NotFound
-            | WaitOutcome::Quarantined
-            | WaitOutcome::Aborted(_) => CompletionSignal::TimedOut,
-        }
+        // One line serves every queue, so the driver re-scans every used ring
+        // on a wake and the queue is no part of the wait. A finite budget
+        // means a request is outstanding, which makes a quiet line a fault.
+        let outcome = if timeout_ns == u64::MAX {
+            self.line.await_event(timeout_ns)
+        } else {
+            self.line.await_completion(timeout_ns)
+        };
+        outcome.into()
     }
 
     fn now_ns(&self) -> u64 {
-        self.waiter.now_ns()
+        self.line.now_ns()
     }
 }
 
@@ -356,8 +300,11 @@ mod tests {
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicU32, AtomicU64};
     use tairix_abi::CapabilityId;
+    use tairix_abi::IrqHandle;
     use tairix_caps::CapabilitySet;
-    use tairix_kernel_irq::{IrqController, IrqWaitAbort, MaskError};
+    use tairix_kernel_irq::{
+        block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, MaskError, WaitOutcome,
+    };
     use tairix_kernel_mem::{
         bootinfo::{BootMemoryMap, MemoryRegion, RegionKind},
         AddressSpace, FrameAllocator, HostPageTable, PhysAddr, SimPhysMap, VirtAddr, PAGE_SIZE,
@@ -366,9 +313,8 @@ mod tests {
     use tairix_kernel_sec::identity::UserId;
     use tairix_log::{Event, Sink};
 
-    /// Owner process id every fixture binds the device line against. The
-    /// host waits on `self.caller.process()`, and [`task_with`] derives
-    /// the caller with this id.
+    /// Owner process id every fixture binds the device line against, waits
+    /// on, and derives its caller with ([`task_with`]).
     const OWNER: ProcessId = ProcessId(99);
 
     /// Permissive controller so [`IrqTable::fire`] can mask and set
@@ -380,7 +326,8 @@ mod tests {
         }
     }
 
-    /// Deterministic [`IrqWaiter`] for the host tests.
+    /// Deterministic [`LineWait`] for the host tests: the shared wait loop
+    /// over `handle`, counting which wait it was asked for.
     ///
     /// `now_ns` advances one tick per park, so a caller's finite budget
     /// expires after that many parks — the silent-device path. When
@@ -391,40 +338,41 @@ mod tests {
     /// caller's budget reaches the park that has to honour it.
     struct TestWaiter<'a> {
         table: &'a IrqTable,
+        handle: IrqHandle,
         controller: OkController,
         fire_line: Option<u32>,
         fire_after: u32,
         yields: AtomicU32,
         now: AtomicU64,
         parked_until: AtomicU64,
+        completions: AtomicU32,
+        events: AtomicU32,
     }
 
     impl<'a> TestWaiter<'a> {
-        /// Waiter that never fires; used by the alloc / drop tests
-        /// that never call `notify_wait`.
-        fn idle(table: &'a IrqTable) -> Self {
+        /// Waiter on `handle` that never fires.
+        fn idle(table: &'a IrqTable, handle: IrqHandle) -> Self {
             Self {
                 table,
+                handle,
                 controller: OkController,
                 fire_line: None,
                 fire_after: 0,
                 yields: AtomicU32::new(0),
                 now: AtomicU64::new(0),
                 parked_until: AtomicU64::new(0),
+                completions: AtomicU32::new(0),
+                events: AtomicU32::new(0),
             }
         }
 
-        /// Waiter that fires `line` on the `after`-th cooperative
-        /// yield.
-        fn firing(table: &'a IrqTable, line: u32, after: u32) -> Self {
+        /// Waiter on `handle` that fires `line` on the `after`-th
+        /// cooperative yield.
+        fn firing(table: &'a IrqTable, handle: IrqHandle, line: u32, after: u32) -> Self {
             Self {
-                table,
-                controller: OkController,
                 fire_line: Some(line),
                 fire_after: after,
-                yields: AtomicU32::new(0),
-                now: AtomicU64::new(0),
-                parked_until: AtomicU64::new(0),
+                ..Self::idle(table, handle)
             }
         }
 
@@ -434,6 +382,26 @@ mod tests {
 
         fn parked_until(&self) -> u64 {
             self.parked_until.load(Ordering::Relaxed)
+        }
+
+        /// How many completion and event waits were asked for.
+        fn waits(&self) -> (u32, u32) {
+            (
+                self.completions.load(Ordering::Relaxed),
+                self.events.load(Ordering::Relaxed),
+            )
+        }
+    }
+
+    impl LineWait for TestWaiter<'_> {
+        fn await_completion(&self, budget_ns: u64) -> WaitOutcome {
+            self.completions.fetch_add(1, Ordering::Relaxed);
+            block_until_ready(self.table, self.handle, OWNER, budget_ns, self)
+        }
+
+        fn await_event(&self, timeout_ns: u64) -> WaitOutcome {
+            self.events.fetch_add(1, Ordering::Relaxed);
+            block_until_ready(self.table, self.handle, OWNER, timeout_ns, self)
         }
     }
 
@@ -542,9 +510,8 @@ mod tests {
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
-        let waiter = TestWaiter::idle(&irq);
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let waiter = TestWaiter::idle(&irq, handle);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         let slab = host.alloc_dma_zeroed(PAGE_SIZE).expect("granted");
         assert_eq!(slab.len(), PAGE_SIZE);
         assert!(slab.as_bytes().iter().all(|b| *b == 0));
@@ -567,9 +534,8 @@ mod tests {
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
-        let waiter = TestWaiter::idle(&irq);
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let waiter = TestWaiter::idle(&irq, handle);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         {
             let slab = host.alloc_dma_zeroed(PAGE_SIZE).expect("granted");
             assert_eq!(host.outstanding(), 1);
@@ -594,9 +560,8 @@ mod tests {
         // No `MEM_DMA` capability: every allocation must fail closed.
         let caller = task_with(&[], &sink);
         let (irq, handle) = irq_binding(4);
-        let waiter = TestWaiter::idle(&irq);
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let waiter = TestWaiter::idle(&irq, handle);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         let err = host.alloc_dma_zeroed(PAGE_SIZE).unwrap_err();
         assert!(matches!(err, DriverError::PermissionDenied));
         assert_eq!(host.outstanding(), 0);
@@ -613,9 +578,8 @@ mod tests {
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
-        let waiter = TestWaiter::idle(&irq);
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let waiter = TestWaiter::idle(&irq, handle);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         let err = host.alloc_dma_zeroed(0).unwrap_err();
         assert!(matches!(err, DriverError::BufferTooSmall));
         assert_eq!(host.outstanding(), 0);
@@ -629,9 +593,8 @@ mod tests {
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
-        let waiter = TestWaiter::idle(&irq);
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let waiter = TestWaiter::idle(&irq, handle);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         let mut a = host.alloc_dma_zeroed(PAGE_SIZE).expect("first");
         let mut b = host.alloc_dma_zeroed(PAGE_SIZE).expect("second");
         // Distinct slot indices guarantee the slabs name disjoint
@@ -665,12 +628,11 @@ mod tests {
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
-        let waiter = TestWaiter::idle(&irq);
+        let waiter = TestWaiter::idle(&irq, handle);
         // Pre-fire the line through a permissive controller so the
         // ready flag is already set when `notify_wait` polls.
         irq.fire(4, &OkController).expect("pre-fire");
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::Fired);
         // No yield occurred: the pre-fired ready flag was consumed on
         // the first poll.
@@ -696,9 +658,8 @@ mod tests {
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
-        let waiter = TestWaiter::firing(&irq, 4, 3);
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let waiter = TestWaiter::firing(&irq, handle, 4, 3);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         // A budget generous enough to outlast the three parks (the fake
         // clock ticks once per park), so the fire is what ends the wait.
         assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::Fired);
@@ -720,7 +681,7 @@ mod tests {
     #[test]
     fn notify_wait_observes_mask_before_wake() {
         // `SpinLock`/atomics (not `Cell`) so `Probe`/`ProbeWaiter` are
-        // `Sync` — the host now requires `waiter: &(dyn IrqWaiter + Sync)`.
+        // `Sync`, as the host's line wait must be.
         struct Probe<'a> {
             table: &'a IrqTable,
             handle: IrqHandle,
@@ -752,6 +713,14 @@ mod tests {
                 Ok(())
             }
         }
+        impl LineWait for ProbeWaiter<'_> {
+            fn await_completion(&self, budget_ns: u64) -> WaitOutcome {
+                block_until_ready(self.table, self.probe.handle, OWNER, budget_ns, self)
+            }
+            fn await_event(&self, timeout_ns: u64) -> WaitOutcome {
+                block_until_ready(self.table, self.probe.handle, OWNER, timeout_ns, self)
+            }
+        }
 
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
         let sim = fresh_sim();
@@ -770,8 +739,7 @@ mod tests {
             line: 4,
             yields: AtomicU32::new(0),
         };
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::Fired);
         assert_eq!(
             *probe.ready_during_mask.lock(),
@@ -797,12 +765,11 @@ mod tests {
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
-        let waiter = TestWaiter::idle(&irq);
+        let waiter = TestWaiter::idle(&irq, handle);
         // Release every binding owned by the device task before the
         // wait runs.
         irq.release_for(OWNER, &OkController);
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::TimedOut);
         assert!(irq.lookup(handle).is_none());
     }
@@ -826,9 +793,8 @@ mod tests {
         let (irq, handle) = irq_binding(4);
         // Never fires; the fake clock ticks once per park, so a 5 ns budget
         // expires after a bounded number of parks.
-        let waiter = TestWaiter::idle(&irq);
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let waiter = TestWaiter::idle(&irq, handle);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         assert_eq!(host.notify_wait(0, 5), CompletionSignal::TimedOut);
         // The binding is untouched: a timed-out wait consumes nothing and
         // leaves the line bound for the next request.
@@ -848,9 +814,8 @@ mod tests {
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
-        let waiter = TestWaiter::idle(&irq);
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let waiter = TestWaiter::idle(&irq, handle);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         // The clock starts at 0, so the loop's absolute deadline is the
         // budget itself.
         assert_eq!(host.notify_wait(0, 9), CompletionSignal::TimedOut);
@@ -861,6 +826,25 @@ mod tests {
         );
     }
 
+    /// A budget is a request outstanding, waited for as a completion, whose
+    /// silence the kernel records; no budget is an unsolicited event.
+    #[test]
+    fn a_budget_waits_for_a_completion_and_no_budget_for_an_event() {
+        let frames = FrameAllocator::new(&small_map(16)).unwrap();
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
+        let sink = Recorder::new();
+        let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
+        let (irq, handle) = irq_binding(4);
+        let waiter = TestWaiter::idle(&irq, handle);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        assert_eq!(host.notify_wait(0, 5), CompletionSignal::TimedOut);
+        assert_eq!(waiter.waits(), (1, 0));
+        irq.fire(4, &OkController).expect("fire");
+        assert_eq!(host.notify_wait(0, u64::MAX), CompletionSignal::Fired);
+        assert_eq!(waiter.waits(), (1, 1));
+    }
+
     #[test]
     fn a_waits_clock_is_the_parks_own_clock() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
@@ -869,9 +853,8 @@ mod tests {
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
-        let waiter = TestWaiter::idle(&irq);
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let waiter = TestWaiter::idle(&irq, handle);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         assert_eq!(host.now_ns(), 0);
         assert_eq!(host.notify_wait(0, 5), CompletionSignal::TimedOut);
         assert_eq!(
@@ -891,9 +874,8 @@ mod tests {
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
-        let waiter = TestWaiter::idle(&irq);
-        let host =
-            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        let waiter = TestWaiter::idle(&irq, handle);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
         // The pool's frames hold sixteen pages.
         let err = host.alloc_dma_zeroed(PAGE_SIZE * 64).unwrap_err();
         assert_eq!(err, DriverError::OutOfMemory);

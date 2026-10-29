@@ -225,8 +225,6 @@ pub fn bring_up_virtio_mmio<P: MmioFloorPort>(
         caller,
         audit,
         PoolId::fresh(),
-        armed.table(),
-        armed.handle(),
         waiter,
     )));
     Ok(FloorDevice {

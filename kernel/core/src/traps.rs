@@ -14,6 +14,8 @@
 //! reached only from a trap taken in user mode. That is what makes the
 //! others safe on a trap taken with the kernel mid-operation.
 
+use core::sync::atomic::Ordering;
+
 use tairix_arch_api::CpuId;
 
 /// Honour `cpu`'s pending reschedule on the way back to user mode.
@@ -63,13 +65,73 @@ pub extern "C" fn on_timer_tick(cpu: CpuId) {
 /// kill or its stop then waited on the lockup watchdog's monopoly guard.
 /// Pure accounting — the context switch is [`on_user_preempt_point`]'s job.
 pub extern "C" fn on_reschedule_ipi(cpu: CpuId) {
+    if let Some(state) = crate::cpu_state::get(cpu) {
+        state.ipi_pending_since.store(0, Ordering::Release);
+    }
     crate::preempt::request_forced_yield(cpu);
+}
+
+/// Note that a reschedule IPI is about to be raised on `target`, so the
+/// lockup watchdog can report one the target never takes
+/// ([`AuditEvent::IpiUndelivered`](crate::audit::AuditEvent::IpiUndelivered)).
+/// Called by each port before it raises the IPI; the oldest outstanding send
+/// is the one kept, so a later send reads no clock. A send to the calling
+/// CPU is not noted, since a port may answer it without an interrupt, and
+/// nothing is noted until a watchdog cadence sample has run, since only its
+/// scan reads the mark.
+pub fn note_reschedule_ipi_sent(target: CpuId) {
+    if !crate::watchdog::cadence_running() {
+        return;
+    }
+    let Some(hook) = crate::waitq::wait_arch() else {
+        return;
+    };
+    if hook.current_cpu() == Some(target) {
+        return;
+    }
+    let Some(state) = crate::cpu_state::get(target) else {
+        return;
+    };
+    if state.ipi_pending_since.load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    let _ = state.ipi_pending_since.compare_exchange(
+        0,
+        hook.now_ns().max(1),
+        Ordering::AcqRel,
+        Ordering::Relaxed,
+    );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{on_timer_tick, on_user_preempt_point};
+    use super::{
+        note_reschedule_ipi_sent, on_reschedule_ipi, on_timer_tick, on_user_preempt_point,
+    };
     use crate::preempt::{preemption_count, take_preempt_pending};
+    use core::sync::atomic::Ordering;
+
+    /// A send to another CPU is noted with when it was made, the oldest of
+    /// several outstanding kept, and taking the IPI clears it.
+    #[test]
+    fn a_noted_send_is_cleared_when_the_ipi_is_taken() {
+        let _ = crate::test_boot::claim_scheduler();
+        let target = crate::test_boot::claim_cpu();
+        let pending = || {
+            crate::cpu_state::get(target)
+                .expect("a claimed CPU has a slot")
+                .ipi_pending_since
+                .load(Ordering::Relaxed)
+        };
+        crate::watchdog::note_cadence_running();
+        crate::test_boot::advance_clock(5_000);
+        note_reschedule_ipi_sent(target);
+        crate::test_boot::advance_clock(1_000);
+        note_reschedule_ipi_sent(target);
+        assert_eq!(pending(), 5_000, "the oldest send is kept");
+        on_reschedule_ipi(target);
+        assert_eq!(pending(), 0);
+    }
 
     #[test]
     fn the_timer_tick_latches_the_pending_preemption() {

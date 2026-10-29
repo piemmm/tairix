@@ -53,7 +53,7 @@ pub use tairix_log::{
 pub use tairix_test_riscv64_boot::boot;
 
 use crate::common::{
-    drive_driver_lifecycle, dtb_total_size, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
+    drive_driver_lifecycle, dtb_total_size, FixtureLine, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
 };
 
 use tairix_itest_finisher::fail_point;
@@ -344,21 +344,18 @@ where
     ) else {
         env.fail("DMA pool construct");
     };
-    let waiter = WfiWaiter {
-        controller,
-        line,
+    let wait = FixtureLine {
         table,
         handle,
+        owner: caller.process(),
+        park: WfiWaiter {
+            controller,
+            line,
+            table,
+            handle,
+        },
     };
-    let vhost = KernelVirtioHost::new(
-        pool,
-        &caller,
-        &SERIAL_SINK,
-        PoolId::fresh(),
-        table,
-        handle,
-        &waiter,
-    );
+    let vhost = KernelVirtioHost::new(pool, &caller, &SERIAL_SINK, PoolId::fresh(), &wait);
 
     // 7. Drive the shared lifecycle with `body` against the reloaded driver.
     drive_driver_lifecycle(&env, cfg, transport, &vhost, body)

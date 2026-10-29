@@ -225,9 +225,11 @@ or any bundle driver) is unsettled from admission; one whose driver cannot is
 settled at once. The driver says it has settled with `hw_node_settle` (no. 140,
 `CAP_HW_EMIT`, no arguments): the kernel marks the caller's own matched node
 and bumps the generation on the edge only. A bus driver calls it after its
-initial walk — xHCI once no skipped-port retry is armed — a channel driver once
-its channel node is published, and a driver with nothing to enumerate as it
-starts.
+initial walk — xHCI once no skipped-port retry is armed — a channel driver
+through `serve::publish_channel`, which settles once the channel node is
+published, and a driver with nothing to enumerate as it starts. A publishing
+driver that never settles holds the boot's settling for the device manager's
+five-second bound (`13027`).
 
 A keyboard's driver marks its node a key source with `hw_node_key_source`
 (no. 145, `CAP_INPUT_INJECT`, no arguments) once its keys reach the seat: the

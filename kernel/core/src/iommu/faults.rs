@@ -11,7 +11,7 @@ use tairix_kernel_iommu_api::{
     Clock, Fault, FaultBudget, FaultLimits, FaultReason, FaultRoute, FaultVerdict, IommuUnit,
     FAULT_QUEUE_RECORDS,
 };
-use tairix_kernel_irq::{IrqController, IrqTable, WaitOutcome};
+use tairix_kernel_irq::{IrqController, IrqTable, LineWait, WaitOutcome};
 use tairix_kernel_sched_api::TaskId;
 use tairix_kernel_sec::ProcessId;
 use tairix_log::{Field, FieldValue, Level, Sink};
@@ -311,7 +311,7 @@ impl Translation {
 
 /// Wait for the fault interrupt, at most `timeout_ns`.
 fn wait(waiter: &IrqParkWaiter, timeout_ns: u64) -> Result<(), &'static str> {
-    match waiter.park_wait(timeout_ns) {
+    match waiter.await_event(timeout_ns) {
         WaitOutcome::Ready | WaitOutcome::TimedOut => Ok(()),
         WaitOutcome::NotFound => Err("unbound"),
         WaitOutcome::Quarantined => Err("quarantined"),

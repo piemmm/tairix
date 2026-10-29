@@ -181,6 +181,8 @@ impl SchedulerArch for RiscvBinArch {
     }
 
     fn send_ipi(&self, target: CpuId) {
+        // Noted before it is raised, so one the target never takes is seen.
+        tairix_kernel_core::note_reschedule_ipi_sent(target);
         self.arch.send_ipi(target);
     }
 

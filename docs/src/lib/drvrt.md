@@ -173,7 +173,10 @@ every supplier needs is defined here once:
   protocol's own loop admits its callers: the network channel answers the
   network stack alone. **`serve::publish_channel`** then publishes the
   channel node naming it, with whatever facts it states, so the service finds
-  the channel in the tree only once it serves. The audio and network channels,
+  the channel in the tree only once it serves, and settles the driver's node:
+  the channel is the one child a channel-serving driver publishes, and the
+  device manager holds the boot's settling until each publishing driver has
+  settled. The audio and network channels,
   the GPIO header and every temperature sensor bind and publish through these
   two. A consumer finds the channel with `HwNode::channel_endpoint`.
 - **`serve::thermal_sensor`** serves a `ThermalSensor` on its node's sensor

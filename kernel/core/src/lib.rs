@@ -315,7 +315,9 @@ pub use syscfg::{
     load_and_apply_system_config, read_image_system_config, ImageConfig, IMAGE_SYSTEM_CONFIG,
     SYSTEM_CONFIG,
 };
-pub use traps::{on_reschedule_ipi, on_timer_tick, on_user_preempt_point};
+pub use traps::{
+    note_reschedule_ipi_sent, on_reschedule_ipi, on_timer_tick, on_user_preempt_point,
+};
 pub use useradmin::{
     LateUsersAdmin, NullUsersAdmin, UserAdminBacking, UserAdminEngine, UsersAdmin,
     UsersAdminAlreadyInstalled, NULL_USERS_ADMIN,
@@ -335,8 +337,7 @@ pub use waitq::{
 };
 pub use wallclock::{KernelWallClock, NullWallClock, WallClockSource, NULL_WALL_CLOCK};
 pub use watchdog::{
-    check_stall, install_recovery as install_watchdog_recovery,
-    install_report_sink as install_watchdog_sink, note_progress, on_watchdog_tick,
+    check_stall, install_recovery as install_watchdog_recovery, note_progress, on_watchdog_tick,
     set_activity as set_watchdog_activity, KernelInternalLines, WatchdogActivity,
     DEFAULT_HARD_LOCKUP_THRESHOLD_NS, DEFAULT_SOFT_LOCKUP_THRESHOLD_NS,
 };

@@ -44,6 +44,8 @@ struct FixtureBlock {
     medium: Option<BlkMedium>,
     flushes: usize,
     discards: usize,
+    /// How long each operation takes on the test's wait clock.
+    takes_ns: u64,
 }
 
 impl FixtureBlock {
@@ -56,10 +58,12 @@ impl FixtureBlock {
             medium: Some(FIXTURE_MEDIUM),
             flushes: 0,
             discards: 0,
+            takes_ns: 0,
         }
     }
 
     fn check(&mut self) -> Result<(), DriverError> {
+        crate::test_boot::advance_clock(self.takes_ns);
         match self.fail {
             Some(err) => Err(err),
             None => Ok(()),
@@ -413,6 +417,65 @@ fn a_metered_discard_is_folded_as_an_occupancy_not_a_transfer() {
     assert_eq!(io.read_bytes, 0);
     assert_eq!(io.write_bytes, 0);
     assert_eq!(source.counters.snapshot().completions, 1);
+}
+
+/// The record is the device's own time, timed from the two readings the fold
+/// takes, so a read a hair short of the bar passes unremarked.
+#[test]
+fn a_device_operation_taking_a_quarter_second_is_recorded_and_a_quicker_one_is_not() {
+    use crate::test_sink::{with_log_level, TestSink};
+
+    let _ = crate::test_boot::claim_scheduler();
+    let sink: &'static TestSink = crate::forever(alloc::boxed::Box::new(TestSink::new()));
+    let mut inner = FixtureBlock::new(4);
+    inner.takes_ns = SLOW_DEVICE_NS - 1;
+    let mut device = MeteredBlock::new(inner, DEV, sink);
+    let mut buf = [0u8; BLOCK];
+    with_log_level(Level::Trace, || {
+        device.read_blocks(1, &mut buf).expect("reads");
+        assert!(sink.snapshot().is_empty(), "a read short of the bar");
+        device.device.takes_ns = SLOW_DEVICE_NS;
+        device.read_blocks(2, &mut buf).expect("reads");
+        device.device.fail = Some(DriverError::DeviceFault);
+        assert_eq!(device.flush(), Err(DriverError::DeviceFault));
+    });
+    let events = sink.snapshot();
+    assert_eq!(events.len(), 2, "{events:?}");
+    let fields = |at: usize| -> Vec<(&str, &str)> {
+        events[at]
+            .fields
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect()
+    };
+    let dev = alloc::format!("{DEV}");
+    assert_eq!(events[0].id, AuditEvent::DeviceOperationSlow.id());
+    assert_eq!(events[0].level, Level::Warn);
+    assert_eq!(
+        fields(0),
+        [
+            ("dev", dev.as_str()),
+            ("device", "fixture-blk"),
+            ("op", "read"),
+            ("lba", "2"),
+            ("bytes", "512"),
+            ("elapsed_ms", "250"),
+            ("ok", "true"),
+        ]
+    );
+    assert_eq!(
+        fields(1),
+        [
+            ("dev", dev.as_str()),
+            ("device", "fixture-blk"),
+            ("op", "flush"),
+            ("lba", "null"),
+            ("bytes", "0"),
+            ("elapsed_ms", "250"),
+            ("ok", "false"),
+        ],
+        "a slow failure is named as one"
+    );
 }
 
 #[test]

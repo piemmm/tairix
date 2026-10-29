@@ -114,6 +114,28 @@ pub trait IrqController {
             Trigger::Edge => Err(MaskError::Unsupported),
         }
     }
+
+    /// What `line` is doing at the controller now, or [`None`] where the
+    /// controller cannot read it back. Lets a wait whose device has gone
+    /// quiet tell a raise left undelivered from one never made.
+    fn line_state(&self, line: u32) -> Option<LineState> {
+        let _ = line;
+        None
+    }
+}
+
+/// A line as its controller holds it ([`IrqController::line_state`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct LineState {
+    /// Raised and not yet taken by any CPU.
+    pub pending: bool,
+    /// Taken by a CPU that has not completed it.
+    pub active: bool,
+    /// Unmasked, so a pending raise can reach a CPU.
+    pub enabled: bool,
+    /// The dense id of the CPU the line is routed to, where the controller
+    /// routes it to one.
+    pub target: Option<u32>,
 }
 
 /// How a wired line signals its device's interrupt.
@@ -1049,6 +1071,13 @@ mod tests {
         let out = f();
         STARVED.with(|starved| starved.set(false));
         out
+    }
+
+    /// A controller that cannot read its lines back says so, rather than
+    /// reporting a line idle.
+    #[test]
+    fn a_controller_with_no_read_back_reports_no_line_state() {
+        assert_eq!(UNSUPPORTED_CONTROLLER.line_state(9), None);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use tairix_abi::driver::CompletionSignal;
 use tairix_abi::{HwNode, HwResourceKind, IrqHandle};
 use tairix_kernel_core::waitq::deadline_for;
 use tairix_kernel_core::{park_until, wait_now_ns, FallbackPark, IrqParkWaiter};
-use tairix_kernel_irq::{IrqController, IrqTable, Trigger, WaitOutcome};
+use tairix_kernel_irq::{IrqController, IrqTable, LineWait, Trigger};
 use tairix_kernel_sec::captable::ProcessId;
 use tairix_log::Sink;
 
@@ -63,7 +63,7 @@ impl FloorCompletion {
 
 impl CompletionWait for FloorCompletion {
     fn await_irq(&self) -> CompletionSignal {
-        completion(self.waiter.park_wait(SILENCE_BUDGET_NS))
+        self.waiter.await_completion(SILENCE_BUDGET_NS).into()
     }
 }
 
@@ -79,20 +79,6 @@ impl Delay for FloorCompletion {
 
     fn now_us(&self) -> u64 {
         wait_now_ns().map_or(0, |ns| ns / 1_000)
-    }
-}
-
-/// What a wait's outcome tells the driver: a fire, or else a silence it
-/// fails the operation closed on — a timeout, a released or quarantined
-/// binding, an aborted wait. The driver re-reads its status on a fire, so a
-/// spurious wake is harmless.
-fn completion(outcome: WaitOutcome) -> CompletionSignal {
-    match outcome {
-        WaitOutcome::Ready => CompletionSignal::Fired,
-        WaitOutcome::TimedOut
-        | WaitOutcome::NotFound
-        | WaitOutcome::Quarantined
-        | WaitOutcome::Aborted(_) => CompletionSignal::TimedOut,
     }
 }
 
@@ -185,14 +171,11 @@ mod tests {
     use std::vec::Vec;
 
     use tairix_abi::driver::timing::Delay;
-    use tairix_abi::driver::CompletionSignal;
     use tairix_abi::{HwDeviceClass, HwNode, HwResource, IrqHandle};
-    use tairix_kernel_irq::{
-        IrqController, IrqTable, IrqWaitAbort, MaskError, Trigger, WaitOutcome,
-    };
+    use tairix_kernel_irq::{IrqController, IrqTable, MaskError, Trigger};
     use tairix_kernel_sec::captable::ProcessId;
 
-    use super::{completion, node_line, FloorCompletion, LineHost};
+    use super::{node_line, FloorCompletion, LineHost};
     use crate::test_support::NullSink;
 
     const OWNER: ProcessId = ProcessId(7);
@@ -309,24 +292,6 @@ mod tests {
             &[HwResource::irq_at(u64::from(u32::MAX) + 1, 0)],
         ] {
             assert!(node_line(&node_with(resources)).is_err(), "{resources:?}");
-        }
-    }
-
-    #[test]
-    fn only_a_fire_is_a_completion() {
-        assert_eq!(completion(WaitOutcome::Ready), CompletionSignal::Fired);
-        for silence in [
-            WaitOutcome::TimedOut,
-            WaitOutcome::NotFound,
-            WaitOutcome::Quarantined,
-            WaitOutcome::Aborted(IrqWaitAbort::Interrupted),
-            WaitOutcome::Aborted(IrqWaitAbort::Unparkable),
-        ] {
-            assert_eq!(
-                completion(silence),
-                CompletionSignal::TimedOut,
-                "{silence:?}"
-            );
         }
     }
 

@@ -9,9 +9,9 @@ Wake-up plumbing on the kernel side — the per-line wait queue and the
 controller-level mask / unmask sequence — is wired and
 QEMU-validated (see *Kernel-side implementation* below). The first
 in-kernel consumer of the wait loop, `KernelVirtioHost::notify_wait`,
-blocks a loaded virtio driver on its device's pre-bound `IrqHandle`
-through the same shared primitive (Stage 4.D Item 2-tail.3). This
-page locks down the contract those pieces respect.
+blocks a loaded virtio driver on its device's bound line through the
+same shared primitive. This page locks down the contract those pieces
+respect.
 
 ## ABI surface
 
@@ -378,16 +378,18 @@ Three implementations exist:
   the `tests/integration/irq_kthread_qemu_aarch64` vertical, where a
   device SPI wakes a parked kthread under the live scheduler.
 * **`KernelVirtioHost::notify_wait`** (`kernel/virtio`): waits on
-  the device's pre-bound
-  `IrqHandle` against the owning task (`caller.task()`) with the
-  **caller's** timeout, and answers `CompletionSignal::Fired` or
+  the device's bound line through the kernel's `LineWait`
+  (`kernel/irq`), which holds the binding and its owning process, with
+  the **caller's** timeout, and answers `CompletionSignal::Fired` or
   `CompletionSignal::TimedOut`. A virtio device signals completion
   on a single MSI / MMIO line, not per-queue, so the wait key is the
-  handle, not `queue_index`; the driver re-scans every used ring on
+  binding, not `queue_index`; the driver re-scans every used ring on
   wake-up. Because the wake-up is the fire count `fire` advances
   *after* masking, the mask-before-wake invariant is observed before
   the driver returns from `notify_wait` — exercised by
   `kernel_host::tests::notify_wait_observes_mask_before_wake`.
+  `IrqParkWaiter` is the kernel's `LineWait`, so a virtio floor's waits
+  are recorded exactly as the SD host floor's are (below).
 
   A driver with a **request outstanding** passes that device's
   per-request deadline (`BlkDeviceClass::budget().deadline_ns` for a
@@ -422,6 +424,21 @@ Three implementations exist:
   was performed, absent when it had not been. The fire's instant is the
   table's own (`IrqTable::last_fire_ns`), on the clock the waiter reads.
   Covered by `a_fire_whose_wake_reaches_the_waiter_late_is_recorded`.
+
+  A wait for an *outstanding request* (`LineWait::await_completion`, which
+  both floors' completion seams take, the virtio host for every finite
+  budget) still unanswered after 250 ms is recorded
+  (`4074` `IRQ_COMPLETION_OVERDUE`, Warn) and then waits out the rest of its
+  budget. The record reads the line back from its controller
+  (`IrqController::line_state`: `pending`, `active`, `enabled`, and the CPU
+  it is routed to) with that CPU's watchdog activity, so a line raised and
+  unmasked while its target idles — an interrupt never delivered — is told
+  apart from one the device never raised. A controller that cannot read its
+  lines back leaves those fields `null`. A wait for an event that may never
+  come uses `LineWait::await_event`, where a long quiet line is no fault.
+  Covered by
+  `an_overdue_completion_is_recorded_with_its_line_and_still_waited_for` and
+  `kernel_host::tests::a_budget_waits_for_a_completion_and_no_budget_for_an_event`.
 
 This design composes existing scheduler primitives only; no new
 scheduler interface is introduced (`AGENTS.md` §2.4 — no interface

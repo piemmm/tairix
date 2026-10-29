@@ -48,7 +48,7 @@ use tairix_log::{Event, EventId, Level, Sink};
 use tairix_virtio::transport_mmio::{regs, COMPATIBLE};
 use tairix_virtio::{PoolId, VirtioHost};
 
-use crate::common::{drive_driver_lifecycle, QemuEnv, ScenarioConfig, IDENTITY_LIMIT};
+use crate::common::{drive_driver_lifecycle, FixtureLine, QemuEnv, ScenarioConfig, IDENTITY_LIMIT};
 use tairix_itest_finisher::fail_point;
 
 /// Re-export so the verticals name the concrete transport for the shared
@@ -518,20 +518,17 @@ where
     ) else {
         env.fail("DMA pool construct");
     };
-    let waiter = WfiWaiter {
-        source,
+    let wait = FixtureLine {
         table,
         handle,
+        owner: caller.process(),
+        park: WfiWaiter {
+            source,
+            table,
+            handle,
+        },
     };
-    let vhost = KernelVirtioHost::new(
-        pool,
-        &caller,
-        &SERIAL_SINK,
-        PoolId::fresh(),
-        table,
-        handle,
-        &waiter,
-    );
+    let vhost = KernelVirtioHost::new(pool, &caller, &SERIAL_SINK, PoolId::fresh(), &wait);
 
     // 7. Drive the shared lifecycle with `body` against the reloaded driver.
     drive_driver_lifecycle(&env, cfg, transport, &vhost, body)

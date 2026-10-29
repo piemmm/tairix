@@ -73,7 +73,7 @@ use crate::system_mount::{
 use crate::transform_cache::{SharedClusterCache, TransformClusterCache};
 use crate::unlock_service::{
     autoload_caps, loader_caps, note, service_caps, set_store_service_task,
-    store_endpoint_binder_caps, take_boot, KthreadConsoleRead, UNLOCK_TASK,
+    store_endpoint_binder_caps, take_boot, KthreadConsoleRead, UNLOCK_SERVICE, UNLOCK_TASK,
     USERS_DB_INSTALLED_MESSAGE,
 };
 
@@ -239,25 +239,28 @@ pub fn spawn_unlock<P: UnlockPort>(
         crate::app_store::APP_STORE.note_unavailable();
     };
     let admitted = ctx.spawn_kernel_service(alloc::boxed::Box::new(body));
-    if let Some(task_id) = admitted {
-        // The serve loop registers on `SERVE_WAITQ` under this id, so a posted
-        // request unparks it: a real wake, never a busy-yield.
-        set_store_service_task(task_id);
-    }
-    let started = admitted.is_some();
-    note(
-        audit,
-        if started { Level::Info } else { Level::Error },
-        if started {
-            "root-unlock service kthread admitted (bring-up runs on first dispatch)"
-        } else {
-            "root-unlock service kthread could not be admitted; opening console gate"
-        },
-    );
-    if !started {
+    let Some(task_id) = admitted else {
+        note(
+            audit,
+            Level::Error,
+            "root-unlock service kthread could not be admitted; opening console gate",
+        );
         give_up();
-    }
-    started
+        return false;
+    };
+    // The serve loop registers on `SERVE_WAITQ` under this id, so a posted
+    // request unparks it: a real wake, never a busy-yield.
+    set_store_service_task(task_id);
+    note_field(
+        audit,
+        (
+            UNLOCK_SERVICE,
+            "root-unlock service kthread admitted (bring-up runs on first dispatch)",
+        ),
+        "task",
+        Some(task_id),
+    );
+    true
 }
 
 /// Admit the bound floor driver at the signed load gate, then bring its
@@ -340,6 +343,21 @@ pub struct UnlockEnv {
 /// together with a served one.
 const BOOT_DISK_DEV: u64 = kernel_block_device(0);
 
+/// Audit event: the root grew to fill its medium — its partition (`what` is
+/// `partition`, `blocks` its new length) or the volume on it (`what` is
+/// `volume`, `blocks` what it gained).
+pub const ROOT_GROWN: EventId = EventId(4188);
+
+/// Audit event: growing the root to its medium was refused at `what`; it
+/// mounts at the size it had.
+pub const ROOT_GROWTH_REFUSED: EventId = EventId(4189);
+
+/// Audit event: the root prefetch was admitted as `task`.
+pub const ROOT_PREFETCH_ADMITTED: EventId = EventId(4182);
+
+/// Audit event: the root prefetch finished, `elapsed_ms` after it began.
+pub const ROOT_PREFETCH_FINISHED: EventId = EventId(4183);
+
 /// The live [`WritableRootSink`]: on a successful unlock it opens a second,
 /// independent `'static` read-write [`ARXFS`] window onto the `ARXFSRoot`
 /// partition under the just-derived key and registers it as the **writable
@@ -357,15 +375,6 @@ const BOOT_DISK_DEV: u64 = kernel_block_device(0);
 /// writer of the volume. Fail-soft and audited: any partition/window/mount
 /// refusal leaves the writable tree failing closed and never disturbs the
 /// users/identity install.
-/// Audit event: the root grew to fill its medium — its partition (`what` is
-/// `partition`, `blocks` its new length) or the volume on it (`what` is
-/// `volume`, `blocks` what it gained).
-pub const ROOT_GROWN: EventId = EventId(4188);
-
-/// Audit event: growing the root to its medium was refused at `what`; it
-/// mounts at the size it had.
-pub const ROOT_GROWTH_REFUSED: EventId = EventId(4189);
-
 struct WritableStateSink<B: Block + 'static> {
     store: &'static DriverStoreService<B>,
     audit: &'static (dyn Sink + Sync),
@@ -846,23 +855,66 @@ pub fn finish_unlock<B: Block + 'static>(
 
 /// Take the root mount's reads off `store`'s disk while the Supervisor window
 /// waits: it can outlast its 2 s by however long console 0's input device
-/// takes to bind.
+/// takes to bind. Its admission and how long it ran are recorded
+/// ([`ROOT_PREFETCH_ADMITTED`], [`ROOT_PREFETCH_FINISHED`]).
 fn spawn_root_prefetch<B: Block + 'static>(
     ctx: &'static (dyn InitSpawnCtx + Sync),
     store: &'static DriverStoreService<B>,
     audit: &'static (dyn Sink + Sync),
 ) {
-    let prefetch = move |_: &mut dyn YieldHandle| crate::root_mount::prefetch_root(store.window());
-    if ctx
-        .spawn_kernel_service(alloc::boxed::Box::new(prefetch))
-        .is_none()
-    {
-        note(
+    let prefetch = move |_: &mut dyn YieldHandle| {
+        let began = wait_now_ns();
+        crate::root_mount::prefetch_root(store.window());
+        let elapsed_ns = began
+            .zip(wait_now_ns())
+            .map(|(began, now)| now.saturating_sub(began));
+        note_field(
+            audit,
+            (
+                ROOT_PREFETCH_FINISHED,
+                "root-unlock: root prefetch finished",
+            ),
+            "elapsed_ms",
+            elapsed_ns.map(|ns| ns / 1_000_000),
+        );
+    };
+    match ctx.spawn_kernel_service(alloc::boxed::Box::new(prefetch)) {
+        Some(task) => note_field(
+            audit,
+            (
+                ROOT_PREFETCH_ADMITTED,
+                "root-unlock: root prefetch admitted",
+            ),
+            "task",
+            Some(task),
+        ),
+        None => note(
             audit,
             Level::Warn,
             "root-unlock: root prefetch not admitted; the mount reads the disk cold",
-        );
+        ),
     }
+}
+
+/// Record `event` with its one `key` field.
+fn note_field(
+    audit: &dyn Sink,
+    (id, message): (EventId, &'static str),
+    key: &'static str,
+    value: Option<u64>,
+) {
+    log(
+        audit,
+        &Event {
+            level: Level::Info,
+            id,
+            message,
+            fields: &[Field {
+                key,
+                value: value.map_or(FieldValue::Null, FieldValue::UnsignedInt),
+            }],
+        },
+    );
 }
 
 /// Become the persistent capability-gated driver-store serve loop the
@@ -1056,6 +1108,33 @@ mod tests {
             "the partition and the volume each grew once: {ids:?}"
         );
         assert!(!ids.contains(&ROOT_GROWTH_REFUSED.0));
+    }
+
+    /// The prefetch's records name it by its task and say how long it ran,
+    /// or `null` where there was no clock to time it by.
+    #[test]
+    fn the_prefetch_records_its_task_and_how_long_it_ran() {
+        use tairix_kernel_core::test_sink::TestSink;
+
+        let sink = TestSink::new();
+        note_field(
+            &sink,
+            (ROOT_PREFETCH_ADMITTED, "admitted"),
+            "task",
+            Some(42),
+        );
+        note_field(
+            &sink,
+            (ROOT_PREFETCH_FINISHED, "finished"),
+            "elapsed_ms",
+            None,
+        );
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[0].id, ROOT_PREFETCH_ADMITTED);
+        assert_eq!(events[0].fields, [("task".into(), "42".into())]);
+        assert_eq!(events[1].id, ROOT_PREFETCH_FINISHED);
+        assert_eq!(events[1].fields, [("elapsed_ms".into(), "null".into())]);
     }
 
     /// Regression: the window opened once any input device was bound, so a

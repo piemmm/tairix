@@ -12,9 +12,10 @@ use tairix_arch_api::{PageTableFrames, StuckInterrupt};
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 use crate::gic::SPURIOUS_INTID;
 use crate::gic::{
-    first_stuck_spi, icenabler_offset, icfgr_edge_bit, icfgr_offset, igroupr_offset, isenabler_bit,
-    isenabler_offset, GICD_CTLR, GICD_ICACTIVER, GICD_ICENABLER, GICD_IGROUPR, GICD_IPRIORITYR,
-    GICD_TYPER, GICD_TYPER_ITLINES_MASK, MAX_INTID, MID_RANGE_PRIORITY, MIN_SPI_INTID,
+    first_stuck_spi, icenabler_offset, icfgr_edge_bit, icfgr_offset, igroupr_offset,
+    isactiver_offset, isenabler_bit, isenabler_offset, ispendr_offset, GICD_CTLR, GICD_ICACTIVER,
+    GICD_ICENABLER, GICD_IGROUPR, GICD_IPRIORITYR, GICD_TYPER, GICD_TYPER_ITLINES_MASK, MAX_INTID,
+    MID_RANGE_PRIORITY, MIN_SPI_INTID,
 };
 
 const GICD_IGRPMODR: usize = 0x0D00;
@@ -639,6 +640,31 @@ impl<M: Gicv3Mmio, C: CpuInterface> Gicv3<M, C> {
     #[must_use]
     pub fn is_enabled(&self, rd: usize, intid: u32) -> bool {
         self.read(rd, intid, isenabler_offset(intid)) & isenabler_bit(intid) != 0
+    }
+
+    /// Whether `intid` is pending.
+    #[must_use]
+    pub fn is_pending(&self, rd: usize, intid: u32) -> bool {
+        self.read(rd, intid, ispendr_offset(intid)) & isenabler_bit(intid) != 0
+    }
+
+    /// Whether `intid` is active.
+    #[must_use]
+    pub fn is_active(&self, rd: usize, intid: u32) -> bool {
+        self.read(rd, intid, isactiver_offset(intid)) & isenabler_bit(intid) != 0
+    }
+
+    /// The affinity SPI `intid` is routed to, its routing-mode bit cleared,
+    /// or [`None`] for a private interrupt. Read as two words, which the
+    /// architecture permits on either half of `GICD_IROUTER<n>`.
+    #[must_use]
+    pub fn route(&self, intid: u32) -> Option<u64> {
+        (MIN_SPI_INTID..=MAX_INTID).contains(&intid).then(|| {
+            let off = GICD_IROUTER + 8 * intid as usize;
+            let low = u64::from(self.mmio.distributor_read(off));
+            let high = u64::from(self.mmio.distributor_read(off + 4));
+            ((high << 32) | low) & Affinity::MASK
+        })
     }
 
     /// Whether `intid` is edge-triggered.

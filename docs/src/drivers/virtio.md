@@ -384,9 +384,9 @@ and the audit `Sink` `S`:
 
 ```rust
 pub struct KernelVirtioHost<'a, P: PageTable, S: Sink + ?Sized> {
-    /* RefCell<DmaPool<'a, P>>, &'a TaskCapabilities, &'a S,
+    /* SpinLock<DmaPool<'a, P>>, &'a TaskCapabilities, &'a S,
        fresh PoolId, monotonic slot counter, live-slot table,
-       &'a IrqTable, IrqHandle, &'a dyn IrqWaiter */
+       &'a (dyn LineWait + Sync) */
 }
 ```
 
@@ -409,11 +409,12 @@ drop, looks the buffer up by slot, and routes it back through
 performed at construction (`AGENTS.md` §2.10 — every `unsafe`
 block carries its `// SAFETY:` justification).
 
-`notify_wait` blocks the loaded driver task on the device's
-pre-bound interrupt line through `kernel/irq::block_until_ready`
-(Stage 4.D Item 2-tail.3); the host borrows the kernel `IrqTable`,
-the bus-driver-minted `IrqHandle`, and the scheduler/clock
-`IrqWaiter` seam for this.
+`notify_wait` blocks the loaded driver task on the device's bound
+interrupt line through the kernel's `LineWait` (`kernel/irq`), which
+holds the binding: a finite budget is a request outstanding and waits as
+a completion, `u64::MAX` an unsolicited event. The kernel's `LineWait` is
+`IrqParkWaiter`, so the host's waits carry the same late-wake and overdue
+records as every other device the kernel drives (`docs/src/security/irq.md`).
 
 The wait is bounded by the **caller's** `timeout_ns` and answers
 `CompletionSignal::Fired` or `CompletionSignal::TimedOut`. A driver with a

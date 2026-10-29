@@ -119,14 +119,22 @@
 //! waited on whatever the interrupted CPU ran — a lone user task on a tickless
 //! core, for as long as it ran.
 
+use core::panic::Location;
 use core::sync::atomic::Ordering;
 
 use tairix_kernel_sched_api::{CpuId, SchedResult, SchedulerArch, SchedulerPolicy, StepOutcome};
+use tairix_log::{Field, FieldValue, Level, Sink};
 use tairix_sync::once::OnceCell;
 
+use crate::audit::{emit, AuditEvent};
 use crate::cpu_state;
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
+use crate::waitq::{wait_now_ns, LATE_WAKE_NS};
+
+/// Where a preemption boundary is reached: the in-kernel site calling
+/// [`yield_if_owed`], or [`None`] on the return to user mode.
+type Site = Option<&'static Location<'static>>;
 
 /// A scheduler-backed query the policy-neutral preempt path uses to decide
 /// whether a fired tick actually owes a context switch: does `cpu` have a
@@ -322,12 +330,12 @@ fn count_preemption(cpu: CpuId) {
 ///
 /// Returns `true` if a task was suspended (and the preemption counted).
 #[must_use]
-fn honour_latched_tick(cpu: CpuId) -> bool {
+fn honour_latched_tick(cpu: CpuId, site: Site) -> bool {
     if !reschedule_owed(cpu) {
         keep_periodic_tick(cpu);
         return false;
     }
-    if !reschedule_current(cpu, RescheduleAction::Yield) {
+    if !yield_cpu(cpu, site) {
         // The fired one-shot was consumed, but no dispatcher ran to arm a
         // replacement quantum. Restore a non-tickless policy's periodic
         // deadline before returning; otherwise this CPU can resume a busy
@@ -377,9 +385,14 @@ fn honour_latched_tick(cpu: CpuId) -> bool {
 /// `false` if nothing was owed or no resumable task is published (the
 /// fail-closed [`reschedule_current`] return — early boot, or a stray call
 /// from a context the dispatcher does not own).
+///
+/// A body resumed a quarter of a second or more after it yielded is recorded
+/// ([`AuditEvent::KernelYieldLate`]) under the site that called this.
 #[must_use]
+#[track_caller]
 pub fn yield_if_owed() -> bool {
-    current_cpu().is_some_and(honour_owed)
+    let site = Location::caller();
+    current_cpu().is_some_and(|cpu| honour_owed(cpu, Some(site)))
 }
 
 /// Make one dispatch decision on `cpu`: retire both reschedule latches the
@@ -460,7 +473,7 @@ pub fn settle_before_user() {
 /// suspended.
 fn honour_before_user(mut cpu: CpuId) -> bool {
     let mut suspended = false;
-    while honour_owed(cpu) {
+    while honour_owed(cpu, None) {
         suspended = true;
         mask_interrupts();
         match current_cpu() {
@@ -483,10 +496,10 @@ pub(crate) fn current_cpu() -> Option<CpuId> {
 }
 
 /// Perform the wakes interrupts only flagged, then act on `cpu`'s latches:
-/// the one decision both preemption boundaries make. Returns whether the
-/// task was suspended.
-fn honour_owed(cpu: CpuId) -> bool {
-    gives_way_to_interrupt_work(cpu, drain_flagged_wakes()) || honour_latches(cpu)
+/// the one decision both preemption boundaries make, reached at `site`.
+/// Returns whether the task was suspended.
+fn honour_owed(cpu: CpuId, site: Site) -> bool {
+    gives_way_to_interrupt_work(cpu, drain_flagged_wakes(), site) || honour_latches(cpu, site)
 }
 
 /// Give `cpu` up when the wakes just performed (`woke`) left it a competitor,
@@ -495,14 +508,60 @@ fn honour_owed(cpu: CpuId) -> bool {
 /// Neither waits for a tick: a lone task on a tickless core may not take one
 /// for seconds, and until then the woken task, or the `^C` aimed at this one,
 /// waited behind it.
-fn gives_way_to_interrupt_work(cpu: CpuId, woke: bool) -> bool {
+fn gives_way_to_interrupt_work(cpu: CpuId, woke: bool, site: Site) -> bool {
     let owed = (woke && active_gate().is_none_or(|gate| gate.has_runnable_competitor(cpu)))
         || crate::procsignal::has_pending_foreground();
-    if !owed || !reschedule_current(cpu, RescheduleAction::Yield) {
+    if !owed || !yield_cpu(cpu, site) {
         return false;
     }
     count_preemption(cpu);
     true
+}
+
+/// Yield the task running on `cpu` to its dispatcher, recording a kernel
+/// body at `site` resumed [`LATE_WAKE_NS`] or more later. The clock is read
+/// only on this path, never on a boundary that owes nothing.
+fn yield_cpu(cpu: CpuId, site: Site) -> bool {
+    let Some(site) = site else {
+        return reschedule_current(cpu, RescheduleAction::Yield);
+    };
+    let yielded_at = wait_now_ns();
+    let yielded = reschedule_current(cpu, RescheduleAction::Yield);
+    if let (true, Some(yielded_at), Some(now)) = (yielded, yielded_at, wait_now_ns()) {
+        report_late_yield(
+            crate::audit::kernel_sink(),
+            site,
+            now.saturating_sub(yielded_at),
+        );
+    }
+    yielded
+}
+
+/// Record a kernel body at `site` resumed `late_ns` after yielding, when that
+/// is [`LATE_WAKE_NS`] or more.
+fn report_late_yield(sink: Option<&dyn Sink>, site: &'static Location<'static>, late_ns: u64) {
+    let Some(sink) = sink.filter(|_| late_ns >= LATE_WAKE_NS) else {
+        return;
+    };
+    emit(
+        sink,
+        Level::Warn,
+        AuditEvent::KernelYieldLate,
+        &[
+            Field {
+                key: "site",
+                value: FieldValue::Str(site.file()),
+            },
+            Field {
+                key: "line",
+                value: FieldValue::UnsignedInt(u64::from(site.line())),
+            },
+            Field {
+                key: "late_ms",
+                value: FieldValue::UnsignedInt(late_ns / 1_000_000),
+            },
+        ],
+    );
 }
 
 /// Perform the wakes device and timer interrupts flagged. A task at either
@@ -536,17 +595,17 @@ fn drain_flagged_wakes() -> bool {
 ///
 /// Returns `true` if a task was suspended (and the preemption counted).
 #[must_use]
-fn honour_latches(cpu: CpuId) -> bool {
+fn honour_latches(cpu: CpuId, site: Site) -> bool {
     let tick_pending = take_preempt_pending(cpu);
     if take_forced_yield(cpu) {
-        if !reschedule_current(cpu, RescheduleAction::Yield) {
+        if !yield_cpu(cpu, site) {
             keep_periodic_tick(cpu);
             return false;
         }
         count_preemption(cpu);
         return true;
     }
-    tick_pending && honour_latched_tick(cpu)
+    tick_pending && honour_latched_tick(cpu, site)
 }
 
 /// The number of involuntary preemptions performed on `cpu` since boot.
@@ -568,6 +627,12 @@ pub fn total_preemption_count() -> u64 {
 mod tests {
     use super::*;
     use core::sync::atomic::AtomicU64;
+
+    /// The calling test, as the in-kernel site reaching a boundary.
+    #[track_caller]
+    fn here() -> &'static Location<'static> {
+        Location::caller()
+    }
 
     struct TestCompetitorGate {
         periodic_rearms: [AtomicU64; crate::cpu_state::TEST_CPUS],
@@ -889,7 +954,7 @@ mod tests {
         set_test_gate(&TEST_COMPETITOR_GATE);
         let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(cpu);
         assert!(!take_preempt_pending(cpu));
-        assert!(!honour_latches(cpu));
+        assert!(!honour_latches(cpu, Some(here())));
         assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before);
         assert_eq!(preemption_count(cpu), 0);
     }
@@ -908,12 +973,12 @@ mod tests {
         set_test_gate(&TEST_COMPETITOR_GATE);
         let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(cpu);
         note_preempt_tick(cpu);
-        assert!(!honour_latches(cpu));
+        assert!(!honour_latches(cpu, Some(here())));
         assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before + 1);
         // Consumed at the boundary, so the next unit of work starts clean and
         // a single tick cannot yield twice.
         assert!(!take_preempt_pending(cpu));
-        assert!(!honour_latches(cpu));
+        assert!(!honour_latches(cpu, Some(here())));
         assert_eq!(preemption_count(cpu), 0);
     }
 
@@ -925,14 +990,14 @@ mod tests {
         let cpu_b = crate::test_boot::claim_cpu();
         set_test_gate(&TEST_COMPETITOR_GATE);
         note_preempt_tick(cpu_a);
-        assert!(!honour_latches(cpu_b));
+        assert!(!honour_latches(cpu_b, Some(here())));
         assert!(take_preempt_pending(cpu_a));
     }
 
     /// An out-of-range CPU fails closed: no phantom yield, no rearm.
     #[test]
     fn the_in_kernel_boundary_fails_closed_for_an_unknown_cpu() {
-        assert!(!honour_latches(u32::MAX));
+        assert!(!honour_latches(u32::MAX, Some(here())));
     }
 
     /// A CPU whose scheduler progress has aged past the monopoly guard is
@@ -976,9 +1041,9 @@ mod tests {
         request_forced_yield(cpu);
         // Reaches the (host: fail-closed) reschedule path, which restores the
         // periodic deadline, and consumes the latch exactly once.
-        assert!(!honour_latches(cpu));
+        assert!(!honour_latches(cpu, Some(here())));
         assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before + 1);
-        assert!(!honour_latches(cpu));
+        assert!(!honour_latches(cpu, Some(here())));
         assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before + 1);
     }
 
@@ -1016,7 +1081,7 @@ mod tests {
         let queries_before = TEST_COMPETITOR_GATE.competitor_queries(cpu);
         let runs_before = drain_runs();
         script_drain(true);
-        assert!(!honour_owed(cpu));
+        assert!(!honour_owed(cpu, Some(here())));
         script_drain(false);
         assert_eq!(drain_runs(), runs_before + 1);
         assert_eq!(
@@ -1033,7 +1098,35 @@ mod tests {
         set_test_gate(&TEST_COMPETITOR_GATE);
         let queries_before = TEST_COMPETITOR_GATE.competitor_queries(cpu);
         script_drain(false);
-        assert!(!honour_owed(cpu));
+        assert!(!honour_owed(cpu, Some(here())));
         assert_eq!(TEST_COMPETITOR_GATE.competitor_queries(cpu), queries_before);
+    }
+
+    /// A kernel body resumed at the late-wake bar or later is recorded with
+    /// its site; one resumed sooner is not.
+    #[test]
+    fn a_kernel_yield_resumed_late_is_recorded_and_a_prompt_one_is_not() {
+        use crate::test_sink::{with_log_level, TestSink};
+        use alloc::string::ToString;
+
+        let sink = TestSink::new();
+        let site = here();
+        with_log_level(Level::Trace, || {
+            report_late_yield(Some(&sink), site, LATE_WAKE_NS - 1);
+            report_late_yield(Some(&sink), site, LATE_WAKE_NS);
+            report_late_yield(None, site, LATE_WAKE_NS);
+        });
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].id, AuditEvent::KernelYieldLate.id());
+        assert_eq!(events[0].level, Level::Warn);
+        assert_eq!(
+            events[0].fields,
+            [
+                ("site".to_string(), site.file().to_string()),
+                ("line".to_string(), site.line().to_string()),
+                ("late_ms".to_string(), "250".to_string()),
+            ]
+        );
     }
 }
