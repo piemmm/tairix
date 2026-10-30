@@ -22,6 +22,8 @@ use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
+use tairix_arch_api::backtrace::UserRegisterFrame;
+use tairix_arch_api::fault::set_user_fault_terminator;
 use tairix_arch_api::{UserEntry, BOOT_CPU};
 use tairix_arch_riscv64::context_hal::ContextSwitchHal;
 use tairix_arch_riscv64::fdt::Fdt;
@@ -69,11 +71,10 @@ const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 /// Per-process stack-canary seed handed to each program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
-/// Physical frames the test hands the two spawn builds (image segments + the
-/// user stacks + the startup blocks for both programs, with headroom). The
-/// page-table frames come from the per-space [`paging::PageTablePool`]s, not
-/// from here.
-const FRAME_COUNT: usize = 960;
+/// Physical frames the test hands the four spawn builds (image segments + the
+/// user stacks + the startup blocks, with headroom). The page-table frames
+/// come from the per-space [`paging::PageTablePool`]s, not from here.
+const FRAME_COUNT: usize = 1280;
 
 /// Cooperative-loop watchdog: maximum `step` iterations before the test
 /// declares the workload deadlocked. Sized generously for QEMU TCG.
@@ -104,6 +105,8 @@ const FAIL_FP_CLOBBERED: NonZeroU16 = fail_point!(12);
 const FAIL_KERNEL_FP: NonZeroU16 = fail_point!(13);
 /// The kernel never computed under a probe's `frm`.
 const FAIL_KERNEL_FP_NEVER: NonZeroU16 = fail_point!(14);
+/// A genuinely illegal instruction did not end its task exactly once.
+const FAIL_ILLEGAL_NOT_FATAL: NonZeroU16 = fail_point!(15);
 
 /// Total `yield` syscalls observed across both U-mode tasks.
 static YIELDS: AtomicU64 = AtomicU64::new(0);
@@ -114,6 +117,8 @@ static EXITS: AtomicU64 = AtomicU64::new(0);
 static BAD_EXITS: AtomicU64 = AtomicU64::new(0);
 /// Set non-zero if a kernel float op did not round to nearest.
 static KERNEL_FP_BAD: AtomicU64 = AtomicU64::new(0);
+/// Tasks the user-fault terminator ended.
+static TERMINATIONS: AtomicU64 = AtomicU64::new(0);
 /// Kernel float ops performed under a probe's live `frm`.
 static KERNEL_FP_RUNS: AtomicU64 = AtomicU64::new(0);
 
@@ -139,6 +144,7 @@ static ALLOCATOR: FreeListAllocator =
 static PAGE_TABLES_A: paging::PageTablePool = paging::PageTablePool::new();
 static PAGE_TABLES_B: paging::PageTablePool = paging::PageTablePool::new();
 static PAGE_TABLES_H: paging::PageTablePool = paging::PageTablePool::new();
+static PAGE_TABLES_I: paging::PageTablePool = paging::PageTablePool::new();
 
 /// Physical-frame backing store the spawn builders draw user pages from.
 /// `align(4096)` so each `PAGE_SIZE` slice is a valid page frame; identity-
@@ -257,6 +263,18 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     }
 }
 
+/// The terminator the illegal-instruction task reaches. The kernel retries a
+/// task's first illegal instruction with a zeroed floating-point file, never
+/// reading it; a genuinely illegal one traps again, from a task that now owns
+/// state, and only then is the task ended — here, once.
+extern "C" fn terminate(_fault_pc: u64, _regs: *const UserRegisterFrame) -> bool {
+    TERMINATIONS.fetch_add(1, Ordering::SeqCst);
+    // Reap the task: this switches back to the dispatcher and never resumes
+    // it, so the `false` below is unreachable.
+    let _ = reschedule_current(BOOT_CPU, RescheduleAction::Exit);
+    false
+}
+
 /// Build one isolated U-mode address space from the fixture `image` over the
 /// per-space page-table `pool`, returning its Sv39 root and the entry register
 /// state. Activates the space (so the user mappings land in it) and builds the
@@ -368,6 +386,9 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
         qemu_exit::exit_failure(FAIL_PARSE);
     };
     let (root_h, entry_h) = build_user_space(&PAGE_TABLES_H, &hygiene, HYGIENE_RXE, &[b"h"]);
+    // A fourth runs an illegal instruction ahead of any floating point, which
+    // must end it.
+    let (root_i, entry_i) = build_user_space(&PAGE_TABLES_I, &image, PROGRAM_RXE, &[b"fp", b"!"]);
 
     // Install the trap vector + the syscall-dispatch callback before any user
     // task runs. The vector lives in the kernel's identity window present in
@@ -378,6 +399,9 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // `step` loop below).
     unsafe { trap::init_traps() };
     syscall_entry::set_dispatch_callback(dispatch);
+    if set_user_fault_terminator(terminate).is_err() {
+        qemu_exit::exit_failure(FAIL_SPAWN);
+    }
 
     // Build the live scheduler over the production arch handle. Interrupts stay
     // masked, so dispatch is the cooperative `step` loop below (the spawn-time
@@ -403,7 +427,12 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // resumed task always lands on *its* kernel stack with no dispatcher-side
     // repointing (unlike x86_64's per-CPU `set_kernel_rsp0`).
     let cs = ContextSwitchHal::new();
-    for (root_phys, entry) in [(root_a, entry_a), (root_b, entry_b), (root_h, entry_h)] {
+    for (root_phys, entry) in [
+        (root_a, entry_a),
+        (root_b, entry_b),
+        (root_h, entry_h),
+        (root_i, entry_i),
+    ] {
         let pre_resume = move |_top: u64, tag: AddressTag| {
             // SAFETY: paging is enabled and `root_phys` is the Sv39 root of a
             // space that maps the low identity window the running dispatcher
@@ -428,7 +457,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
             qemu_exit::exit_failure(FAIL_SPAWN);
         }
     }
-    note(TEST_SPAWNED, "riscv64 D37 test: three U-mode tasks spawned");
+    note(TEST_SPAWNED, "riscv64 D37 test: four U-mode tasks spawned");
 
     // Cooperative dispatch loop: drive `step` until both U-mode tasks have
     // exited. Each `step` resumes a task, which `sret`s into U-mode, yields back
@@ -444,6 +473,11 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     }
     if sched.live_task_count() != 0 {
         qemu_exit::exit_failure(FAIL_DEADLOCK);
+    }
+    // Ahead of the exit checks: an illegal instruction the task survived
+    // would otherwise read as a clobbered file.
+    if TERMINATIONS.load(Ordering::SeqCst) != 1 {
+        qemu_exit::exit_failure(FAIL_ILLEGAL_NOT_FATAL);
     }
     // The property under test comes first: a task that saw the other's values
     // stops at that round, so it also yields fewer times than expected, and

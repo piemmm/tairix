@@ -13,9 +13,11 @@
 //!   it cannot see a predecessor's residue, and there is nothing to save or
 //!   restore on its behalf — a task that never computes in floating point
 //!   pays nothing at all.
-//! * Its first floating-point instruction therefore traps. The handler zeroes
-//!   the file, gives the task `Initial`, and retries the instruction; from
-//!   then on the task owns FP state.
+//! * Its first floating-point instruction therefore traps as an illegal
+//!   instruction. The handler zeroes the file, gives the task `Initial`, and
+//!   retries the instruction; from then on the task owns FP state. The
+//!   instruction is never read: a genuinely illegal one, retried unchanged,
+//!   traps again from a task that now owns state, and that trap is fatal.
 //! * The hardware promotes `Initial`/`Clean` to `Dirty` on the first write, so
 //!   a trap saves the file only when the task actually changed it, and the
 //!   return path reloads an owned file.
@@ -163,77 +165,6 @@ pub const fn on_return(owned: bool) -> OnReturn {
     } else {
         OnReturn::LeaveOff
     }
-}
-
-/// Whether the instruction encoded at the front of `code` reads or writes the
-/// `F`/`D` register file or `fcsr`.
-///
-/// A task runs with `FS` at `Off` until it first needs floating point, so that
-/// first use arrives as an illegal-instruction trap and the handler must tell
-/// "enable FP and retry" apart from a genuinely undefined instruction.
-///
-/// The opcode groups are read straight from the unprivileged ISA rather than
-/// borrowed from `lib/disasm`: that crate renders instructions as text and so
-/// allocates, and linking it here would force a global allocator on every
-/// consumer of this crate — including the minimal test kernels that rightly
-/// have none. Ten lines of opcode test is the cheaper side of that trade.
-///
-/// Allocates nothing and decodes nothing further, so it is callable from a
-/// fault path. `false` for an empty, truncated, or reserved-length parcel:
-/// anything that cannot be read as one whole RV64GC instruction leaves the
-/// fault fatal (fail closed).
-#[must_use]
-pub fn touches_fp_state(code: &[u8]) -> bool {
-    if code.len() < 2 {
-        return false;
-    }
-    let first = u16::from_le_bytes([code[0], code[1]]);
-    match parcel_bytes(first) {
-        2 => compressed_touches_fp_state(u32::from(first)),
-        4 if code.len() >= 4 => {
-            full_touches_fp_state(u32::from_le_bytes([code[0], code[1], code[2], code[3]]))
-        }
-        _ => false,
-    }
-}
-
-/// Instruction length in bytes declared by the low bits of the first parcel
-/// (unprivileged ISA, expanded-length encoding). Reserved longer parcels
-/// answer 0: RV64GC defines none, and none can reach the FP unit.
-const fn parcel_bytes(first: u16) -> usize {
-    if first & 0b11 != 0b11 {
-        2
-    } else if first & 0b1_1100 != 0b1_1100 {
-        4
-    } else {
-        0
-    }
-}
-
-/// Bits `[hi:lo]` of `word`, inclusive.
-const fn bits(word: u32, hi: u32, lo: u32) -> u32 {
-    (word >> lo) & ((1 << (hi - lo + 1)) - 1)
-}
-
-/// The 32-bit major opcodes that reach the FP register file or `fcsr`.
-const fn full_touches_fp_state(word: u32) -> bool {
-    match bits(word, 6, 0) {
-        // LOAD-FP, STORE-FP, the four fused multiply-adds, and OP-FP.
-        0b000_0111 | 0b010_0111 | 0b100_0011 | 0b100_0111 | 0b100_1011 | 0b100_1111
-        | 0b101_0011 => true,
-        // SYSTEM reaches `fcsr` only through a real CSR access — `funct3` of
-        // zero is `ecall`/`ebreak`/`*ret`/`sfence` — naming fflags, frm, or fcsr.
-        0b111_0011 => bits(word, 14, 12) & 0b11 != 0 && matches!(bits(word, 31, 20), 0x001..=0x003),
-        _ => false,
-    }
-}
-
-/// The compressed forms that reach the FP register file: `c.fld`/`c.fsd` in
-/// quadrant 0 and `c.fldsp`/`c.fsdsp` in quadrant 2, which share their two
-/// `funct3` values. RV64 has no `c.flw`/`c.fsw` — those encodings are
-/// `c.ld`/`c.sd` — so these are the whole set.
-const fn compressed_touches_fp_state(parcel: u32) -> bool {
-    matches!(parcel & 3, 0 | 2) && matches!(bits(parcel, 15, 13), 1 | 5)
 }
 
 // --- Register moves (riscv64 only) --------------------------------------
@@ -507,11 +438,12 @@ pub(crate) unsafe fn on_return_to_user(anchor: *mut TrapAnchor, frame_sstatus: &
     }
 }
 
-/// Give a task taking its first floating-point instruction a zeroed file, so
-/// it starts from nothing rather than whatever the last task left behind.
+/// Give a task that owns no FP state, taking an illegal-instruction trap, a
+/// zeroed file, so a first floating-point instruction starts from nothing
+/// rather than whatever the last task left behind.
 ///
-/// `false` when the task already owns state: the instruction was genuinely
-/// illegal rather than a first use, and retrying it would loop forever.
+/// `false` when the task already owns state: the instruction is genuinely
+/// illegal, and retrying it would loop forever.
 ///
 /// # Safety
 ///

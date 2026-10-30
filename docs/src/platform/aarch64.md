@@ -1182,8 +1182,9 @@ system-register/assembly/MMIO operations to the freestanding target.
   table stores with a full-system `dsb sy` (MMU-off stores are Device-nGnRnE,
   outside the inner-shareable domain an `ish` barrier covers), and
   installs the **whole**
-  known `SCTLR_EL1` value (`paging::SCTLR_MMU_ON`: RES1 + translation +
-  data/instruction caches, after an `ic iallu`), never OR-ing `M` into
+  known `SCTLR_EL1` value (`protection::sctlr_mmu_on`: RES1 + translation +
+  data/instruction caches, with `SPAN` clear on a CPU held to PAN, after an
+  `ic iallu`), never OR-ing `M` into
   the live register — that would carry the UNKNOWN EL1 reset bits
   (`WXN`, `EE`, …) into translated execution, the silent pre-vectors
   hang real Pi 4 hardware exhibited while QEMU stayed green. The data
@@ -2802,8 +2803,10 @@ leaf-attribute word — W^X by default (`AGENTS.md` §19.2): a `USER | EXEC`
 page is mapped read-only EL0-executable (`el0_code_leaf_attrs`), a
 `USER | WRITE` page execute-never (`el0_data_leaf_attrs`), a read-only
 user page execute-never (`el0_rodata_leaf_attrs`), a kernel page EL1 RW
-EL0-XN (`normal_leaf_attrs`), and a `DEVICE` page `device_leaf_attrs` —
-then walks the table (reusing `map_4k_with_attrs`, one walk, §2.2), failing
+EL0-XN (`normal_leaf_attrs`), a `WRITE_COMBINE` or `DMA_COHERENT` page
+Normal Non-Cacheable and EL1-only unless it is also `USER`
+(`dma_coherent_leaf_attrs`, `el0_dma_coherent_leaf_attrs`), and a `DEVICE`
+page `device_leaf_attrs` — then walks the table (reusing `map_4k_with_attrs`, one walk, §2.2), failing
 closed (`Misaligned`/`AlreadyMapped`/`PoolExhausted`/`InvalidFlags`).
 `root_phys` returns the L1 root and `activate` forwards to the gated
 `switch` (the `TTBR0_EL1`/`TTBR1_EL1`/`SCTLR_EL1.M` enable). Because the walk recovers
@@ -2891,6 +2894,25 @@ structural probe reads a known frame back through the map, finds the map's
 address unreachable and unmappable under a process root, and finds a RAM
 frame above the kernel's own gigapage reachable *only* through the map.
 
+### Privileged Access Never
+
+Where the CPU offers PAN (`FEAT_PAN`, ARMv8.1, reported in
+`ID_AA64MMFR1_EL1`), EL1 can neither read nor write a page EL0 may access;
+every user leaf is `PXN`, so it cannot execute one either. The boot CPU
+settles whether PAN is in force from what it offers, before any other CPU
+starts (`protection::settle`). Each CPU then sets `PSTATE.PAN` as it starts
+(`protection::hold`), and a CPU that cannot hold it does not join.
+Translation comes on with `SCTLR_EL1.SPAN` clear, so every exception taken
+to EL1 sets PAN again before any kernel code runs. The kernel reaches user
+memory only through the direct map, so it never clears PAN. `AT S1E1R`
+ignores PAN, so the watchdog's stack-link probe (`paging::el1_may_read`)
+also refuses a page EL0 can reach while translation is on. The boot records the outcome as event
+4105 (`KERNEL_BOOT_PROTECTIONS`, field `pan`), at Warn where PAN is absent,
+as on the Raspberry Pi 4's Cortex-A72. `uaccess_fault_qemu_aarch64` runs on
+`cortex-a76` (the Raspberry Pi 5's core) and proves a guarded copy reading
+an EL0 page through its user address faults, while the same bytes copy
+through the kernel's own mapping.
+
 ### Kthread kernel stacks and their guard page
 
 A kthread's kernel stack is a run of pages in the **shared kernel remap
@@ -2971,7 +2993,10 @@ the cross-CPU contract requires.
 real two-core `virt` board: the boot core starts core 1 (PSCI `CPU_ON`),
 then drives `Aarch64Arch::shootdown_page`; reaching the PASS finisher
 proves the broadcast executes across a multi-PE domain without faulting.
-Enrolled in `tools/xtask/src/commands/qemu_tests.rs` (`cpus: 2`, 60 s).
+It runs on `cortex-a76`, which offers PAN, and also requires both cores to
+hold it and, with translation off, the stack-link probe to admit the core's
+own stack. Enrolled in `tools/xtask/src/commands/qemu_tests.rs` (`cpus: 2`,
+60 s).
 
 ## Heterogeneous (`big.LITTLE`) core classification
 

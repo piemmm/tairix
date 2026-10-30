@@ -333,7 +333,7 @@ with the Stage-3 paging primitives:
   `tairix-test-abi-sys-syscall-qemu-riscv64`): identity-maps the kernel
   (S-mode), aliases the `tairix_sys_cap_query` stub page at a high user VA with the
   `U` bit (`paging::flags::USER`) + a user stack, installs the dispatch
-  callback, sets `sstatus.SUM`, and `sret`s to U-mode. The stub's `ecall` is a
+  callback, and `sret`s to U-mode. The stub's `ecall` is a
   genuine environment-call-from-U; the callback asserts `(number, args)` before
   the `SiFive` PASS finisher. The riscv64 trap handler already routed
   `ecall`-from-U to `dispatch_ecall`, so no arch change was needed.

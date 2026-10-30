@@ -629,6 +629,14 @@ mod user_windows;
 ))]
 mod mem_map;
 
+// The boot's record of the supervisor protections in force, on the ports
+// whose protections depend on what the CPU offers.
+#[cfg(any(
+    all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")),
+    test
+))]
+mod protections;
+
 // The build script's pure target-selection logic, compiled into the
 // host test build so its rules are unit tested.
 #[cfg(test)]
@@ -659,6 +667,14 @@ mod discovery_test_bus;
 /// `kernel/core`-owned `4000..5000` range; the id is part of the audit
 /// contract with external consumers and may not be renumbered.
 pub const KERNEL_BOOT_DIRECT_MAP: tairix_log::EventId = tairix_log::EventId(4096);
+
+/// Security-relevant boot decision: which supervisor protections every CPU
+/// runs the kernel under (the x86_64 and aarch64 ports' `protection`).
+///
+/// Logged on every boot of a port whose protections depend on what its CPU
+/// offers, at Warn where it offers fewer than all of them. The id is part of
+/// the audit contract and may not be renumbered.
+pub const KERNEL_BOOT_PROTECTIONS: tairix_log::EventId = tairix_log::EventId(4105);
 
 pub use kalloc::FreeListAllocator;
 

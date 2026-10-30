@@ -69,8 +69,8 @@ pub const QEMU_BINARY: &str = "qemu-system-x86_64";
 /// Without `RDRAND`/`RDSEED` the kernel's random reserve never seeds and every
 /// CSPRNG consumer fails closed; `enforce` refuses to boot rather than
 /// silently dropping a feature the accelerator cannot supply. Appended to
-/// every `-cpu` model so a capability override ([`Spec::with_x86_64_cpu`])
-/// still seeds.
+/// every `-cpu` model so a capability override ([`Spec::with_cpu`]) still
+/// seeds.
 const ENTROPY_FEATURES: &str = "+rdrand,+rdseed,enforce";
 
 /// The default CPU model: QEMU's baseline `qemu64` plus the supervisor
@@ -100,7 +100,7 @@ const AP_PAST_XAPIC_SLOT: &str = "socket-id=1,core-id=0,thread-id=0";
 /// The `-cpu` model for `spec`: its capability override with the entropy
 /// features appended, or the default [`CPU`].
 fn cpu_model(spec: &Spec) -> String {
-    match spec.x86_64_cpu {
+    match spec.cpu {
         Some(model) => alloc_format(model),
         None => CPU.into(),
     }
@@ -336,7 +336,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
-            x86_64_cpu: None,
+            cpu: None,
             x86_64_topology: crate::x86_64::Topology::Dense,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn the_ap_past_xapic_layout_plugs_its_cpu_in_at_apic_id_256() {
         let spec = fixture_spec(2)
-            .with_x86_64_cpu("max")
+            .with_cpu("max")
             .with_x86_64_topology(Topology::ApPastXapic);
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let after = |argv: &[String], flag: &str| {
@@ -597,7 +597,7 @@ mod tests {
                 "{default} lacks {feature}"
             );
         }
-        let plain = model(&fixture_spec(1).with_x86_64_cpu("qemu64"));
+        let plain = model(&fixture_spec(1).with_cpu("qemu64"));
         assert!(
             !plain
                 .split(',')
@@ -608,7 +608,7 @@ mod tests {
 
     #[test]
     fn a_cpu_override_replaces_the_model_and_keeps_the_entropy_features() {
-        let spec = fixture_spec(1).with_x86_64_cpu("max,-xsaveopt");
+        let spec = fixture_spec(1).with_cpu("max,-xsaveopt");
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let at = argv.iter().position(|a| a == "-cpu").expect("a CPU model");
         let model = &argv[at + 1];

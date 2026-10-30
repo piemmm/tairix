@@ -162,26 +162,26 @@ pub fn watchdog_callback() -> Option<WatchdogCallbackFn> {
 ))]
 const MAX_BACKTRACE_WALK: usize = 64;
 
-/// Return `true` iff `addr` currently translates as an EL1 stage-1
-/// **readable** address.
+/// Return `true` iff an EL1 load from `addr` would succeed now
+/// ([`crate::paging::el1_may_read`]).
 ///
-/// Uses the `AT S1E1R` address-translation instruction and `PAR_EL1.F`
-/// (bit 0: `0` = translation succeeded, `1` = fault) to prove a stack link
-/// is mapped *before* [`capture_sample_backtrace`] dereferences it, so the
+/// Proves a stack link is mapped, and while PAN is in force not EL0's,
+/// *before* [`capture_sample_backtrace`] dereferences it, so the
 /// frame-pointer walk can never fault inside the watchdog interrupt handler
 /// even when the interrupted context left a non-zero, aligned, yet unmapped
-/// `x29` (early-boot assembly, a task entry trampoline, a corrupt stack).
-/// `AT` only *translates* `addr`; it never reads the memory and cannot
-/// fault. `PAR_EL1` is saved and restored so a translation the interrupted
-/// context had in flight is never clobbered by the sample. Fail-closed: any
-/// translation fault reports not-readable and the walk stops.
+/// or user `x29` (early-boot assembly, a task entry trampoline, a corrupt
+/// stack). `AT` only *translates* `addr`; it never reads the memory and
+/// cannot fault, and `PAR_EL1` is saved and restored so a translation the
+/// interrupted context had in flight is never clobbered by the sample.
+/// Fail-closed: any translation fault reports not-readable and the walk
+/// stops.
 #[cfg(all(
     target_arch = "aarch64",
     target_os = "none",
     feature = "watchdog-diagnostics"
 ))]
 unsafe fn el1_readable(addr: u64) -> bool {
-    !crate::paging::par_faulted(crate::paging::translate_el1(addr, false))
+    crate::paging::el1_may_read(addr)
 }
 
 /// The pure frame-pointer walk shared by [`capture_sample_backtrace`] and
@@ -333,8 +333,8 @@ pub unsafe fn capture_sample_backtrace(frame: *const u64, out: &mut [u64]) -> us
         fp,
         stack_floor,
         out,
-        // SAFETY: `el1_readable` only translates `addr` (`AT S1E1R`); it
-        // never reads the memory and cannot fault.
+        // SAFETY: `el1_readable` only translates `addr` (`AT`); it never
+        // reads the memory and cannot fault.
         |addr| unsafe { el1_readable(addr) },
         // SAFETY: `walk_frames` calls this only after the `readable` seam
         // above proved `addr` mapped and readable at EL1, and `addr` is

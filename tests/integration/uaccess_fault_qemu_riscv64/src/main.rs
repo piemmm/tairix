@@ -26,7 +26,10 @@
 //!    unmapped page returns the fault error; a copy writing it returns
 //!    the fault error — each taking a *real* hardware page fault whose
 //!    redirect lets execution continue to the next check.
-//! 4. The fatal `fault` handler reports FAILURE: reaching it means the
+//! 4. Arming the vector cleared `sstatus.SUM`, so a guarded copy reading a
+//!    mapped `U` page through its user address faults, while the same bytes
+//!    copy through the kernel's own mapping of them.
+//! 5. The fatal `fault` handler reports FAILURE: reaching it means the
 //!    window redirect did not absorb the deliberate fault.
 //!
 //! ## How it differs from a production kernel
@@ -45,8 +48,8 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_arch_api::fatal::KernelFault;
-    use tairix_arch_api::mmu::AddressSpace as _;
-    use tairix_arch_api::uaccess::conformance::{self, Verdict};
+    use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
+    use tairix_arch_api::uaccess::conformance::{self, reach_into, Reach, Verdict};
     use tairix_arch_riscv64::paging::{AddressSpace, PageTablePool};
     use tairix_arch_riscv64::{handle_panic_via_serial, qemu_exit, trap, SERIAL_SINK};
     use tairix_itest_finisher::fail_point;
@@ -74,6 +77,27 @@ mod kernel {
     const FAIL_NOT_INSTALLED: NonZeroU16 = fail_point!(3);
     const FAIL_INTACT_COPY: NonZeroU16 = fail_point!(4);
     const FAIL_FAULT_NOT_REPORTED: NonZeroU16 = fail_point!(5);
+    const FAIL_SUM_SET: NonZeroU16 = fail_point!(6);
+    const FAIL_USER_PAGE_READ: NonZeroU16 = fail_point!(7);
+    const FAIL_KERNEL_MAPPING_READ: NonZeroU16 = fail_point!(8);
+
+    /// A user address beyond the identity map that the space maps
+    /// [`PROBE_PAGE`] at with the `U` bit.
+    const USER_PROBE_VA: u64 = 6 * (1 << 30);
+
+    /// `sstatus.SUM`, which lets S-mode load and store `U` pages.
+    const SSTATUS_SUM: u64 = 1 << 18;
+
+    /// The byte every word of [`PROBE_PAGE`] holds.
+    const PROBE_BYTE: u8 = 0x5A;
+
+    /// The page the probe reads by its user address and by the identity map,
+    /// the kernel's own mapping of it. Never written, so a read proves which
+    /// mapping reached it.
+    #[repr(C, align(4096))]
+    struct ProbePage([u8; 4096]);
+
+    static PROBE_PAGE: ProbePage = ProbePage([PROBE_BYTE; 4096]);
 
     /// Page-table pool backing the address space (lives in `.bss`).
     static POOL: PageTablePool = PageTablePool::new();
@@ -126,6 +150,31 @@ mod kernel {
         qemu_exit::exit_failure(code);
     }
 
+    /// Arming the vector cleared `SUM`, so S-mode reaches the probe page
+    /// only through the kernel's own mapping of it: a guarded copy reading it
+    /// by its user address faults. Returns only if both hold.
+    fn check_supervisor_reach(probe: u64) {
+        let sstatus: u64;
+        // SAFETY: reading `sstatus` in S-mode changes nothing.
+        unsafe { core::arch::asm!("csrr {}, sstatus", out(reg) sstatus, options(nomem, nostack)) };
+        if sstatus & SSTATUS_SUM != 0 {
+            fail("`SUM` set after arming the vector", FAIL_SUM_SET);
+        }
+        // SAFETY: `USER_PROBE_VA` maps the probe page as a `U` page and the
+        // identity map is the kernel's own mapping of it.
+        match unsafe { reach_into(USER_PROBE_VA, probe, PROBE_BYTE) } {
+            Reach::OwnMappingOnly => {}
+            Reach::UserAddressRead => fail(
+                "a kernel read of a user page did not fault",
+                FAIL_USER_PAGE_READ,
+            ),
+            Reach::OwnMappingUnread => fail(
+                "the kernel's mapping did not read the page",
+                FAIL_KERNEL_MAPPING_READ,
+            ),
+        }
+    }
+
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
     /// calls (via `tairix_arch_riscv64_main`).
     #[no_mangle]
@@ -137,10 +186,18 @@ mod kernel {
         );
 
         // Build the identity space; `UNMAPPED_VA` lies beyond it.
-        let space = match AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB) {
-            Some(space) => space,
-            None => fail("identity map", FAIL_SETUP),
+        let Some(mut space) = AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB) else {
+            fail("identity map", FAIL_SETUP);
         };
+        // The kernel runs identity-mapped, so the probe's address is its
+        // physical one.
+        let probe = core::ptr::addr_of!(PROBE_PAGE) as u64;
+        if space
+            .map_page(USER_PROBE_VA, probe, PageFlags::READ | PageFlags::USER)
+            .is_err()
+        {
+            fail("probe page", FAIL_SETUP);
+        }
 
         // Install the fatal handler (the FAILURE reporter), then the trap
         // vector — which also arms the Arch HAL guarded-copy slot, the
@@ -172,6 +229,7 @@ mod kernel {
         let verdict = unsafe { conformance::run(UNMAPPED_VA as *mut u8, &mut scratch) };
         match verdict {
             Verdict::Pass => {
+                check_supervisor_reach(probe);
                 note(
                     Level::Info,
                     UA_TEST_PASS,

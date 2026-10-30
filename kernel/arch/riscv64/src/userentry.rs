@@ -2,17 +2,15 @@
 //! ([`tairix_arch_api::EnterUser`]).
 //!
 //! Dropping a freshly built process image into U-mode is the `sret`
-//! sequence: set `sstatus.SUM` (so the S-mode trap handler that runs after
-//! the program's `ecall` may touch the U-bit user stack), clear
-//! `sstatus.SPP`/`SPIE` (so `sret` targets U-mode with `sstatus.SIE == 0`
-//! there) and `sstatus.SIE` (so no S-mode interrupt can be taken across the
-//! rest of the sequence — the `sscratch` arm below depends on it), lay this
-//! task's **trap anchor** just below the kernel stack pointer and arm
-//! `sscratch` with it, load `sepc` with the entry point and `sp`/`a0` with
-//! the stack pointer and first argument, hand U-mode a zeroed thread
-//! pointer, then `sret`. This is the one definition of that sequence; the
-//! CC2/CC3 QEMU verticals reach it through the HAL rather than copying the
-//! `asm!` block.
+//! sequence: clear `sstatus.SPP`/`SPIE` (so `sret` targets U-mode with
+//! `sstatus.SIE == 0` there) and `sstatus.SIE` (so no S-mode interrupt can be
+//! taken across the rest of the sequence — the `sscratch` arm below depends
+//! on it), lay this task's **trap anchor** just below the kernel stack
+//! pointer and arm `sscratch` with it, load `sepc` with the entry point,
+//! `sp`/`a0` with the stack pointer and first argument and `tp` with the
+//! thread's own thread pointer, then `sret`. This is the one definition of
+//! that sequence; the CC2/CC3 QEMU verticals reach it through the HAL rather
+//! than copying the `asm!` block.
 //!
 //! # The trap anchor and `tp`
 //!
@@ -24,8 +22,8 @@
 //! kernel would resolve its per-CPU state from whatever value the trapping
 //! task last put there. The entry sequence therefore publishes the running
 //! hart's `tp` into the anchor (it is still live in `tp` at that point) and
-//! then **zeroes** `tp` for U-mode, so the entered task neither inherits nor
-//! can observe the kernel's hart identity.
+//! then loads `tp` with the thread's own thread pointer, so the entered task
+//! neither inherits nor can observe the kernel's hart identity.
 //!
 //! # U-mode preemptibility
 //!
@@ -80,14 +78,9 @@ impl EnterUser for UserMode {
 
 /// `sstatus.SPIE` — the S-mode interrupt enable `sret` restores (bit 5).
 const SSTATUS_SPIE: u64 = 1 << 5;
-/// `sstatus.SUM` — permit S-mode data access to U-bit pages (bit 18).
-pub(crate) const SSTATUS_SUM: u64 = 1 << 18;
 /// `sstatus.VS` — vector-unit enablement (bits 10:9). Firmware leaves it on
 /// where the hart has one.
 const SSTATUS_VS: u64 = 0b11 << 9;
-
-/// The `sstatus` bits [`enter_user_mode`] sets before `sret`.
-const USER_ENTRY_SSTATUS_SET: u64 = SSTATUS_SUM;
 
 /// The `sstatus` bits [`enter_user_mode`] clears before `sret`: `SPP` and
 /// `SPIE` aim the transition at U-mode, and `SIE` masks S-mode interrupts
@@ -112,10 +105,8 @@ const USER_ENTRY_SSTATUS_SET: u64 = SSTATUS_SUM;
 const USER_ENTRY_SSTATUS_CLEAR: u64 =
     SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_SIE | crate::fpstate::FS_MASK | SSTATUS_VS;
 
-// Masking `SIE` is load-bearing, and the two masks must not fight: a bit in
-// both would leave the order of the `csrs`/`csrc` pair deciding the outcome.
+// Masking `SIE` is load-bearing.
 const _: () = assert!(USER_ENTRY_SSTATUS_CLEAR & SSTATUS_SIE != 0);
-const _: () = assert!(USER_ENTRY_SSTATUS_SET & USER_ENTRY_SSTATUS_CLEAR == 0);
 
 /// Drop to U-mode at `entry` with stack pointer `sp`, thread pointer
 /// `tls_base`, and `a0` set, and every other integer register zero: kernel
@@ -131,27 +122,25 @@ const _: () = assert!(USER_ENTRY_SSTATUS_SET & USER_ENTRY_SSTATUS_CLEAR == 0);
 unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64, tls_base: u64) -> ! {
     use crate::trap::{TRAP_ANCHOR_BYTES, TRAP_ANCHOR_FP_OWNED_OFFSET, TRAP_ANCHOR_KTP_OFFSET};
 
-    // SAFETY: the-sanctioned assembly carve-out (no Rust spelling for
-    // `sret` or the `sstatus` CSR edits). `csrs`/`csrc` set/clear exactly
-    // the named bits, and the `csrc` — which masks `SIE` — precedes the
-    // `csrw sscratch` it protects. Lowering `sp` by `TRAP_ANCHOR_BYTES`
-    // carves the anchor out of stack this diverging sequence has already
-    // abandoned (nothing returns to the frames above it), so publishing this
-    // hart's `tp` there cannot touch a live frame; the trap vector then swaps
-    // to that address on the next U->S trap and rebuilds its frame beneath it
-    // (`trap.s`). `csrw sepc` and the `sp`/`a0` moves load the U-mode entry
-    // state, loading `tp` with the thread's own thread pointer keeps the
-    // kernel's hart identity out of U-mode (the anchor above already holds
-    // the copy the trap vector needs), and `sret` performs the documented
-    // S→U transition. The caller's safety
-    // contract guarantees the mapped entry/stack. `options(noreturn)` matches
-    // the divergence, and `sp` is deliberately left as the user stack — no
-    // output operand is possible alongside `noreturn`, so `sp` itself carries
-    // the anchor address across the three instructions that need it. The
-    // block never returns, so it may zero registers it names no operand for.
+    // SAFETY: the sanctioned assembly carve-out (no Rust spelling for `sret`
+    // or the `sstatus` CSR edit). `csrc` clears exactly the named bits, and
+    // it masks `SIE` before the `csrw sscratch` it protects. Lowering `sp` by
+    // `TRAP_ANCHOR_BYTES` carves the anchor out of stack this diverging
+    // sequence has already abandoned (nothing returns to the frames above
+    // it), so publishing this hart's `tp` there cannot touch a live frame; the
+    // trap vector then swaps to that address on the next U->S trap and
+    // rebuilds its frame beneath it (`trap.s`). `csrw sepc` and the `sp`/`a0`
+    // moves load the U-mode entry state, loading `tp` with the thread's own
+    // thread pointer keeps the kernel's hart identity out of U-mode (the
+    // anchor above already holds the copy the trap vector needs), and `sret`
+    // performs the documented S→U transition. The caller's safety contract
+    // guarantees the mapped entry/stack. `options(noreturn)` matches the
+    // divergence, and `sp` is deliberately left as the user stack — no output
+    // operand is possible alongside `noreturn`, so `sp` itself carries the
+    // anchor address across the three instructions that need it. The block
+    // never returns, so it may zero registers it names no operand for.
     unsafe {
         core::arch::asm!(
-            "csrs sstatus, {set}",
             "csrc sstatus, {clr}",
             "addi sp, sp, -{anchor_bytes}",
             "sd tp, {ktp_off}(sp)",
@@ -189,7 +178,6 @@ unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64, tls_base: u64) -> ! {
             "mv t5, zero",
             "mv t6, zero",
             "sret",
-            set = in(reg) USER_ENTRY_SSTATUS_SET,
             clr = in(reg) USER_ENTRY_SSTATUS_CLEAR,
             anchor_bytes = const TRAP_ANCHOR_BYTES,
             ktp_off = const TRAP_ANCHOR_KTP_OFFSET,
@@ -240,16 +228,6 @@ mod tests {
     fn user_entry_targets_u_mode_with_interrupts_restored_from_spie() {
         assert_ne!(USER_ENTRY_SSTATUS_CLEAR & SSTATUS_SPP, 0);
         assert_ne!(USER_ENTRY_SSTATUS_CLEAR & SSTATUS_SPIE, 0);
-    }
-
-    #[test]
-    fn user_entry_lets_the_kernel_reach_the_u_bit_user_stack() {
-        assert_eq!(USER_ENTRY_SSTATUS_SET, SSTATUS_SUM);
-    }
-
-    #[test]
-    fn user_entry_set_and_clear_masks_are_disjoint() {
-        assert_eq!(USER_ENTRY_SSTATUS_SET & USER_ENTRY_SSTATUS_CLEAR, 0);
     }
 
     /// A task never starts able to read or write a register file this port

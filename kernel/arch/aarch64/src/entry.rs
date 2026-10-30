@@ -19,12 +19,14 @@ extern "C" {
 
 /// The trampoline jumps here, exactly once, on the boot CPU.
 ///
-/// The EL1 vectors are armed before `kernel_main` runs, so no binary can
-/// take an exception with `VBAR_EL1` still pointing wherever the firmware
-/// left it: every fault reaches the fatal path, and with no fault handler
-/// installed that path reports the syndrome rather than re-faulting
-/// silently. The DTB is validated by the boot pipeline if and when it
-/// parses it.
+/// The boot CPU settles and holds the kernel's protection
+/// ([`crate::protection`]) before anything else: no binary runs where EL1
+/// can reach a user page the CPU could have barred it from. The EL1 vectors
+/// are armed before `kernel_main` runs, so no binary can take an exception
+/// with `VBAR_EL1` still pointing wherever the firmware left it: every fault
+/// reaches the fatal path, and with no fault handler installed that path
+/// reports the syndrome rather than re-faulting silently. The DTB is
+/// validated by the boot pipeline if and when it parses it.
 ///
 /// # Safety
 ///
@@ -33,6 +35,10 @@ extern "C" {
 /// established). Calling from anywhere else is a kernel bug.
 #[no_mangle]
 pub extern "C" fn tairix_arch_aarch64_main(dtb: u64) -> ! {
+    crate::protection::settle();
+    // SAFETY: EL1 on the boot CPU, with no user page mapped yet; the boot CPU
+    // offers what it settled, so it holds it.
+    let _ = unsafe { crate::protection::hold() };
     // SAFETY: the boot CPU, a stack established, interrupts masked — the
     // contract `init_vectors` states, which `boot.s` guarantees here.
     unsafe { crate::exceptions::init_vectors() };

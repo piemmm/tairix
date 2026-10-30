@@ -233,6 +233,46 @@ pub mod conformance {
 
         Verdict::Pass
     }
+
+    /// Outcome of [`reach_into`].
+    #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+    pub enum Reach {
+        /// The kernel reached the page only through its own mapping of it.
+        OwnMappingOnly,
+        /// A guarded copy read the page through its user address.
+        UserAddressRead,
+        /// The kernel's own mapping did not read the page's bytes.
+        OwnMappingUnread,
+    }
+
+    /// Check the supervisor protection a port holds the kernel to — SMAP,
+    /// PAN, a clear `SUM` — against one user page: a guarded copy reading it
+    /// through its user address faults, while the same bytes copy through
+    /// the kernel's own mapping of it.
+    ///
+    /// # Safety
+    ///
+    /// `user_va` and `kernel_va` must map, under the active translation, one
+    /// page whose first 64 bytes all hold `byte`: `user_va` as a user page,
+    /// `kernel_va` as the kernel's own mapping of it.
+    #[must_use]
+    pub unsafe fn reach_into(user_va: u64, kernel_va: u64, byte: u8) -> Reach {
+        let mut scratch = [0u8; 64];
+        // SAFETY: `scratch` is writable for its length and the source is a
+        // mapped page, so the copy either faults into the window or reads it.
+        let through_user =
+            unsafe { copy_user_span(scratch.as_mut_ptr(), user_va as *const u8, scratch.len()) };
+        if through_user.is_ok() {
+            return Reach::UserAddressRead;
+        }
+        // SAFETY: as above, through the kernel's own mapping of the page.
+        let through_kernel =
+            unsafe { copy_user_span(scratch.as_mut_ptr(), kernel_va as *const u8, scratch.len()) };
+        if through_kernel.is_err() || scratch != [byte; 64] {
+            return Reach::OwnMappingUnread;
+        }
+        Reach::OwnMappingOnly
+    }
 }
 
 #[cfg(test)]

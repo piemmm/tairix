@@ -1363,12 +1363,10 @@ pub struct Spec {
     /// through [`Spec::with_ram_mib`] and read it through
     /// [`Spec::ram_mib`], which is what the argv builders emit.
     declared_ram_mib: Option<u32>,
-    /// An x86_64 `-cpu` model overriding the default
-    /// [`x86_64::CPU`], for a vertical whose subject is a
-    /// CPU capability (an FP-save flavour). `None` on every other arch and
-    /// every x86_64 test that does not care; set through
-    /// [`Spec::with_x86_64_cpu`] and read through [`Spec::x86_64_cpu`].
-    x86_64_cpu: Option<&'static str>,
+    /// A `-cpu` model overriding the target's default, for a vertical whose
+    /// subject is a CPU capability the default lacks. `None` for every test
+    /// that does not care; set through [`Spec::with_cpu`].
+    cpu: Option<&'static str>,
     /// How an x86_64 board lays its CPUs out; set through
     /// [`Spec::with_x86_64_topology`].
     pub x86_64_topology: x86_64::Topology,
@@ -1570,7 +1568,7 @@ impl Spec {
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
-            x86_64_cpu: None,
+            cpu: None,
             x86_64_topology: x86_64::Topology::Dense,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
@@ -1617,14 +1615,14 @@ impl Spec {
         self
     }
 
-    /// Override the x86_64 `-cpu` model, for a vertical whose subject is a CPU
-    /// capability the default [`x86_64::CPU`] does not
-    /// exercise (an FP-save flavour). Ignored on every other arch. The runner
-    /// re-appends the entropy features the port needs, so a bare `max` still
-    /// seeds the CSPRNG.
+    /// Override the `-cpu` model, for a vertical whose subject is a CPU
+    /// capability the target's default model does not exercise: an FP-save
+    /// flavour, or a supervisor protection. On x86_64 the runner re-appends the
+    /// entropy features the port needs, so a bare `max` still seeds the
+    /// CSPRNG; elsewhere the model is used as given.
     #[must_use]
-    pub fn with_x86_64_cpu(mut self, cpu: &'static str) -> Self {
-        self.x86_64_cpu = Some(cpu);
+    pub fn with_cpu(mut self, cpu: &'static str) -> Self {
+        self.cpu = Some(cpu);
         self
     }
 
@@ -1634,13 +1632,6 @@ impl Spec {
     pub fn with_x86_64_topology(mut self, topology: x86_64::Topology) -> Self {
         self.x86_64_topology = topology;
         self
-    }
-
-    /// The x86_64 `-cpu` model this spec requests, or the default when it set
-    /// none.
-    #[must_use]
-    pub fn x86_64_cpu(&self) -> &str {
-        self.x86_64_cpu.unwrap_or(crate::x86_64::CPU)
     }
 
     /// Guest RAM in mebibytes: this run's declared size, or the per-arch
@@ -1735,7 +1726,7 @@ impl Spec {
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
-            x86_64_cpu: None,
+            cpu: None,
             x86_64_topology: x86_64::Topology::Dense,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
@@ -1772,7 +1763,7 @@ impl Spec {
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
-            x86_64_cpu: None,
+            cpu: None,
             x86_64_topology: x86_64::Topology::Dense,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
@@ -6686,7 +6677,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
-            x86_64_cpu: None,
+            cpu: None,
             x86_64_topology: x86_64::Topology::Dense,
             block_devices: vec![BlockDevice {
                 image: PathBuf::from("/definitely/not/a/real/disk.img"),

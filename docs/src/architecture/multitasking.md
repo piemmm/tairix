@@ -139,14 +139,12 @@ pays nothing (`kernel/arch/riscv64/src/fpstate.rs`):
 
 - A task starts with FP **off**, owning no state. It cannot read the file, so
   it cannot see a predecessor's residue.
-- Its first floating-point instruction therefore traps. The handler confirms
-  the faulting encoding really does reach the FP unit — an opcode test the port
-  keeps itself, because `lib/disasm` renders instructions as text and so
-  allocates, and linking it here would force a global allocator on every
-  consumer of the arch crate — reading the instruction through the guarded-copy
-  window so an unreadable page fails closed. It then zeroes the file, gives the
-  task `Initial`, and retries. A task that already owns state is refused, so a
-  genuinely illegal encoding cannot retry forever.
+- Its first floating-point instruction therefore traps as an illegal
+  instruction. The handler zeroes the file, gives the task `Initial`, and
+  retries. It never reads the instruction, which lies in user memory the
+  kernel does not touch: any illegal instruction from a task owning no state
+  is retried so, and a genuinely illegal one then traps again from a task that
+  owns state, which is refused and fatal, so none retries forever.
 - The hardware promotes `Initial`/`Clean` to `Dirty` on the first write, so a
   trap saves the file only when the task actually changed it, and the return
   path reloads an owned file.
@@ -171,7 +169,9 @@ and `fp_isolation_qemu_riscv64`: tasks fill their register files with
 different patterns across yields, faults and preemption while the kernel
 computes under a hostile user environment, and each run passes only if no task
 observes another's values, the kernel's results are correctly rounded, and a
-freshly entered process finds no register the kernel wrote.
+freshly entered process finds no register the kernel wrote. The riscv64 run
+also starts a task on an illegal instruction ahead of any floating point and
+passes only if it is ended exactly once.
 
 ## Aliasing discipline across the switch
 

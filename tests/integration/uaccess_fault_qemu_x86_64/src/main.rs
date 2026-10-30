@@ -53,13 +53,12 @@ mod kernel {
 
     use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
-    use tairix_arch_api::uaccess::conformance::{self, Verdict};
-    use tairix_arch_api::uaccess::copy_user_span;
+    use tairix_arch_api::uaccess::conformance::{self, reach_into, Reach, Verdict};
     use tairix_arch_x86_64::paging::{self, AddressSpace, PageTablePool};
     use tairix_arch_x86_64::protection::{self, Protections};
     use tairix_arch_x86_64::qemu_exit;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
-    use tairix_kernel::x86_64::boot::KERNEL_BOOT_PROTECTIONS;
+    use tairix_kernel::KERNEL_BOOT_PROTECTIONS;
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
@@ -192,33 +191,14 @@ mod kernel {
         // and every static stay mapped across the switch; the test ends on
         // this root.
         unsafe { root.switch() };
-        let mut scratch = [0u8; 64];
-        // SAFETY: `scratch` is writable for its length; the source is a
-        // mapped user page, which SMAP refuses the kernel, so the window's
-        // fix-up absorbs the fault.
-        let through_user = unsafe {
-            copy_user_span(
-                scratch.as_mut_ptr(),
-                USER_PROBE_VA as *const u8,
-                scratch.len(),
-            )
-        };
-        if through_user.is_ok() {
-            return Err("a kernel read of a user page did not fault");
+        // SAFETY: `USER_PROBE_VA` maps the probe page as a user page under
+        // the root just switched to, and its direct-map alias is the kernel's
+        // own mapping of it.
+        match unsafe { reach_into(USER_PROBE_VA, paging::physmap_virt(phys), PROBE_BYTE) } {
+            Reach::OwnMappingOnly => Ok(()),
+            Reach::UserAddressRead => Err("a kernel read of a user page did not fault"),
+            Reach::OwnMappingUnread => Err("the direct map did not read the page"),
         }
-        // SAFETY: as above, from the page's direct-map alias, which is the
-        // kernel's own mapping of it.
-        let through_map = unsafe {
-            copy_user_span(
-                scratch.as_mut_ptr(),
-                paging::physmap_virt(phys) as *const u8,
-                scratch.len(),
-            )
-        };
-        if through_map.is_err() || scratch != [PROBE_BYTE; 64] {
-            return Err("the direct map did not read the page");
-        }
-        Ok(())
     }
 
     /// Whether `event` is the boot's record of every protection in force.

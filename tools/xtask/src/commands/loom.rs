@@ -77,6 +77,15 @@ pub const TARGETS: &[Target] = &[
         description: "the park/unpark handshake: a park and the wake racing it, \
                       a wake owed to a later park, and a stop around both",
     },
+    Target {
+        package: "tairix-arch-api",
+        dir: "kernel/arch/api",
+        harness: "loom",
+        build: Build::Feature("loom"),
+        description: "the lock-free page-table protocol: a table linked under a \
+                      walk that follows it, and a fault-time leaf update racing \
+                      an unmap",
+    },
 ];
 
 /// The cfg that swaps `core`'s atomics for the model checker's. Applied

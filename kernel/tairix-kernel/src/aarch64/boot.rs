@@ -372,6 +372,11 @@ pub fn boot(
     // keeps the console and the boot record says so.
     let video_console = mmu_on && crate::console_layout::CONSOLE.attach(None);
 
+    crate::protections::log(
+        log_sink,
+        [("pan", tairix_arch_aarch64::protection::pan_in_force())],
+    );
+
     if let Some(pcie) = early.pcie {
         log_pcie_discovery(log_sink, &pcie);
     }

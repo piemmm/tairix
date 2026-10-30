@@ -33,7 +33,7 @@ const TRAP_S: &str = include_str!("trap.s");
 /// Only integer-literal `.equ`s are resolved: an expression-valued one (such
 /// as `OFF_UTP_PRE`) is checked by [`equ_expr`] instead, so a malformed or
 /// renamed definition fails the test rather than silently reading as zero.
-fn equ(name: &str) -> u64 {
+pub(super) fn equ(name: &str) -> u64 {
     let prefix = format!(".equ {name},");
     let line = TRAP_S
         .lines()

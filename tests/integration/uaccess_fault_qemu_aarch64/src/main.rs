@@ -26,7 +26,12 @@
 //!    unmapped page returns the fault error; a copy writing it returns
 //!    the fault error — each taking a *real* hardware data abort whose
 //!    redirect lets execution continue to the next check.
-//! 4. The fatal `fault` handler reports FAILURE: reaching it means the
+//! 4. On a CPU offering PAN (the enrolment runs `cortex-a76`), the boot held
+//!    the CPU to it: `PSTATE.PAN` is set and translation came on with
+//!    `SCTLR_EL1.SPAN` clear, so a guarded copy reading a mapped EL0 page
+//!    through its user address faults while the same bytes copy through the
+//!    kernel's own mapping of them.
+//! 5. The fatal `fault` handler reports FAILURE: reaching it means the
 //!    window redirect did not absorb the deliberate abort.
 //!
 //! ## How it differs from a production kernel
@@ -44,13 +49,14 @@ mod kernel {
     use core::num::NonZeroU16;
     use core::panic::PanicInfo;
 
-    use tairix_arch_aarch64::paging::{AddressSpace, PageTablePool};
+    use tairix_arch_aarch64::paging::{self, AddressSpace, PageTablePool};
+    use tairix_arch_aarch64::protection;
     use tairix_arch_aarch64::{
         enable_fp_el1, exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK,
     };
     use tairix_arch_api::fatal::KernelFault;
-    use tairix_arch_api::mmu::AddressSpace as _;
-    use tairix_arch_api::uaccess::conformance::{self, Verdict};
+    use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
+    use tairix_arch_api::uaccess::conformance::{self, reach_into, Reach, Verdict};
     use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Field, Level};
 
@@ -75,6 +81,31 @@ mod kernel {
     const FAIL_NOT_INSTALLED: NonZeroU16 = fail_point!(3);
     const FAIL_INTACT_COPY: NonZeroU16 = fail_point!(4);
     const FAIL_FAULT_NOT_REPORTED: NonZeroU16 = fail_point!(5);
+    const FAIL_PAN_NOT_HELD: NonZeroU16 = fail_point!(6);
+    const FAIL_USER_PAGE_READ: NonZeroU16 = fail_point!(7);
+    const FAIL_KERNEL_MAPPING_READ: NonZeroU16 = fail_point!(8);
+    const FAIL_STACK_PROBE: NonZeroU16 = fail_point!(9);
+
+    /// An EL0 address beyond the identity map that the space maps
+    /// [`PROBE_PAGE`] at.
+    const USER_PROBE_VA: u64 = 4 * (1 << 30);
+
+    /// `PSTATE.PAN`, as the `PAN` register reads it.
+    const PSTATE_PAN: u64 = 1 << 22;
+
+    /// `SCTLR_EL1.SPAN`: set, an exception taken to EL1 leaves PAN alone.
+    const SCTLR_SPAN: u64 = 1 << 23;
+
+    /// The byte every word of [`PROBE_PAGE`] holds.
+    const PROBE_BYTE: u8 = 0x5A;
+
+    /// The page the probe reads by its user address and by the identity map,
+    /// the kernel's own mapping of it. Never written, so a read proves which
+    /// mapping reached it.
+    #[repr(C, align(4096))]
+    struct ProbePage([u8; 4096]);
+
+    static PROBE_PAGE: ProbePage = ProbePage([PROBE_BYTE; 4096]);
 
     /// Page-table pool backing the address space (lives in `.bss`).
     static POOL: PageTablePool = PageTablePool::new();
@@ -150,6 +181,52 @@ mod kernel {
         qemu_exit::exit_failure(code);
     }
 
+    /// The boot held the CPU to PAN, so EL1 reaches the probe page only
+    /// through the kernel's own mapping of it: a guarded copy reading it by
+    /// its EL0 address faults. Returns only if all of that holds.
+    fn check_pan(probe: u64) {
+        if !protection::pan_in_force() {
+            fail("PAN not in force on a CPU offering it", FAIL_PAN_NOT_HELD);
+        }
+        let (pan, sctlr): (u64, u64);
+        // SAFETY: the CPU offers PAN, so its register exists; both reads
+        // change nothing.
+        unsafe {
+            core::arch::asm!(
+                "mrs {pan}, S3_0_C4_C2_3",
+                "mrs {sctlr}, sctlr_el1",
+                pan = out(reg) pan,
+                sctlr = out(reg) sctlr,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        if pan & PSTATE_PAN == 0 || sctlr & SCTLR_SPAN != 0 {
+            fail("PAN not set, or SPAN left set", FAIL_PAN_NOT_HELD);
+        }
+        // The watchdog's stack-link probe: EL1 may read its own stack, and
+        // neither an EL0 page nor an unmapped one.
+        let on_stack = 0u64;
+        if !paging::el1_may_read(core::ptr::addr_of!(on_stack) as u64)
+            || paging::el1_may_read(USER_PROBE_VA)
+            || paging::el1_may_read(UNMAPPED_VA)
+        {
+            fail("the stack-link probe misjudged a page", FAIL_STACK_PROBE);
+        }
+        // SAFETY: `USER_PROBE_VA` maps the probe page as an EL0 page and the
+        // identity map is the kernel's own mapping of it.
+        match unsafe { reach_into(USER_PROBE_VA, probe, PROBE_BYTE) } {
+            Reach::OwnMappingOnly => {}
+            Reach::UserAddressRead => fail(
+                "a kernel read of a user page did not fault",
+                FAIL_USER_PAGE_READ,
+            ),
+            Reach::OwnMappingUnread => fail(
+                "the kernel's mapping did not read the page",
+                FAIL_KERNEL_MAPPING_READ,
+            ),
+        }
+    }
+
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
     /// calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
@@ -167,10 +244,18 @@ mod kernel {
         );
 
         // Build the identity space; `UNMAPPED_VA` lies beyond it.
-        let space = match AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB) {
-            Some(space) => space,
-            None => fail("identity map", FAIL_SETUP),
+        let Some(mut space) = AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB) else {
+            fail("identity map", FAIL_SETUP);
         };
+        // The kernel runs identity-mapped, so the probe's address is its
+        // physical one.
+        let probe = core::ptr::addr_of!(PROBE_PAGE) as u64;
+        if space
+            .map_page(USER_PROBE_VA, probe, PageFlags::READ | PageFlags::USER)
+            .is_err()
+        {
+            fail("probe page", FAIL_SETUP);
+        }
 
         // Install the fatal handler (the FAILURE reporter), then the
         // vector table — which also arms the Arch HAL guarded-copy slot,
@@ -202,6 +287,7 @@ mod kernel {
         let verdict = unsafe { conformance::run(UNMAPPED_VA as *mut u8, &mut scratch) };
         match verdict {
             Verdict::Pass => {
+                check_pan(probe);
                 note(
                     Level::Info,
                     UA_TEST_PASS,

@@ -16,6 +16,10 @@
 //! 2. The boot core drives `Aarch64Arch::shootdown_page` — the broadcast
 //!    invalidation + barriers — and reaches the PASS finisher, proving the
 //!    broadcast executes on a real multi-core machine without faulting.
+//! 3. Both cores hold PAN: the enrolment runs `cortex-a76`, which offers it,
+//!    and the port sets `PSTATE.PAN` on each core as it starts. Translation
+//!    stays off throughout, where no page is EL0's, so the watchdog's
+//!    stack-link probe still lets EL1 read its own stack.
 //!
 //! Unlike the `riscv64`/`x86_64` verticals there is no software acknowledge to
 //! observe: the broadcast and its `dsb ish` completion are the hardware's
@@ -53,7 +57,8 @@ mod kernel {
 
     use tairix_arch_aarch64::kernel_arch::read_cntfrq;
     use tairix_arch_aarch64::{
-        fdt, handle_panic_via_serial, qemu_exit, smp, Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
+        fdt, handle_panic_via_serial, paging, protection, qemu_exit, smp, Aarch64Arch,
+        Aarch64ArchStorage, SERIAL_SINK,
     };
     use tairix_arch_api::{CpuId, CrossCpuTlbShootdown, BOOT_CPU};
     use tairix_itest_finisher::fail_point;
@@ -83,6 +88,17 @@ mod kernel {
     const FAIL_SECONDARY_START: NonZeroU16 = fail_point!(1);
     /// Failure finisher code: `CNTFRQ_EL0` reported a zero frequency.
     const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(3);
+    /// Failure finisher code: a core does not hold PAN on a CPU offering it.
+    const FAIL_PAN_NOT_HELD: NonZeroU16 = fail_point!(4);
+    /// Failure finisher code: with translation off, the stack-link probe
+    /// refused the core's own stack.
+    const FAIL_STACK_PROBE: NonZeroU16 = fail_point!(5);
+
+    /// `PSTATE.PAN`, as the `PAN` register reads it.
+    const PSTATE_PAN: u64 = 1 << 22;
+
+    /// Set to `1` by the secondary core when it found `PSTATE.PAN` set.
+    static SECONDARY_PAN: AtomicU32 = AtomicU32::new(0);
 
     /// Set to `1` by the secondary core once it is up and idling, so the
     /// inner-shareable domain genuinely contains a second PE when the boot
@@ -94,6 +110,9 @@ mod kernel {
     /// broadcast to reach it, so it signals ready and idles — no GIC or
     /// vector setup is required.
     extern "C" fn secondary_entry(_cpu: CpuId) -> ! {
+        if pan_set() {
+            SECONDARY_PAN.store(1, Ordering::SeqCst);
+        }
         SECONDARY_READY.store(1, Ordering::SeqCst);
         loop {
             // SAFETY: `wfi` is a wait-for-interrupt hint with no
@@ -102,6 +121,25 @@ mod kernel {
                 core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
             }
         }
+    }
+
+    /// Whether the calling core holds PAN; `false` while PAN is not in force,
+    /// when the core may not even have the register.
+    fn pan_set() -> bool {
+        if !protection::pan_in_force() {
+            return false;
+        }
+        let pan: u64;
+        // SAFETY: PAN is in force, so every running core offers the register;
+        // reading it changes nothing.
+        unsafe {
+            core::arch::asm!(
+                "mrs {}, S3_0_C4_C2_3",
+                out(reg) pan,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        pan & PSTATE_PAN != 0
     }
 
     /// Forward to the shared aarch64 panic bridge (parks the core; the run
@@ -115,6 +153,13 @@ mod kernel {
     /// calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
+        // Per-CPU bookkeeping backing for this two-core vertical.
+        static ARCH_STORAGE: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
+        // The secondary-core stack pool, sized to this two-core vertical: the
+        // `smp.s` trampoline reads its published base and stride to seed the
+        // started core's stack.
+        static SECONDARY_STACKS: smp::SecondaryStackPool<2> = smp::SecondaryStackPool::new();
+
         log(
             &SERIAL_SINK,
             &Event {
@@ -130,21 +175,14 @@ mod kernel {
             qemu_exit::exit_failure(FAIL_ZERO_FREQ);
         }
 
-        // Per-CPU bookkeeping backing for this two-core vertical.
-        static ARCH_STORAGE: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
         let arch = Aarch64Arch::with_cpus(
             &ARCH_STORAGE,
             BOOT_CPU,
             counter_hz,
-            &[BOOT_CPU as u64, SECONDARY_MPIDR],
+            &[u64::from(BOOT_CPU), SECONDARY_MPIDR],
         );
 
-        // Register the secondary-core stack pool sized to this two-core
-        // vertical before any `CPU_ON`; the `smp.s` trampoline reads its
-        // published base/stride to seed the started core's stack
-        // (the pool scales with the core count, not a
-        // fixed `const`).
-        static SECONDARY_STACKS: smp::SecondaryStackPool<2> = smp::SecondaryStackPool::new();
+        // Registered before any `CPU_ON`.
         if SECONDARY_STACKS.register().is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
@@ -165,6 +203,13 @@ mod kernel {
         // genuinely multi-PE inner-shareable domain.
         while SECONDARY_READY.load(Ordering::SeqCst) == 0 {
             core::hint::spin_loop();
+        }
+        if !pan_set() || SECONDARY_PAN.load(Ordering::SeqCst) == 0 {
+            qemu_exit::exit_failure(FAIL_PAN_NOT_HELD);
+        }
+        let on_stack = 0u64;
+        if !paging::el1_may_read(core::ptr::addr_of!(on_stack) as u64) {
+            qemu_exit::exit_failure(FAIL_STACK_PROBE);
         }
         log(
             &SERIAL_SINK,

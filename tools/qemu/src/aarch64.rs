@@ -82,9 +82,9 @@ pub fn machine(board: Board) -> (&'static str, &'static [&'static str]) {
     }
 }
 
-/// CPU model. `cortex-a72` is a widely-available ARMv8-A core (the
-/// Raspberry Pi 4's CPU) that QEMU's `virt` board models cleanly under
-/// TCG.
+/// Default CPU model, unless the spec names another ([`Spec::with_cpu`]).
+/// `cortex-a72` is a widely-available ARMv8-A core (the Raspberry Pi 4's
+/// CPU) that QEMU's `virt` board models cleanly under TCG.
 pub const CPU: &str = "cortex-a72";
 
 /// QEMU host-process exit status the semihosting `SYS_EXIT` success path
@@ -140,7 +140,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push(unit.into());
     }
     argv.push("-cpu".into());
-    argv.push(CPU.into());
+    argv.push(spec.cpu.unwrap_or(CPU).into());
     argv.push("-no-reboot".into());
     // Pin the board's emulated real-time clock when the vertical asked for
     // a deterministic one, so a clock-chip driver's reading is a value the
@@ -257,7 +257,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
-            x86_64_cpu: None,
+            cpu: None,
             x86_64_topology: crate::x86_64::Topology::Dense,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
@@ -534,6 +534,20 @@ mod tests {
             .position(|a| a == "-cpu")
             .expect("argv contains -cpu");
         assert_eq!(argv[c + 1], CPU);
+    }
+
+    /// A vertical whose subject is a capability the default model lacks runs
+    /// on the model it names, given as is.
+    #[test]
+    fn a_named_cpu_model_replaces_the_default() {
+        let spec = fixture_spec(1).with_cpu("max");
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let c = argv
+            .iter()
+            .position(|a| a == "-cpu")
+            .expect("argv contains -cpu");
+        assert_eq!(argv[c + 1], "max");
+        assert_eq!(argv.iter().filter(|a| *a == "-cpu").count(), 1);
     }
 
     #[test]

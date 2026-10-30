@@ -32,7 +32,8 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use tairix_arch_api::frames::{
-    active_frames, pool_slot_of, reclaim_hierarchy, PageTableFrames, TableFrame,
+    active_frames, descriptors, pool_slot_of, reclaim_hierarchy, Leaf, PageTableFrames, TableFrame,
+    LINK_ORDERING, WALK_ORDERING,
 };
 use tairix_arch_api::gigapages;
 use tairix_arch_api::mmu::{
@@ -114,7 +115,12 @@ pub const fn phys_from_pte(pte: u64) -> u64 {
 /// from a virtual address.
 #[must_use]
 pub const fn vpn_index(vaddr: u64, level: usize) -> usize {
-    ((vaddr >> (12 + 9 * level)) & 0x1FF) as usize
+    ((vaddr >> level_shift(level)) & 0x1FF) as usize
+}
+
+/// The log2 of the bytes one entry of a `level` table maps.
+const fn level_shift(level: usize) -> usize {
+    12 + 9 * level
 }
 
 /// Assemble the `satp` value selecting Sv39 with `root_phys` as the
@@ -393,56 +399,29 @@ impl AddressSpace {
         Some(Self { root_phys, frames })
     }
 
-    /// The Sv39 root table, recovered through the frame source that drew
-    /// it, or [`None`] when the source cannot reach it (fail closed).
+    /// The Sv39 root table's entries, recovered through the frame source
+    /// that drew it, or [`None`] when the source cannot reach it (fail
+    /// closed).
     ///
-    /// The space retains only `root_phys`: a `&'static mut` to the root
-    /// held here would alias the second `&mut` the fault-time walk of the
-    /// *active* root mints ([`retry_granted_fault`]).
-    fn root_table(&self) -> Option<*mut [u64; ENTRIES_PER_TABLE]> {
-        self.frames.table_at(self.root_phys)
+    /// The space retains only `root_phys`, never a reference: another hart
+    /// walks the root while it is active ([`retry_granted_fault`]).
+    fn root_table(&self) -> Option<&[AtomicU64; ENTRIES_PER_TABLE]> {
+        // SAFETY: `root_phys` names this space's root table, drawn from
+        // `self.frames`, and it lives as long as the space.
+        Some(unsafe { descriptors(self.frames.table_at(self.root_phys)?) })
     }
 
-    /// `true` if `vaddr` already resolves to a leaf in this hierarchy.
-    ///
-    /// A read-only Sv39 walk used by the [`tairix_arch_api::mmu::AddressSpace`]
-    /// HAL impl to report [`tairix_arch_api::mmu::MapError::AlreadyMapped`]
-    /// rather than silently clobber an existing mapping. Each level is
-    /// recovered from the frame source that drew it, the same round-trip
-    /// [`ensure_child`] relies on, so an entry the source cannot reach
-    /// reads as "no leaf here".
-    fn leaf_present(&self, vaddr: u64) -> bool {
-        let Some(root_table) = self.root_table() else {
-            return false;
-        };
-        // SAFETY: `root_phys` names this space's live root table, drawn
-        // from `self.frames`; `&self` keeps the read shared.
-        let e2 = unsafe { &*root_table }[vpn_index(vaddr, 2)];
-        if (e2 & flags::VALID) == 0 {
-            return false;
-        }
-        if pte_is_leaf(e2) {
-            return true;
-        }
-        let Some(l1) = self.frames.table_at(phys_from_pte(e2)) else {
-            return false;
-        };
-        // SAFETY: a present non-leaf entry holds a PPN `ensure_child` drew
-        // from this source, so its view of it is a live table of this
-        // hierarchy; `&self` keeps the read shared.
-        let e1 = unsafe { &*l1 }[vpn_index(vaddr, 1)];
-        if (e1 & flags::VALID) == 0 {
-            return false;
-        }
-        if pte_is_leaf(e1) {
-            return true;
-        }
-        let Some(l0) = self.frames.table_at(phys_from_pte(e1)) else {
-            return false;
-        };
-        // SAFETY: as above — a present non-leaf L1 entry's PPN is a live
-        // table of this hierarchy.
-        (unsafe { &*l0 }[vpn_index(vaddr, 0)] & flags::VALID) != 0
+    /// The valid leaf covering `vaddr` in this hierarchy, or [`None`].
+    fn leaf(&self, vaddr: u64) -> Option<Leaf<'_>> {
+        // SAFETY: as `root_table`.
+        unsafe { leaf_in(self.frames, self.root_phys, vaddr) }
+    }
+
+    /// The 4 KiB leaf covering `vaddr`, or [`None`] where none does: a
+    /// gigapage or megapage on the way is never shattered by a per-page
+    /// operation.
+    fn page_leaf(&self, vaddr: u64) -> Option<Leaf<'_>> {
+        self.leaf(vaddr).filter(|leaf| leaf.shift == level_shift(0))
     }
 
     /// Map `paddr` at `vaddr` with 4 KiB granularity.
@@ -463,8 +442,6 @@ impl AddressSpace {
             return None;
         }
         let i2 = vpn_index(vaddr, 2);
-        let i1 = vpn_index(vaddr, 1);
-        let i0 = vpn_index(vaddr, 0);
 
         // A user leaf in a kernel slot would hand U-mode the direct
         // physical map or the kernel heap's remap window, both shared by
@@ -475,15 +452,16 @@ impl AddressSpace {
             return None;
         }
 
-        // SAFETY: `root_phys` names this space's live root table, drawn
-        // from `self.frames`; `&mut self` makes the exclusive borrow sound.
-        let root = unsafe { &mut *self.root_table()? };
-        let l1 = ensure_child(root, i2, frames)?;
-        let l0 = ensure_child(l1, i1, frames)?;
-        if pte_is_leaf(l0[i0]) {
+        let l1 = ensure_child(self.root_table()?, i2, frames)?;
+        let l0 = ensure_child(l1, vpn_index(vaddr, 1), frames)?;
+        let slot = &l0[vpn_index(vaddr, 0)];
+        if pte_is_leaf(slot.load(Ordering::Relaxed)) {
             return None;
         }
-        l0[i0] = pte_from_phys(paddr, flags | flags::VALID | flags::ACCESSED | flags::DIRTY);
+        slot.store(
+            pte_from_phys(paddr, flags | flags::VALID | flags::ACCESSED | flags::DIRTY),
+            Ordering::Relaxed,
+        );
         Some(())
     }
 
@@ -515,13 +493,14 @@ impl AddressSpace {
         // A kernel slot is not identity address space; aliasing into one
         // would clobber the direct physical map or the shared remap
         // hierarchy every root points at.
-        // SAFETY: `root_phys` names this space's live root table, drawn
-        // from `self.frames`; `&mut self` makes the exclusive borrow sound.
-        let root = unsafe { &mut *self.root_table()? };
-        if (root[i2] & flags::VALID) != 0 || is_kernel_slot(i2) {
+        let slot = &self.root_table()?[i2];
+        if (slot.load(Ordering::Relaxed) & flags::VALID) != 0 || is_kernel_slot(i2) {
             return None;
         }
-        root[i2] = pte_from_phys(paddr, flags | flags::VALID | flags::ACCESSED | flags::DIRTY);
+        slot.store(
+            pte_from_phys(paddr, flags | flags::VALID | flags::ACCESSED | flags::DIRTY),
+            Ordering::Relaxed,
+        );
         Some(())
     }
 
@@ -608,7 +587,7 @@ fn page_flags_from_sv39(pte: u64) -> PageFlags {
 /// (30 = gigapage, 21 = megapage, 12 = 4 KiB). The page offset is
 /// dropped so the result is always page-aligned (the HAL `translate`
 /// contract reports the 4 KiB page base).
-fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: u32) -> u64 {
+fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: usize) -> u64 {
     let region_mask = (1u64 << region_shift) - 1;
     (leaf_base + (vaddr & region_mask)) & !((PAGE_SIZE as u64) - 1)
 }
@@ -618,7 +597,9 @@ impl MmuAddressSpace for AddressSpace {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 || (paddr & (PAGE_SIZE as u64 - 1)) != 0 {
             return Err(MapError::Misaligned);
         }
-        if flags.is_write_exec() {
+        // A non-canonical address names no page: mapping it would install
+        // its canonical alias's leaf.
+        if flags.is_write_exec() || !is_canonical(vaddr) {
             return Err(MapError::InvalidFlags);
         }
         // Sv39 states no memory type, so neither can be honoured: memory a
@@ -626,13 +607,13 @@ impl MmuAddressSpace for AddressSpace {
         if flags.contains(PageFlags::WRITE_COMBINE) || flags.contains(PageFlags::DMA_COHERENT) {
             return Err(MapError::Unsupported);
         }
-        // Checked ahead of `leaf_present` so the refusal names the reason
-        // the address is unusable rather than whatever the kernel's own
-        // shared windows happen to have mapped there.
+        // Checked ahead of the leaf walk so the refusal names the reason the
+        // address is unusable rather than whatever the kernel's own shared
+        // windows happen to have mapped there.
         if flags.contains(PageFlags::USER) && is_kernel_slot(vpn_index(vaddr, 2)) {
             return Err(MapError::InvalidFlags);
         }
-        if self.leaf_present(vaddr) {
+        if self.leaf(vaddr).is_some() {
             return Err(MapError::AlreadyMapped);
         }
         let frames = self.frames;
@@ -644,82 +625,19 @@ impl MmuAddressSpace for AddressSpace {
     }
 
     fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
-        // SAFETY: `root_phys` names this space's live root table, drawn
-        // from `self.frames`; `&self` keeps the read shared.
-        let e2 = unsafe { &*self.root_table()? }[vpn_index(vaddr, 2)];
-        if (e2 & flags::VALID) == 0 {
-            return None;
-        }
-        if pte_is_leaf(e2) {
-            return Some((
-                resolved_page(phys_from_pte(e2), vaddr, 30),
-                page_flags_from_sv39(e2),
-            ));
-        }
-        // SAFETY: a present non-leaf entry holds a PPN `ensure_child` drew
-        // from this source, so its view of it is a live table of this
-        // hierarchy (the same round-trip `leaf_present` relies on);
-        // `&self` keeps the read shared.
-        let e1 = unsafe { &*self.frames.table_at(phys_from_pte(e2))? }[vpn_index(vaddr, 1)];
-        if (e1 & flags::VALID) == 0 {
-            return None;
-        }
-        if pte_is_leaf(e1) {
-            return Some((
-                resolved_page(phys_from_pte(e1), vaddr, 21),
-                page_flags_from_sv39(e1),
-            ));
-        }
-        // SAFETY: as above — a present non-leaf L1 entry's PPN is a live
-        // table of this hierarchy.
-        let e0 = unsafe { &*self.frames.table_at(phys_from_pte(e1))? }[vpn_index(vaddr, 0)];
-        if (e0 & flags::VALID) == 0 || !pte_is_leaf(e0) {
-            return None;
-        }
-        Some((phys_from_pte(e0), page_flags_from_sv39(e0)))
+        let leaf = self.leaf(vaddr)?;
+        Some((
+            resolved_page(phys_from_pte(leaf.seen), vaddr, leaf.shift),
+            page_flags_from_sv39(leaf.seen),
+        ))
     }
 
     fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
             return Err(MapError::Misaligned);
         }
-        // Navigate to the 4 KiB leaf without allocating. A missing level
-        // or a large-page leaf encountered on the way means there is no
-        // 4 KiB leaf to tear down here — fail closed (the per-page unmap
-        // path never shatters a gigapage/megapage).
-        let root_table = self.root_table().ok_or(MapError::NotMapped)?;
-        // SAFETY: `root_phys` names this space's live root table, drawn
-        // from `self.frames`; `&mut self` makes the exclusive borrow sound.
-        let e2 = unsafe { &*root_table }[vpn_index(vaddr, 2)];
-        if (e2 & flags::VALID) == 0 || pte_is_leaf(e2) {
-            return Err(MapError::NotMapped);
-        }
-        let frames = self.frames;
-        let l1_table = frames
-            .table_at(phys_from_pte(e2))
-            .ok_or(MapError::NotMapped)?;
-        // SAFETY: a present non-leaf entry's PPN is a live table of this
-        // hierarchy, reached through the source that drew it (see
-        // `translate`); `&mut self` makes the exclusive borrow sound.
-        let l1 = unsafe { &mut *l1_table };
-        let e1 = l1[vpn_index(vaddr, 1)];
-        if (e1 & flags::VALID) == 0 || pte_is_leaf(e1) {
-            return Err(MapError::NotMapped);
-        }
-        let l0_table = frames
-            .table_at(phys_from_pte(e1))
-            .ok_or(MapError::NotMapped)?;
-        // SAFETY: as above — a present non-leaf L1 entry's PPN is a live
-        // table of this hierarchy.
-        let l0 = unsafe { &mut *l0_table };
-        let i0 = vpn_index(vaddr, 0);
-        let e0 = l0[i0];
-        if (e0 & flags::VALID) == 0 || !pte_is_leaf(e0) {
-            return Err(MapError::NotMapped);
-        }
-        let paddr = phys_from_pte(e0);
-        l0[i0] = 0;
-        Ok(paddr)
+        let leaf = self.page_leaf(vaddr).ok_or(MapError::NotMapped)?;
+        Ok(phys_from_pte(leaf.slot.swap(0, Ordering::Relaxed)))
     }
 
     fn root_phys(&self) -> u64 {
@@ -748,49 +666,18 @@ impl MmuAddressSpace for AddressSpace {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
             return Err(MapError::Misaligned);
         }
-        // Navigate to the 4 KiB leaf without allocating, exactly as
-        // `unmap` does. A missing level or a large-page leaf on the way
-        // means there is no 4 KiB leaf whose referenced bit this reports —
-        // fail closed with `NotMapped` (the tier tracks only 4 KiB
-        // anonymous leaves, never a gigapage/megapage).
-        let root_table = self.root_table().ok_or(MapError::NotMapped)?;
-        // SAFETY: `root_phys` names this space's live root table, drawn
-        // from `self.frames`; `&mut self` makes the exclusive borrow sound.
-        let e2 = unsafe { &*root_table }[vpn_index(vaddr, 2)];
-        if (e2 & flags::VALID) == 0 || pte_is_leaf(e2) {
-            return Err(MapError::NotMapped);
-        }
-        let frames = self.frames;
-        let l1_table = frames
-            .table_at(phys_from_pte(e2))
-            .ok_or(MapError::NotMapped)?;
-        // SAFETY: a present non-leaf entry's PPN is a live table of this
-        // hierarchy, reached through the source that drew it (see
-        // `translate`); `&mut self` makes the exclusive borrow sound.
-        let l1 = unsafe { &mut *l1_table };
-        let e1 = l1[vpn_index(vaddr, 1)];
-        if (e1 & flags::VALID) == 0 || pte_is_leaf(e1) {
-            return Err(MapError::NotMapped);
-        }
-        let l0_table = frames
-            .table_at(phys_from_pte(e1))
-            .ok_or(MapError::NotMapped)?;
-        // SAFETY: as above — a present non-leaf L1 entry's PPN is a live
-        // table of this hierarchy.
-        let l0 = unsafe { &mut *l0_table };
-        let i0 = vpn_index(vaddr, 0);
-        let e0 = l0[i0];
-        if (e0 & flags::VALID) == 0 || !pte_is_leaf(e0) {
-            return Err(MapError::NotMapped);
-        }
-        let was_accessed = (e0 & flags::ACCESSED) != 0;
+        // The tier tracks only 4 KiB anonymous leaves, never a gigapage or
+        // megapage.
+        let leaf = self.page_leaf(vaddr).ok_or(MapError::NotMapped)?;
+        let was_accessed = (leaf.seen & flags::ACCESSED) != 0;
         if was_accessed {
             // Clear the Accessed bit so the next access re-sets it (in the
             // walk on Svadu, or via the Svade page-fault path); a later
             // probe reading it still clear proves the page went untouched.
             // Invalidate the stale TLB entry so the cleared bit is observed
             // on the next translation rather than served from a cached PTE.
-            l0[i0] = e0 & !flags::ACCESSED;
+            // An atomic clear, so a Dirty bit the walk sets meanwhile stays.
+            leaf.slot.fetch_and(!flags::ACCESSED, Ordering::Relaxed);
             invalidate_page_local(vaddr);
         }
         Ok(was_accessed)
@@ -830,13 +717,8 @@ impl MmuAddressSpace for AddressSpace {
         let Some(root_table) = self.root_table() else {
             return;
         };
-        // SAFETY: `root_phys` names this space's live root table, drawn
-        // from `self.frames`; `&mut self` makes the exclusive borrow sound,
-        // and the borrow ends before the reclaim walk below re-reads it.
-        unsafe {
-            for slot in (*root_table).iter_mut().skip(PHYSMAP_FIRST_SLOT) {
-                *slot = 0;
-            }
+        for slot in root_table.iter().skip(PHYSMAP_FIRST_SLOT) {
+            slot.store(0, Ordering::Relaxed);
         }
         let frames = self.frames;
         // An Sv39 hierarchy rooted at level 2: a valid PTE with R=W=X=0 is
@@ -1463,32 +1345,22 @@ impl AccessKind {
     }
 }
 
-/// How a faulting access reached its leaf: what it did, and the mode and the
-/// reach into user memory it ran with.
+/// How a faulting access reached its leaf: what it did, and the mode it ran
+/// in.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FaultingAccess {
     /// What the access did.
     pub kind: AccessKind,
     /// It ran in U-mode.
     pub from_user: bool,
-    /// `sstatus.SUM` was set, so an S-mode load or store may reach a user
-    /// page.
-    pub user_memory: bool,
 }
 
 impl FaultingAccess {
     /// Whether `leaf`, a valid leaf, grants this access as the hart's own walk
-    /// would: its permission bit, and its user bit against the mode.
+    /// would: its permission bit, and its user bit against the mode. The
+    /// kernel runs with `sstatus.SUM` clear, so no user page grants S-mode.
     const fn granted_by(self, leaf: u64) -> bool {
-        if (leaf & self.kind.required_perm()) == 0 {
-            return false;
-        }
-        let user_page = (leaf & flags::USER) != 0;
-        if self.from_user {
-            user_page
-        } else {
-            !user_page || (self.user_memory && !matches!(self.kind, AccessKind::Instruction))
-        }
+        (leaf & self.kind.required_perm()) != 0 && ((leaf & flags::USER) != 0) == self.from_user
     }
 }
 
@@ -1507,6 +1379,10 @@ impl FaultingAccess {
 /// non-canonical address, an absent leaf, or one that does not grant the
 /// access is the access's own fault and touches nothing. It allocates nothing
 /// and is sound in trap context.
+///
+/// It takes no lock, so `unmap` or the scanner may be changing the same leaf
+/// on another hart; the bits are set only by an exchange from the leaf the
+/// walk read ([`Leaf::set_while`]), never written back over a change.
 #[must_use]
 pub fn retry_granted_fault(vaddr: u64, access: FaultingAccess) -> bool {
     let root_phys = active_root_phys();
@@ -1516,11 +1392,9 @@ pub fn retry_granted_fault(vaddr: u64, access: FaultingAccess) -> bool {
     let Some(frames) = active_frames() else {
         return false;
     };
-    // SAFETY: `root_phys` is the live root table of a space this port
-    // built, so the published production source reaches it and every table
-    // below it; the trap handler holds the hart exclusively while it
-    // resolves the fault, so the `&mut` borrows of the descriptors are
-    // unique.
+    // SAFETY: `root_phys` is the root table of a space this port built, so
+    // the published production source reaches it and every table below it,
+    // and its space outlives the task this hart is running in it.
     unsafe { retry_granted_in_root(frames, root_phys, vaddr, access) }
 }
 
@@ -1530,10 +1404,7 @@ pub fn retry_granted_fault(vaddr: u64, access: FaultingAccess) -> bool {
 ///
 /// # Safety
 ///
-/// `root_phys` must be a live Sv39 root table drawn from `frames`, whose
-/// descendant tables `frames` can therefore reach, and the caller must
-/// hold exclusive access to the hierarchy for the duration of the call (no
-/// aliasing `&mut`).
+/// As [`leaf_in`].
 #[must_use]
 unsafe fn retry_granted_in_root(
     frames: &dyn PageTableFrames,
@@ -1541,64 +1412,69 @@ unsafe fn retry_granted_in_root(
     vaddr: u64,
     access: FaultingAccess,
 ) -> bool {
-    // Sv39 faults an address whose bits 63..=38 are not all one value before
-    // it walks; the walk below would otherwise find its canonical alias.
-    let high = vaddr >> 38;
-    if high != 0 && high != u64::MAX >> 38 {
-        return false;
-    }
-    let Some(root_table) = frames.table_at(root_phys) else {
+    // SAFETY: the function contract, forwarded.
+    let Some(leaf) = (unsafe { leaf_in(frames, root_phys, vaddr) }) else {
         return false;
     };
-    // SAFETY: `root_phys` is a live Sv39 root table `frames` reaches per
-    // the function contract; the caller guarantees exclusive access, so
-    // the `&mut` borrows are unique.
-    let root = unsafe { &mut *root_table };
-    let e2 = root[vpn_index(vaddr, 2)];
-    if (e2 & flags::VALID) == 0 {
-        return false;
-    }
-    if pte_is_leaf(e2) {
-        return retry_leaf(&mut root[vpn_index(vaddr, 2)], vaddr, access);
-    }
-    let Some(l1_table) = frames.table_at(phys_from_pte(e2)) else {
-        return false;
-    };
-    // SAFETY: a valid non-leaf entry's PPN is a table of this hierarchy.
-    let l1 = unsafe { &mut *l1_table };
-    let e1 = l1[vpn_index(vaddr, 1)];
-    if (e1 & flags::VALID) == 0 {
-        return false;
-    }
-    if pte_is_leaf(e1) {
-        return retry_leaf(&mut l1[vpn_index(vaddr, 1)], vaddr, access);
-    }
-    let Some(l0_table) = frames.table_at(phys_from_pte(e1)) else {
-        return false;
-    };
-    // SAFETY: as above — a valid non-leaf L1 entry's PPN is an L0 table of
-    // this hierarchy.
-    let l0 = unsafe { &mut *l0_table };
-    let i0 = vpn_index(vaddr, 0);
-    if (l0[i0] & flags::VALID) == 0 || !pte_is_leaf(l0[i0]) {
-        return false;
-    }
-    retry_leaf(&mut l0[i0], vaddr, access)
-}
-
-/// Set the Accessed (and, for a store, Dirty) bit on `leaf` when it grants
-/// `access`, discard this hart's entry for `vaddr`, and answer whether it did.
-fn retry_leaf(leaf: &mut u64, vaddr: u64, access: FaultingAccess) -> bool {
-    if !access.granted_by(*leaf) {
-        return false;
-    }
-    *leaf |= if access.kind.sets_dirty() {
+    let bits = if access.kind.sets_dirty() {
         flags::ACCESSED | flags::DIRTY
     } else {
         flags::ACCESSED
     };
+    if leaf.set_while(bits, |pte| access.granted_by(pte)).is_none() {
+        return false;
+    }
     invalidate_page_local(vaddr);
     true
+}
+
+/// The valid leaf covering `vaddr` in the Sv39 hierarchy rooted at
+/// `root_phys`, or [`None`] for a non-canonical address or one no valid leaf
+/// covers.
+///
+/// # Safety
+///
+/// `root_phys` must be a Sv39 root table drawn from `frames`, whose
+/// descendant tables `frames` can therefore reach, and the hierarchy must
+/// stay allocated for `'a`.
+unsafe fn leaf_in<'a>(
+    frames: &dyn PageTableFrames,
+    root_phys: u64,
+    vaddr: u64,
+) -> Option<Leaf<'a>> {
+    if !is_canonical(vaddr) {
+        return None;
+    }
+    let mut table = frames.table_at(root_phys)?;
+    for level in (0..SV39_LEVELS).rev() {
+        // SAFETY: `table` is the root, or the table a valid non-leaf entry
+        // above names, of a hierarchy the contract keeps allocated for `'a`.
+        let slot = &unsafe { descriptors(table) }[vpn_index(vaddr, level)];
+        let seen = slot.load(WALK_ORDERING);
+        if (seen & flags::VALID) == 0 {
+            return None;
+        }
+        if pte_is_leaf(seen) {
+            return Some(Leaf {
+                slot,
+                seen,
+                shift: level_shift(level),
+            });
+        }
+        if level == 0 {
+            return None;
+        }
+        table = frames.table_at(phys_from_pte(seen))?;
+    }
+    None
+}
+
+/// Whether Sv39 translates `vaddr` at all: it faults an address whose bits
+/// 63..=38 are not all one value before it walks, which a walk by index
+/// would otherwise resolve to its canonical alias.
+const fn is_canonical(vaddr: u64) -> bool {
+    let high = vaddr >> 38;
+    high == 0 || high == u64::MAX >> 38
 }
 
 /// Reactivate `root_phys` as the active Sv39 translation root under `tag`'s
@@ -1655,35 +1531,30 @@ pub unsafe fn activate_user_root(root_phys: u64, tag: AddressTag) {
     let _ = (root_phys, tag);
 }
 
-// `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned
-// reference points at a freshly-alloc'd table from `frames` or at a
-// sibling recovered from the same source, never a borrow of
-// `parent` — exactly the shape `mut_from_ref` flags.
-#[allow(clippy::mut_from_ref)]
-fn ensure_child(
-    parent: &mut [u64; ENTRIES_PER_TABLE],
+/// The child table entry `idx` of `parent` names, linking a fresh one where
+/// the entry is invalid, or [`None`] for a leaf there (never shattered) or
+/// an exhausted source.
+fn ensure_child<'a>(
+    parent: &'a [AtomicU64; ENTRIES_PER_TABLE],
     idx: usize,
-    frames: &'static dyn PageTableFrames,
-) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
-    let entry = parent[idx];
+    frames: &dyn PageTableFrames,
+) -> Option<&'a [AtomicU64; ENTRIES_PER_TABLE]> {
+    let entry = parent[idx].load(WALK_ORDERING);
     if (entry & flags::VALID) != 0 {
         if pte_is_leaf(entry) {
-            // A leaf where we expected a table pointer: refuse rather
-            // than shatter a large page silently.
             return None;
         }
         let table = frames.table_at(phys_from_pte(entry))?;
-        // SAFETY: every non-leaf valid entry was inserted below with a PPN
-        // drawn from `frames`, so the source's view of it is a live table
-        // of this hierarchy; the walk holds the hierarchy exclusively, so
-        // the `&mut` does not alias.
-        let child: &'static mut [u64; ENTRIES_PER_TABLE] = unsafe { &mut *table };
-        Some(child)
+        // SAFETY: every valid non-leaf entry was linked below with a PPN
+        // drawn from `frames`, so the source's view of it is a table of this
+        // hierarchy, allocated as long as `parent` is.
+        Some(unsafe { descriptors(table) })
     } else {
         let TableFrame { phys, entries } = frames.alloc_table()?;
-        // Non-leaf (table pointer): valid set, R/W/X clear.
-        parent[idx] = pte_from_phys(phys, flags::VALID);
-        Some(entries)
+        // A table pointer: valid, R/W/X clear.
+        parent[idx].store(pte_from_phys(phys, flags::VALID), LINK_ORDERING);
+        // SAFETY: as above; `entries` is not used again.
+        Some(unsafe { descriptors(entries) })
     }
 }
 

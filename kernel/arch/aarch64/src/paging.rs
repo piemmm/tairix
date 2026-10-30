@@ -40,7 +40,8 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_arch_api::frames::{
-    active_frames, pool_slot_of, reclaim_hierarchy, PageTableFrames, TableFrame,
+    active_frames, descriptors, pool_slot_of, reclaim_hierarchy, Leaf, PageTableFrames, TableFrame,
+    LINK_ORDERING, WALK_ORDERING,
 };
 use tairix_arch_api::mmu::{
     AccessTracking, AddressSpace as MmuAddressSpace, KernelWindow, MapError, PageFlags,
@@ -154,7 +155,13 @@ pub const TCR_VALUE: u64 = {
 /// bits 29, 28, 23, 22, 20, and 11. Every other bit — including the
 /// booby-traps `EE`/`E0E` (data big-endian), `WXN` (writable implies
 /// execute-never), `A`/`SA`/`SA0` (alignment checking) — is left clear.
+/// Bit 23 is [`SCTLR_SPAN`] on a CPU with PAN.
 pub const SCTLR_RES1: u64 = (1 << 29) | (1 << 28) | (1 << 23) | (1 << 22) | (1 << 20) | (1 << 11);
+
+/// `SCTLR_EL1.SPAN`: set, an exception taken to EL1 leaves `PSTATE.PAN` as it
+/// was; clear, it sets PAN. RES1 where the CPU lacks PAN, so only a CPU the
+/// kernel holds to PAN clears it ([`crate::protection::sctlr_mmu_on`]).
+pub const SCTLR_SPAN: u64 = 1 << 23;
 
 /// The known MMU-off `SCTLR_EL1` (= [`SCTLR_RES1`], `0x30D0_0800`) the
 /// entry trampolines establish before the first EL1 data access.
@@ -172,9 +179,10 @@ pub const SCTLR_RES1: u64 = (1 << 29) | (1 << 28) | (1 << 23) | (1 << 22) | (1 <
 pub const SCTLR_MMU_OFF: u64 = SCTLR_RES1;
 
 /// The full MMU-on `SCTLR_EL1` value `AddressSpace::switch` (freestanding
-/// only) installs:
-/// [`SCTLR_RES1`] plus `M` (stage-1 translation), `C` (data cache), and
-/// `I` (instruction cache).
+/// only) installs on a CPU not held to PAN: [`SCTLR_RES1`] plus `M`
+/// (stage-1 translation), `C` (data cache), and `I` (instruction cache). A
+/// CPU held to PAN installs it with [`SCTLR_SPAN`] clear
+/// ([`crate::protection::sctlr_mmu_on`]).
 ///
 /// Written as a whole — never OR-ed into the live register — so no
 /// UNKNOWN reset bit survives into translated execution (see
@@ -219,9 +227,13 @@ pub const fn phys_from_descriptor(desc: u64) -> u64 {
 /// from a virtual address.
 #[must_use]
 pub const fn table_index(vaddr: u64, level: usize) -> usize {
-    // L1 indexes bits [38:30], L2 [29:21], L3 [20:12].
-    let shift = 12 + 9 * (LEVELS - level);
-    ((vaddr >> shift) & 0x1FF) as usize
+    ((vaddr >> table_shift(level)) & 0x1FF) as usize
+}
+
+/// The log2 of the bytes one entry of a `level` table maps: L1 indexes
+/// bits `[38:30]`, L2 `[29:21]`, L3 `[20:12]`.
+const fn table_shift(level: usize) -> usize {
+    12 + 9 * (LEVELS - level)
 }
 
 /// Lower attributes for a kernel Normal-memory leaf (AF, inner
@@ -309,11 +321,24 @@ pub const fn el0_data_leaf_attrs() -> u64 {
 /// granularity.
 #[must_use]
 pub const fn el0_dma_coherent_leaf_attrs() -> u64 {
+    non_cacheable_leaf(attrs::AP_RW_EL0)
+}
+
+/// [`el0_dma_coherent_leaf_attrs`] for a page only the kernel reaches:
+/// read/write at EL1 alone (`AP_RW_EL1`).
+#[must_use]
+pub const fn dma_coherent_leaf_attrs() -> u64 {
+    non_cacheable_leaf(attrs::AP_RW_EL1)
+}
+
+/// A Normal Non-Cacheable, execute-never page leaf under the access `ap`
+/// grants.
+const fn non_cacheable_leaf(ap: u64) -> u64 {
     attrs::VALID
         | attrs::TABLE_OR_PAGE
         | attrs::AF
         | attrs::SH_INNER
-        | attrs::AP_RW_EL0
+        | ap
         | attrs::ATTR_IDX_NORMAL_NC
         | attrs::PXN
         | attrs::UXN
@@ -1465,58 +1490,29 @@ impl AddressSpace {
         })
     }
 
-    /// The L1 root table, recovered through the frame source that drew
-    /// it, or [`None`] when the source cannot reach it (fail closed).
+    /// The L1 root table's descriptors, recovered through the frame source
+    /// that drew it, or [`None`] when the source cannot reach it (fail
+    /// closed).
     ///
-    /// The space retains only `root_phys`: a `&'static mut` to the root
-    /// held here would alias the second `&mut` the fault-time walk of the
-    /// *active* root mints ([`set_accessed_flag_in_active`]).
-    fn root_table(&self) -> Option<*mut [u64; ENTRIES_PER_TABLE]> {
-        self.frames.table_at(self.root_phys)
+    /// The space retains only `root_phys`, never a reference: another CPU
+    /// walks the root while it is active ([`set_accessed_flag_in_active`]).
+    fn root_table(&self) -> Option<&[AtomicU64; ENTRIES_PER_TABLE]> {
+        // SAFETY: `root_phys` names this space's L1 table, drawn from
+        // `self.frames`, and it lives as long as the space.
+        Some(unsafe { descriptors(self.frames.table_at(self.root_phys)?) })
     }
 
-    /// `true` if `vaddr` already resolves to a live leaf (block or page)
-    /// in this hierarchy.
-    ///
-    /// A read-only stage-1 walk used by the
-    /// [`tairix_arch_api::mmu::AddressSpace`] HAL impl to report
-    /// [`tairix_arch_api::mmu::MapError::AlreadyMapped`] rather than
-    /// silently clobber an existing mapping. Each level is recovered from
-    /// the frame source that drew it, the same round-trip
-    /// [`ensure_child`] uses, so a descriptor the source cannot reach
-    /// reads as "no leaf here".
-    fn leaf_present(&self, vaddr: u64) -> bool {
-        let Some(root_table) = self.root_table() else {
-            return false;
-        };
-        // SAFETY: `root_phys` names this space's live L1 table, drawn from
-        // `self.frames`; `&self` keeps the read shared.
-        let e1 = unsafe { &*root_table }[table_index(vaddr, 1)];
-        if (e1 & attrs::VALID) == 0 {
-            return false;
-        }
-        if is_block(e1) {
-            return true;
-        }
-        let Some(l2) = self.frames.table_at(phys_from_descriptor(e1)) else {
-            return false;
-        };
-        // SAFETY: a present table descriptor holds an output address
-        // `ensure_child` drew from this source, so its view of it is a
-        // live table of this hierarchy; `&self` keeps the read shared.
-        let e2 = unsafe { &*l2 }[table_index(vaddr, 2)];
-        if (e2 & attrs::VALID) == 0 {
-            return false;
-        }
-        if is_block(e2) {
-            return true;
-        }
-        let Some(l3) = self.frames.table_at(phys_from_descriptor(e2)) else {
-            return false;
-        };
-        // SAFETY: as above — a present L2 table descriptor's output
-        // address is a live table of this hierarchy.
-        (unsafe { &*l3 }[table_index(vaddr, 3)] & attrs::VALID) != 0
+    /// The valid leaf covering `vaddr` in this hierarchy, or [`None`].
+    fn leaf(&self, vaddr: u64) -> Option<Leaf<'_>> {
+        // SAFETY: as `root_table`.
+        unsafe { leaf_in(self.frames, self.root_phys, vaddr) }
+    }
+
+    /// The 4 KiB page leaf covering `vaddr`, or [`None`] where none does: a
+    /// block on the way is never shattered by a per-page operation.
+    fn page_leaf(&self, vaddr: u64) -> Option<Leaf<'_>> {
+        self.leaf(vaddr)
+            .filter(|leaf| leaf.shift == table_shift(LEVELS))
     }
 
     /// Map `paddr` at `vaddr` with 4 KiB granularity as Normal memory
@@ -1557,19 +1553,13 @@ impl AddressSpace {
         {
             return None;
         }
-        let i1 = table_index(vaddr, 1);
-        let i2 = table_index(vaddr, 2);
-        let i3 = table_index(vaddr, 3);
-
-        // SAFETY: `root_phys` names this space's live L1 table, drawn from
-        // `self.frames`; `&mut self` makes the exclusive borrow sound.
-        let root = unsafe { &mut *self.root_table()? };
-        let l2 = ensure_child(root, i1, frames)?;
-        let l3 = ensure_child(l2, i2, frames)?;
-        if (l3[i3] & attrs::VALID) != 0 {
+        let l2 = ensure_child(self.root_table()?, table_index(vaddr, 1), frames)?;
+        let l3 = ensure_child(l2, table_index(vaddr, 2), frames)?;
+        let slot = &l3[table_index(vaddr, 3)];
+        if (slot.load(Ordering::Relaxed) & attrs::VALID) != 0 {
             return None;
         }
-        l3[i3] = descriptor(paddr, leaf_attrs);
+        slot.store(descriptor(paddr, leaf_attrs), Ordering::Relaxed);
         Some(())
     }
 
@@ -1609,17 +1599,24 @@ impl AddressSpace {
             } else {
                 device_leaf_attrs(false)
             }
-        } else if flags.contains(PageFlags::WRITE_COMBINE) {
-            el0_dma_coherent_leaf_attrs() | attrs::SW_WRITE_COMBINE
-        } else if flags.contains(PageFlags::DMA_COHERENT) {
-            // A buffer shared with a non-I/O-coherent DMA master (the
-            // BCM2711 PCIe root complex): Normal Non-Cacheable so the device
-            // and CPU see each other's writes without cache maintenance,
-            // while ordinary ring/context loads/stores still work (Device
-            // memory would forbid them). Always EL0-accessible RW,
-            // execute-never — the only consumer is a user-space driver's DMA
-            // carve.
-            el0_dma_coherent_leaf_attrs()
+        } else if flags.contains(PageFlags::WRITE_COMBINE)
+            || flags.contains(PageFlags::DMA_COHERENT)
+        {
+            // Normal Non-Cacheable: a write-combined surface, or a buffer
+            // shared with a non-I/O-coherent DMA master (the BCM2711 PCIe
+            // root complex), which then sees the CPU's writes without cache
+            // maintenance while ring loads and stores still work (Device
+            // memory would forbid them). EL0 reaches it only if asked.
+            let leaf = if flags.contains(PageFlags::USER) {
+                el0_dma_coherent_leaf_attrs()
+            } else {
+                dma_coherent_leaf_attrs()
+            };
+            if flags.contains(PageFlags::WRITE_COMBINE) {
+                leaf | attrs::SW_WRITE_COMBINE
+            } else {
+                leaf
+            }
         } else if flags.contains(PageFlags::USER) {
             if flags.contains(PageFlags::EXEC) {
                 el0_code_leaf_attrs()
@@ -1634,8 +1631,9 @@ impl AddressSpace {
     }
 
     /// Activate this address space: program `MAIR_EL1`, `TCR_EL1`, both
-    /// translation roots, and install the full known [`SCTLR_MMU_ON`] value
-    /// (translation plus caches), then synchronise.
+    /// translation roots, and install the full known MMU-on `SCTLR_EL1`
+    /// ([`crate::protection::sctlr_mmu_on`]: translation plus caches), then
+    /// synchronise.
     ///
     /// # Safety
     ///
@@ -1710,9 +1708,10 @@ impl Stage1TranslationEnabled {
 }
 
 /// Program the calling CPU's stage-1 translation registers — both regimes
-/// — and enable the MMU + caches with the full known [`SCTLR_MMU_ON`]
-/// value: the one enable sequence [`AddressSpace::switch`] (boot CPU) and
-/// [`adopt_boot_translation`] (secondary CPUs) share.
+/// — and enable the MMU + caches with the full known MMU-on `SCTLR_EL1`
+/// ([`crate::protection::sctlr_mmu_on`]): the one enable sequence
+/// [`AddressSpace::switch`] (boot CPU) and [`adopt_boot_translation`]
+/// (secondary CPUs) share.
 ///
 /// `TTBR1_EL1` is written here and nowhere else, because the kernel regime
 /// is one global root every CPU shares for the image's lifetime: a later
@@ -1762,7 +1761,7 @@ unsafe fn program_stage1_translation(root_phys: u64) -> Stage1TranslationEnabled
             tcr = in(reg) TCR_VALUE,
             ttbr = in(reg) root_phys,
             ttbr1 = in(reg) kernel_root_phys(),
-            sctlr = in(reg) SCTLR_MMU_ON,
+            sctlr = in(reg) crate::protection::sctlr_mmu_on(crate::protection::pan_in_force()),
             options(nostack, preserves_flags),
         );
     }
@@ -1910,7 +1909,7 @@ impl MmuAddressSpace for AddressSpace {
         if flags.is_write_exec() || !self.regime.holds(vaddr) {
             return Err(MapError::InvalidFlags);
         }
-        if self.leaf_present(vaddr) {
+        if self.leaf(vaddr).is_some() {
             return Err(MapError::AlreadyMapped);
         }
         let frames = self.frames;
@@ -1925,41 +1924,11 @@ impl MmuAddressSpace for AddressSpace {
         if !self.regime.holds(vaddr) {
             return None;
         }
-        // SAFETY: `root_phys` names this space's live L1 table, drawn from
-        // `self.frames`; `&self` keeps the read shared.
-        let e1 = unsafe { &*self.root_table()? }[table_index(vaddr, 1)];
-        if (e1 & attrs::VALID) == 0 {
-            return None;
-        }
-        if is_block(e1) {
-            return Some((
-                resolved_page(phys_from_descriptor(e1), vaddr, 30),
-                page_flags_from_leaf(e1),
-            ));
-        }
-        // SAFETY: a present table descriptor holds an output address
-        // `ensure_child` drew from this source, so its view of it is a
-        // live table of this hierarchy (the same round-trip
-        // `leaf_present` relies on); `&self` keeps the read shared.
-        let e2 =
-            unsafe { &*self.frames.table_at(phys_from_descriptor(e1))? }[table_index(vaddr, 2)];
-        if (e2 & attrs::VALID) == 0 {
-            return None;
-        }
-        if is_block(e2) {
-            return Some((
-                resolved_page(phys_from_descriptor(e2), vaddr, 21),
-                page_flags_from_leaf(e2),
-            ));
-        }
-        // SAFETY: as above — a present L2 table descriptor's output
-        // address is a live table of this hierarchy.
-        let e3 =
-            unsafe { &*self.frames.table_at(phys_from_descriptor(e2))? }[table_index(vaddr, 3)];
-        if (e3 & attrs::VALID) == 0 {
-            return None;
-        }
-        Some((phys_from_descriptor(e3), page_flags_from_leaf(e3)))
+        let leaf = self.leaf(vaddr)?;
+        Some((
+            resolved_page(phys_from_descriptor(leaf.seen), vaddr, leaf.shift),
+            page_flags_from_leaf(leaf.seen),
+        ))
     }
 
     fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
@@ -1969,44 +1938,8 @@ impl MmuAddressSpace for AddressSpace {
         if !self.regime.holds(vaddr) {
             return Err(MapError::NotMapped);
         }
-        // Navigate to the 4 KiB page leaf without allocating. A missing
-        // level or a block leaf encountered on the way means there is no
-        // 4 KiB leaf to tear down here — fail closed (the per-page unmap
-        // path never shatters a block).
-        let root_table = self.root_table().ok_or(MapError::NotMapped)?;
-        // SAFETY: `root_phys` names this space's live L1 table, drawn from
-        // `self.frames`; `&mut self` makes the exclusive borrow sound.
-        let e1 = unsafe { &*root_table }[table_index(vaddr, 1)];
-        if (e1 & attrs::VALID) == 0 || is_block(e1) {
-            return Err(MapError::NotMapped);
-        }
-        let frames = self.frames;
-        let l2_table = frames
-            .table_at(phys_from_descriptor(e1))
-            .ok_or(MapError::NotMapped)?;
-        // SAFETY: a present table descriptor's output address is a live
-        // table of this hierarchy, reached through the source that drew
-        // it (see `translate`); `&mut self` makes the exclusive borrow
-        // sound.
-        let l2 = unsafe { &mut *l2_table };
-        let e2 = l2[table_index(vaddr, 2)];
-        if (e2 & attrs::VALID) == 0 || is_block(e2) {
-            return Err(MapError::NotMapped);
-        }
-        let l3_table = frames
-            .table_at(phys_from_descriptor(e2))
-            .ok_or(MapError::NotMapped)?;
-        // SAFETY: as above — a present L2 table descriptor's output
-        // address is a live table of this hierarchy.
-        let l3 = unsafe { &mut *l3_table };
-        let i3 = table_index(vaddr, 3);
-        let e3 = l3[i3];
-        if (e3 & attrs::VALID) == 0 {
-            return Err(MapError::NotMapped);
-        }
-        let paddr = phys_from_descriptor(e3);
-        l3[i3] = 0;
-        Ok(paddr)
+        let leaf = self.page_leaf(vaddr).ok_or(MapError::NotMapped)?;
+        Ok(phys_from_descriptor(leaf.slot.swap(0, Ordering::Relaxed)))
     }
 
     fn root_phys(&self) -> u64 {
@@ -2037,43 +1970,9 @@ impl MmuAddressSpace for AddressSpace {
         if !self.regime.holds(vaddr) {
             return Err(MapError::NotMapped);
         }
-        // Navigate to the 4 KiB page leaf without allocating, exactly as
-        // `unmap` does. A missing level or a block leaf encountered on the
-        // way means there is no 4 KiB leaf whose referenced bit this
-        // reports — fail closed with `NotMapped` (the tier tracks only
-        // 4 KiB anonymous leaves, never a coarse block).
-        let root_table = self.root_table().ok_or(MapError::NotMapped)?;
-        // SAFETY: `root_phys` names this space's live L1 table, drawn from
-        // `self.frames`; `&mut self` makes the exclusive borrow sound.
-        let e1 = unsafe { &*root_table }[table_index(vaddr, 1)];
-        if (e1 & attrs::VALID) == 0 || is_block(e1) {
-            return Err(MapError::NotMapped);
-        }
-        let frames = self.frames;
-        let l2_table = frames
-            .table_at(phys_from_descriptor(e1))
-            .ok_or(MapError::NotMapped)?;
-        // SAFETY: a present table descriptor's output address is a live
-        // table of this hierarchy, reached through the source that drew
-        // it (see `translate`); `&mut self` makes the exclusive borrow of
-        // the leaf sound.
-        let l2 = unsafe { &mut *l2_table };
-        let e2 = l2[table_index(vaddr, 2)];
-        if (e2 & attrs::VALID) == 0 || is_block(e2) {
-            return Err(MapError::NotMapped);
-        }
-        let l3_table = frames
-            .table_at(phys_from_descriptor(e2))
-            .ok_or(MapError::NotMapped)?;
-        // SAFETY: as above — a present L2 table descriptor's output
-        // address is a live table of this hierarchy.
-        let l3 = unsafe { &mut *l3_table };
-        let i3 = table_index(vaddr, 3);
-        let e3 = l3[i3];
-        if (e3 & attrs::VALID) == 0 {
-            return Err(MapError::NotMapped);
-        }
-        let was_accessed = (e3 & attrs::AF) != 0;
+        // The tier tracks only 4 KiB anonymous leaves, never a coarse block.
+        let leaf = self.page_leaf(vaddr).ok_or(MapError::NotMapped)?;
+        let was_accessed = (leaf.seen & attrs::AF) != 0;
         if was_accessed {
             // Clear the Access Flag so the next access raises an
             // Access-Flag fault the exception path re-sets; a later probe
@@ -2081,7 +1980,7 @@ impl MmuAddressSpace for AddressSpace {
             // between (the clock scan). Invalidate the stale TLB entry so
             // the cleared flag is observed on the next translation rather
             // than served from a cached descriptor that still carries AF.
-            l3[i3] = e3 & !attrs::AF;
+            leaf.slot.fetch_and(!attrs::AF, Ordering::Relaxed);
             invalidate_page_inner_shareable(vaddr);
         }
         Ok(was_accessed)
@@ -2424,6 +2323,12 @@ fn active_root_phys() -> u64 {
 /// fabricates a mapping or masks a genuine fault). It allocates nothing
 /// and is sound in exception context.
 ///
+/// It takes no lock, so `unmap` or the scanner may be changing the same
+/// leaf on another CPU. AF is set only by an exchange from the descriptor
+/// the walk read: a leaf unmapped, remapped or re-permissioned meanwhile is
+/// never written back, which would hand the retried access a frame its
+/// space no longer owns.
+///
 /// Only a `TTBR0_EL1` address is resolved: the referenced-bit clock tracks
 /// anonymous user leaves, and every kernel-regime leaf is mapped with AF
 /// already set, so a kernel address here is not this mechanism's fault. It
@@ -2441,10 +2346,9 @@ pub fn set_accessed_flag_in_active(vaddr: u64) -> bool {
     let Some(frames) = active_frames() else {
         return false;
     };
-    // SAFETY: `root_phys` is the live L1 table of a space this port built,
-    // so the published production source reaches it and every table below
-    // it; the exception handler holds the CPU exclusively while it resolves
-    // the fault, so the `&mut` borrows of the descriptors are unique.
+    // SAFETY: `root_phys` is the L1 table of a space this port built, so the
+    // published production source reaches it and every table below it, and
+    // its space outlives the task this CPU is running in it.
     unsafe { set_accessed_flag_in_root(frames, root_phys, vaddr) }
 }
 
@@ -2455,69 +2359,62 @@ pub fn set_accessed_flag_in_active(vaddr: u64) -> bool {
 ///
 /// # Safety
 ///
-/// `root_phys` must be a live L1 table drawn from `frames`, whose
-/// descendant tables `frames` can therefore reach, and the caller must
-/// hold exclusive access to the hierarchy for the duration of the call (no
-/// aliasing `&mut`).
+/// As [`leaf_in`].
 #[must_use]
 unsafe fn set_accessed_flag_in_root(
     frames: &dyn PageTableFrames,
     root_phys: u64,
     vaddr: u64,
 ) -> bool {
-    let Some(l1_table) = frames.table_at(root_phys) else {
+    // SAFETY: the function contract, forwarded.
+    let Some(leaf) = (unsafe { leaf_in(frames, root_phys, vaddr) }) else {
         return false;
     };
-    // SAFETY: `root_phys` is a live L1 table `frames` reaches per the
-    // function contract; the caller guarantees exclusive access, so the
-    // `&mut` borrow of the descriptor is unique.
-    let l1 = unsafe { &mut *l1_table };
-    let e1 = l1[table_index(vaddr, 1)];
-    if (e1 & attrs::VALID) == 0 {
+    if leaf.set_while(attrs::AF, access_flag_clear).is_none() {
         return false;
     }
-    if is_block(e1) {
-        return set_af_if_clear(&mut l1[table_index(vaddr, 1)], vaddr);
-    }
-    let Some(l2_table) = frames.table_at(phys_from_descriptor(e1)) else {
-        return false;
-    };
-    // SAFETY: a valid table descriptor's output address is a next-level
-    // table of this hierarchy (see `AddressSpace::translate`).
-    let l2 = unsafe { &mut *l2_table };
-    let e2 = l2[table_index(vaddr, 2)];
-    if (e2 & attrs::VALID) == 0 {
-        return false;
-    }
-    if is_block(e2) {
-        return set_af_if_clear(&mut l2[table_index(vaddr, 2)], vaddr);
-    }
-    let Some(l3_table) = frames.table_at(phys_from_descriptor(e2)) else {
-        return false;
-    };
-    // SAFETY: as above — a valid L2 table descriptor points at an L3 table
-    // of this hierarchy.
-    let l3 = unsafe { &mut *l3_table };
-    let i3 = table_index(vaddr, 3);
-    if (l3[i3] & attrs::VALID) == 0 {
-        return false;
-    }
-    set_af_if_clear(&mut l3[i3], vaddr)
-}
-
-/// Set the Access Flag on `leaf` when it is currently clear, invalidate
-/// the stale TLB entry for `vaddr`, and report whether AF was set.
-///
-/// Returns `false` (touching nothing) when AF is already set — the fault
-/// was not the software referenced-bit mechanism, so the caller must fall
-/// through to the ordinary fault path.
-fn set_af_if_clear(leaf: &mut u64, vaddr: u64) -> bool {
-    if (*leaf & attrs::AF) != 0 {
-        return false;
-    }
-    *leaf |= attrs::AF;
     invalidate_page_inner_shareable(vaddr);
     true
+}
+
+/// Whether `desc` is a valid leaf whose Access Flag the scanner cleared: the
+/// only leaf an Access-Flag fault is this mechanism's.
+const fn access_flag_clear(desc: u64) -> bool {
+    (desc & attrs::VALID) != 0 && (desc & attrs::AF) == 0
+}
+
+/// The valid leaf, block or page, covering `vaddr` in the hierarchy rooted
+/// at `root_phys`, or [`None`] where no valid leaf does.
+///
+/// # Safety
+///
+/// `root_phys` must be an L1 table drawn from `frames`, whose descendant
+/// tables `frames` can therefore reach, and the hierarchy must stay
+/// allocated for `'a`.
+unsafe fn leaf_in<'a>(
+    frames: &dyn PageTableFrames,
+    root_phys: u64,
+    vaddr: u64,
+) -> Option<Leaf<'a>> {
+    let mut table = frames.table_at(root_phys)?;
+    for level in 1..=LEVELS {
+        // SAFETY: `table` is the root, or the table a valid table descriptor
+        // above names, of a hierarchy the contract keeps allocated for `'a`.
+        let slot = &unsafe { descriptors(table) }[table_index(vaddr, level)];
+        let seen = slot.load(WALK_ORDERING);
+        if (seen & attrs::VALID) == 0 {
+            return None;
+        }
+        if level == LEVELS || is_block(seen) {
+            return Some(Leaf {
+                slot,
+                seen,
+                shift: table_shift(level),
+            });
+        }
+        table = frames.table_at(phys_from_descriptor(seen))?;
+    }
+    None
 }
 
 /// Reactivate `root_phys` as the active stage-1 EL1&0 translation root under
@@ -2593,9 +2490,9 @@ pub unsafe fn activate_user_root(root_phys: u64, tag: AddressTag) {
 /// that may be unmapped, misaligned, or wild. `PAR_EL1` is saved and restored
 /// so a translation the interrupted context had in flight is never clobbered.
 ///
-/// The one `AT` probe in the port: the watchdog's stack-link check and the
-/// fatal report's faulting-address probe are both this, so their fail-closed
-/// reading of `PAR_EL1` cannot diverge.
+/// The port's EL1 `AT` probe: the fatal report's faulting-address probe is
+/// this, and the watchdog's stack-link check ([`el1_may_read`]) starts with
+/// it, so their fail-closed reading of `PAR_EL1` cannot diverge.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[must_use]
 pub fn translate_el1(addr: u64, write: bool) -> u64 {
@@ -2709,34 +2606,65 @@ pub const fn par_faulted(par: u64) -> bool {
     (par & 1) != 0
 }
 
-// `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned
-// reference points at a freshly-alloc'd table from `frames` or at a
-// sibling recovered from the same source, never a borrow of `parent` —
-// exactly the shape `mut_from_ref` flags.
-#[allow(clippy::mut_from_ref)]
-fn ensure_child(
-    parent: &mut [u64; ENTRIES_PER_TABLE],
+/// Whether an EL1 load from `addr` would succeed: it translates for EL1 and,
+/// while PAN is in force under stage-1 translation, EL0 cannot reach it.
+/// `AT S1E1R` ignores PAN, so a page EL0 may access would otherwise answer
+/// readable and then fault. With translation off no page is EL0's, and
+/// `AT S1E0R` would answer every address reachable.
+///
+/// Translates only, like [`translate_el1`], so it cannot fault.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub fn el1_may_read(addr: u64) -> bool {
+    if par_faulted(translate_el1(addr, false)) {
+        return false;
+    }
+    if !crate::protection::pan_in_force() || !translation_enabled() {
+        return true;
+    }
+    let par: u64;
+    // SAFETY: as `translate_el1`'s: `AT S1E0R` records the outcome of
+    // translating `addr` for EL0 in `PAR_EL1` without accessing it, and the
+    // interrupted context's `PAR_EL1` is restored.
+    unsafe {
+        core::arch::asm!(
+            "mrs {saved}, par_el1",
+            "at s1e0r, {addr}",
+            "isb",
+            "mrs {par}, par_el1",
+            "msr par_el1, {saved}",
+            saved = out(reg) _,
+            addr = in(reg) addr,
+            par = out(reg) par,
+            options(nostack, preserves_flags),
+        );
+    }
+    par_faulted(par)
+}
+
+/// The child table entry `idx` of `parent` names, linking a fresh one where
+/// the entry is invalid, or [`None`] for a block there (never shattered) or
+/// an exhausted source.
+fn ensure_child<'a>(
+    parent: &'a [AtomicU64; ENTRIES_PER_TABLE],
     idx: usize,
-    frames: &'static dyn PageTableFrames,
-) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
-    let entry = parent[idx];
+    frames: &dyn PageTableFrames,
+) -> Option<&'a [AtomicU64; ENTRIES_PER_TABLE]> {
+    let entry = parent[idx].load(WALK_ORDERING);
     if (entry & attrs::VALID) != 0 {
         if is_block(entry) {
-            // A block where we expected a table pointer: refuse rather
-            // than shatter a large mapping silently.
             return None;
         }
         let table = frames.table_at(phys_from_descriptor(entry))?;
-        // SAFETY: every non-block valid entry was inserted below with an
-        // output address drawn from `frames`, so the source's view of it
-        // is a live table of this hierarchy; the walk holds the hierarchy
-        // exclusively, so the `&mut` does not alias.
-        let child: &'static mut [u64; ENTRIES_PER_TABLE] = unsafe { &mut *table };
-        Some(child)
+        // SAFETY: every valid table descriptor was linked below with an
+        // output address drawn from `frames`, so the source's view of it is
+        // a table of this hierarchy, allocated as long as `parent` is.
+        Some(unsafe { descriptors(table) })
     } else {
         let TableFrame { phys, entries } = frames.alloc_table()?;
-        parent[idx] = table_descriptor(phys);
-        Some(entries)
+        parent[idx].store(table_descriptor(phys), LINK_ORDERING);
+        // SAFETY: as above; `entries` is not used again.
+        Some(unsafe { descriptors(entries) })
     }
 }
 
@@ -2794,7 +2722,7 @@ fn page_flags_from_leaf(desc: u64) -> PageFlags {
 /// (30 = L1 block, 21 = L2 block, 12 = L3 page). The page offset is
 /// dropped so the result is page-aligned (the HAL `translate` contract
 /// reports the 4 KiB page base).
-fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: u32) -> u64 {
+fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: usize) -> u64 {
     let region_mask = (1u64 << region_shift) - 1;
     (leaf_base + (vaddr & region_mask)) & !((PAGE_SIZE as u64) - 1)
 }

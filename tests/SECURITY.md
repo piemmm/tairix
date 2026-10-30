@@ -45,10 +45,11 @@ New work targets the CVE classes these do **not** yet hit.
 
 ### 1.3 Honest reach (§2.1, §2.6)
 
-x86_64 holds every CPU to SMEP, SMAP and UMIP where the CPU offers them
-(§5); aarch64 and riscv64 do not yet bar the kernel from user pages
-(`plans/OPEN-DEFECTS.md`), and KPTI/IBPB are `Pending` and tied to
-**Stage 6** (`sidechannel.rs` states this). A live ring-3 entry path exists —
+x86_64 holds every CPU to SMEP, SMAP and UMIP where the CPU offers them,
+aarch64 to PAN where it offers it, and riscv64 runs with `sstatus.SUM` clear,
+so on no port does the kernel reach a user page but through its validated
+copy (§5); KPTI/IBPB are `Pending` and tied to **Stage 6** (`sidechannel.rs`
+states this). A live ring-3 entry path exists —
 the Arch HAL `EnterUser` `iretq` primitive
 (`kernel/arch/x86_64/src/userentry.rs`), exercised end-to-end by
 `enter_user_qemu_x86_64` — as does the per-access `copy_from_user` hardware
@@ -231,6 +232,41 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   enrolment run plain `qemu64`, so entries are taken, and an application
   processor joins, where `clac` does not exist. A kernel instruction fetch from a user
   page is not provoked on the metal: `CR4.SMEP` is asserted set instead.
+- **PAN and `SUM` (CWE-862; the SMAP-bypass class on aarch64 and riscv64).**
+  *Landed* (`plans/OPEN-DEFECTS.md` D1584, D1585). aarch64: the boot CPU
+  settles whether PAN is in force from `ID_AA64MMFR1_EL1`, each CPU sets
+  `PSTATE.PAN` as it starts and one that cannot does not join, and translation
+  comes on with `SCTLR_EL1.SPAN` clear, so every exception taken to EL1 sets it
+  again (`kernel/arch/aarch64/src/protection.rs`); a kernel-only Normal
+  Non-Cacheable leaf is EL1's alone, and the watchdog's stack-link probe
+  refuses an EL0 page. riscv64: every hart clears `sstatus.SUM` as it arms its
+  trap vector and nothing sets it again, so the first-use floating-point trap
+  retries without reading the instruction. Host tests: `protection::tests`,
+  `non_cacheable_leaves_reach_el0_only_when_asked`, `sum_tests` (the clear,
+  and every `sstatus` write in the port), and
+  `a_fault_is_retried_only_where_the_leaf_grants_the_access`. QEMU:
+  `uaccess_fault_qemu_aarch64` (on `cortex-a76`) and
+  `uaccess_fault_qemu_riscv64` prove, through the check
+  `uaccess_fault_qemu_x86_64` shares (`uaccess::conformance::reach_into`), a
+  guarded copy reading a mapped user page through its user address faults
+  while the same bytes copy through the kernel's own mapping, and the aarch64
+  run that the stack-link probe refuses
+  an EL0 page; `cross_cpu_tlb_shootdown_qemu_aarch64` requires a secondary
+  core to hold PAN, and the probe to admit the core's own stack with
+  translation off; `fp_isolation_qemu_riscv64` ends a task on an
+  illegal instruction exactly once; and the boot's record
+  (`KERNEL_BOOT_PROTECTIONS`) names `pan`, at Warn on the default
+  `cortex-a72`, which lacks it.
+- **Lock-free page-table updates (CWE-362 / CWE-416; a race restoring a freed
+  frame's mapping).** *Landed* (`plans/OPEN-DEFECTS.md` D1586): the aarch64
+  and riscv64 fault-time access-bit fix-ups take no lock, so they set the bit
+  only by an exchange from the leaf their walk read
+  (`tairix_arch_api::frames::Leaf::set_while`), and every software access to a
+  live table is atomic: an unmap or permission change on another CPU is
+  judged afresh, never written back over. Host tests: `frames::tests`, the
+  per-port `*_never_restores_a_leaf_unmapped_after_its_walk`; loom:
+  `kernel/arch/api/tests/loom.rs` (the update racing an unmap, and a table
+  linked under a walk that follows it).
 - **`copy_from_user` TOCTOU & non-canonical user pointers (CWE-367 / CWE-822).**
   *Host validator landed:* `syscall_entry.rs::validate_user_buffer` rejects a
   null, non-canonical, kernel-range, or wrapping user `(ptr, len)` buffer
@@ -267,17 +303,16 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   zero-on-free info-leak, DMA descriptor fuzzing, slab metadata fault-injection,
   audit-log chain-tamper. All map to named CVE classes against already-landed
   code.
-- **Highest yield but Stage-6-gated:** KPTI, and the aarch64/riscv64
-  equivalents of SMAP. Write the conformance/spec tests now as the gate;
-  implement in Stage 6. (The `copy_from_user` hardware fault trap has landed —
-  §5 — with per-port QEMU verticals, and so have x86_64's `CR0.WP` with its
-  kernel W^X and its SMEP, SMAP and UMIP.)
+- **Highest yield but Stage-6-gated:** KPTI. Write the conformance/spec tests
+  now as the gate; implement in Stage 6. (The `copy_from_user` hardware fault
+  trap has landed — §5 — with per-port QEMU verticals, and so have x86_64's
+  `CR0.WP` with its kernel W^X and its SMEP, SMAP and UMIP, aarch64's PAN, and
+  riscv64's clear `SUM`.)
 - **Regression-guard, not bug-finding:** the side-channel barrier /
   `is_release_ready` honesty tests.
 - **What these tests cannot prove:** they validate the *detector*, not that
   corruption is impossible; software tagging is probabilistic (tag wrap,
-  §19.10). State this in the test. Hardware-enforced detection (MTE faults,
-  and on aarch64/riscv64 the faults their SMAP equivalents would raise) is
+  §19.10). State this in the test. Hardware-enforced detection (MTE faults) is
   Arch-HAL/Stage-6-gated.
 
 ## 7. Definition of Done (§7)
@@ -310,6 +345,5 @@ reverted before the task is done (§2.5, §7).
 3. **Audit-log chain-tamper** tests (§19.4).
 4. **Ring-boundary QEMU tests:** `fmask`/RFLAGS, `swapgs`/stack-pivot, `sysret`
    non-canonical RIP, GDT/TSS/IST invariants.
-5. **Stage-6-gated conformance specs:** the aarch64/riscv64 SMAP
-   equivalents, `copy_from_user` TOCTOU, KPTI — written now as the gate the
-   feature must pass.
+5. **Stage-6-gated conformance specs:** `copy_from_user` TOCTOU, KPTI —
+   written now as the gate the feature must pass.

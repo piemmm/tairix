@@ -2,10 +2,10 @@
 //!
 //! `stval` is not frame-resident: every trap rewrites it, and the fault path
 //! runs code that can take one — the retry walk, a resolver that blocks on I/O,
-//! the guarded read of an illegal instruction, the terminator. A read after
-//! any of them could report another trap's value as this fault's address. The
-//! path builds only for the freestanding target, so the order is pinned
-//! against `trap.rs`; the needles live here, where none can match itself.
+//! the terminator. A read after any of them could report another trap's value
+//! as this fault's address. The path builds only for the freestanding target,
+//! so the order is pinned against `trap.rs`; the needles live here, where none
+//! can match itself.
 
 use super::sret_tests::only;
 
@@ -20,7 +20,6 @@ fn the_fault_path_reads_stval_once_before_anything_can_trap() {
     for can_trap in [
         "retry_granted_fault(stval, access)",
         "resolver(stval, write_fault,",
-        "illegal_instruction_needs_fp(pc)",
         "fatal_exception(scause, stval, frame)",
     ] {
         assert!(

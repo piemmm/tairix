@@ -24,6 +24,8 @@
 //! deliberate shape of modularity, never collapsed behind a
 //! `cfg` (carve-out).
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use tairix_sync::Once;
 
 /// Number of `u64` entries in one 4 KiB page table.
@@ -106,8 +108,8 @@ pub trait PageTableFrames: Sync {
     /// address makes the walk report "not mapped" instead of
     /// dereferencing whatever the integer happens to name. The returned
     /// pointer is valid for the frame's whole 512 entries and aliases
-    /// the `entries` view of the same `alloc_table`, so a caller must
-    /// hold exclusive access before minting a `&mut` from it.
+    /// the `entries` view of the same `alloc_table`; a table another CPU
+    /// may be walking is reached through [`descriptors`].
     fn table_at(&self, phys: u64) -> Option<*mut [u64; PAGE_TABLE_ENTRIES]>;
 
     /// Return the table frame at physical address `phys` to this source.
@@ -153,6 +155,96 @@ pub trait PageTableFrames: Sync {
     /// [`Self::alloc_block`] handed out and no hardware reads any more.
     fn free_block(&self, phys: u64, order: u32) {
         let _ = (phys, order);
+    }
+}
+
+/// The descriptors of the table at `table`, as the atomics a live table's
+/// descriptors are.
+///
+/// A table another CPU can reach is not its walker's alone: a fault there
+/// walks the active root with no lock and may set a leaf's access bit. So
+/// every software access to a table once it is linked is atomic, and a leaf
+/// is changed in place only by an exchange from the value its writer saw.
+/// A table no walk can reach yet, one [`PageTableFrames::alloc_table`] has
+/// just handed out, may be written through its `entries` until it is linked.
+///
+/// # Safety
+///
+/// `table` must name a table frame that stays allocated for `'a`, such as
+/// [`PageTableFrames::table_at`] answers for a table of a live hierarchy,
+/// and no `&mut` to it may be used while the view is.
+#[must_use]
+pub unsafe fn descriptors<'a>(
+    table: *mut [u64; PAGE_TABLE_ENTRIES],
+) -> &'a [AtomicU64; PAGE_TABLE_ENTRIES] {
+    // SAFETY: `AtomicU64` has the size and bit validity of `u64` and a table
+    // is page aligned; the caller keeps the frame allocated for `'a` and
+    // reaches it through no `&mut` meanwhile.
+    unsafe { &*table.cast::<[AtomicU64; PAGE_TABLE_ENTRIES]>() }
+}
+
+/// The ordering a walk reads a descriptor with. It pairs with
+/// [`LINK_ORDERING`], so a walk that follows a table it read the link of
+/// sees the table's entries as linked, never the frame's earlier contents.
+pub const WALK_ORDERING: Ordering = Ordering::Acquire;
+
+/// The ordering a table is linked into its parent with, publishing its zeroed
+/// entries to every walk that reads the link.
+pub const LINK_ORDERING: Ordering = Ordering::Release;
+
+/// One descriptor of a live table, as a fault-time update exchanges it.
+///
+/// [`AtomicU64`] is the slot every port's table holds; the trait lets a
+/// model checker drive [`Leaf::set_while`] over atomics of its own.
+pub trait DescriptorSlot {
+    /// Replace the descriptor with `new` if it still holds `current`,
+    /// answering the descriptor found: `Ok` when it was replaced.
+    ///
+    /// # Errors
+    ///
+    /// The descriptor the slot held instead of `current`.
+    fn exchange(&self, current: u64, new: u64) -> Result<u64, u64>;
+}
+
+impl DescriptorSlot for AtomicU64 {
+    fn exchange(&self, current: u64, new: u64) -> Result<u64, u64> {
+        self.compare_exchange(current, new, Ordering::Relaxed, Ordering::Relaxed)
+    }
+}
+
+/// A valid leaf a port's walk found.
+#[derive(Debug)]
+pub struct Leaf<'a, S: ?Sized = AtomicU64> {
+    /// The leaf's slot in its table.
+    pub slot: &'a S,
+    /// The descriptor the walk read from [`Self::slot`].
+    pub seen: u64,
+    /// The log2 of the bytes the leaf maps.
+    pub shift: usize,
+}
+
+impl<S: DescriptorSlot + ?Sized> Leaf<'_, S> {
+    /// Set `bits` on the leaf while `admits` accepts the descriptor it holds,
+    /// answering the descriptor that then holds them, or [`None`] once
+    /// `admits` refuses one.
+    ///
+    /// Each change is an exchange from the descriptor last read, so a leaf
+    /// another CPU has unmapped, remapped or re-permissioned since is judged
+    /// afresh rather than written back: an update a fault makes with no lock
+    /// can never restore a mapping its space has dropped.
+    pub fn set_while(&self, bits: u64, admits: impl Fn(u64) -> bool) -> Option<u64> {
+        let mut seen = self.seen;
+        while admits(seen) {
+            let set = seen | bits;
+            if set == seen {
+                return Some(seen);
+            }
+            match self.slot.exchange(seen, set) {
+                Ok(_) => return Some(set),
+                Err(now) => seen = now,
+            }
+        }
+        None
     }
 }
 
@@ -607,3 +699,7 @@ pub mod conformance {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "frames_tests.rs"]
+mod tests;

@@ -22,7 +22,7 @@ use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
-use tairix_arch_api::frames::{pool_slot_of, PageTableFrames, TableFrame};
+use tairix_arch_api::frames::{descriptors, pool_slot_of, PageTableFrames, TableFrame};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 extern "C" {
@@ -1526,9 +1526,9 @@ impl MmuAddressSpace for AddressSpace {
         }
         let pt_table = frames.table_at(e2 & ADDR_MASK).ok_or(MapError::NotMapped)?;
         // SAFETY: present non-huge PD entry → a live PT of this hierarchy,
-        // and `&mut self` makes the exclusive borrow of the leaf sound.
-        let pt = unsafe { &mut *pt_table };
-        let e1 = pt[i1];
+        // allocated as long as the space is.
+        let leaf = &unsafe { descriptors(pt_table) }[i1];
+        let e1 = leaf.load(Ordering::Relaxed);
         if e1 & flags::PRESENT == 0 {
             return Err(MapError::NotMapped);
         }
@@ -1536,8 +1536,9 @@ impl MmuAddressSpace for AddressSpace {
         if was_accessed {
             // Clear the Accessed bit so the CPU re-sets it on the next
             // touch; a later probe reading it still clear proves the page
-            // went untouched in between (the clock scan).
-            pt[i1] = e1 & !flags::ACCESSED;
+            // went untouched in between (the clock scan). An atomic clear,
+            // so a Dirty bit another CPU's walk sets meanwhile stays.
+            leaf.fetch_and(!flags::ACCESSED, Ordering::Relaxed);
             // The stale TLB entry may still permit an access without a
             // page-walk (and so without re-setting Accessed), so the
             // cleared bit only becomes observable once the TLB entry is

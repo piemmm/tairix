@@ -1290,7 +1290,7 @@ fn a_descriptor_the_source_cannot_reach_fails_the_walk_closed() {
     // space, drawn from `POOL`.
     assert!(!unsafe { set_accessed_flag_in_root(&POOL, space.root_phys(), va) });
     // And a fresh map over the unreachable branch is refused rather than
-    // walked into: `leaf_present` reads it as absent, then `ensure_child`
+    // walked into: the leaf walk reads it as absent, then `ensure_child`
     // refuses the descriptor it cannot recover.
     assert_eq!(
         mmu::AddressSpace::map_page(&mut space, va, 0x4123_4000, PageFlags::READ),
@@ -1382,4 +1382,54 @@ fn ttbr0_carries_the_asid_above_the_table_base() {
     assert_eq!(ttbr0(0x4123_4000, 255) >> 56, 0, "an 8-bit ASID only");
     tairix_arch_api::tags_conformance::run_all(&TAGS, u16::from(u8::MAX), 0x4123_4000, 0x4124_4000);
     assert!(TAGS.invalidation_reaches_every_tag());
+}
+
+/// A kernel-only Normal Non-Cacheable page — the write-combined boot
+/// framebuffer, an in-kernel DMA buffer — is EL1's alone: a leaf EL0 may
+/// access hands it to user code, and under PAN faults the kernel's own use.
+#[test]
+fn non_cacheable_leaves_reach_el0_only_when_asked() {
+    const AP_MASK: u64 = 0b11 << 6;
+    let shared = PageFlags::READ | PageFlags::WRITE;
+    for memory in [PageFlags::WRITE_COMBINE, PageFlags::DMA_COHERENT] {
+        let kernel = AddressSpace::leaf_attrs_for(shared | memory);
+        let user = AddressSpace::leaf_attrs_for(shared | memory | PageFlags::USER);
+        assert_eq!(kernel & AP_MASK, attrs::AP_RW_EL1, "{memory:?}");
+        assert_eq!(user & AP_MASK, attrs::AP_RW_EL0, "{memory:?}");
+        assert_eq!(kernel & !AP_MASK, user & !AP_MASK, "only the reach differs");
+        let decoded = page_flags_from_leaf(kernel);
+        assert!(decoded.contains(memory) && !decoded.contains(PageFlags::USER));
+    }
+    assert_eq!(dma_coherent_leaf_attrs() & AP_MASK, attrs::AP_RW_EL1);
+}
+
+/// The fault walks a leaf whose Access Flag the scanner cleared, and the
+/// space's owner unmaps the page on another CPU before the fault sets the
+/// flag: the update must not map the freed frame again.
+#[test]
+fn an_access_flag_fix_up_never_restores_a_leaf_unmapped_after_its_walk() {
+    use tairix_arch_api::mmu;
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let va = 64u64 << 30;
+    mmu::AddressSpace::map_page(
+        &mut space,
+        va,
+        0x4100_0000,
+        PageFlags::READ | PageFlags::USER,
+    )
+    .expect("map");
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
+        Ok(true)
+    );
+    // SAFETY: the space's root table, alive for the whole test.
+    let walked = unsafe { leaf_in(&POOL, space.root_phys(), va) }.expect("the fault's walk");
+    mmu::AddressSpace::unmap(&mut space, va).expect("unmap");
+    assert_eq!(walked.set_while(attrs::AF, access_flag_clear), None);
+    assert_eq!(
+        mmu::AddressSpace::translate(&space, va),
+        None,
+        "the unmap stands"
+    );
 }

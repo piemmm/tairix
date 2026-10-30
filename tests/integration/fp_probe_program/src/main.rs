@@ -46,6 +46,15 @@ mod program {
     const EXIT_FILE_CLOBBERED: i32 = 72;
     /// Exit code for a missing or unusable per-task seed argument.
     const EXIT_NO_SEED: i32 = 73;
+    /// Exit code for an illegal instruction the task survived.
+    #[cfg(fp_probe_riscv64)]
+    const EXIT_ILLEGAL_SURVIVED: i32 = 74;
+
+    /// The seed that runs an illegal instruction ahead of any floating point.
+    /// riscv64 retries a task's first illegal instruction with a zeroed file,
+    /// never reading it, so a genuinely illegal one must still end the task.
+    #[cfg(fp_probe_riscv64)]
+    const ILLEGAL_SEED: u8 = b'!';
 
     /// Rounds of fill-trap-verify when the consuming build pinned no count.
     /// More than one so a port that happened to preserve the file across the
@@ -344,6 +353,13 @@ mod program {
         else {
             return EXIT_NO_SEED;
         };
+        #[cfg(fp_probe_riscv64)]
+        if seed == ILLEGAL_SEED {
+            // SAFETY: `unimp` is the defined illegal instruction and touches
+            // nothing; the kernel ends the task on it.
+            unsafe { core::arch::asm!("unimp", options(nomem, nostack)) };
+            return EXIT_ILLEGAL_SURVIVED;
+        }
         let seed = u64::from(seed);
 
         for round in 0..u64::from(rounds()) {

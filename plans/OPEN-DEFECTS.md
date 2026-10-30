@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 535 open, 1045 closed, 1580 total.
+**closed**, and a partial fix stays **open**. 533 open, 1048 closed, 1581 total.
 
-### Open (535)
+### Open (533)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -561,10 +561,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1559 | every image embeds the build host's absolute paths — the toolchain's `rust-src` and the cargo registry sources, through panic and `#[track_caller]` locations — because no build remaps them, so two hosts with different home directories build different images from the same inputs, and a shipped image names its builder's home directory | **medium, supply chain**; noticed checking what the sleeping lock's site records put in an image (workspace paths are already relative). Not absorbed: the fix is a remapping policy for every image build (cargo `trim-paths`, or `--remap-path-prefix` for the sysroot and the registry), which also decides what a debug image's backtraces and DWARF name, and a reproducibility check that a second host would catch. `.cargo/config.toml`, `tools/xtask` image pipeline |
 | D1577 | the aarch64 kernel runs from identity RAM gigapages that are read/write and EL1-executable (`PXN` clear), and virtual address 0 is mapped — Device on QEMU `virt`, the kernel's own gigapage on the Pi 4 — so a kernel NULL dereference does not fault, a stray write lands in live memory, and the kernel image is writable and executable | **high, hardening**; the aarch64 sibling of D1571, logged when D1571 was scoped to x86_64 at the user's direction. The kernel's `TTBR1_EL1` regime wants the x86_64 shape: the image mapped per section, the direct map `PXN`, and nothing physical mapped as itself where the kernel runs. `kernel/arch/aarch64/src/paging.rs` (`normal_leaf_attrs`) |
 | D1578 | the riscv64 kernel runs from identity gigapages mapped `R\|W\|X` from virtual address 0, so a kernel NULL dereference does not fault, a stray write lands in live memory, and the kernel image is writable and executable | **high, hardening**; the riscv64 sibling of D1571, logged at the user's direction. The kernel is identity-linked, so the fix is a higher-half link or per-section leaves over the window it runs from. `kernel/arch/riscv64/src/paging.rs` (`new_identity_gigapages`) |
-| D1584 | the aarch64 kernel runs with no `PAN`, so EL1 can read and write any user page directly, outside the guarded user copy | **high, hardening**; the aarch64 sibling of D1579's SMAP half, logged when D1579 was fixed for x86_64 (user leaves are already `PXN`, the SMEP half). The kernel reaches user memory only through the direct map, so ARMv8.1 `PSTATE.PAN` can stay set, with `SCTLR_EL1.SPAN` clear so each exception entry sets it; a part without `PAN` is to be recorded, as x86_64 records SMAP's absence. `kernel/arch/aarch64/src/` (the `SCTLR_EL1` set-up and the trap entry) |
-| D1585 | the riscv64 kernel runs with `sstatus.SUM` set, so S-mode can read and write any user page directly, outside the guarded user copy | **high, hardening**; the riscv64 sibling of D1579's SMAP half (S-mode never executes a `U` page, the SMEP half). `userentry` sets `SUM` for the trap handler that follows; the kernel reaches user memory only through the direct map, so `SUM` can stay clear once every S-mode path that reads a user address directly is moved off it. `kernel/arch/riscv64/src/userentry.rs` (`SSTATUS_SUM`), `trap.rs` |
 
-### Closed (1045)
+### Closed (1048)
 
 | ID | Subject |
 |---|---|
@@ -1613,6 +1611,9 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1582 | x86_64 boot read the loader's hand-off and walked the ACPI tables by dereferencing firmware-supplied physical addresses as pointers, unchecked, so a table or record beyond the identity window faulted the boot rather than being refused or reached — closed: every read goes through the direct map, bounded by its live extent; a span outside it is refused (`BootDataError::Unmapped`) or skipped, and ACPI tables above 4 GiB are reached once the map is widened; `an_sdt_outside_the_map_is_skipped`, `an_sdt_claiming_less_than_its_header_is_skipped`, `the_rsdt_walk_reads_four_byte_entries` |
 | D1583 | two x86_64 inline-assembly blocks setting a `CR4` bit — `paging::enable_pcids` and the `xstate` set-up's `OSXSAVE` — ORed it in with `or`, which writes the status flags, yet declared `options(preserves_flags)`, so the compiler was free to keep a comparison's outcome in `RFLAGS` across them — closed: neither claims to preserve the flags, and `no_block_claiming_to_preserve_the_flags_writes_them` refuses any block of the port that claims to while running an instruction outside the classified set |
 | D1579 | x86_64 set neither `CR4.SMEP` nor `CR4.SMAP`, so the kernel could execute a user page, and read or write one outside the guarded user copy — closed: joining the kernel root holds every CPU to `CR0.WP` and, where the CPU offers them, SMEP, SMAP and UMIP (`protection`); the boot CPU settles the set and a CPU that cannot hold it does not join. The kernel reaches user memory only through the direct map, so it never sets `AC`: `IA32_FMASK` and every gate stub (`clear_entry_flags!`) clear the `AC` user code may set, and the boot entry writes `RFLAGS` whole. The boot records the set (`KERNEL_BOOT_PROTECTIONS`), at Warn where the CPU offers fewer. `protection::tests`, `every_asynchronous_entry_stub_clears_the_alignment_check_flag_under_smap`, `the_boot_entry_writes_rflags_whole`, `uaccess_fault_qemu_x86_64` |
+| D1584 | the aarch64 kernel ran with no `PAN`, so EL1 could read and write any user page directly, outside the guarded user copy — closed: the boot CPU settles whether PAN is in force from `ID_AA64MMFR1_EL1`, each CPU sets `PSTATE.PAN` as it starts and one that cannot does not join, and translation comes on with `SCTLR_EL1.SPAN` clear, so every exception taken to EL1 sets PAN again (`protection`). The kernel reaches user memory only through the direct map, so it never clears PAN; the watchdog's stack-link probe also refuses an EL0 page (`paging::el1_may_read`), and a kernel-only write-combined or DMA-coherent leaf, which EL0 could reach before, is EL1's alone. The boot records `pan` (`KERNEL_BOOT_PROTECTIONS`), at Warn where the CPU lacks it, as the Raspberry Pi 4's Cortex-A72 does. `protection::tests`, `non_cacheable_leaves_reach_el0_only_when_asked`, `protections::tests`, `uaccess_fault_qemu_aarch64` and `cross_cpu_tlb_shootdown_qemu_aarch64` (both on `cortex-a76`) |
+| D1585 | the riscv64 kernel ran with `sstatus.SUM` set, so S-mode could read and write any user page directly, outside the guarded user copy — closed: every hart clears `SUM` as it arms its trap vector and nothing in the port sets it again. The user entry no longer sets it, the fault retry never grants S-mode a user page, and a task's first floating-point use is retried with a zeroed file without the kernel reading the instruction, which lies in user memory (a genuinely illegal one traps again, fatally). `sum_tests`, `a_fault_is_retried_only_where_the_leaf_grants_the_access`, `uaccess_fault_qemu_riscv64`, `fp_isolation_qemu_riscv64` |
+| D1586 | the aarch64 and riscv64 fault-time access-bit fix-ups wrote back a leaf they had read with no lock, so an unmap or permission change made on another CPU in between was undone, restoring a mapping to a frame its space had freed; and the accessed-bit clear on x86_64 and riscv64 could drop a Dirty bit the hardware walk set meanwhile — closed: the fix-up sets the bit only by an exchange from the leaf its walk read (`frames::Leaf::set_while`), every software access to a live table is atomic (`frames::descriptors`), a table is linked with `LINK_ORDERING` and followed with `WALK_ORDERING`, and the clear is an atomic `fetch_and`. Noticed closing D1585. `frames::tests`, `an_access_flag_fix_up_never_restores_a_leaf_unmapped_after_its_walk`, `a_fault_time_retry_never_restores_a_leaf_unmapped_after_its_walk`, `kernel/arch/api/tests/loom.rs` |
 
 ## Scope
 
@@ -4764,12 +4765,12 @@ in any riscv64 user binary; the compiler needed no permission to emit one.
 in floating point still pays nothing:
 
 - A task starts FP-**off** owning no state, so it cannot read the file and has
-  nothing to save or restore. Its first floating-point instruction traps; the
-  handler confirms the encoding really reaches the FP unit (an opcode test the
-  port keeps itself, reading the instruction through the guarded-copy window so
-  an unreadable page fails closed), zeroes the file, gives the task `Initial`,
-  and retries. A task that already owns state is refused, so a genuinely illegal
-  encoding cannot retry forever.
+  nothing to save or restore. Its first floating-point instruction traps as an
+  illegal instruction; the handler zeroes the file, gives the task `Initial`,
+  and retries, without reading the instruction (it lies in user memory, which
+  the trap path never touches). A genuinely illegal instruction then traps
+  again from a task that owns state, which is refused and fatal, so none can
+  retry forever.
 - A trap saves the file only on a `Dirty` reading, and the return path reloads
   it — eagerly, because lazy *restore* is the disclosure pattern this defect
   already was.
@@ -4796,15 +4797,8 @@ emits floating-point instructions, which is what makes the defect observable at
 all. Verified to fail before the fix and pass after: neutering just the reload
 reports finisher 12 (`FAIL_FP_CLOBBERED`), and the property is asserted ahead of
 the yield count so a clobbered file names the cause rather than the short count
-it also produces. The `FS` accessors, the two trap decisions, and the first-use
-opcode test are host-tested beside them.
-
-**A dependency deliberately not taken.** The opcode test first lived in
-`lib/disasm`, which already dispatches on those groups. That was wrong: the
-crate renders instructions as text and so pulls in `alloc`, which forced a
-global allocator on every consumer of the arch crate and broke six minimal
-riscv64 test kernels that rightly have none. Ten lines of opcode test in the
-port is the cheaper side of that trade.
+it also produces. The `FS` accessors and the two trap decisions are
+host-tested beside them.
 
 The kernel's own floating point is covered by the same vertical: a kernel
 computation under a task's non-default rounding mode must round to nearest,

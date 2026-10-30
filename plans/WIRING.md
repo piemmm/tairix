@@ -493,7 +493,7 @@ refused) with a faithful + lenient in-test double in
 its existing `paging::AddressSpace` — a retained `pool` field, a neutral
 `PageFlags`→native leaf translation (Sv39 R/W/X/U; aarch64 W^X-aware
 EL0/kernel/device leaf attrs; x86_64 user/kernel + W^X), a read-only
-`leaf_present` walk for the `AlreadyMapped` guard, and `activate`
+leaf walk for the `AlreadyMapped` guard, and `activate`
 forwarding to the gated `switch` — reusing the existing walk (one walk,
 §2.2) so the inherent `map_4k*` methods (used by the spawn/c-program/
 abi-sys verticals) keep their signatures. AArch64's `switch` completes

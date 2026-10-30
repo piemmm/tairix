@@ -317,7 +317,9 @@ extern "C" {
 /// secondary hart it brings up, and may re-arm one before it first enters
 /// U-mode — to re-establish the `sscratch == 0` invariant, say. Arming also
 /// gives the hart the kernel's floating-point environment, zeroing the file,
-/// so it is never done once this hart owes a task its registers.
+/// so it is never done once this hart owes a task its registers, and clears
+/// `sstatus.SUM`, so no user page is within the hart's S-mode reach: the
+/// kernel reaches user memory only through the direct map.
 ///
 /// # Safety
 ///
@@ -348,7 +350,17 @@ pub unsafe fn install_trap_vector() {
         // interrupt source is armed (`trap.s`).
         core::arch::asm!("csrw sscratch, zero", options(nomem, nostack));
     }
+    // SAFETY: clearing `SUM` only puts user pages out of this hart's S-mode
+    // reach, and nothing the kernel runs touches one by its user address. No
+    // instruction sets it again, and U-mode cannot write `sstatus`.
+    unsafe {
+        core::arch::asm!("csrc sstatus, {sum}", sum = in(reg) SSTATUS_SUM, options(nostack));
+    }
 }
+
+/// `sstatus.SUM` — permit S-mode data access to U-bit pages (bit 18).
+#[cfg(any(all(target_arch = "riscv64", target_os = "none"), test))]
+const SSTATUS_SUM: u64 = 1 << 18;
 
 /// Point `stvec` at the trap vector (direct mode) and enable supervisor
 /// external interrupts.
@@ -580,29 +592,6 @@ unsafe fn anchor_of(frame: *mut TrapFrame) -> *mut crate::fpstate::TrapAnchor {
     frame.wrapping_add(1).cast()
 }
 
-/// Whether the illegal instruction at `pc` reaches the floating-point unit.
-///
-/// Read through the guarded copy window, so an unreadable page answers `false`
-/// and leaves the fault fatal. The 32-bit read is tried first and a 16-bit
-/// parcel second, because a compressed instruction can sit in the last two
-/// bytes of a mapped page.
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
-fn illegal_instruction_needs_fp(pc: u64) -> bool {
-    let Some(copy) = tairix_arch_api::uaccess::guarded_copy() else {
-        return false;
-    };
-    let mut parcel = [0u8; 4];
-    for len in [4usize, 2] {
-        // SAFETY: `parcel` is valid for four writable bytes and cannot overlap
-        // a user address; the window absorbs a fault reading `pc` and reports
-        // it as a non-zero return, whose destination bytes we discard.
-        if unsafe { copy(parcel.as_mut_ptr(), pc as *const u8, len) } == 0 {
-            return crate::fpstate::touches_fp_state(&parcel[..len]);
-        }
-    }
-    false
-}
-
 /// The trap handler proper.
 ///
 /// # Safety
@@ -713,7 +702,6 @@ unsafe fn trap_body(
             let access = crate::paging::FaultingAccess {
                 kind,
                 from_user: trap_came_from_user(sstatus),
-                user_memory: (sstatus & crate::userentry::SSTATUS_SUM) != 0,
             };
             if crate::paging::retry_granted_fault(stval, access) {
                 return;
@@ -771,21 +759,19 @@ unsafe fn trap_body(
             }
         }
 
-        // A task's first floating-point instruction: it runs with FP off and
-        // owning no register state, so the access traps here. Give it a zeroed
-        // file and return without advancing the saved `sepc`, so the epilogue
-        // retries the instruction. `adopt_on_first_use` refuses a task that
-        // already owns state, which is what stops a genuinely illegal FP
-        // encoding from retrying forever.
-        if scause == SCAUSE_ILLEGAL_INSTRUCTION && from_user_entry {
-            // SAFETY: reading the frame's saved `sepc` is a plain field load.
-            let pc = unsafe { (*frame).sepc };
-            // SAFETY: `anchor` is this frame's anchor, per the contract.
-            if illegal_instruction_needs_fp(pc)
-                && unsafe { crate::fpstate::adopt_on_first_use(anchor) }
-            {
-                return;
-            }
+        // A task runs with FP off until it owns register state, so its first
+        // floating-point instruction traps here. Any illegal instruction from
+        // a task owning none is retried with a zeroed file: the kernel never
+        // reads the instruction, which lies in user memory. Retried
+        // unchanged, a genuinely illegal one traps again from a task that now
+        // owns state, which `adopt_on_first_use` refuses, so none retries
+        // forever.
+        // SAFETY: `anchor` is this frame's anchor, per the contract.
+        if scause == SCAUSE_ILLEGAL_INSTRUCTION
+            && from_user_entry
+            && unsafe { crate::fpstate::adopt_on_first_use(anchor) }
+        {
+            return;
         }
 
         // Any other synchronous exception (a page fault, an access fault,
@@ -910,6 +896,12 @@ mod trap_layout_tests;
 #[cfg(test)]
 #[path = "stval_tests.rs"]
 mod stval_tests;
+
+/// The supervisor's reach into user pages, pinned against the port's
+/// sources: every hart clears `sstatus.SUM`, and nothing sets it again.
+#[cfg(test)]
+#[path = "sum_tests.rs"]
+mod sum_tests;
 
 #[cfg(test)]
 mod tests {

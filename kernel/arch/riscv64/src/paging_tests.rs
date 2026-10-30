@@ -549,7 +549,7 @@ fn a_pte_the_source_cannot_reach_fails_the_walk_closed() {
         retry_granted_in_root(&POOL, space.root_phys(), va, user(AccessKind::Load))
     });
     // And a fresh map over the unreachable branch is refused rather than
-    // walked into: `leaf_present` reads it as absent, then `ensure_child`
+    // walked into: the leaf walk reads it as absent, then `ensure_child`
     // refuses the PTE it cannot recover.
     assert_eq!(
         mmu::AddressSpace::map_page(&mut space, va, 0x8123_4000, PageFlags::READ),
@@ -636,16 +636,14 @@ const fn user(kind: AccessKind) -> FaultingAccess {
     FaultingAccess {
         kind,
         from_user: true,
-        user_memory: false,
     }
 }
 
-/// `kind` from S-mode with user memory in reach.
+/// `kind` from S-mode.
 const fn kernel(kind: AccessKind) -> FaultingAccess {
     FaultingAccess {
         kind,
         from_user: false,
-        user_memory: true,
     }
 }
 
@@ -688,19 +686,18 @@ fn a_fault_is_retried_only_where_the_leaf_grants_the_access() {
         !retry(va | !((1 << 38) - 1) & !(1 << 38), user(AccessKind::Load)),
         "a non-canonical alias of the page"
     );
-    let reachless = FaultingAccess {
-        user_memory: false,
-        ..kernel(AccessKind::Load)
-    };
-    assert!(
-        !retry(va, reachless),
-        "the kernel with user memory out of reach"
-    );
 
-    // Clear A: a permitted load sets it back and is retried.
+    // Clear A: the kernel's load is refused and leaves it clear, since no
+    // user page is in S-mode's reach; the task's own load sets it back.
     assert_eq!(
         mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
         Ok(true)
+    );
+    assert!(!retry(va, kernel(AccessKind::Load)), "the kernel's load");
+    assert_eq!(
+        leaf_pte(pool, &space, va).expect("mapped").0 & flags::ACCESSED,
+        0,
+        "a refused fault writes nothing"
     );
     assert!(retry(va, user(AccessKind::Load)));
     assert_ne!(
@@ -712,8 +709,8 @@ fn a_fault_is_retried_only_where_the_leaf_grants_the_access() {
     // before the page was made valid: still retried, never fatal.
     assert!(retry(va, user(AccessKind::Load)));
     assert!(
-        retry(va, kernel(AccessKind::Load)),
-        "the kernel reaching user memory"
+        !retry(va, kernel(AccessKind::Load)),
+        "the kernel never reaches a user page, accessed or not"
     );
 }
 
@@ -1010,4 +1007,71 @@ fn a_range_past_the_ceiling_fences_the_whole_space_and_one_at_it_does_not() {
     assert!(!fences_whole_space(RANGE_FENCE_CEILING));
     assert!(fences_whole_space(RANGE_FENCE_CEILING + 1));
     assert!(fences_whole_space(usize::MAX));
+}
+
+#[test]
+fn a_non_canonical_address_names_no_page() {
+    use tairix_arch_api::mmu::{self, MapError, PageFlags};
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 1).expect("root");
+    let va = 100u64 << 30;
+    mmu::AddressSpace::map_page(&mut space, va, 0x8200_0000, PageFlags::READ).expect("map");
+    // Bit 38 clear under set bits above it: a walk by index alone resolves
+    // it to `va`'s leaf, but Sv39 faults it before walking.
+    let alias = va | !((1 << 38) - 1) & !(1 << 38);
+    assert_eq!(mmu::AddressSpace::translate(&space, alias), None);
+    assert_eq!(
+        mmu::AddressSpace::unmap(&mut space, alias),
+        Err(MapError::NotMapped)
+    );
+    assert_eq!(
+        mmu::AddressSpace::map_page(
+            &mut space,
+            alias + PAGE_SIZE as u64,
+            0x8200_1000,
+            PageFlags::READ
+        ),
+        Err(MapError::InvalidFlags),
+        "mapping the alias would install the canonical page's leaf"
+    );
+    assert_eq!(
+        mmu::AddressSpace::translate(&space, va + PAGE_SIZE as u64),
+        None
+    );
+    assert!(mmu::AddressSpace::translate(&space, va).is_some());
+}
+
+/// The fault walks a leaf whose Accessed bit the scanner cleared, and the
+/// space's owner unmaps the page on another hart before the fault sets the
+/// bit: the update must not map the freed frame again.
+#[test]
+fn a_fault_time_retry_never_restores_a_leaf_unmapped_after_its_walk() {
+    use tairix_arch_api::mmu::{self, PageFlags};
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 1).expect("root");
+    let va = 100u64 << 30;
+    mmu::AddressSpace::map_page(
+        &mut space,
+        va,
+        0x8200_0000,
+        PageFlags::READ | PageFlags::USER,
+    )
+    .expect("map");
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
+        Ok(true)
+    );
+    // SAFETY: the space's root table, alive for the whole test.
+    let walked = unsafe { leaf_in(&POOL, space.root_phys(), va) }.expect("the fault's walk");
+    mmu::AddressSpace::unmap(&mut space, va).expect("unmap");
+    let load = user(AccessKind::Load);
+    assert_eq!(
+        walked.set_while(flags::ACCESSED, |pte| load.granted_by(pte)),
+        None
+    );
+    assert_eq!(
+        mmu::AddressSpace::translate(&space, va),
+        None,
+        "the unmap stands"
+    );
 }

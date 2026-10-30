@@ -29,9 +29,8 @@
 //!    *only* the aliased stub and its stack — the isolation contract.
 //! 3. Installs the syscall dispatch callback via
 //!    `set_dispatch_callback`, points `stvec` at the trap vector
-//!    (`trap::init_traps`), sets `sstatus.SUM` (so the S-mode trap
-//!    handler may touch the U-bit user stack), and `sret`s to U-mode at
-//!    the aliased stub entry with the capability id in `a0`.
+//!    (`trap::init_traps`, which also clears `sstatus.SUM`), and `sret`s to
+//!    U-mode at the aliased stub entry with the capability id in `a0`.
 //!
 //! The stub's `ecall` raises an environment-call-from-U exception into
 //! the kernel S-mode trap vector, which marshals `a7`/`a0`–`a5` into the
@@ -112,8 +111,7 @@ mod kernel {
     const USER_STACK_VA: u64 = 0x10_0040_0000;
 
     /// User stack size in 4 KiB pages (16 KiB — ample for the stub
-    /// prologue and the S-mode trap handler that runs on it after the
-    /// `ecall`).
+    /// prologue; the S-mode trap handler runs on the kernel stack).
     const USER_STACK_PAGES: usize = 4;
 
     /// Stable audit-event ids for the QEMU transcript.

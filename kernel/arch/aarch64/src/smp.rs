@@ -727,17 +727,21 @@ fn spintable_trampoline_addr() -> usize {
 /// Rust side of the secondary trampoline.
 ///
 /// `smp.s` jumps here, once per secondary core, after seeding a private
-/// stack. It runs the installed [`set_secondary_entry`] callback; with
-/// none installed it parks the core (the `start_secondary` guard makes
-/// this branch unreachable in practice, but a freshly-started core must
-/// never fall through to undefined instructions, fail
-/// closed).
+/// stack. It holds the core to the kernel's protection
+/// ([`crate::protection`]) and runs the installed [`set_secondary_entry`]
+/// callback; a core that cannot hold it, or one started with no callback
+/// installed (the `start_secondary` guard makes that unreachable in
+/// practice), parks rather than run, fail closed.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn tairix_arch_aarch64_secondary_main(cpu: CpuId) -> ! {
     install_current_cpu_index(cpu);
-    if let Some(entry) = SECONDARY_ENTRY_FN.load() {
-        entry(cpu);
+    // SAFETY: EL1 on a core fresh from the trampoline, before it adopts any
+    // translation, so it reaches no user page.
+    if unsafe { crate::protection::hold() } {
+        if let Some(entry) = SECONDARY_ENTRY_FN.load() {
+            entry(cpu);
+        }
     }
     crate::kernel_arch::halt_current_cpu()
 }

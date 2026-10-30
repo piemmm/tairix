@@ -57,6 +57,12 @@ path = "src/lib.rs"
 # reads once it has kept a cause. The feature must not be enabled in production
 # kernel builds — a port always reserves its regions, and a machine dies once.
 host-tests = []
+# `loom` builds `tests/loom.rs`, the models of the lock-free page-table
+# protocol: a table linked under a walk that follows it, and a fault-time
+# leaf update racing an unmap. The update is generic over `DescriptorSlot`,
+# so the models drive it over loom's own atomics and the crate graph builds
+# as usual; `cargo xtask loom` alone turns it on.
+loom = ["dep:loom"]
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
@@ -72,6 +78,7 @@ tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 # the one line shape the kernel's own post-mortem uses. Allocator-free, so the
 # freestanding test kernels still link no global allocator.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+loom = { version = "0.7", optional = true }
 
 # The stack-unwinder fuzz harness (`tests/fuzz_backtrace.rs`) drives
 # `backtrace::walk` over adversarial frame chains. It uses

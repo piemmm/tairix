@@ -179,6 +179,7 @@ pub mod percpu_hal;
 /// [`fdt`] reader.
 pub mod platform;
 pub mod preempt;
+pub mod protection;
 /// PSCI (Power State Coordination Interface) firmware calls — the
 /// `CPU_ON` secondary-core power-on path the SMP bring-up issues
 /// (`plans/WIRING.md` W6).

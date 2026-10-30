@@ -234,6 +234,23 @@ below — publishes it beside the `IrqTable`, installs its dispatcher and sets
   `ecall` branch and before anything that can take a nested trap — the A/D
   walk, the resolver, the terminator — and hands every consumer that one
   reading.
+- **No user page within S-mode's reach.** Installing the vector
+  (`trap::install_trap_vector`, which `init_traps` runs) clears
+  `sstatus.SUM` on the hart, and nothing sets it again. The kernel reaches
+  user memory only through the direct map, by the user copies, which walk
+  the task's registered snapshot; the trap path reads none, not even the
+  instruction a task's first use of floating point traps on. An S-mode
+  access to a user page is a fault, never an Accessed/Dirty retry:
+  `uaccess_fault_qemu_riscv64` proves a guarded copy reading a mapped `U`
+  page by its user address faults, while the kernel's own mapping reads
+  the same bytes.
+- **The fault-time retry takes no lock.** `paging::retry_granted_fault`
+  walks the live root while `unmap` or the cold-page scanner may be
+  changing it on another hart, so every access to a live table is atomic
+  (`tairix_arch_api::frames::descriptors`) and the Accessed/Dirty bits are
+  set only by an exchange from the leaf the walk read
+  (`frames::Leaf::set_while`). A leaf unmapped or re-permissioned meanwhile
+  is judged afresh, never written back over the change.
 
 ### Per-task kernel stack + frame-resident return state (`trap.s`)
 
@@ -636,10 +653,9 @@ context with the Stage-3 Sv39 primitives:
    single-page code alias is sufficient; the identity pages carry no `U`
    bit, so U-mode can reach only the aliased stub and its stack.
 3. Installs the syscall dispatch callback (`syscall_entry::set_dispatch_callback`),
-   points `stvec` at the trap vector (`trap::init_traps`), sets
-   `sstatus.SUM` (so the S-mode trap handler may touch the U-bit stack),
-   and `sret`s to U-mode at the aliased stub entry with the capability id
-   in `a0`.
+   points `stvec` at the trap vector (`trap::init_traps`, which also
+   clears `sstatus.SUM`), and `sret`s to U-mode at the aliased stub entry
+   with the capability id in `a0`.
 
 The stub's `ecall` raises an environment-call-from-U exception into the
 S-mode trap vector, which marshals `a7`/`a0`–`a5` and calls the

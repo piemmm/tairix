@@ -2259,9 +2259,10 @@ and its architecture-neutral core lands here (staged in
   `Supported`; wasm32 stays fail-closed by construction.
   - **x86_64**: the hardware always sets the Accessed bit (PTE bit 5) and
     never clears it (Intel SDM Vol 3A §4.8), so `test_and_clear_accessed`
-    walks to the 4 KiB leaf, reads and clears bit 5, and `INVLPG`s the
-    page — no software fault path. `flags::ACCESSED` is the single
-    definition of bit 5.
+    walks to the 4 KiB leaf, clears bit 5 atomically (so a Dirty bit
+    another CPU's walk sets meanwhile is kept), and `INVLPG`s the page — no
+    software fault path. `flags::ACCESSED` is the single definition of
+    bit 5.
   - **aarch64**: the Access Flag (AF, descriptor bit 10) is
     software-managed — cortex-a57/a72 (the boards and the default QEMU
     CPU) lack ARMv8.1 HAFDBS, so an access to a valid leaf whose AF is
@@ -2274,12 +2275,25 @@ and its architecture-neutral core lands here (staged in
   - **riscv64**: the Accessed bit (A, PTE bit 6) is likewise
     software-managed — RISC-V leaves A/D *update* implementation-defined
     (a Svade part faults, a Svadu part updates in the walk).
-    `test_and_clear_accessed` clears A (+ `sfence.vma`); the trap path
-    (load/store/instruction page fault → `paging::set_accessed_flag_in_active`
+    `test_and_clear_accessed` clears A atomically (+ `sfence.vma`), so a
+    Dirty bit a Svadu walk sets meanwhile is kept; the trap path
+    (load/store/instruction page fault → `paging::retry_granted_fault`
     with the `AccessKind`) sets A (and D for a store) back **only** on a
-    valid leaf that permits the access — a genuine permission fault (same
-    `scause`) is never masked — and retries. On a Svadu part the fault
-    never fires and the branch is inert.
+    valid leaf that permits the access from the faulting mode — a genuine
+    permission fault (same `scause`) is never masked, and with `SUM` clear
+    no user page permits an S-mode access — and retries. On a Svadu part
+    the A/D fault never fires.
+  - **The fix-up takes no lock** on either software-managed port: `unmap`
+    or the scanner may be changing the same leaf on another CPU. Every
+    software access to a live table is therefore atomic
+    (`tairix_arch_api::frames::descriptors`), and the bit is set only by an
+    exchange from the descriptor the walk read (`frames::Leaf::set_while`):
+    a leaf unmapped, remapped or re-permissioned meanwhile is judged afresh
+    and never written back, which would restore a mapping to a frame its
+    space no longer owns. A table is linked with `frames::LINK_ORDERING`
+    and followed with `frames::WALK_ORDERING`, so a walk sees a fresh
+    table's zeroed entries. `kernel/arch/api/tests/loom.rs` checks both
+    halves over every interleaving (`cargo xtask loom`).
   - **wasm32** keeps the fail-closed default permanently: the browser
     sandbox exposes no per-page referenced bit.
   The `HostPageTable` double models the bit in software, so the scanner is

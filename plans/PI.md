@@ -237,8 +237,9 @@ serves both `virt` (PSCI-held secondaries) and the Pi (all-core release).
 Both EL1 entry trampolines (`boot.s` `.Lin_el1`, `smp.s`) write the known
 MMU-off `SCTLR_EL1` (`paging::SCTLR_MMU_OFF`, ARMv8.0 RES1 bits only,
 unit-test-pinned) before the first EL1 data access, and
-`AddressSpace::switch` installs the whole known `paging::SCTLR_MMU_ON`
-(RES1 + M + C + I, after `ic iallu`) rather than OR-ing `M` into the
+`AddressSpace::switch` installs the whole known MMU-on value
+(`protection::sctlr_mmu_on`: RES1 + M + C + I, with `SPAN` clear on a CPU
+held to PAN, after `ic iallu`) rather than OR-ing `M` into the
 live register: `SCTLR_EL1` is architecturally UNKNOWN at first EL1 entry
 on real silicon (EL2 hand-off and PSCI `CPU_ON` alike), and a carried
 UNKNOWN `WXN`/`EE` bit hung the metal Pi 4 at the MMU switch while QEMU
