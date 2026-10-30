@@ -4,9 +4,9 @@
 //!
 //! `percpu::init` replaces the boot tables, so a table it built that routed
 //! nothing would park the CPU silently on the first fault from then on. The
-//! kernel loads its per-CPU tables and then reads the first byte past the boot
-//! identity window, which nothing maps; the harness passes the run only if it
-//! stopped on the record naming the vector, the error code and `CR2`.
+//! kernel loads its per-CPU tables and then reads an address of the user half,
+//! which nothing maps; the harness passes the run only if it stopped on the
+//! record naming the vector, the error code and `CR2`.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -18,11 +18,10 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_arch_x86_64::panic::handle_panic_via_serial;
-    use tairix_arch_x86_64::{paging, percpu, qemu_exit, serial};
+    use tairix_arch_x86_64::{percpu, qemu_exit, serial};
 
-    /// The first byte past the boot identity window.
+    /// An address of the user half, which the kernel root leaves unmapped.
     const UNMAPPED: u64 = 0x1_0000_0000;
-    const _: () = assert!(UNMAPPED == (paging::BOOT_IDENTITY_GIB as u64) << 30);
 
     /// The one CPU's descriptor tables, which `percpu::init` fills.
     static PER_CPU_STORAGE: percpu::PerCpuStorage<1> = percpu::PerCpuStorage::new();

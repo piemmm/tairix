@@ -25,19 +25,15 @@
 //! [`X86MachineTakeover::take_over`] performs, in order and without ever
 //! returning on success (every other CPU already quiesced):
 //!
-//! 1. **Mask interrupts** (`cli`) so nothing preempts the solitary CPU. The
+//! 1. **Install the kernel root** (`paging::park_kernel_root`), so the
+//!    translation the sweep runs under is one no process owns: the sweep
+//!    reaches RAM through its direct map, and its tables are the kernel's
+//!    own, in use and so never swept. It is the one step that may refuse, so
+//!    it goes first: a refusal leaves the machine exactly as it was.
+//! 2. **Mask interrupts** (`cli`) so nothing preempts the solitary CPU. The
 //!    x86_64 port wires no lockup watchdog, so there is none to stop.
-//! 2. **Switch onto a reserved stack** the sweep will not overwrite. It lives
-//!    in the kernel image's `.bss` (reserved), which every address space maps
-//!    in the higher half, so the switch is safe under whatever `%cr3` was
-//!    active when the Supervisor was entered.
-//! 3. **Install the reserved boot page tables** (`%cr3 = boot_pml4`). Unlike
-//!    riscv64/aarch64, long mode cannot drop paging, so instead of flattening
-//!    the MMU the takeover switches to the boot page tables — which live
-//!    entirely in `.boot.bss` (reserved) and map both the higher-half kernel
-//!    window (through which the sweep reaches physical RAM) and the low
-//!    identity window — so the sweep never depends on a page-table frame in
-//!    the *usable* RAM it is about to destroy.
+//! 3. **Switch onto a reserved stack** the sweep will not overwrite. It lives
+//!    in the kernel image's `.bss` (reserved), which every root maps.
 //! 4. **Run the sweep** (the arch-neutral whole-RAM test of every *usable*
 //!    frame, which renders progress to the console) on the reserved stack.
 //!    The Supervisor's `memtest` sweep tests all of RAM continuously and
@@ -54,13 +50,6 @@
 //! the caller's and is fail-closed there.
 
 use tairix_arch_api::{MachineTakeover, TakeoverError};
-
-extern "C" {
-    /// The boot PML4 (`boot.s`, `.boot.bss`), linked 1:1 in low memory so its
-    /// symbol address **is** its physical address — the reserved `%cr3` the
-    /// sweep runs under.
-    static boot_pml4: u8;
-}
 
 /// Size of the reserved takeover stack, in bytes (64 KiB — matching the
 /// riscv64/aarch64 ports and the boot stack's headroom). It lives in the
@@ -93,7 +82,7 @@ static TAKEOVER_STACK: TakeoverStack = TakeoverStack {
 /// The x86_64 machine-takeover handle (`plans/NEW-SUPERVISOR.md` §9).
 ///
 /// A zero-sized unit: the takeover needs no per-instance state (the reserved
-/// stack and the boot page tables are all `static`/linker-provided). Held by
+/// stack and the kernel root are both `static`). Held by
 /// the downstream `KernelArch` wrapper behind the supervisor-gated accessor
 /// and never constructed elsewhere.
 pub struct X86MachineTakeover;
@@ -127,7 +116,14 @@ impl MachineTakeover for X86MachineTakeover {
         // handshake before this is ever reached), so this CPU is the only one
         // running. This body owns only the single-CPU tear-down that follows.
 
-        // 1. Mask interrupts so nothing preempts the solitary CPU. There is
+        // 1. Install the kernel root, the routine park every task suspend
+        //    performs, so a refusal leaves the machine as it was.
+        if !crate::paging::park_kernel_root(true) {
+            // The mechanism reports only failure, so the audit payload is 0.
+            return TakeoverError::PrepareFailed(0);
+        }
+
+        // 2. Mask interrupts so nothing preempts the solitary CPU. There is
         //    no lockup watchdog wired on this port, so there is none to stop.
         // SAFETY: `cli` clears only `RFLAGS.IF`; this is the deliberate,
         // confirmed tear-down the caller's `TakeoverGrant` authorises.
@@ -135,13 +131,10 @@ impl MachineTakeover for X86MachineTakeover {
             core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
         }
 
-        // 2. Switch onto the reserved stack and run the sweep, which never
+        // 3. Switch onto the reserved stack and run the sweep, which never
         //    returns. The sweep handle is reached through a thin pointer to
         //    the caller's `&mut dyn FnMut()`, read once at entry (on the
-        //    still-live caller stack) before the switch. The reserved stack is
-        //    `.bss`, mapped in the higher half under whatever `%cr3` is active,
-        //    so the switch is valid before the boot page tables are installed
-        //    (step 3, in the continuation).
+        //    still-live caller stack) before the switch.
         let mut sweep_ref: &mut dyn FnMut() = sweep;
         let thin = core::ptr::addr_of_mut!(sweep_ref) as usize;
         let stack_top = core::ptr::addr_of!(TAKEOVER_STACK) as usize + TAKEOVER_STACK_BYTES;
@@ -153,9 +146,9 @@ impl MachineTakeover for X86MachineTakeover {
     }
 }
 
-/// Install the reserved boot page tables and run the whole-RAM sweep on the
-/// reserved stack; never returns. Entered from `_takeover_switch_stack` with
-/// `%rsp` already on the reserved takeover stack.
+/// Run the whole-RAM sweep on the reserved stack; never returns. Entered from
+/// `_takeover_switch_stack` with `%rsp` already on the reserved takeover
+/// stack.
 ///
 /// # Safety
 ///
@@ -165,21 +158,6 @@ impl MachineTakeover for X86MachineTakeover {
 /// destroy.
 #[no_mangle]
 unsafe extern "C" fn tairix_arch_x86_64_takeover_continue(thin: usize) -> ! {
-    // 3. Install the reserved boot page tables (`%cr3 = boot_pml4`). They live
-    //    in `.boot.bss` (reserved) and map both the higher-half kernel window
-    //    the sweep writes physical RAM through and the low identity window, so
-    //    nothing the sweep destroys is depended upon. `boot_pml4`'s symbol
-    //    address is its physical address (linked 1:1 in low memory).
-    let boot_cr3 = core::ptr::addr_of!(boot_pml4) as u64;
-    // SAFETY: `boot_pml4` is the boot page-table root the kernel itself booted
-    // on; loading it re-establishes the reserved mapping. Its higher-half
-    // window maps this continuation's code and the reserved stack, so
-    // execution and the stack survive the load; `mov`-to-`%cr3` flushes the
-    // non-global TLB.
-    unsafe {
-        core::arch::asm!("mov cr3, {}", in(reg) boot_cr3, options(nostack, preserves_flags));
-    }
-
     // 4. Run the whole-RAM sweep over every usable frame.
     // SAFETY: `thin` points at the live `&mut dyn FnMut()` the caller placed
     // on its stack; reconstructing and calling it runs the architecture-neutral

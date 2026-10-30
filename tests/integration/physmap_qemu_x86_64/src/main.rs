@@ -1,7 +1,7 @@
 //! x86_64 direct-physical-map QEMU integration test: the kernel reaches
-//! **every** usable byte of a guest that has more RAM than the boot
-//! trampoline's own identity window, and it reaches it in the kernel half
-//! rather than in the half user programs address.
+//! **every** usable byte of a guest that has more RAM than the floor of the
+//! map the boot trampoline lays, and it reaches it in the kernel half rather
+//! than in the half user programs address.
 //!
 //! ## Why this exists
 //!
@@ -21,11 +21,11 @@
 //!
 //! ## What this test asserts
 //!
-//! The guest is given more RAM than the trampoline's window, so the firmware
+//! The guest is given more RAM than the trampoline's floor, so the firmware
 //! map reports usable RAM above it. Then:
 //!
-//! 1. The boot path sized the map past the trampoline's own window — proof
-//!    it read the discovered map rather than a build-time constant.
+//! 1. The boot path sized the map past the trampoline's floor — proof it
+//!    read the discovered map rather than a build-time constant.
 //! 2. The early-boot RAM self-test left **no** usable byte unreachable: each
 //!    one was written and read back through the direct map. A frame the map
 //!    does not cover is left untested and counted, so a map that stopped
@@ -61,7 +61,7 @@ mod kernel {
     use tairix_arch_api::frames::PageTableFrames as _;
     use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
     use tairix_arch_x86_64::paging::{
-        self, AddressSpace, PageTablePool, BOOT_IDENTITY_GIB, PHYSMAP_PML4_FIRST_SLOT,
+        self, AddressSpace, PageTablePool, BOOT_PHYSMAP_GIB, PHYSMAP_PML4_FIRST_SLOT,
     };
     use tairix_arch_x86_64::qemu_exit;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
@@ -98,7 +98,7 @@ mod kernel {
     const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
 
     /// Set when the boot path reported a direct map wider than the
-    /// trampoline's own identity window — the guest's RAM forced it.
+    /// trampoline's floor — the guest's RAM forced it.
     static MAP_SIZED_FROM_RAM: AtomicBool = AtomicBool::new(false);
 
     /// Set when the RAM self-test reported covering every usable byte.
@@ -246,11 +246,10 @@ mod kernel {
             if event.id == KERNEL_BOOT_DIRECT_MAP {
                 match field_u64(event, "gigabytes") {
                     // The guest is sized so its RAM tops the trampoline's
-                    // identity window: a map no wider than that means the
-                    // boot path never read the discovered map, which is the
-                    // defect. The map is live by the time this record is
+                    // floor: a map no wider than that means the boot path
+                    // never read the discovered map, which is the defect. The map is live by the time this record is
                     // written, so the structural probe runs here.
-                    Some(gib) if gib > BOOT_IDENTITY_GIB as u64 => {
+                    Some(gib) if gib > BOOT_PHYSMAP_GIB as u64 => {
                         if let Err(why) = structural_probe() {
                             SerialSink::new().write_event(&Event {
                                 level: tairix_log::Level::Error,

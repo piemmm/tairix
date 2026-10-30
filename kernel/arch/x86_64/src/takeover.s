@@ -11,9 +11,9 @@
 // stack allocated from *usable* RAM, which the sweep destroys). This
 // trampoline installs the reserved (`.bss`, never-swept) takeover stack and
 // tail-calls the Rust continuation on it, so the sweep's own frames live in
-// reserved memory. It never returns (the continuation is `-> !`: it installs
-// the boot page tables, runs the sweep — which loops until the operator
-// resets the machine — and otherwise parks the CPU).
+// reserved memory. It never returns (the continuation is `-> !`: it runs the
+// sweep — which loops until the operator resets the machine — and otherwise
+// parks the CPU).
 //
 // Entry contract (System V AMD64):
 //   %rdi = thin pointer to the caller's `&mut dyn FnMut()` sweep handle

@@ -506,6 +506,185 @@ fn the_boot_entries_clear_the_direction_flag_before_rust() {
     }
 }
 
+/// Each boot entry establishes `CR0` rather than amending it: INIT leaves an
+/// application processor's caches disabled, and multiboot2 leaves the boot
+/// CPU's other bits undefined, so a value read back would carry either into
+/// the kernel.
+#[test]
+fn every_boot_entry_writes_cr0_whole() {
+    for file in ["boot.s", "ap_trampoline.s"] {
+        let (_, source) = ASM_SOURCES
+            .iter()
+            .find(|(name, _)| *name == file)
+            .unwrap_or_else(|| panic!("{file} is not inspected"));
+        let lines = instructions(file, source);
+        assert!(
+            !lines.iter().any(|i| i.starts_with("movl %cr0,")),
+            "{file} reads CR0 back"
+        );
+        let writes: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.ends_with(", %cr0"))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(writes.len(), 1, "{file} writes CR0 once");
+        let value = &lines[writes[0] - 1];
+        assert!(
+            value.starts_with("movl $") && value.ends_with(", %eax"),
+            "{file}: CR0 comes from `{value}`, not a whole value"
+        );
+    }
+}
+
+/// Mnemonics that leave the status flags as they were: the only ones a block
+/// telling the compiler it preserves them may run.
+const LEAVES_STATUS_FLAGS: &[&str] = &[
+    "clflush",
+    "cli",
+    "fxsave64",
+    "hlt",
+    "in",
+    "invlpg",
+    "lea",
+    "lfence",
+    "lgdt",
+    "lidt",
+    "ltr",
+    "mfence",
+    "mov",
+    "out",
+    "pop",
+    "push",
+    "pushfq",
+    "rdmsr",
+    "rdtsc",
+    "retfq",
+    "sti",
+    "swapgs",
+    "wrmsr",
+    "xsave64",
+    "xsaveopt64",
+    "xsetbv",
+];
+
+/// The `asm!` invocations in `source`, each up to its closing parenthesis.
+/// `global_asm!` and `naked_asm!` take no `preserves_flags`, so are skipped.
+fn inline_asm_blocks(source: &str) -> Vec<&str> {
+    let mut blocks = Vec::new();
+    let mut rest = source;
+    while let Some(at) = rest.find("asm!(") {
+        let named = rest[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let body = &rest[at..];
+        let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
+        let mut end = body.len();
+        for (offset, c) in body.char_indices() {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' if quoted => escaped = true,
+                '"' => quoted = !quoted,
+                '(' if !quoted => depth += 1,
+                ')' if !quoted => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = offset + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !named {
+            blocks.push(&body[..end]);
+        }
+        rest = &body[end..];
+    }
+    blocks
+}
+
+/// The instructions a block's template spells, without the registers its
+/// operands are pinned to (`in("dx") port`).
+fn template_instructions(block: &str) -> Vec<String> {
+    let mut instructions = Vec::new();
+    let mut rest = block;
+    while let Some(open) = rest.find('"') {
+        let after = &rest[open + 1..];
+        let close = after.find('"').unwrap_or(after.len());
+        let pinned = rest[..open]
+            .trim_end()
+            .strip_suffix('(')
+            .is_some_and(|head| {
+                ["in", "out", "inout", "lateout", "inlateout"]
+                    .iter()
+                    .any(|kind| head.ends_with(kind))
+            });
+        if !pinned {
+            instructions.extend(
+                after[..close]
+                    .split("\\n")
+                    .flat_map(|line| line.split(';'))
+                    .map(|instruction| instruction.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|instruction| !instruction.is_empty()),
+            );
+        }
+        rest = after.get(close + 1..).unwrap_or("");
+    }
+    instructions
+}
+
+/// The operation `instruction` performs: its first word that is neither a
+/// label nor a prefix, or [`None`] for a line that is only a label.
+fn mnemonic(instruction: &str) -> Option<&str> {
+    instruction.split(' ').find(|word| {
+        !word.ends_with(':') && !["lock", "rep", "repe", "repne", "repz", "repnz"].contains(word)
+    })
+}
+
+#[test]
+fn the_flag_scan_reads_templates_and_not_operand_registers() {
+    let source = r#"
+        core::arch::global_asm!("orl %eax, %eax");
+        core::arch::asm!("mov {t}, cr4", "or {t}, {bit}", "mov cr4, {t}",
+            t = out(reg) _, options(nostack, preserves_flags));
+        unsafe { core::arch::asm!("in al, dx", in("dx") port, out("al") v) };
+    "#;
+    let blocks = inline_asm_blocks(source);
+    assert_eq!(blocks.len(), 2, "`global_asm!` is not an inline block");
+    let template = template_instructions(blocks[0]);
+    assert_eq!(template, ["mov {t}, cr4", "or {t}, {bit}", "mov cr4, {t}"]);
+    assert_eq!(mnemonic(&template[1]), Some("or"));
+    assert!(!LEAVES_STATUS_FLAGS.contains(&"or"));
+    assert_eq!(template_instructions(blocks[1]), ["in al, dx"]);
+    assert_eq!(mnemonic("2: lock xadd [{p}], {v}"), Some("xadd"));
+    assert_eq!(mnemonic("2:"), None, "a label runs nothing");
+}
+
+/// A block telling the compiler it preserves the status flags runs nothing that
+/// writes them, or the compiler may keep a comparison's outcome in `RFLAGS`
+/// across it and branch on the block's leftovers.
+#[test]
+fn no_block_claiming_to_preserve_the_flags_writes_them() {
+    let mut claims = 0usize;
+    for &(name, source) in ASM_SOURCES.iter().filter(|(name, _)| !is_assembly(name)) {
+        for block in inline_asm_blocks(source)
+            .into_iter()
+            .filter(|block| block.contains("preserves_flags"))
+        {
+            claims += 1;
+            for instruction in template_instructions(block) {
+                assert!(
+                    mnemonic(&instruction).is_none_or(|op| LEAVES_STATUS_FLAGS.contains(&op)),
+                    "{name}: `{instruction}` may write the flags its block claims to preserve"
+                );
+            }
+        }
+    }
+    assert!(claims > 0, "the scan found no block to check");
+}
+
 /// The frame is sixteen 16-byte slots and the `MXCSR` word above them, as the
 /// template macros lay it out.
 #[test]

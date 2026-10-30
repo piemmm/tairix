@@ -20,6 +20,7 @@ use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
 use tairix_arch_x86_64::userentry::USER_MODE;
 use tairix_arch_x86_64::{qemu_exit, syscall_entry};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
@@ -28,7 +29,7 @@ use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnMode, SpawnRequest,
     Yielder,
 };
-use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
+use tairix_kernel_mem::{AddressSpace, Frame, PhysAddr, UserStack};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level, Sink};
@@ -62,10 +63,6 @@ const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
 /// Per-process stack-canary seed handed to each program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
-
-/// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11).
-const IA32_EFER: u32 = 0xC000_0080;
-const EFER_NXE: u64 = 1 << 11;
 
 /// Physical frames the test hands the spawn builds. Both program builds draw
 /// from this one pool through a single monotonic cursor, so the two address
@@ -103,10 +100,9 @@ static PAGE_TABLE_POOL_A: paging::PageTablePool = paging::PageTablePool::new();
 static PAGE_TABLE_POOL_B: paging::PageTablePool = paging::PageTablePool::new();
 
 /// Physical-frame backing store the spawn builders draw user pages from.
-/// `align(4096)` so each `PAGE_SIZE` slice is a valid page frame. A higher-half
-/// kernel static, so its physical address is its virtual address minus
-/// [`KERNEL_VMA_BASE`]; the builders reach it through a [`DirectPhysMap`] with
-/// that same offset.
+/// `align(4096)` so each `PAGE_SIZE` slice is a valid page frame. A static of
+/// the kernel image, so its physical address is its virtual address minus
+/// [`KERNEL_VMA_BASE`], and the builders fill it through the direct map.
 #[repr(C, align(4096))]
 struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
 
@@ -211,29 +207,25 @@ static AUDIT_SINK: BootCompletedSink = BootCompletedSink;
 
 /// Build one isolated ring-3 address space from the validated `image` over the
 /// per-space page-table `pool`, returning its PML4 root and the entry register
-/// state. The new space carries the live identity window, the higher-half kernel
-/// window, and the LAPIC MMIO page; it is activated (so the user mappings land
-/// in it) and the image is built through the production capability-checked,
+/// state. The new root carries the kernel half; it is activated (so the user
+/// mappings land in it) and the image is built through the production
+/// capability-checked,
 /// audited `spawn_image` caller. Fails the test loudly on any error.
 fn build_el0_space(pool: &'static paging::PageTablePool, image: &LoadImage) -> (u64, UserEntry) {
-    let Some(arch_space) = paging::AddressSpace::new_boot_identity(pool) else {
+    let Some(arch_space) = paging::AddressSpace::new_process_root(pool) else {
         note(TEST_FAIL, "X2 test: page-table pool exhausted");
         qemu_exit::exit_failure();
     };
     // Capture the CR3 root before the arch space is moved into the `kernel/mem`
     // wrapper, so the per-task `pre_resume` hook can reload it on every switch.
     let root_phys = arch_space.pml4_phys();
-    // SAFETY: the new space carries the live identity window and the
-    // higher-half kernel window, so the executing RIP, the current stack, the
-    // per-CPU `swapgs` TLS, the page-table pools, the frame pool, the heap,
-    // `dispatch`, and every LAPIC MMIO access stay mapped across the CR3
-    // switch.
+    // SAFETY: the root carries the kernel half: the image window holding this
+    // code, the current stack and every static, and the direct map the LAPIC
+    // is reached through, so nothing the kernel touches is lost across the
+    // CR3 switch.
     unsafe { arch_space.switch() };
 
     let mut space = AddressSpace::new(arch_space);
-    // SAFETY: the boot code installs this direct map and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::new(KERNEL_VMA_BASE, 1 << 30) }
-        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image,
         image_bytes: PROGRAM_RXE,
@@ -259,7 +251,7 @@ fn build_el0_space(pool: &'static paging::PageTablePool, image: &LoadImage) -> (
             SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
-            &physmap,
+            &SPAWN_TABLE_PHYSMAP,
             &request,
             next_frame,
         )
@@ -278,31 +270,6 @@ fn build_el0_space(pool: &'static paging::PageTablePool, image: &LoadImage) -> (
 /// exit. Never returns (it exits the VM on PASS or FAIL).
 fn run_timeshare() -> ! {
     note(TEST_START, "x86_64 X2 test: building two ring-3 images");
-
-    // Enable `IA32_EFER.NXE` so the W^X No-Execute leaf bit the adapter sets on
-    // data/rodata pages is honoured rather than reserved.
-    // SAFETY: reading and writing `IA32_EFER` is the documented enable
-    // sequence; it runs once on the BSP and only sets bit 11, preserving
-    // `SCE`/`LME`/`LMA` the boot pipeline established.
-    unsafe {
-        let lo: u32;
-        let hi: u32;
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") IA32_EFER,
-            out("eax") lo,
-            out("edx") hi,
-            options(nostack, preserves_flags),
-        );
-        let efer = (((hi as u64) << 32) | lo as u64) | EFER_NXE;
-        core::arch::asm!(
-            "wrmsr",
-            in("ecx") IA32_EFER,
-            in("eax") efer as u32,
-            in("edx") (efer >> 32) as u32,
-            options(nostack, preserves_flags),
-        );
-    }
 
     syscall_entry::set_dispatch_callback(dispatch);
 
@@ -363,9 +330,8 @@ fn run_timeshare() -> ! {
                 qemu_exit::exit_failure();
             }
             // SAFETY: paging is enabled and `root_phys` is the PML4 of the
-            // task's space, which maps the low identity + higher-half kernel
-            // window the running dispatcher executes from — exactly
-            // `activate_user_root`'s contract.
+            // task's space, which carries the kernel half the running
+            // dispatcher executes from, as `activate_user_root` requires.
             unsafe { activate_user_root(root_phys, tag) };
         };
         let work = move |yielder: &mut Yielder<ContextSwitchHal>| {

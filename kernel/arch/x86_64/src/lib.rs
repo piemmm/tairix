@@ -7,14 +7,13 @@
 //!
 //! # What's here
 //!
-//! * Multiboot1 entry, 32→64 long-mode trampoline, identity-mapped
-//!   bootstrap paging — see `boot.s`.
+//! * Multiboot2 and PVH entries and the 32→64 long-mode trampoline — see
+//!   `boot.s`.
 //! * A 16550-compatible serial console on COM1 (`serial`).
 //! * The smallest IDT that can field a `#PF`/`#GP`/`#DF` and route it to
 //!   a Rust callback registered by the test (`idt`).
-//! * Primitives for building extra page tables and switching CR3 — the
-//!   test driver for `tests/integration/memory_isolation` uses these to
-//!   model two isolated address spaces (`paging`).
+//! * The kernel's own translation root, process roots, and the page-table
+//!   walk (`paging`).
 //! * The QEMU `isa-debug-exit` helper that translates a Pass/Fail result
 //!   into the exit code `tools/qemu` recognises (`qemu_exit`).
 //!
@@ -72,11 +71,10 @@ core::arch::global_asm!(include_str!("context.s"), options(att_syntax));
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 core::arch::global_asm!(include_str!("external_irq.s"), options(att_syntax));
 
-// The machine-takeover stack-switch trampoline and relocatable kernel-image
-// self-test + reset stub (`plans/NEW-SUPERVISOR.md` §9) are meaningful only on
-// the bare-metal target; the whole `takeover` module is freestanding-only (it
-// is all control-register/assembly and destroys the machine, so it is proven
-// by the memtest-takeover QEMU vertical, never a host test).
+// The machine-takeover stack-switch trampoline (`plans/NEW-SUPERVISOR.md` §9)
+// is meaningful only on the bare-metal target; the whole `takeover` module is
+// freestanding-only (it destroys the machine, so it is proven by the
+// memtest-takeover QEMU vertical, never a host test).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 core::arch::global_asm!(include_str!("takeover.s"), options(att_syntax));
 

@@ -1,36 +1,25 @@
-//! Page-table primitives for the Stage-2 memory-isolation test.
+//! x86_64 page tables: the kernel's own root, the roots processes run on,
+//! and the walk that edits them.
 //!
-//! The test in `tests/integration/memory_isolation` needs two
-//! page-table hierarchies that disagree about a single virtual address:
-//! a *victim* address space in which the address resolves to a known
-//! frame, and an *attacker* address space in which it does not. The CPU
-//! must fault the attacker on access. That is the architectural
-//! guarantee ("Memory isolation is enforced by hardware")
-//! requires — and the test verifies — *at the page-table layer*, before
-//! any of the orchestration in `kernel/mem`'s `AddressSpace` is added.
+//! Every root shares one kernel half: the kernel image's window (PML4 slot
+//! 511), mapped section by section with only the access each needs; the
+//! direct physical map (slots 256–509), which nothing executes from; and the
+//! kernel heap's remap window (slot 510). A process root adds its own user
+//! half and nothing else.
 //!
-//! This module deliberately operates one level *below* `kernel/mem`:
+//! The kernel's own root has no user half and maps nothing physical as
+//! itself: the boot CPU moves onto it before the kernel proper runs
+//! (`enter_kernel_root`), and an application processor joins it before its
+//! entry does anything else (`join_kernel_root`). The one identity mapping
+//! left is the page an application processor starts executing at, in a root
+//! only a starting processor loads.
 //!
-//! * It does not allocate from `lib/collections::FrameAllocator`. Instead
-//!   it uses a tiny, in-`.bss` page-frame pool. The kernel-side trait
-//!   plumbing is unrelated to the architectural property under test, and
-//!   pulling it in would require Stage-3a's full physical-frame
-//!   allocator (not in scope, see crate docs).
-//! * It exposes only the operations the test needs: build a PML4 that
-//!   identity-maps the first 32 MiB of physical memory, add an extra
-//!   4 KiB mapping, switch CR3.
-//!
-//! It implements the Arch HAL page-table surface
-//! ([`tairix_arch_api::mmu::AddressSpace`] +
-//! [`tairix_arch_api::tlb::TlbShootdown`]) `kernel/mem` drives. The
-//! page-table *walk* (`map_page` / `translate` / `unmap`) recovers each
-//! level through the frame source that drew it, so it runs on the host
-//! too; only [`AddressSpace::activate`]'s `CR3` load needs the metal,
-//! and that is proven by the `memory_isolation` QEMU vertical. The bit
-//! math is a strict subset so promotion does not require interface
-//! creep.
+//! The walk ([`tairix_arch_api::mmu::AddressSpace`]) recovers each level
+//! through the frame source that drew it, so it runs on the host too; only a
+//! `CR3` load needs the metal.
 
 use core::cell::UnsafeCell;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use tairix_arch_api::frames::{pool_slot_of, PageTableFrames, TableFrame};
@@ -51,21 +40,17 @@ pub use tairix_abi::PAGE_SIZE;
 /// Number of 64-bit entries in a page-table page (PML4 / PDPT / PD / PT).
 pub const ENTRIES_PER_TABLE: usize = 512;
 
-/// Gigabytes of physical memory the boot trampoline identity-maps
-/// (`boot.s` SAFETY-INVARIANT 4, whose static `boot_pds` array holds
-/// exactly this many page directories).
+/// Gigabytes of the direct physical map the boot trampoline lays before the
+/// firmware memory map is read (`boot.s` SAFETY-INVARIANT 10, whose
+/// `boot_pds_physmap` holds a page directory for each).
 ///
-/// This is the whole identity window, never widened: it exists for the
-/// addresses that must be reachable *as* physical addresses — the
-/// trampoline's own tables, the AP start-up trampoline, and the firmware
-/// tables and architectural MMIO frames the boot path reads before
-/// discovery — and its extent is fixed by what `boot.s` builds. RAM is
-/// reached through the direct physical map below instead, so the identity
-/// window's cost no longer scales with the installed RAM.
-pub const BOOT_IDENTITY_GIB: usize = 4;
+/// What the boot reads before it knows the machine lies below it: the
+/// loader's hand-off, the firmware tables, and the architectural register
+/// blocks.
+pub const BOOT_PHYSMAP_GIB: usize = 4;
 
-/// The first physical address past the identity window.
-pub const BOOT_IDENTITY_END: u64 = (BOOT_IDENTITY_GIB as u64) << 30;
+/// The first physical address past the boot trampoline's direct-map floor.
+pub const BOOT_PHYSMAP_END: u64 = (BOOT_PHYSMAP_GIB as u64) << 30;
 
 /// Sign-extend a PML4 slot's base to its canonical higher-half virtual
 /// address: bit 47 of any slot at or above 256 is set, so bits 63:48
@@ -122,7 +107,7 @@ static PHYSMAP_PML4: [AtomicU64; PHYSMAP_PML4_SLOTS] =
 /// boot trampoline lays down (`boot.s` SAFETY-INVARIANT 10). The host has
 /// no trampoline and so no map at all.
 const PHYSMAP_FLOOR_GIB: usize = if cfg!(all(target_arch = "x86_64", target_os = "none")) {
-    BOOT_IDENTITY_GIB
+    BOOT_PHYSMAP_GIB
 } else {
     0
 };
@@ -154,6 +139,39 @@ pub const fn physmap_virt(phys: u64) -> u64 {
     PHYSMAP_VMA_BASE.wrapping_add(phys)
 }
 
+/// Whether the live direct map holds all of physical `[phys, phys + len)`.
+fn physmap_holds(phys: u64, len: u64) -> bool {
+    phys.checked_add(len)
+        .is_some_and(|end| end <= physmap_bytes())
+}
+
+/// The direct-map address of physical `[phys, phys + len)`, or [`None`] for
+/// an empty span or one the live map does not wholly hold.
+#[must_use]
+pub fn physmap_span(phys: u64, len: u64) -> Option<NonNull<u8>> {
+    if len == 0 || !physmap_holds(phys, len) {
+        return None;
+    }
+    let virt = usize::try_from(physmap_virt(phys)).ok()?;
+    NonNull::new(core::ptr::with_exposed_provenance_mut(virt))
+}
+
+/// The bytes at physical `[phys, phys + len)`, read through the direct map,
+/// or [`None`] where [`physmap_span`] refuses the span.
+///
+/// # Safety
+///
+/// Nothing may write those bytes while the slice is in use: they are the
+/// loader's hand-off or firmware tables, never memory the kernel allocates.
+#[must_use]
+pub unsafe fn physmap_slice(phys: u64, len: usize) -> Option<&'static [u8]> {
+    let base = physmap_span(phys, u64::try_from(len).ok()?)?;
+    // SAFETY: `physmap_span` placed the whole span inside the live direct
+    // map, which is never torn down, and the caller vouches that nothing
+    // writes it.
+    Some(unsafe { core::slice::from_raw_parts(base.as_ptr().cast_const(), len) })
+}
+
 /// Write the cache lines holding physical `[phys, phys + len)` back to
 /// memory, `line` bytes at a time, for a DMA walker that does not snoop the
 /// caches: stores before the call reach memory before any after it. `false`,
@@ -161,18 +179,15 @@ pub const fn physmap_virt(phys: u64) -> u64 {
 /// is not a power of two.
 #[must_use]
 pub fn write_back(phys: u64, len: usize, line: u64) -> bool {
-    let Some(end) = u64::try_from(len)
-        .ok()
-        .and_then(|len| phys.checked_add(len))
-    else {
+    let Ok(len) = u64::try_from(len) else {
         return false;
     };
-    if end > physmap_bytes() || !line.is_power_of_two() {
+    if !physmap_holds(phys, len) || !line.is_power_of_two() {
         return false;
     }
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        let stop = physmap_virt(end);
+        let stop = physmap_virt(phys + len);
         let mut addr = physmap_virt(phys & !(line - 1));
         // SAFETY: `mfence` orders memory accesses only. The first keeps the
         // flushes below behind the stores that wrote the lines, the second
@@ -197,10 +212,9 @@ pub fn write_back(phys: u64, len: usize, line: u64) -> bool {
 /// `true` when the part maps 1 GiB pages at PDPT level (CPUID
 /// `0x8000_0001` `EDX[26]`, AMD64 APM Vol. 3 / Intel SDM Vol. 2A).
 ///
-/// With gigapages a whole identity window costs no page directories at
-/// all, so a root's identity map is one table however much RAM the
-/// machine has. The host build reports `false` (no CPU to ask), which
-/// only selects the 2 MiB path the host never walks.
+/// With gigapages the direct map's widening draws no page directories at
+/// all. The host build reports `false` (no CPU to ask), which only selects
+/// the 2 MiB path the host never walks.
 #[must_use]
 pub fn gigapages_supported() -> bool {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -221,8 +235,8 @@ pub fn gigapages_supported() -> bool {
 /// Page-table pages `install_boot_physmap` must draw to widen the map to
 /// `gib` gigabytes.
 ///
-/// The boot trampoline supplies the first span's PDPT and the leaves below
-/// [`BOOT_IDENTITY_GIB`], so what is left is one PDPT per *further* 512 GiB
+/// The first span's PDPT and the leaves below [`BOOT_PHYSMAP_GIB`] exist
+/// before it runs, so what is left is one PDPT per *further* 512 GiB
 /// span, plus — only on a part without 1 GiB pages, where a PDPT cannot
 /// hold the leaves itself — one page directory per gigabyte above the
 /// floor. A `gib` at or below the floor needs nothing.
@@ -281,15 +295,49 @@ pub mod flags {
     /// Page Size (1 for huge pages at PD or PDPT level).
     pub const HUGE: u64 = 1 << 7;
     /// No-Execute (bit 63): an instruction fetch from the page faults.
-    /// Honoured only while `IA32_EFER.NXE` is set; with NXE clear the bit
-    /// is reserved and would fault the walk, so callers that set it must
-    /// have enabled NXE first. Used to mark writable user data and
-    /// read-only user data non-executable (W^X).
+    /// Both trampolines set `IA32_EFER.NXE` before paging is on, so every
+    /// CPU honours it from its first instruction.
     pub const NO_EXECUTE: u64 = 1 << 63;
     /// One of the bits a leaf leaves to software, marking a DMA buffer
     /// ([`PageFlags::DMA`](tairix_arch_api::mmu::PageFlags::DMA)).
     pub const SW_DMA: u64 = 1 << 9;
 }
+
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+mod kernel_root;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub(crate) use kernel_root::{enter_kernel_root, join_kernel_root, startup_root};
+
+/// What the kernel may do with a page it maps for itself: never more than
+/// one of writing and executing, and nothing for ring 3.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KernelAccess {
+    /// Read and execute: the kernel's text.
+    Execute,
+    /// Read only.
+    Read,
+    /// Read and write.
+    Write,
+}
+
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+impl KernelAccess {
+    /// The leaf bits granting exactly this access, for a 4 KiB leaf or,
+    /// with [`flags::HUGE`] added, a larger one.
+    const fn leaf(self) -> u64 {
+        match self {
+            Self::Execute => flags::PRESENT,
+            Self::Read => flags::PRESENT | flags::NO_EXECUTE,
+            Self::Write => flags::PRESENT | flags::WRITABLE | flags::NO_EXECUTE,
+        }
+    }
+}
+
+/// Bits of an entry pointing at a kernel table below it: the leaves decide
+/// the access, so the entry restricts nothing itself.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+const KERNEL_TABLE_ENTRY: u64 = flags::PRESENT | flags::WRITABLE;
 
 /// Leaf permissions, memory type and software marks one 4 KiB mapping walk
 /// applies.
@@ -331,29 +379,26 @@ impl Table {
     }
 }
 
-/// Page-table pages one live root costs at the boot identity floor: the
-/// PML4, the low PDPT, a page directory per identity gigabyte (none where
-/// the part has 1 GiB pages), the higher-half window's PDPT and PD, and one
-/// fine-grained PDPT/PD/PT chain.
-const PAGES_PER_LIVE_ROOT: usize = 2 + BOOT_IDENTITY_GIB + 2 + 3;
-
-/// Pages a further fine-grained mapping costs (PDPT + PD + PT).
+/// Pages one fine-grained mapping chain costs (PDPT + PD + PT).
 const PAGES_PER_FINE_CHAIN: usize = 3;
 
-/// Maximum number of page-table pages a static pool hands out. Sized for the
-/// two roots a bring-up path or a fixture builds at once, plus a further
+/// Page-table pages a live root costs: its PML4 and one fine-grained chain.
+/// The kernel half it carries is shared, not drawn per root.
+const PAGES_PER_LIVE_ROOT: usize = 1 + PAGES_PER_FINE_CHAIN;
+
+/// Pages a [`PageTablePool`] hands out unless its type names another count:
+/// the two roots a bring-up path or a fixture builds at once, plus a further
 /// fine-grained chain each. A pool that runs dry makes `alloc_table` answer
 /// `None`, so the constructor fails closed rather than returning a root with
 /// holes in it.
-const POOL_SIZE: usize = 2 * (PAGES_PER_LIVE_ROOT + PAGES_PER_FINE_CHAIN);
+const POOL_TABLES: usize = 2 * (PAGES_PER_LIVE_ROOT + PAGES_PER_FINE_CHAIN);
 
-/// A statically-allocated pool of zero-initialised page-table pages.
+/// A statically-allocated pool of `N` zero-initialised page-table pages.
 ///
-/// Allocation is monotonic — frames are never freed. That matches the
-/// lifecycle of the Stage-2 tests (set up → run → exit). A real
-/// allocator lives in `kernel/mem` and is wired in by Stage 3a.
-pub struct PageTablePool {
-    storage: [UnsafeCell<Table>; POOL_SIZE],
+/// Allocation is monotonic: tables drawn from kernel-image storage are
+/// never reclaimable RAM, so a returned one is retired without reuse.
+pub struct PageTablePool<const N: usize = POOL_TABLES> {
+    storage: [UnsafeCell<Table>; N],
     used: AtomicUsize,
 }
 
@@ -361,37 +406,26 @@ pub struct PageTablePool {
 // is handed out exactly once (monotonic `AtomicUsize`), so distinct
 // allocations never alias. Callers receive `&'static mut [u64; 512]`s
 // whose lifetimes are disjoint by construction.
-unsafe impl Sync for PageTablePool {}
+unsafe impl<const N: usize> Sync for PageTablePool<N> {}
 
-impl Default for PageTablePool {
+impl<const N: usize> Default for PageTablePool<N> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PageTablePool {
+impl<const N: usize> PageTablePool<N> {
     /// Construct an empty pool. `const`, so the pool lives in `.bss`.
     #[must_use]
     pub const fn new() -> Self {
-        // Build the array of `UnsafeCell<Table>` via a const expression;
-        // each cell is zero-initialised by `Table::new`. The `const`
-        // initializer is consumed at array-literal expansion time and
-        // never re-named, so the `declare_interior_mutable_const` lint
-        // is suppressed with rationale. The
-        // array itself is `POOL_SIZE * sizeof::<Table>()`
-        // and is materialised straight into the returned `Self`,
-        // which lives in `.bss` via `static` storage at every call
-        // site — there is no real stack temporary despite the
-        // `large_stack_arrays` lint's heuristic.
+        // Each element must be its own cell, so the initialiser is a
+        // `const` copied per slot rather than a value shared between them.
         #[allow(clippy::declare_interior_mutable_const)]
         const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table::new());
-        // `[ZERO; POOL_SIZE]` evaluates the const into each slot;
-        // semantically the value is materialised straight into the
-        // returned `Self`, which lives in `.bss` via `static` storage
-        // at every call site — there is no real stack temporary
-        // despite the `large_stack_arrays` lint's heuristic.
+        // Evaluated into the `static` each pool is, never a stack frame,
+        // whatever the `large_stack_arrays` heuristic assumes.
         #[allow(clippy::large_stack_arrays)]
-        let storage = [ZERO; POOL_SIZE];
+        let storage = [ZERO; N];
         Self {
             storage,
             used: AtomicUsize::new(0),
@@ -404,10 +438,10 @@ impl PageTablePool {
     /// on as a deterministic OOM, never a panic.
     pub fn alloc(&self) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
         let idx = self.used.fetch_add(1, Ordering::SeqCst);
-        if idx >= POOL_SIZE {
+        if idx >= N {
             // Roll back so subsequent allocations also fail closed rather
             // than overflowing `usize`.
-            self.used.store(POOL_SIZE, Ordering::SeqCst);
+            self.used.store(N, Ordering::SeqCst);
             return None;
         }
         // SAFETY: monotonic allocator + atomic fetch_add means this index
@@ -420,11 +454,11 @@ impl PageTablePool {
     }
 }
 
-impl PageTableFrames for PageTablePool {
+impl<const N: usize> PageTableFrames for PageTablePool<N> {
     fn alloc_table(&self) -> Option<TableFrame> {
         let entries = self.alloc()?;
-        // The static pool is a higher-half kernel image; `phys_of`
-        // recovers the physical address the MMU needs (`plans/WIRING.md` W5b-3 — the bootstrap frame source).
+        // The static pool is kernel-image storage, so its physical address
+        // is its image-window address less the window's base.
         let phys = phys_of(entries.as_ptr() as u64);
         Some(TableFrame { phys, entries })
     }
@@ -433,7 +467,7 @@ impl PageTableFrames for PageTablePool {
         // Recovered from the slot the pool handed `phys` out of, so the
         // pointer keeps its storage's provenance; a `phys` from anywhere
         // else names no slot and the walk asking for it fails closed.
-        let index = pool_slot_of(phys_of(self.storage.as_ptr() as u64), POOL_SIZE, phys)?;
+        let index = pool_slot_of(phys_of(self.storage.as_ptr() as u64), N, phys)?;
         Some(self.storage[index].get().cast())
     }
 
@@ -449,13 +483,9 @@ impl PageTableFrames for PageTablePool {
 
 /// An address space built on a freshly-allocated PML4.
 ///
-/// Every constructor installs what a live root must carry whichever space
-/// is active: the boot trampoline's higher-half kernel window (`boot.s`
-/// SAFETY-INVARIANT 9), where the kernel's code, stack and data are linked,
-/// and the direct physical map, through which it reaches every frame. They
-/// differ only in whether they add an identity window on top
-/// ([`Self::new_process_root`] does not; [`Self::new_boot_identity`] and
-/// [`Self::new_bookkeeping_identity_32mib`] do, at their own extents).
+/// A root carries the kernel half every root shares — the kernel image's
+/// window, the remap window, the direct physical map — and whatever user
+/// mappings are added to it; none maps anything physical as itself.
 pub struct AddressSpace {
     pml4_phys: u64,
     /// The frame source the page-table walk allocates intermediate
@@ -468,160 +498,22 @@ pub struct AddressSpace {
 }
 
 impl AddressSpace {
-    /// Build a root for a **process**: the kernel windows and the direct
-    /// physical map, and no identity map at all.
+    /// Build a root for a **process**: the shared kernel half and an empty
+    /// user half.
     ///
-    /// The port's kernel is linked higher-half, so nothing a process root
-    /// must keep reachable — the executing kernel code, its stack, a frame
-    /// the kernel reaches by pointer — is addressed physically: the image
-    /// is in its own window and RAM is in the direct map
-    /// ([`PHYSMAP_VMA_BASE`]). The map's slots sit above the user virtual
-    /// region, so the half user code addresses carries user mappings only,
-    /// and the tables beneath them are shared — a process pays its own
-    /// PML4 entries for the whole of RAM, not one page per gigabyte.
+    /// The kernel half's tables are shared rather than drawn per root, so a
+    /// process pays its own PML4 for the whole kernel — image, heap window
+    /// and all of RAM — and not one page more.
     ///
     /// # Errors
     ///
     /// Returns `None` if the frame source is exhausted.
     pub fn new_process_root(frames: &'static dyn PageTableFrames) -> Option<Self> {
-        let (pml4_phys, _) = Self::new_kernel_windows(frames)?;
-        Some(Self { pml4_phys, frames })
-    }
-
-    /// Build a root carrying the boot trampoline's identity window on top
-    /// of the kernel windows and the direct physical map — the constructor
-    /// for a space that must keep physical addresses reachable *as*
-    /// physical addresses while it is live.
-    ///
-    /// The extent is [`BOOT_IDENTITY_GIB`] and is not a parameter: it is
-    /// what `boot.s` maps, and what the addresses that genuinely need it —
-    /// the trampoline's own tables, the AP start-up trampoline, the
-    /// firmware tables — all lie below. RAM above it is reached through the
-    /// direct map like any other frame, so this window does not grow with
-    /// the machine. The leaves are 1 GiB pages where the part has them and
-    /// 2 MiB pages otherwise.
-    ///
-    /// # Errors
-    ///
-    /// Returns `None` if the frame source is exhausted.
-    pub fn new_boot_identity(frames: &'static dyn PageTableFrames) -> Option<Self> {
-        // 512 × 2 MiB = 1 GiB.
-        Self::new_identity(frames, BOOT_IDENTITY_GIB.checked_mul(512)?)
-    }
-
-    /// Build a root identity-mapping only `[0, 32 MiB)`, for a space that is
-    /// **never made live**.
-    ///
-    /// The MMIO register-window maps use one purely as page-table
-    /// bookkeeping — the device is reached through the direct physical map,
-    /// never through this root — and their window base sits inside the
-    /// identity window, so a root carrying that window would collide with
-    /// it. Making this space live would strand every kernel address above
-    /// 32 MiB; use [`Self::new_boot_identity`] for anything that runs.
-    ///
-    /// # Errors
-    ///
-    /// Returns `None` if the frame source is exhausted.
-    pub fn new_bookkeeping_identity_32mib(frames: &'static dyn PageTableFrames) -> Option<Self> {
-        // 16 × 2 MiB = 32 MiB.
-        Self::new_identity(frames, 16)
-    }
-
-    /// Draw a root and install the mappings *every* live space carries: the
-    /// higher-half kernel image window, the kernel remap window, and the
-    /// direct physical map. Done here rather than at each call site so no
-    /// future space can be built without them.
-    ///
-    /// Returns the root's physical address alongside its table, so the
-    /// identity constructor can go on writing into the same root.
-    fn new_kernel_windows(
-        frames: &'static dyn PageTableFrames,
-    ) -> Option<(u64, &'static mut [u64; ENTRIES_PER_TABLE])> {
         let TableFrame {
             phys: pml4_phys,
             entries: pml4,
         } = frames.alloc_table()?;
-
-        // Mirror the boot trampoline's higher-half kernel window so the
-        // higher-half-linked kernel code/stack/data stay reachable after a
-        // CR3 switch to this space (`boot.s` SAFETY-INVARIANT 9). Map the
-        // -2 GiB window at KERNEL_VMA_BASE onto physical [0, 1 GiB) with
-        // 2 MiB huge pages, covering the whole kernel image.
-        let TableFrame {
-            phys: pdpt_high_phys,
-            entries: pdpt_high,
-        } = frames.alloc_table()?;
-        let TableFrame {
-            phys: pd_high_phys,
-            entries: pd_high,
-        } = frames.alloc_table()?;
-        let hi_i4 = ((KERNEL_VMA_BASE >> 39) & 0x1FF) as usize;
-        let hi_i3 = ((KERNEL_VMA_BASE >> 30) & 0x1FF) as usize;
-        pml4[hi_i4] = pdpt_high_phys | flags::PRESENT | flags::WRITABLE;
-        pdpt_high[hi_i3] = pd_high_phys | flags::PRESENT | flags::WRITABLE;
-        for (i, slot) in pd_high.iter_mut().enumerate() {
-            *slot = ((i as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
-        }
-
-        install_kernel_window_slot(pml4);
-        install_physmap_slots(pml4);
-        Some((pml4_phys, pml4))
-    }
-
-    /// Shared constructor backing [`Self::new_boot_identity`] and
-    /// [`Self::new_bookkeeping_identity_32mib`] (one definition).
-    ///
-    /// Identity-maps the first `pages_2mib` 2 MiB pages on top of the
-    /// mappings every live root carries. A whole-gigabyte span on a part
-    /// with 1 GiB pages is laid down as PDPT leaves; otherwise one page
-    /// directory is drawn per gigabyte.
-    fn new_identity(frames: &'static dyn PageTableFrames, pages_2mib: usize) -> Option<Self> {
-        // One PDPT addresses 512 GiB; a wider span has nowhere to put its
-        // remaining directories, so refuse rather than index past the table.
-        if pages_2mib > ENTRIES_PER_TABLE * ENTRIES_PER_TABLE {
-            return None;
-        }
-        let (pml4_phys, pml4) = Self::new_kernel_windows(frames)?;
-        let TableFrame {
-            phys: pdpt_phys,
-            entries: pdpt,
-        } = frames.alloc_table()?;
-        pml4[0] = pdpt_phys | flags::PRESENT | flags::WRITABLE;
-
-        // A whole-gigabyte window on a part with 1 GiB pages needs no page
-        // directories: the PDPT carries the leaves, so a root's identity map
-        // costs one table however much RAM the machine has.
-        if gigapages_supported() && pages_2mib.is_multiple_of(ENTRIES_PER_TABLE) {
-            for (gib, slot) in pdpt
-                .iter_mut()
-                .take(pages_2mib / ENTRIES_PER_TABLE)
-                .enumerate()
-            {
-                *slot = ((gib as u64) << 30) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
-            }
-        } else {
-            // Identity-map `pages_2mib` 2 MiB pages, one PD (512 entries =
-            // 1 GiB) at a time, linking each into the low PDPT.
-            let mut mapped = 0usize;
-            let mut pdpt_idx = 0usize;
-            while mapped < pages_2mib {
-                let TableFrame {
-                    phys: pd_phys,
-                    entries: pd,
-                } = frames.alloc_table()?;
-                pdpt[pdpt_idx] = pd_phys | flags::PRESENT | flags::WRITABLE;
-                for slot in pd.iter_mut() {
-                    if mapped >= pages_2mib {
-                        break;
-                    }
-                    *slot =
-                        ((mapped as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
-                    mapped += 1;
-                }
-                pdpt_idx += 1;
-            }
-        }
-
+        install_kernel_half(pml4);
         Some(Self { pml4_phys, frames })
     }
 
@@ -719,9 +611,8 @@ impl AddressSpace {
     /// Map `paddr` at `vaddr` with a 4 KiB page granularity.
     ///
     /// `vaddr` and `paddr` must be 4 KiB-aligned. Returns `None` on
-    /// page-table-pool exhaustion. Aborts the existing 2 MiB huge-page
-    /// covering `vaddr` if necessary (the Stage-2 tests stay outside
-    /// the identity-mapped range so this is not exercised here).
+    /// page-table-pool exhaustion or if the walk meets an existing huge
+    /// page.
     pub fn map_4k(
         &mut self,
         frames: &'static dyn PageTableFrames,
@@ -742,35 +633,6 @@ impl AddressSpace {
         )
     }
 
-    /// Map `paddr` at `vaddr` (4 KiB granularity) **user-accessible**:
-    /// the leaf and every intermediate table entry on the walk get the
-    /// [`flags::USER`] bit, so a ring-3 (CPL 3) program may reach the
-    /// page. `writable` selects [`flags::WRITABLE`] on the leaf; an
-    /// executable ring-3 page is mapped with `writable = false` (W^X).
-    ///
-    /// `vaddr` and `paddr` must be 4 KiB-aligned. Returns `None` on
-    /// page-table-pool exhaustion or if the walk hits an existing huge
-    /// page.
-    pub fn map_4k_user(
-        &mut self,
-        frames: &'static dyn PageTableFrames,
-        vaddr: u64,
-        paddr: u64,
-        writable: bool,
-    ) -> Option<()> {
-        self.map_4k_inner(
-            frames,
-            vaddr,
-            paddr,
-            LeafPolicy {
-                writable,
-                user: true,
-                no_execute: false,
-                attrs: 0,
-            },
-        )
-    }
-
     /// Map `paddr` at `vaddr` (4 KiB granularity) **user-accessible** with
     /// explicit W^X leaf permissions: `writable` selects [`flags::WRITABLE`]
     /// and `executable` selects whether the page is instruction-fetchable.
@@ -780,9 +642,7 @@ impl AddressSpace {
     /// process image's `RW`/`R` segments and its stack need (a code segment
     /// is mapped `executable = true`, `writable = false`, i.e. `RX`).
     ///
-    /// The caller must have enabled `IA32_EFER.NXE` before mapping any
-    /// non-executable page (otherwise bit 63 is reserved and the walk
-    /// faults). `vaddr` and `paddr` must be 4 KiB-aligned. Returns `None` on
+    /// `vaddr` and `paddr` must be 4 KiB-aligned. Returns `None` on
     /// page-table-pool exhaustion or if the walk hits an existing huge page.
     pub fn map_4k_user_wx(
         &mut self,
@@ -806,7 +666,7 @@ impl AddressSpace {
     }
 
     /// Shared 4 KiB mapping walk for [`Self::map_4k`] and
-    /// [`Self::map_4k_user`] (one definition).
+    /// [`Self::map_4k_user_wx`] (one definition).
     ///
     /// When `leaf.user` is set, [`flags::USER`] is OR-ed into the leaf and
     /// into each intermediate entry on the walk; a kernel mapping leaves
@@ -849,9 +709,7 @@ impl AddressSpace {
             pdpt[i3] |= flags::USER;
         }
 
-        // Refuse to silently shatter an existing huge page — the test
-        // explicitly uses VAs outside the bootstrap identity range so
-        // this path returns `None` if anyone hits it.
+        // A huge leaf here is a live mapping the walk must not shatter.
         if (pd[i2] & flags::HUGE) != 0 {
             return None;
         }
@@ -869,19 +727,11 @@ impl AddressSpace {
     ///
     /// Caller must guarantee that the new PML4 also maps the currently
     /// executing instruction's `rip` and the current stack — otherwise
-    /// the CPU will fault on the very next memory access.
-    /// Every root constructor upholds that by mapping the higher-half
-    /// kernel window (where the higher-half-linked code/stack/data live)
-    /// and the direct physical map; [`Self::new_boot_identity`] adds the
-    /// trampoline's identity window on top for a space that must also
-    /// reach low physical addresses as themselves.
+    /// the CPU will fault on the very next memory access. Every root
+    /// carries the kernel half, so that holds for code and stacks the kernel
+    /// runs on.
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub unsafe fn switch(&self) {
-        // The first fully-configured space activated on the metal is the
-        // permanent boot space: publish its root, set-once, as the park
-        // root teardown and the dispatcher's suspend path re-install so a
-        // dead user root is never left active (see [`park_kernel_root`]).
-        PARK_ROOT.publish(self.pml4_phys);
         // SAFETY: caller asserts the new mappings cover RIP and RSP; see
         // the `# Safety` paragraph above. `mov cr3, _` is otherwise a
         // pure architectural state change.
@@ -902,14 +752,18 @@ impl AddressSpace {
     }
 }
 
-/// PML4 slot the kernel remap window claims.
-///
-/// Chosen from the port's VA layout: the boot trampoline uses slot 0 for
-/// the low identity window and slot 511 for the higher-half kernel window
-/// (`boot.s` SAFETY-INVARIANT 4 and 9), so slot 510 is the highest free
-/// canonical slot. One PML4 slot is 512 GiB of address space, which costs
+/// PML4 slot the kernel remap window claims: the highest one below the
+/// kernel image's. One PML4 slot is 512 GiB of address space, which costs
 /// nothing until something is backed into it and needs one shared PDPT.
-const KERNEL_WINDOW_PML4_SLOT: usize = 510;
+const KERNEL_WINDOW_PML4_SLOT: usize = KERNEL_IMAGE_PML4_SLOT - 1;
+
+/// PML4 slot of the -2 GiB window the kernel image is linked in.
+const KERNEL_IMAGE_PML4_SLOT: usize = ((KERNEL_VMA_BASE >> 39) & 0x1FF) as usize;
+
+const _: () = assert!(
+    KERNEL_IMAGE_PML4_SLOT == ENTRIES_PER_TABLE - 1 && KERNEL_VMA_BASE.trailing_zeros() >= 30,
+    "the image window is the top PML4 slot, and its base a whole gigabyte"
+);
 
 /// Pages the kernel remap window spans: one PML4 slot is 512 entries at
 /// each of the three levels below it.
@@ -945,25 +799,25 @@ const _: () = assert!(
 /// ([`physmap_gigapages`]).
 ///
 /// The boot trampoline lays the map's floor down before it knows how much
-/// RAM is installed (`boot.s` SAFETY-INVARIANT 10): its own PDPT at
-/// [`PHYSMAP_PML4_FIRST_SLOT`], covering `[0, BOOT_IDENTITY_GIB GiB)`
-/// through the identity window's page directories. That is enough for the
-/// architectural MMIO frames and the firmware tables; this is what extends
-/// it over the discovered RAM, so a frame the allocator draws from the top
-/// of a multi-terabyte pool is reachable by pointer like any other.
+/// RAM is installed (`boot.s` SAFETY-INVARIANT 10), covering
+/// `[0, BOOT_PHYSMAP_GIB GiB)`, and the kernel root carries a copy of its
+/// PDPT as the map's first span at [`PHYSMAP_PML4_FIRST_SLOT`]. That is
+/// enough for the architectural MMIO frames and the firmware tables; this is
+/// what extends it over the discovered RAM, so a frame the allocator draws
+/// from the top of a multi-terabyte pool is reachable by pointer like any
+/// other. Every leaf is non-executable, as the floor's are.
 ///
 /// `tables` is the physical base of [`physmap_table_frames`] contiguous
 /// page-aligned frames — the further spans' PDPTs first, then the page
 /// directories a part without 1 GiB pages needs. They are written through
-/// the trampoline's identity window, so the run must lie inside it.
+/// the floor, so the run must lie inside it.
 ///
 /// Returns `false`, having changed nothing, for a `gib` that is not a
-/// widening ([`BOOT_IDENTITY_GIB`] or less), exceeds [`MAX_PHYSMAP_GIB`],
+/// widening ([`BOOT_PHYSMAP_GIB`] or less), exceeds [`MAX_PHYSMAP_GIB`],
 /// comes with a `tables` run that is misaligned or reaches outside the
-/// identity window, arrives after the map has already been widened, or
-/// meets a live root whose first-span entry is not the trampoline's — the
-/// caller then fails the boot rather than running on a map it did not
-/// install.
+/// floor, arrives after the map has already been widened, or meets a live
+/// root that does not carry the published first span — the caller then
+/// fails the boot rather than running on a map it did not install.
 ///
 /// # Safety
 ///
@@ -973,14 +827,14 @@ const _: () = assert!(
 ///   other owner holds (the boot path reserves them out of the memory map
 ///   before the frame allocator is built).
 ///
-/// The widening only adds translations — in the trampoline's own table
-/// above its floor, and in PML4 slots the trampoline left empty — so no
-/// live translation changes meaning; `CR3` is reloaded at the end so the
-/// CPU picks the new entries up.
+/// The widening only adds translations — in the first span above the
+/// floor, and in PML4 slots left empty — so no live translation changes
+/// meaning; `CR3` is reloaded at the end so the CPU picks the new entries
+/// up.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub unsafe fn install_boot_physmap(gib: usize, tables: u64) -> bool {
-    if gib <= BOOT_IDENTITY_GIB || gib > MAX_PHYSMAP_GIB {
+    if gib <= BOOT_PHYSMAP_GIB || gib > MAX_PHYSMAP_GIB {
         return false;
     }
     // One widening per boot: a second would rewrite the trampoline's table
@@ -992,27 +846,23 @@ pub unsafe fn install_boot_physmap(gib: usize, tables: u64) -> bool {
     let Some(bytes) = (frames as u64).checked_mul(PAGE_SIZE as u64) else {
         return false;
     };
-    let writable_through_identity = tables & (PAGE_SIZE as u64 - 1) == 0
+    let inside_floor = tables & (PAGE_SIZE as u64 - 1) == 0
         && tables
             .checked_add(bytes)
-            .is_some_and(|end| end <= BOOT_IDENTITY_END);
-    if !writable_through_identity {
+            .is_some_and(|end| end <= BOOT_PHYSMAP_END);
+    if !inside_floor {
         return false;
     }
-    let root = active_root_phys();
-    if root == 0 {
+    // SAFETY: `CR3` names the live PML4, a kernel-image table the floor
+    // holds. The only entries written are the map's own slots, which are
+    // empty above its first span.
+    let Some(pml4) = (unsafe { mapped_table(active_root_phys()) }) else {
         return false;
-    }
-    // SAFETY: `CR3` names the live PML4, which sits in low physical memory
-    // the trampoline identity-maps, so its physical address dereferences
-    // directly. The only entries written are the map's own slots, which the
-    // trampoline left empty above its floor.
-    let pml4 = unsafe { &mut *(root as *mut [u64; ENTRIES_PER_TABLE]) };
-    let floor = boot_physmap_entry();
-    // The trampoline writes its floor by a byte offset into `boot_pml4`; if
-    // that ever disagreed with the slot constant here, the map would be
-    // built somewhere nothing reads. Check, do not assume.
-    if pml4[PHYSMAP_PML4_FIRST_SLOT] != floor {
+    };
+    // The first span the kernel root published; a live root without it is
+    // not one this widening may extend.
+    let floor = PHYSMAP_PML4[0].load(Ordering::Acquire);
+    if floor == 0 || !names_same_table(pml4[PHYSMAP_PML4_FIRST_SLOT], floor) {
         return false;
     }
 
@@ -1021,31 +871,29 @@ pub unsafe fn install_boot_physmap(gib: usize, tables: u64) -> bool {
     let spans = gib.div_ceil(ENTRIES_PER_TABLE);
     let huge = gigapages_supported();
     let directories = tables + ((spans - 1) as u64) * PAGE_SIZE as u64;
+    let leaf = KernelAccess::Write.leaf() | flags::HUGE;
 
     // The entry for one gigabyte of the map: a 1 GiB leaf where the part
     // has them, else a page directory of 2 MiB leaves drawn from the run.
     // One definition, shared by the trampoline's span and the further ones.
-    let leaf_for = |slot_gib: usize| -> u64 {
+    let entry_for = |slot_gib: usize| -> Option<u64> {
         let base = (slot_gib as u64) << 30;
         if huge {
-            return base | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+            return Some(base | leaf);
         }
         let pd_phys = directories + ((slot_gib - PHYSMAP_FLOOR_GIB) as u64) * PAGE_SIZE as u64;
-        // These frames were carved from the firmware memory map, not handed
-        // out by a `PageTableFrames` source, and they are written before the
-        // frame allocator exists — so the trampoline's identity window is
-        // the only view of them there is. Every other walk in this module
-        // goes through the source that drew the table.
+        // These frames were carved from the firmware memory map before the
+        // frame allocator exists, so no `PageTableFrames` source drew them
+        // and the floor is the only view of them there is.
         //
-        // SAFETY: the caller pins the run as unowned page-aligned frames
-        // inside the identity window, so each page dereferences here and
-        // aliases nothing live.
-        let pd = unsafe { &mut *(pd_phys as *mut [u64; ENTRIES_PER_TABLE]) };
+        // SAFETY: the caller pins the run as unowned page-aligned frames,
+        // checked above to lie inside the floor, so the page aliases nothing
+        // live.
+        let pd = unsafe { mapped_table(pd_phys) }?;
         for (block, entry) in pd.iter_mut().enumerate() {
-            *entry =
-                (base + ((block as u64) << 21)) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+            *entry = (base + ((block as u64) << 21)) | leaf;
         }
-        pd_phys | flags::PRESENT | flags::WRITABLE
+        Some(pd_phys | KERNEL_TABLE_ENTRY)
     };
 
     let mut entries = [0u64; PHYSMAP_PML4_SLOTS];
@@ -1055,24 +903,28 @@ pub unsafe fn install_boot_physmap(gib: usize, tables: u64) -> bool {
             floor & ADDR_MASK
         } else {
             let phys = tables + ((span - 1) as u64) * PAGE_SIZE as u64;
-            *entry = phys | flags::PRESENT | flags::WRITABLE;
+            *entry = phys | KERNEL_TABLE_ENTRY;
             phys
         };
-        // SAFETY: span 0 is the trampoline's own table and the rest are
-        // pages of the caller's carved run; both lie inside the identity
-        // window, so they dereference here and alias nothing live.
-        let pdpt = unsafe { &mut *(pdpt_phys as *mut [u64; ENTRIES_PER_TABLE]) };
+        // SAFETY: span 0 is the kernel root's own table and the rest are
+        // pages of the caller's carved run; both lie inside the floor and
+        // alias nothing live.
+        let Some(pdpt) = (unsafe { mapped_table(pdpt_phys) }) else {
+            return false;
+        };
         let first_gib = span * ENTRIES_PER_TABLE;
-        // The trampoline already filled its span below the floor; leave
-        // those entries exactly as they are, since live translations use
-        // them.
+        // The first span already maps the floor; leave those entries
+        // exactly as they are, since live translations use them.
         let from = if span == 0 { PHYSMAP_FLOOR_GIB } else { 0 };
         for (slot, pte) in pdpt.iter_mut().enumerate().skip(from) {
             let slot_gib = first_gib + slot;
             if slot_gib >= gib {
                 break;
             }
-            *pte = leaf_for(slot_gib);
+            let Some(entry) = entry_for(slot_gib) else {
+                return false;
+            };
+            *pte = entry;
         }
     }
 
@@ -1124,12 +976,10 @@ fn publish_physmap(entries: &[u64; PHYSMAP_PML4_SLOTS], gib: usize) -> bool {
 /// Copy the published direct-map entries into `pml4`'s claimed slots.
 ///
 /// Every root constructor calls this, so no space can be built without the
-/// map: the trampoline's floor span is adopted here, and the widening's
-/// further spans come from what it published (it patches the live root
-/// itself). A not-present-to-present entry needs no TLB maintenance: the
-/// CPU never caches an absent translation.
+/// map: the kernel root's first span, and the widening's further spans (it
+/// patches the live root itself). A not-present-to-present entry needs no
+/// TLB maintenance: the CPU never caches an absent translation.
 fn install_physmap_slots(pml4: &mut [u64; ENTRIES_PER_TABLE]) {
-    adopt_boot_physmap_floor();
     for (offset, slot) in PHYSMAP_PML4.iter().enumerate() {
         let entry = slot.load(Ordering::Acquire);
         if entry != 0 {
@@ -1138,32 +988,15 @@ fn install_physmap_slots(pml4: &mut [u64; ENTRIES_PER_TABLE]) {
     }
 }
 
-/// The direct map's first-span entry as the boot trampoline built it: its
-/// own PDPT, whose address is a link-time constant because `.boot.bss` is
-/// linked 1:1 in low memory (`linker.ld`), so it *is* the physical address
-/// the MMU needs.
+/// The direct map's floor entry as the boot trampoline built it: its own
+/// PDPT, whose address is a link-time constant because `.boot.bss` is linked
+/// 1:1 in low memory (`linker.ld`), so it *is* the physical address the MMU
+/// needs.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn boot_physmap_entry() -> u64 {
     // A link-time constant, never dereferenced here.
     let phys = core::ptr::addr_of!(boot_pdpt_physmap) as u64;
-    phys | flags::PRESENT | flags::WRITABLE
-}
-
-/// Publish the trampoline's floor as the map's first span, once.
-///
-/// Every root constructor calls this, so a consumer that runs no boot path
-/// — an integration fixture with its own `kernel_main` — still reaches the
-/// architectural MMIO frames under every root it builds. The widening fills
-/// the same table's upper slots and republishes the identical entry, so the
-/// two cannot disagree.
-fn adopt_boot_physmap_floor() {
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    let _ = PHYSMAP_PML4[0].compare_exchange(
-        0,
-        boot_physmap_entry(),
-        Ordering::AcqRel,
-        Ordering::Relaxed,
-    );
+    phys | KERNEL_TABLE_ENTRY
 }
 
 /// `true` if PML4 slot `index` belongs to the kernel half — the direct
@@ -1253,23 +1086,70 @@ fn install_kernel_window_slot(pml4: &mut [u64; ENTRIES_PER_TABLE]) {
     }
 }
 
-/// The boot space's root, which [`park_kernel_root`] parks on.
+/// The image window's shared PML4 entry, or `0` before the kernel root is
+/// built.
+static KERNEL_IMAGE_PML4: AtomicU64 = AtomicU64::new(0);
+
+/// Install the kernel half every root shares into `pml4`: the image window,
+/// the remap window once reserved, and the direct physical map.
+fn install_kernel_half(pml4: &mut [u64; ENTRIES_PER_TABLE]) {
+    let image = KERNEL_IMAGE_PML4.load(Ordering::Acquire);
+    if image != 0 {
+        pml4[KERNEL_IMAGE_PML4_SLOT] = image;
+    }
+    install_kernel_window_slot(pml4);
+    install_physmap_slots(pml4);
+}
+
+/// Whether `entry` points at the table that `table`, an entry this port
+/// wrote, points at.
+///
+/// Compared by what the entry names rather than bit for bit: the CPU sets
+/// the accessed bit in every entry it walks, so a live entry stops equalling
+/// the value written into it the first time its span is touched.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+const fn names_same_table(entry: u64, table: u64) -> bool {
+    entry & flags::PRESENT != 0
+        && entry & flags::HUGE == 0
+        && entry & ADDR_MASK == table & ADDR_MASK
+}
+
+/// The page table at physical `phys`, reached through the direct map, or
+/// [`None`] for an address that is not a page the live map holds. No table
+/// is ever at physical `0`.
+///
+/// # Safety
+///
+/// `phys` names a page table no other reference reaches while the returned
+/// one is in use.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+unsafe fn mapped_table(phys: u64) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
+    if phys == 0 || !phys.is_multiple_of(PAGE_SIZE as u64) {
+        return None;
+    }
+    physmap_span(phys, PAGE_SIZE as u64)?;
+    // SAFETY: the direct map holds the whole page, never torn down, and the
+    // caller vouches that nothing else reaches the table.
+    Some(unsafe { &mut *(physmap_virt(phys) as *mut [u64; ENTRIES_PER_TABLE]) })
+}
+
+/// The kernel root, which every CPU runs kernel threads and the dispatcher
+/// on and [`park_kernel_root`] parks on.
 static PARK_ROOT: ParkRoot = ParkRoot::new();
 
-/// Park the calling CPU's translation regime on the published boot
-/// kernel root under PCID `0`, discarding that PCID's entries first when
-/// `flush`, so no user space's root remains active after its task suspends
-/// or exits. Returns `false`, changing nothing, when no park root has been
-/// published yet (fail closed).
+/// Park the calling CPU's translation regime on the kernel root under PCID
+/// `0`, discarding that PCID's entries first when `flush`, so no user
+/// space's root remains active after its task suspends or exits. Returns
+/// `false`, changing nothing, before the kernel root is built (fail closed).
 ///
 /// The dispatcher calls this after every switch-back from a user task;
 /// address-space teardown calls it, flushing, before dismantling a root
 /// that is somehow still active.
 pub fn park_kernel_root(flush: bool) -> bool {
-    // SAFETY: the published root is the boot space's, which maps the low
-    // identity window and the higher-half kernel window for the image's
-    // lifetime — exactly `activate_user_root`'s contract (inert on the
-    // host, where the root is never published anyway).
+    // SAFETY: the kernel root carries the kernel half every root shares,
+    // which holds everything kernel code runs on — exactly
+    // `activate_user_root`'s contract (inert on the host, where no root is
+    // ever published).
     unsafe { PARK_ROOT.park(flush, activate_user_root) }
 }
 
@@ -1329,7 +1209,7 @@ pub(crate) unsafe fn enable_pcids() {
                 "mov cr4, {t}",
                 t = out(reg) _,
                 bit = in(reg) CR4_PCIDE,
-                options(nostack, preserves_flags),
+                options(nostack),
             );
         }
         let _ =
@@ -1385,26 +1265,6 @@ impl AddressTags for X86_64Tags {
     }
 }
 
-/// Publish the calling CPU's *current* translation root — the boot
-/// trampoline's `CR3` tables, which live in permanent kernel storage
-/// (`boot.s`) — as the park root, set-once.
-///
-/// The x86_64 boot never activates a Rust-built kernel `AddressSpace`
-/// (it keeps running on the trampoline tables), so — unlike
-/// aarch64/riscv64, where the boot space's `switch()` publishes — the
-/// boot path calls this once on the BSP before any user space can be
-/// spawned; a later `switch()` to a per-process space then cannot claim
-/// the slot.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub fn publish_boot_park_root() {
-    PARK_ROOT.publish(active_root_phys());
-}
-
-/// Host substitute: there is no boot trampoline `CR3` on the host; the
-/// park root stays unpublished and [`park_kernel_root`] reports `false`.
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-pub fn publish_boot_park_root() {}
-
 /// The physical root of the calling CPU's active translation regime
 /// (`CR3`'s table base, PCID/flag bits masked off), or `0` on the host,
 /// which runs no translation regime of its own.
@@ -1442,9 +1302,9 @@ fn active_root_phys() -> u64 {
 /// Paging must already be enabled, and the PML4 at `root_phys` must map the
 /// currently-executing kernel `rip`, `rsp`, and the data the code touches
 /// (the per-CPU `swapgs` TLS, the dispatcher's stack) identically to the
-/// outgoing root — every TAIRiX user space maps the low identity window and
-/// the higher-half kernel window, so this holds for any task root, but a
-/// `root_phys` that does not faults the CPU on its next access.
+/// outgoing root — every root this port builds carries the shared kernel
+/// half those lie in, but a `root_phys` that does not faults the CPU on its
+/// next access.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub unsafe fn activate_user_root(root_phys: u64, tag: AddressTag) {
     let value = if pcids_on() {
@@ -1703,24 +1563,17 @@ impl MmuAddressSpace for AddressSpace {
         let Some(root) = self.root_table() else {
             return;
         };
-        // The kernel remap window's and the direct physical map's PML4
-        // entries point at tables *every* root shares, not at tables this
-        // hierarchy owns, and the walk below cannot tell the two apart — it
-        // would free the live kernel heap's page tables, or the map the
-        // whole kernel reaches RAM through. Drop them from this root first;
-        // both are permanent and are reached through every other root
-        // unchanged.
+        // Every kernel-half entry points at tables *every* root shares — the
+        // image window, the remap window, the direct map — and the walk
+        // below cannot tell them from tables this hierarchy owns: it would
+        // free the kernel's own page tables. Drop them from this root first;
+        // all are permanent and reached through every other root unchanged.
         //
         // SAFETY: `pml4_phys` names this space's live PML4, drawn from
         // `self.frames`; `&mut self` makes the exclusive borrow sound, and
         // the borrow ends before the reclaim walk below re-reads the root.
         unsafe {
-            (*root)[KERNEL_WINDOW_PML4_SLOT] = 0;
-            for slot in (*root)
-                .iter_mut()
-                .skip(PHYSMAP_PML4_FIRST_SLOT)
-                .take(PHYSMAP_PML4_SLOTS)
-            {
+            for slot in (*root).iter_mut().skip(PHYSMAP_PML4_FIRST_SLOT) {
                 *slot = 0;
             }
         }
@@ -1735,8 +1588,8 @@ impl MmuAddressSpace for AddressSpace {
                 && (depth == 0 || (entry & flags::HUGE) == 0))
                 .then_some(entry & ADDR_MASK)
         };
-        // SAFETY: every phys `child_of` yields was written by
-        // `ensure_child` / `new_identity` from a `TableFrame` of
+        // SAFETY: with the kernel half dropped, every phys `child_of` yields
+        // was written by `ensure_child` from a `TableFrame` of
         // `self.frames`, so it names a live table this hierarchy owns and
         // the source can reach; the guard above upholds the not-active
         // contract the caller asserts, and `self` is borrowed mutably so no
@@ -1883,9 +1736,8 @@ mod tests {
     use core::sync::atomic::AtomicU64;
     use tairix_arch_api::mmu::{self, PageFlags};
 
-    /// A virtual address above the widest identity window the boot floor
-    /// can carry, so the walk draws fresh tables instead of meeting a
-    /// constructor's huge-page leaf.
+    /// A user-half address no root maps until a test does, so the walk
+    /// draws fresh tables for it.
     const FINE_VA: u64 = 480u64 << 30;
     const FINE_PA: u64 = 0x4123_4000;
 
@@ -1897,6 +1749,24 @@ mod tests {
             !write_back(physmap_bytes(), 1, 64),
             "the host carries no direct map at all"
         );
+    }
+
+    /// A span is reached only whole and only inside the live map. The extent
+    /// is process-global, so the reachable case is checked against whatever
+    /// it is when the test runs.
+    #[test]
+    fn a_direct_map_span_is_refused_unless_the_map_holds_it_whole() {
+        assert!(physmap_span(0x1000, 0).is_none(), "an empty span");
+        assert!(
+            !physmap_holds(u64::MAX - 0xFFF, 0x2000),
+            "a span that wraps"
+        );
+        let top = physmap_bytes();
+        assert!(!physmap_holds(top, 1), "past the map's extent");
+        if let Some(last) = top.checked_sub(1) {
+            assert!(!physmap_holds(last, 2), "straddling its end");
+            assert!(physmap_holds(last, 1), "its last byte");
+        }
     }
 
     #[test]
@@ -1917,13 +1787,13 @@ mod tests {
     #[test]
     fn passes_frames_conformance() {
         static POOL: PageTablePool = PageTablePool::new();
-        tairix_arch_api::frames::conformance::run_all(&POOL, POOL_SIZE);
+        tairix_arch_api::frames::conformance::run_all(&POOL, POOL_TABLES);
     }
 
     #[test]
     fn passes_mmu_conformance() {
         static POOL: PageTablePool = PageTablePool::new();
-        let mut space = AddressSpace::new_bookkeeping_identity_32mib(&POOL).expect("a root");
+        let mut space = AddressSpace::new_process_root(&POOL).expect("a root");
         mmu::conformance::run_all(&mut space, FINE_VA, FINE_PA);
     }
 
@@ -1948,7 +1818,7 @@ mod tests {
     #[test]
     fn an_entry_the_source_cannot_reach_fails_the_walk_closed() {
         static POOL: PageTablePool = PageTablePool::new();
-        let mut space = AddressSpace::new_bookkeeping_identity_32mib(&POOL).expect("a root");
+        let mut space = AddressSpace::new_process_root(&POOL).expect("a root");
         mmu::AddressSpace::map_page(&mut space, FINE_VA, FINE_PA, PageFlags::READ)
             .expect("map the probe page");
         // A page-aligned table the pool never handed out, holding a
@@ -2072,13 +1942,12 @@ mod tests {
     #[test]
     fn reclaim_table_frames_returns_every_drawn_table_exactly_once() {
         static POOL: RecordingFrames = RecordingFrames::new();
-        let mut space = AddressSpace::new_bookkeeping_identity_32mib(&POOL).expect("a root");
+        let mut space = AddressSpace::new_process_root(&POOL).expect("a root");
         let root_phys = space.root_phys();
         let drawn = POOL.used.load(Ordering::SeqCst);
         // Two pages a gigabyte apart, so the walk draws an independent
-        // PD/PT pair for each. Both hang off the *low* PDPT the identity
-        // window already installed, because a PML4 slot spans 512 GiB and
-        // these addresses are inside slot 0.
+        // PD/PT pair for each, both under the one PDPT slot 0 draws: a PML4
+        // slot spans 512 GiB.
         mmu::AddressSpace::map_page(&mut space, FINE_VA, FINE_PA, PageFlags::READ).expect("map A");
         mmu::AddressSpace::map_page(
             &mut space,
@@ -2088,7 +1957,7 @@ mod tests {
         )
         .expect("map B");
         let total = POOL.used.load(Ordering::SeqCst);
-        assert_eq!(total, drawn + 4, "a PD/PT pair per page, no new PDPT");
+        assert_eq!(total, drawn + 5, "a PDPT, then a PD/PT pair per page");
 
         // SAFETY: a host space is no CPU's active translation, and no
         // other reference into its tables is live.
@@ -2154,34 +2023,49 @@ mod tests {
         );
     }
 
-    /// A process root reaches RAM through the direct map only. The bare
-    /// physical address of the very same frame resolves to nothing, which
-    /// is what makes the low half user-only: the standing full-RAM
-    /// identity map every spawned process used to carry is gone.
+    /// A process root carries the shared kernel half and an empty user half,
+    /// so no address of it maps anything physical as itself, NULL included.
     #[test]
-    fn a_process_root_has_no_identity_map_where_a_boot_root_does() {
-        static PROCESS_POOL: PageTablePool = PageTablePool::new();
-        static BOOT_POOL: PageTablePool = PageTablePool::new();
-        let probe = 0x0020_0000u64;
-
-        let process = AddressSpace::new_process_root(&PROCESS_POOL).expect("a process root");
+    fn a_process_root_maps_nothing_physical_as_itself() {
+        static POOL: PageTablePool = PageTablePool::new();
+        let process = AddressSpace::new_process_root(&POOL).expect("a process root");
+        for probe in [
+            0,
+            crate::smp::AP_TRAMPOLINE_PHYS,
+            0x0020_0000,
+            BOOT_PHYSMAP_END - PAGE_SIZE as u64,
+        ] {
+            assert!(
+                mmu::AddressSpace::translate(&process, probe).is_none(),
+                "{probe:#x} is mapped as itself"
+            );
+        }
+        let root = POOL
+            .table_at(process.root_phys())
+            .expect("the pool's own root");
+        // SAFETY: this space's PML4 from the test's own pool, only read.
+        let root = unsafe { &*root };
         assert!(
-            mmu::AddressSpace::translate(&process, probe).is_none(),
-            "a process root must not map a physical address as itself"
+            root.iter()
+                .take(PHYSMAP_PML4_FIRST_SLOT)
+                .all(|entry| *entry == 0),
+            "the user half starts empty"
         );
+    }
 
-        let boot = AddressSpace::new_boot_identity(&BOOT_POOL).expect("a boot root");
-        assert_eq!(
-            mmu::AddressSpace::translate(&boot, probe).map(|(phys, _)| phys),
-            Some(probe),
-            "a boot root keeps the trampoline's identity window"
-        );
-        // And it stops at the trampoline's own extent rather than growing
-        // with the machine: RAM above it is the direct map's job.
+    /// The CPU sets the accessed bit in every entry it walks, so a live entry
+    /// is matched by the table it names, never bit for bit.
+    #[test]
+    fn the_floor_check_ignores_the_accessed_bit() {
+        let floor = 0x0010_5000 | KERNEL_TABLE_ENTRY;
+        assert!(names_same_table(floor, floor));
+        assert!(names_same_table(floor | flags::ACCESSED, floor));
+        assert!(!names_same_table(floor & !flags::PRESENT, floor));
         assert!(
-            mmu::AddressSpace::translate(&boot, BOOT_IDENTITY_END).is_none(),
-            "the identity window is the trampoline's fixed extent"
+            !names_same_table(floor | flags::HUGE, floor),
+            "a leaf names no table"
         );
+        assert!(!names_same_table(floor + PAGE_SIZE as u64, floor));
     }
 
     /// Every x86 DMA master snoops, so memory a non-snooping one would share
@@ -2239,13 +2123,15 @@ mod tests {
         ] {
             assert!(
                 space
-                    .map_4k_user(&POOL, canonical_slot_base(slot), FINE_PA, true)
+                    .map_4k_user_wx(&POOL, canonical_slot_base(slot), FINE_PA, true, false)
                     .is_none(),
                 "slot {slot} is the kernel's"
             );
         }
         // Not a blanket refusal: the user half still maps.
-        assert!(space.map_4k_user(&POOL, FINE_VA, FINE_PA, true).is_some());
+        assert!(space
+            .map_4k_user_wx(&POOL, FINE_VA, FINE_PA, true, false)
+            .is_some());
     }
 
     #[test]
@@ -2269,14 +2155,13 @@ mod tests {
         );
     }
 
-    /// The one test that drives the set-once publication, because it is
-    /// process-global: a second caller is refused by design. Every other
-    /// test here is insensitive to it — a root's direct-map slots name
-    /// tables this pool owns and the reclaim walk drops them before it
-    /// descends, so neither the pool accounting nor a walk of the low half
-    /// changes.
+    /// The one test that drives the set-once publications, because they are
+    /// process-global: a second caller is refused by design. Every other test
+    /// here is insensitive to them — a root's kernel-half slots name tables
+    /// this pool owns and the reclaim walk drops them before it descends, so
+    /// neither the pool accounting nor a walk of the user half changes.
     #[test]
-    fn every_root_installs_the_published_direct_map() {
+    fn every_root_installs_the_published_kernel_half() {
         static POOL: PageTablePool = PageTablePool::new();
         const GIB: usize = 4;
 
@@ -2287,10 +2172,10 @@ mod tests {
             entries: pdpt,
         } = POOL.alloc_table().expect("a PDPT");
         for (gib, slot) in pdpt.iter_mut().take(GIB).enumerate() {
-            *slot = ((gib as u64) << 30) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+            *slot = ((gib as u64) << 30) | KernelAccess::Write.leaf() | flags::HUGE;
         }
         let mut entries = [0u64; PHYSMAP_PML4_SLOTS];
-        entries[0] = pdpt_phys | flags::PRESENT | flags::WRITABLE;
+        entries[0] = pdpt_phys | KERNEL_TABLE_ENTRY;
         assert!(publish_physmap(&entries, GIB), "the first publication");
         assert_eq!(physmap_gigapages(), GIB);
         assert_eq!(physmap_bytes(), (GIB as u64) << 30);
@@ -2298,24 +2183,33 @@ mod tests {
             !publish_physmap(&entries, GIB),
             "the map is installed once per boot"
         );
+        let TableFrame { phys: image, .. } = POOL.alloc_table().expect("an image PDPT");
+        KERNEL_IMAGE_PML4.store(image | KERNEL_TABLE_ENTRY, Ordering::Release);
 
         let probe = 0x1234_5000u64;
-        for space in [
-            AddressSpace::new_process_root(&POOL).expect("a process root"),
-            AddressSpace::new_boot_identity(&POOL).expect("a boot root"),
-        ] {
-            assert_eq!(
-                mmu::AddressSpace::translate(&space, physmap_virt(probe)).map(|(phys, _)| phys),
-                Some(probe),
-                "every root reaches a frame through the direct map"
-            );
-        }
+        let space = AddressSpace::new_process_root(&POOL).expect("a process root");
+        let (phys, rights) =
+            mmu::AddressSpace::translate(&space, physmap_virt(probe)).expect("in the direct map");
+        assert_eq!(
+            phys, probe,
+            "every root reaches a frame through the direct map"
+        );
+        assert!(
+            !rights.contains(PageFlags::EXEC),
+            "nothing runs from the direct map"
+        );
         // Past the published extent nothing is mapped, so a frame the map
         // does not cover faults rather than reading a neighbour's.
-        let space = AddressSpace::new_process_root(&POOL).expect("a process root");
         assert!(
             mmu::AddressSpace::translate(&space, physmap_virt(physmap_bytes())).is_none(),
             "the map stops at its published extent"
         );
+        let root = POOL
+            .table_at(space.root_phys())
+            .expect("the pool's own root");
+        // SAFETY: this space's PML4 from the test's own pool, only read.
+        let root = unsafe { &*root };
+        assert_eq!(root[KERNEL_IMAGE_PML4_SLOT], image | KERNEL_TABLE_ENTRY);
+        assert_eq!(root[PHYSMAP_PML4_FIRST_SLOT], entries[0]);
     }
 }

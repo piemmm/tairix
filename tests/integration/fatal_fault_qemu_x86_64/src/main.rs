@@ -2,8 +2,8 @@
 //! links only the port and installs no fault handler is reported, and the
 //! run ends on the report.
 //!
-//! The kernel reads the first byte past the boot identity window, which
-//! nothing maps. The port's boot entry installed its exception tables, so
+//! The kernel reads an address of the user half, which nothing maps. The
+//! port's boot entry installed its exception tables, so
 //! the `#PF` reaches the fatal path instead of triple-faulting through the
 //! invalid IDTR `boot.s` leaves, and with no handler installed the port
 //! writes its own report. The harness passes the run only if it stopped on
@@ -20,13 +20,12 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_arch_x86_64::panic::handle_panic_via_serial;
-    use tairix_arch_x86_64::{paging, qemu_exit, serial};
+    use tairix_arch_x86_64::{qemu_exit, serial};
 
-    /// The first byte past the boot identity window. The harness expects
-    /// this address in the record, so a change to the window is a change to
-    /// the expectation.
+    /// An address of the user half, which the kernel root leaves unmapped.
+    /// The harness expects this address in the record, so a change here is
+    /// a change to the expectation.
     const UNMAPPED: u64 = 0x1_0000_0000;
-    const _: () = assert!(UNMAPPED == (paging::BOOT_IDENTITY_GIB as u64) << 30);
 
     #[panic_handler]
     fn fatal_fault_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {

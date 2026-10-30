@@ -203,12 +203,22 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   point at guard-paged kernel stacks; `Idt::load` rejects a malformed table;
   double-fault/NMI use a separate IST stack (a kernel-stack overflow cannot
   recurse).
-- **SMEP/SMAP/UMIP/WP control bits (CWE-862; ret2usr / SMAP-bypass).** *Not yet
+- **Kernel W^X and `CR0.WP` (CWE-123 / CWE-787; write-what-where into kernel
+  text).** *Landed on x86_64* (`plans/OPEN-DEFECTS.md` D1571): every CPU runs
+  on the kernel root, which maps nothing physical as itself, maps the image per
+  section (text RX, read-only data R+NX, data RW+NX), keeps the direct map
+  non-executable with its alias of the text and read-only data read only, and
+  sets `CR0.WP` on joining, so a read-only leaf holds against the kernel.
+  Host tests in `paging::kernel_root` cover the table builders over adversarial
+  section layouts and the bound on the tables they draw. aarch64 and riscv64
+  still run on read/write/executable identity mappings (open rows in
+  `plans/OPEN-DEFECTS.md`).
+- **SMEP/SMAP/UMIP control bits (CWE-862; ret2usr / SMAP-bypass).** *Not yet
   implemented.* Add the bits to the Arch-HAL CPU-control surface and write the
-  §17.2/§19.1 QEMU conformance test asserting `CR4.SMEP`/`CR4.SMAP` and
-  `CR0.WP` are set and that a kernel read/exec of a user page faults. Until the
-  bits land this is the **spec that gates the feature** — a real failing-until-
-  implemented target, **not** `#[ignore]` (§2.5).
+  §17.2/§19.1 QEMU conformance test asserting `CR4.SMEP`/`CR4.SMAP` are set and
+  that a kernel read/exec of a user page faults. Until the bits land this is
+  the **spec that gates the feature** — a real failing-until-implemented
+  target, **not** `#[ignore]` (§2.5).
 - **`copy_from_user` TOCTOU & non-canonical user pointers (CWE-367 / CWE-822).**
   *Host validator landed:* `syscall_entry.rs::validate_user_buffer` rejects a
   null, non-canonical, kernel-range, or wrapping user `(ptr, len)` buffer
@@ -245,16 +255,16 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   zero-on-free info-leak, DMA descriptor fuzzing, slab metadata fault-injection,
   audit-log chain-tamper. All map to named CVE classes against already-landed
   code.
-- **Highest yield but Stage-6-gated:** SMEP/SMAP/WP enforcement and KPTI.
+- **Highest yield but Stage-6-gated:** SMEP/SMAP enforcement and KPTI.
   Write the conformance/spec tests now as the gate; implement in Stage 6.
   (The `copy_from_user` hardware fault trap has landed — §5 — with per-port
-  QEMU verticals.)
+  QEMU verticals, and so has x86_64's `CR0.WP` with its kernel W^X.)
 - **Regression-guard, not bug-finding:** the side-channel barrier /
   `is_release_ready` honesty tests.
 - **What these tests cannot prove:** they validate the *detector*, not that
   corruption is impossible; software tagging is probabilistic (tag wrap,
   §19.10). State this in the test. Hardware-enforced detection (MTE faults,
-  `CR0.WP`, SMEP/SMAP page faults on a corrupted PTE) is Arch-HAL/Stage-6-gated.
+  SMEP/SMAP page faults on a corrupted PTE) is Arch-HAL/Stage-6-gated.
 
 ## 7. Definition of Done (§7)
 
@@ -286,5 +296,5 @@ reverted before the task is done (§2.5, §7).
 3. **Audit-log chain-tamper** tests (§19.4).
 4. **Ring-boundary QEMU tests:** `fmask`/RFLAGS, `swapgs`/stack-pivot, `sysret`
    non-canonical RIP, GDT/TSS/IST invariants.
-5. **Stage-6-gated conformance specs:** SMEP/SMAP/`CR0.WP`, `copy_from_user`
+5. **Stage-6-gated conformance specs:** SMEP/SMAP, `copy_from_user`
    TOCTOU, KPTI — written now as the gate the feature must pass.

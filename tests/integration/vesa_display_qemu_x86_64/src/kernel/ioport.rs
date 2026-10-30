@@ -14,10 +14,9 @@
 //! big-endian register, only over I/O ports here.
 //!
 //! The DMA target buffers and the staged control structure are kernel
-//! pointers in a -2 GiB higher-half kernel: a stack buffer is identity-
-//! mapped low RAM (the x86_64 boot maps `0..4 GiB`), but a heap buffer is
-//! a higher-half virtual address (`KERNEL_VMA_BASE + phys`). The
-//! [`DmaAddressRegister::to_physical`] override below maps both back to
+//! pointers, in the image (`KERNEL_VMA_BASE + phys`: statics and the boot
+//! stack) or in the direct map (`PHYSMAP_VMA_BASE + phys`). The
+//! [`DmaAddressRegister::to_physical`] override below maps either back to
 //! the physical address QEMU's DMA engine reads/writes.
 
 use tairix_abi::PortIo;
@@ -36,17 +35,15 @@ pub struct IoPortDma;
 
 impl DmaAddressRegister for IoPortDma {
     fn to_physical(&self, virt: u64) -> u64 {
-        // Higher-half kernel virtual-to-physical: pointers at or above
-        // KERNEL_VMA_BASE (statics, heap) are linked at `base + phys`, so
-        // subtract the base; low pointers (the boot stack) are identity-
-        // mapped and pass through unchanged (linker.ld / boot.s
-        // SAFETY-INVARIANT 9).
-        let base = tairix_arch_x86_64::paging::KERNEL_VMA_BASE;
-        if virt >= base {
-            virt - base
-        } else {
-            virt
+        use tairix_arch_x86_64::paging::{physmap_bytes, KERNEL_VMA_BASE, PHYSMAP_VMA_BASE};
+        if let Some(phys) = virt.checked_sub(KERNEL_VMA_BASE) {
+            return phys;
         }
+        // Any other address names no frame by arithmetic; one no device can
+        // reach fails the transfer rather than aiming it elsewhere.
+        virt.checked_sub(PHYSMAP_VMA_BASE)
+            .filter(|phys| *phys < physmap_bytes())
+            .unwrap_or(u64::MAX)
     }
 
     fn write_dma_address(&self, dma_phys: u64) {

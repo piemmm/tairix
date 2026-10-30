@@ -8,18 +8,16 @@
 //! ring-3 selectors, the TSS, and `syscall`/`IA32_LSTAR` entry installed, so
 //! this test boots the production `tairix-kernel` pipeline (exactly like the
 //! sibling `tairix-test-spawn-program-qemu-x86_64`). On
-//! `AuditEvent::BootCompleted` it enables `IA32_EFER.NXE`, builds a fresh
-//! address space (low 32 MiB identity + the higher-half kernel window),
-//! switches CR3, installs a dispatch callback, then calls the production
-//! capability-checked, audited spawn caller
-//! (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
-//! materialise the program's ring-3 image — built from the `rxe` blob the build
-//! script produced, with W^X leaf permissions (code RX, data RW-NX, rodata
-//! R-NX) — and `iretq` into it. The C program checks a Time64 value across the
-//! boundaries, an ipc header, and a sysinfo header, then calls `cap_query`
-//! and `clock_get`; the dispatch callback services those two syscalls
-//! (returning a known answer / sentinel) and finally asserts the `exit` code is
-//! `99` before `qemu_exit::exit_success`.
+//! `AuditEvent::BootCompleted` it builds a process root, switches CR3, installs
+//! a dispatch callback, then calls the production capability-checked, audited
+//! spawn caller (`tairix_kernel_core::spawn_and_enter`, gated on
+//! `CAP_PROC_SPAWN`) to materialise the program's ring-3 image — built from the
+//! `rxe` blob the build script produced, with W^X leaf permissions (code RX,
+//! data RW-NX, rodata R-NX) — and `iretq` into it. The C program checks a
+//! Time64 value across the boundaries, an ipc header, and a sysinfo header,
+//! then calls `cap_query` and `clock_get`; the dispatch callback services those
+//! two syscalls (returning a known answer / sentinel) and finally asserts the
+//! `exit` code is `99` before `qemu_exit::exit_success`.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]

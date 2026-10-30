@@ -699,9 +699,9 @@ mod tests {
     }
 
     /// The shape a PC firmware map has once the guest has more RAM than the
-    /// boot trampoline's own window: the legacy low window, the main block
-    /// below the PCI hole, the reserved hole itself, and the remainder
-    /// re-based above 4 GiB.
+    /// boot trampoline's floor of the direct map: the legacy low window, the
+    /// main block below the PCI hole, the reserved hole itself, and the
+    /// remainder re-based above 4 GiB.
     fn pc_map_with_high_ram() -> BootMemoryMap {
         let mut map = BootMemoryMap::new();
         map.push(usable(0, 0x9_FC00));
@@ -716,14 +716,14 @@ mod tests {
     }
 
     #[test]
-    fn identity_window_covers_the_top_of_usable_ram() {
-        // RAM ends at 5 GiB + 1 MiB, so the window must reach the whole 6th
+    fn the_direct_map_covers_the_top_of_usable_ram() {
+        // RAM ends at 5 GiB + 1 MiB, so the map must reach the whole 6th
         // gigabyte or the frames at the top of the pool are unreachable.
         assert_eq!(direct_map_gib(&pc_map_with_high_ram(), 4, 64), 6);
     }
 
     #[test]
-    fn identity_window_ignores_reserved_regions_above_ram() {
+    fn the_direct_map_ignores_reserved_regions_above_ram() {
         // A firmware map spans its reserved MMIO hole past the installed
         // RAM; sizing from the highest *address* would map gigabytes of it.
         let mut map = BootMemoryMap::new();
@@ -737,9 +737,9 @@ mod tests {
     }
 
     #[test]
-    fn identity_window_clamps_to_the_user_virtual_base() {
-        // RAM above the cap shares the window's virtual range with the child
-        // image, so the window stops short of it and those frames fail closed.
+    fn the_direct_map_stops_at_the_widest_the_port_can_express() {
+        // RAM above the cap has no address in the map, so those frames fail
+        // closed.
         let mut map = BootMemoryMap::new();
         map.push(usable(0, 128u64 << 30));
         assert_eq!(direct_map_gib(&map, 4, 64), 64);

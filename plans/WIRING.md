@@ -174,18 +174,15 @@ through the bounded cross-CPU IPI-halt handshake (`tairix_arch_api::quiesce`,
 else fail-closed `CpuQuiesceTimeout`), mask interrupts (`sstatus.SIE`/`sie`;
 `DAIF` + `CNTV_CTL_EL0`; `cli`), switch to a reserved `.bss` stack, run the
 arch-neutral whole-RAM sweep continuously (cycling every pattern over all of
-RAM until reset), then relocate a register-only stub into a swept usable page
-to test the kernel-image region and reset. riscv64/aarch64 park on the
+RAM until the operator resets the machine). riscv64/aarch64 park on the
 **reserved** boot root, whose tables lie in the kernel image, and keep paging
-on (both ports are identity-mapped, so `virt==phys`); x86_64 switches `%cr3`
-to the **reserved** boot page tables (`boot_pml4` in `.boot.bss`) for the sweep and
-builds a minimal identity page table in the swept arena for the stub, testing
-`[__boot_phys_start, __kernel_phys_end)` and resetting through the legacy 8042 /
-`0xCF9` hardware. Each is proven end-to-end by
-`tests/integration/supervisor_memtest_takeover_qemu_<t>` (the guest ends in a
-reset). `wasm32` is `n/a` (a sandbox owns no physical RAM to take over). Per-port
-impls are staged with the Supervisor `memtest` command, not part of the
-§17.2 parity guarantee.
+on (both ports are identity-mapped, so `virt==phys`); x86_64, which cannot drop
+long-mode paging either, parks on its kernel root the same way and sweeps RAM
+through the direct map. Each is proven end-to-end by
+`tests/integration/supervisor_memtest_takeover_qemu_<t>` (the harness resets
+the guest once it reports a completed test loop). `wasm32` is `n/a` (a sandbox
+owns no physical RAM to take over). Per-port impls are staged with the
+Supervisor `memtest` command, not part of the §17.2 parity guarantee.
 
 `MsiMultiplexer` (`kernel/arch/api/src/msimux.rs`) is the second optional
 slice: a root complex that captures endpoint messages and raises one parent

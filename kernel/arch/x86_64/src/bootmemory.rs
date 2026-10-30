@@ -174,6 +174,18 @@ impl FirmwareRegion {
     }
 }
 
+/// The physical ranges the port claims before the frame allocator exists:
+/// the running kernel `image`, and the frame an application processor starts
+/// at, which the firmware reports usable and every launch overwrites.
+#[must_use]
+pub fn boot_reservations(image: Range<u64>) -> [Range<u64>; 2] {
+    let trampoline = crate::smp::AP_TRAMPOLINE_PHYS;
+    [
+        image,
+        trampoline..trampoline + crate::paging::PAGE_SIZE as u64,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     //! Host-side tests, including the round-trip lock against the
@@ -182,6 +194,46 @@ mod tests {
     use super::*;
     use crate::multiboot2::{EfiMemoryDescriptor, Mb2MemoryEntry, Mb2MemoryKind};
     use tairix_kernel_mem::{MemoryRegion as KMemRegion, RegionKind as KRegionKind};
+
+    /// The frame an AP starts at is claimed beside the image, so a firmware
+    /// map reporting low memory usable never hands it to the allocator.
+    #[test]
+    fn the_ap_start_frame_is_reserved_beside_the_image() {
+        let image = 0x10_0000..0x21E_6000;
+        let trampoline = crate::smp::AP_TRAMPOLINE_PHYS;
+        let page = crate::paging::PAGE_SIZE as u64;
+        let reserved = boot_reservations(image.clone());
+        assert_eq!(reserved, [image, trampoline..trampoline + page]);
+
+        let mut map = tairix_kernel_mem::BootMemoryMap::new();
+        map.push(KMemRegion {
+            start: tairix_kernel_mem::PhysAddr::new(0),
+            length: 0x9_F000,
+            kind: KRegionKind::Usable,
+        });
+        for range in reserved {
+            map.reserve_range(
+                tairix_kernel_mem::PhysAddr::new(range.start),
+                tairix_kernel_mem::PhysAddr::new(range.end),
+            );
+        }
+        let usable = map
+            .regions()
+            .iter()
+            .filter(|region| region.kind == KRegionKind::Usable);
+        assert!(
+            usable.clone().all(|region| {
+                let start = region.start.as_u64();
+                start + region.length <= trampoline || start >= trampoline + page
+            }),
+            "the allocator could hand the AP's frame out"
+        );
+        assert_eq!(
+            usable.map(|region| region.length).sum::<u64>(),
+            0x9_F000 - page,
+            "and nothing else of low memory is withheld"
+        );
+    }
 
     /// Translate our mirror enum to the canonical kernel/mem enum.
     fn lift(k: RegionKind) -> KRegionKind {

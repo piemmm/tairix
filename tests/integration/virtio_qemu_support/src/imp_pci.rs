@@ -17,14 +17,14 @@ use tairix_kernel::x86_64::arch_wrapper::published_irq_table;
 use tairix_kernel::SERIAL_SINK;
 use tairix_kernel_core::iommu::{MasterOwner, MasterTarget, Mastering, KERNEL_OWNER};
 use tairix_kernel_irq::{IrqWaitAbort, IrqWaiter};
-use tairix_kernel_mem::{AddressSpace, DirectPhysMap, DmaPool, HostPageTable, MmioMap, VirtAddr};
+use tairix_kernel_mem::{AddressSpace, DmaPool, HostPageTable, MmioMap, VirtAddr};
 use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{KernelMmioMapper, KernelVirtioHost};
 use tairix_log::{Event, EventId, Level, Sink};
 use tairix_virtio::{PoolId, VirtioHost};
 
-use crate::common::{drive_driver_lifecycle, FixtureLine, QemuEnv, ScenarioConfig, IDENTITY_LIMIT};
+use crate::common::{drive_driver_lifecycle, FixtureLine, QemuEnv, ScenarioConfig};
 
 /// Re-export so the verticals can name the concrete transport for the
 /// shared device-tail turbofish without their own `tairix-drv-bus-virtio`
@@ -78,7 +78,7 @@ const TASK: ProcessId = ProcessId(0x5b1);
 const POOL_PAGES: usize = 64;
 
 /// Base virtual address of each minted DMA window (bookkeeping only;
-/// access is through the identity map).
+/// access is through the kernel's direct map).
 const POOL_VBASE: u64 = 0x2000_0000;
 
 /// Base virtual address of the MMIO register-window map.
@@ -218,18 +218,15 @@ where
         env.fail("no published IrqTable");
     };
 
-    // 1. Per-device DMA: the kernel's frames, reached through the boot
-    //    identity map.
-    // The kernel's own allocator owns every RAM frame it did not reserve,
-    // so the DMA pool draws from it: a second allocator over any of its
-    // frames would hand out memory the kernel is also using.
+    // 1. Per-device DMA: the kernel's frames, reached through its direct
+    //    map. The kernel's own allocator owns every RAM frame it did not
+    //    reserve, so the DMA pool draws from it: a second allocator over any
+    //    of its frames would hand out memory the kernel is also using.
     let Some(services) = tairix_kernel_core::installed_spawn_services() else {
         env.fail("no live frame allocator");
     };
     let frames = services.frames();
-    // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let phys = unsafe { DirectPhysMap::identity(IDENTITY_LIMIT) }
-        .expect("the boot direct map addresses its window");
+    let phys = &tairix_kernel::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 
     // 2. Bus-driver task capability context.
     let mut grants = CapabilitySet::empty();
@@ -263,7 +260,7 @@ where
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(MMIO_VBASE),
         MMIO_CAP_PAGES,
-        &phys,
+        phys,
     ) else {
         env.fail("MMIO map construct");
     };
@@ -301,7 +298,7 @@ where
         VirtAddr::new(POOL_VBASE),
         POOL_PAGES,
         frames,
-        &phys,
+        phys,
         DmaCoherence::Snooped,
     ) else {
         env.fail("DMA pool construct");

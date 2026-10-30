@@ -7,17 +7,16 @@
 //! the GDT ring-3 selectors, the TSS, and `syscall`/`IA32_LSTAR` entry
 //! installed, so this test boots the production `tairix-kernel` pipeline (which
 //! also programs the periodic LAPIC timer). On `AuditEvent::BootCompleted` it
-//! enables `IA32_EFER.NXE`, builds **one** hardware-isolated ring-3 address
-//! space from the `el0_spinner` `rxe` fixture through the production
-//! capability-checked, audited `tairix_kernel_core::spawn_image` caller, and
-//! admits it as a resumable user kthread via
-//! `tairix_kernel_core::spawn_user_kthread`. Its `pre_resume` hook reloads CR3
-//! (`tairix_arch_x86_64::paging::activate_user_root`) and repoints **both** the
-//! per-CPU `syscall` entry stack (`syscall_entry::set_kernel_rsp0`) and the
-//! `TSS.RSP0` trap stack (`percpu::install_tss_rsp0`) at the task's own kernel
-//! stack — the latter because an involuntary timer IRQ taken from ring 3 is
-//! delivered through the IDT interrupt gate, for which the CPU reads
-//! `TSS.RSP0`.
+//! builds **one** hardware-isolated ring-3 address space from the `el0_spinner`
+//! `rxe` fixture through the production capability-checked, audited
+//! `tairix_kernel_core::spawn_image` caller, and admits it as a resumable user
+//! kthread via `tairix_kernel_core::spawn_user_kthread`. Its `pre_resume` hook
+//! reloads CR3 (`tairix_arch_x86_64::paging::activate_user_root`) and repoints
+//! **both** the per-CPU `syscall` entry stack
+//! (`syscall_entry::set_kernel_rsp0`) and the `TSS.RSP0` trap stack
+//! (`percpu::install_tss_rsp0`) at the task's own kernel stack — the latter
+//! because an involuntary timer IRQ taken from ring 3 is delivered through the
+//! IDT interrupt gate, for which the CPU reads `TSS.RSP0`.
 //!
 //! It then arms the **production** ring-3-preemption path verbatim
 //! (the same `tairix_arch_x86_64::preempt` surface the bin

@@ -84,6 +84,9 @@ pub enum BootDataError {
     /// The PVH start-info record or its memory-map table failed
     /// structural validation.
     Pvh(pvh::ParseError),
+    /// The record, or a table it points at, lies outside the direct
+    /// physical map.
+    Unmapped,
 }
 
 /// Protocol-neutral view of the loader-provided boot information.
@@ -111,11 +114,10 @@ impl BootData<'static> {
     ///
     /// # Safety
     ///
-    /// `boot_info` must be the verbatim pointer the boot trampoline
-    /// passed to `kernel_main` (`boot.s` SAFETY-INVARIANT 7). The blob
-    /// and every table it points at sit below 4 GiB in the trampoline's
-    /// identity-mapped window (SAFETY-INVARIANT 4), so the raw reads
-    /// below stay inside mapped memory the loader populated.
+    /// `boot_info` must be the verbatim address the boot trampoline
+    /// passed to `kernel_main` (`boot.s` SAFETY-INVARIANT 7). Nothing may
+    /// write the blob or a table it points at while the view is in use;
+    /// each is read through the direct map, and one outside it refused.
     pub unsafe fn load(boot_info: u64) -> Result<Self, BootDataError> {
         match protocol().ok_or(BootDataError::NoProtocolRecorded)? {
             BootProtocol::Multiboot2 => {
@@ -123,41 +125,34 @@ impl BootData<'static> {
                 // full slice by it, then let the validator re-check the
                 // structure.
                 //
-                // SAFETY: the caller guarantees `boot_info` is the
-                // loader-published record inside the identity-mapped
-                // window (see the function contract above).
-                let header = unsafe { core::slice::from_raw_parts(boot_info as *const u8, 8) };
+                // SAFETY: the caller's contract above.
+                let header = unsafe { paging::physmap_slice(boot_info, 8) }
+                    .ok_or(BootDataError::Unmapped)?;
                 let total_size =
                     u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
                 // SAFETY: same contract; `total_size` is the loader's
                 // stated length of its own record, which the validator
                 // re-bounds.
-                let bytes =
-                    unsafe { core::slice::from_raw_parts(boot_info as *const u8, total_size) };
+                let bytes = unsafe { paging::physmap_slice(boot_info, total_size) }
+                    .ok_or(BootDataError::Unmapped)?;
                 multiboot2::BootInfo::parse(bytes)
                     .map(BootData::Multiboot2)
                     .map_err(BootDataError::Multiboot2)
             }
             BootProtocol::Pvh => {
-                // SAFETY: the caller guarantees `boot_info` is the
-                // loader-published `hvm_start_info` inside the
-                // identity-mapped window (see the function contract).
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(boot_info as *const u8, pvh::START_INFO_V1_LEN)
-                };
+                // SAFETY: the caller's contract above.
+                let bytes = unsafe { paging::physmap_slice(boot_info, pvh::START_INFO_V1_LEN) }
+                    .ok_or(BootDataError::Unmapped)?;
                 let start_info = pvh::StartInfo::parse(bytes).map_err(BootDataError::Pvh)?;
                 // `parse` guaranteed `memmap_paddr != 0` and a non-zero,
                 // non-overflowing entry count.
                 let len = start_info
                     .memmap_len_bytes()
                     .ok_or(BootDataError::Pvh(pvh::ParseError::Truncated))?;
-                // SAFETY: `memmap_paddr` is the loader-published table
-                // address inside the same identity-mapped window; `len`
-                // is the loader's stated table length, which the
-                // validator re-bounds.
-                let table = unsafe {
-                    core::slice::from_raw_parts(start_info.memmap_paddr as *const u8, len)
-                };
+                // SAFETY: same contract; `len` is the loader's stated table
+                // length, which the validator re-bounds.
+                let table = unsafe { paging::physmap_slice(start_info.memmap_paddr, len) }
+                    .ok_or(BootDataError::Unmapped)?;
                 let memmap = pvh::MemoryMap::parse(table, start_info.memmap_entries)
                     .map_err(BootDataError::Pvh)?;
                 Ok(BootData::Pvh { start_info, memmap })
@@ -169,8 +164,8 @@ impl BootData<'static> {
 impl<'a> BootData<'a> {
     /// The kernel command line the loader passed, if it passed one that is
     /// UTF-8 and, from a PVH loader, ends within [`pvh::COMMAND_LINE_MAX`]
-    /// bytes of RAM the loader's own memory map reports, inside the identity
-    /// window.
+    /// bytes of RAM the loader's own memory map reports, inside the direct
+    /// map.
     ///
     /// The text lies in loader memory the frame allocator later reuses, so a
     /// caller that keeps it keeps a copy.
@@ -189,13 +184,13 @@ impl<'a> BootData<'a> {
                 }
                 let end = memmap
                     .ram_end(start)?
-                    .min(paging::BOOT_IDENTITY_END)
+                    .min(paging::physmap_bytes())
                     .min(start.saturating_add(pvh::COMMAND_LINE_MAX as u64));
                 let len = usize::try_from(end.checked_sub(start)?).ok()?;
                 // SAFETY: the `len` bytes from `start` are RAM the loader's
-                // own map reports, inside the identity-mapped window the
-                // function contract names, so reading them touches no device.
-                let bytes = unsafe { core::slice::from_raw_parts(start as *const u8, len) };
+                // own map reports, so reading them touches no device, and the
+                // function contract keeps them unwritten.
+                let bytes = unsafe { paging::physmap_slice(start, len) }?;
                 pvh::command_line(bytes)
             }
         }
@@ -212,44 +207,31 @@ impl BootData<'_> {
     ///
     /// # Safety
     ///
-    /// Same contract as [`BootData::load`]: the loader-published tables
-    /// and the legacy BIOS window live below 4 GiB in the
-    /// identity-mapped window, so reading [`acpi::RSDP_V2_LEN`] bytes
-    /// at the PVH `rsdp_paddr` and scanning
-    /// [`acpi::LEGACY_REGION_LEN`] bytes at
-    /// [`acpi::LEGACY_REGION_BASE`] stay inside mapped memory.
+    /// Same contract as [`BootData::load`], over [`acpi::RSDP_V2_LEN`]
+    /// bytes at the PVH `rsdp_paddr` and the [`acpi::LEGACY_REGION_LEN`]
+    /// bytes at [`acpi::LEGACY_REGION_BASE`], both read through the direct
+    /// map.
     #[must_use]
     pub unsafe fn validated_rsdp(&self) -> Option<acpi::Rsdp> {
         match self {
             BootData::Multiboot2(info) => acpi::Rsdp::validate(info.rsdp()?).ok(),
             BootData::Pvh { start_info, .. } => {
                 if start_info.rsdp_paddr != 0 {
-                    // SAFETY: `rsdp_paddr` is the loader-published RSDP
-                    // address inside the identity-mapped window (the
-                    // function contract); the v2 length is the widest
-                    // form and `Rsdp::validate` re-checks both
+                    // SAFETY: the function contract; the v2 length is the
+                    // widest form and `Rsdp::validate` re-checks both
                     // checksums.
-                    let bytes = unsafe {
-                        core::slice::from_raw_parts(
-                            start_info.rsdp_paddr as *const u8,
-                            acpi::RSDP_V2_LEN,
-                        )
-                    };
-                    if let Ok(rsdp) = acpi::Rsdp::validate(bytes) {
+                    let bytes =
+                        unsafe { paging::physmap_slice(start_info.rsdp_paddr, acpi::RSDP_V2_LEN) };
+                    if let Some(rsdp) = bytes.and_then(|bytes| acpi::Rsdp::validate(bytes).ok()) {
                         return Some(rsdp);
                     }
                 }
-                // SAFETY: the legacy BIOS window is firmware-populated
-                // physical memory below 4 GiB inside the same
-                // identity-mapped window (the function contract);
-                // `find_rsdp` checksum-validates every candidate before
-                // accepting it.
+                // SAFETY: the function contract, over firmware-populated
+                // memory; `find_rsdp` checksum-validates every candidate
+                // before accepting it.
                 let region = unsafe {
-                    core::slice::from_raw_parts(
-                        acpi::LEGACY_REGION_BASE as *const u8,
-                        acpi::LEGACY_REGION_LEN,
-                    )
-                };
+                    paging::physmap_slice(acpi::LEGACY_REGION_BASE, acpi::LEGACY_REGION_LEN)
+                }?;
                 acpi::find_rsdp(region).map(|(_, rsdp)| rsdp)
             }
         }

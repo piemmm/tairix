@@ -124,13 +124,13 @@ write-combining (`Unsupported`) rather than silently mapping UC.
 
 The aperture must not be aliased with a conflicting memory type, which the
 SDM leaves undefined; a write-combining page aliased to a cacheable one is the
-case it singles out. Today it would be: the boot identity window (0–4 GiB) and
-the direct physical map (a 0–4 GiB floor sharing the identity window's 2 MiB
-leaves, widened to the top of RAM) map every range they span, non-RAM
-included, through PAT entry 0. An aperture in either span therefore already
-has a write-back-typed alias, cacheable wherever the firmware's MTRRs leave
-the range write-back. F1 removes that alias rather than relying on the
-MTRRs, so the kernel's one mapping of the aperture is the write-combining one.
+case it singles out. Today it would be: the direct physical map (a 0–4 GiB
+floor, widened to the top of RAM) maps every range it spans, non-RAM
+included, through PAT entry 0, and it is the kernel root's one mapping of
+physical memory. An aperture in its span therefore already has a
+write-back-typed alias, cacheable wherever the firmware's MTRRs leave the
+range write-back. F1 removes that alias rather than relying on the MTRRs, so
+the kernel's one mapping of the aperture is the write-combining one.
 
 Tests: host tests of the PAT value and of the leaf encode/decode round trip at
 every page size, and the x86_64 conformance vertical mapping a write-combining

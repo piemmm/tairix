@@ -16,13 +16,14 @@ use tairix_arch_x86_64::paging::{self, KERNEL_VMA_BASE};
 use tairix_arch_x86_64::userentry::UserMode;
 use tairix_arch_x86_64::{fault, qemu_exit, syscall_entry};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
 use tairix_kernel_core::{spawn_image, MemMap, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{
-    map_anonymous, page_count_for, unmap_anonymous, AddressSpace, AnonError, DirectPhysMap, Frame,
-    PhysAddr, Retire, Unpublished, UserStack,
+    map_anonymous, page_count_for, unmap_anonymous, AddressSpace, AnonError, Frame, PhysAddr,
+    Retire, Unpublished, UserStack,
 };
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level, Sink};
@@ -53,10 +54,6 @@ const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 /// Per-process stack-canary seed handed to the program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
-/// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11).
-const IA32_EFER: u32 = 0xC000_0080;
-const EFER_NXE: u64 = 1 << 11;
-
 /// Physical frames the test hands the spawn build and the anonymous map.
 const FRAME_COUNT: usize = 320;
 
@@ -85,9 +82,9 @@ static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
 /// Physical-frame backing store the spawn builder and the anonymous map draw
 /// user pages from. `align(4096)` so each `PAGE_SIZE` slice is a valid page
-/// frame. A higher-half kernel static, so its physical address is its virtual
-/// address minus [`KERNEL_VMA_BASE`]; the builders reach it through a
-/// [`DirectPhysMap`] with that same offset.
+/// frame. A static of the kernel image, so its physical address is its virtual
+/// address minus [`KERNEL_VMA_BASE`], and the builders reach it through the
+/// direct map.
 #[repr(C, align(4096))]
 struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
 
@@ -138,11 +135,9 @@ impl CapabilityQuery for SpawnAuthority {
     }
 }
 
-/// The live user address space the anonymous map/unmap mutate, plus the kernel
-/// direct-physical map used to zero frames on map and on free.
+/// The live user address space the anonymous map/unmap mutate.
 struct LiveSpace {
     space: AddressSpace<paging::AddressSpace>,
-    physmap: DirectPhysMap,
 }
 
 /// The `MemMap` producer the test installs: it maps and unmaps anonymous `RW`
@@ -236,7 +231,7 @@ impl MemMap for AnonProducer {
         let live = self.live()?;
         map_anonymous(
             &mut live.space,
-            &live.physmap,
+            &SPAWN_TABLE_PHYSMAP,
             addr_hint,
             page_count,
             next_frame,
@@ -251,7 +246,7 @@ impl MemMap for AnonProducer {
         let live = self.live()?;
         unmap_anonymous(
             &mut live.space,
-            &live.physmap,
+            &SPAWN_TABLE_PHYSMAP,
             base,
             page_count,
             retire,
@@ -380,42 +375,15 @@ static AUDIT_SINK: BootCompletedSink = BootCompletedSink;
 fn run_round_trip() -> ! {
     note(TEST_START, "x86_64 mem_map test: building the ring-3 image");
 
-    // Enable `IA32_EFER.NXE` so the W^X No-Execute leaf bit the adapter sets on
-    // data/rodata pages is honoured rather than reserved.
-    // SAFETY: reading and writing `IA32_EFER` is the documented enable
-    // sequence; it runs once on the BSP and only sets bit 11, preserving
-    // `SCE`/`LME`/`LMA` the boot pipeline established.
-    unsafe {
-        let lo: u32;
-        let hi: u32;
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") IA32_EFER,
-            out("eax") lo,
-            out("edx") hi,
-            options(nostack, preserves_flags),
-        );
-        let efer = (((hi as u64) << 32) | lo as u64) | EFER_NXE;
-        core::arch::asm!(
-            "wrmsr",
-            in("ecx") IA32_EFER,
-            in("eax") efer as u32,
-            in("edx") (efer >> 32) as u32,
-            options(nostack, preserves_flags),
-        );
-    }
-
-    // Fresh address space (low 32 MiB identity + higher-half kernel window) and
-    // activate it before any user mapping is added.
-    let Some(arch) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
+    // A process root, activated before any user mapping is added.
+    let Some(arch) = paging::AddressSpace::new_process_root(&PAGE_TABLE_POOL) else {
         note(TEST_FAIL, "mem_map test: page-table pool exhausted");
         qemu_exit::exit_failure();
     };
-    // SAFETY: the new space carries the live identity window and the
-    // higher-half kernel window, so the executing RIP, the current stack, the
-    // per-CPU `swapgs` TLS, the page-table pool, the frame pool,
-    // `dispatch`/`on_fault`, and the timer ISR's LAPIC MMIO access all stay
-    // mapped across the CR3 switch.
+    // SAFETY: the root carries the kernel half: the image window holding this
+    // code, the current stack and every static, and the direct map the LAPIC
+    // is reached through, so nothing the kernel touches is lost across the
+    // CR3 switch.
     unsafe { arch.switch() };
     syscall_entry::set_dispatch_callback(dispatch);
 
@@ -426,9 +394,6 @@ fn run_round_trip() -> ! {
     };
 
     let mut space = AddressSpace::new(arch);
-    // SAFETY: the boot code installs this direct map and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::new(KERNEL_VMA_BASE, 1 << 30) }
-        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image: &image,
         image_bytes: PROGRAM_RXE,
@@ -454,7 +419,7 @@ fn run_round_trip() -> ! {
             SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
-            &physmap,
+            &SPAWN_TABLE_PHYSMAP,
             &request,
             next_frame,
         )
@@ -473,7 +438,7 @@ fn run_round_trip() -> ! {
     // tables live in the static `PAGE_TABLE_POOL`).
     // SAFETY: called once on the boot CPU before `enter_user` (and thus any
     // `mem_map`) can fire.
-    unsafe { PRODUCER.install(LiveSpace { space, physmap }) };
+    unsafe { PRODUCER.install(LiveSpace { space }) };
 
     note(TEST_SPAWNED, "x86_64 mem_map test: ring-3 program spawned");
 

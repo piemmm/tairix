@@ -19,15 +19,10 @@ use crate::{bootinfo, pic, pio, pvh, MULTIBOOT2_BOOTLOADER_MAGIC};
 extern "C" {
     /// Provided by the test binary. Must not return.
     ///
-    /// The single `boot_info` parameter carries the verbatim 64-bit
-    /// pointer the loader passed in `%ebx`. A binary that does not need
-    /// to inspect the boot info (e.g.
-    /// `tests/integration/memory_isolation`) can simply ignore it; a
-    /// binary that does need it (e.g.
-    /// `tests/integration/scheduler_stress_qemu`) parses it via
-    /// `crate::bootinfo::BootData::load` once it has identity-mapped
-    /// access to that address — `boot.s` SAFETY-INVARIANT 4 guarantees
-    /// the first 4 GiB of physical memory are reachable.
+    /// The single `boot_info` parameter carries the verbatim physical
+    /// address the loader passed in `%ebx`, which a binary that needs it
+    /// parses through `crate::bootinfo::BootData::load`. The binary runs on
+    /// the kernel root, so nothing physical is reachable as itself.
     fn kernel_main(boot_info: u64) -> !;
 }
 
@@ -52,7 +47,11 @@ extern "C" {
 ///    IDTR `boot.s` leaves. A binary observes its own faults through the
 ///    fault-handler slot, and the kernel replaces the tables with its
 ///    per-CPU ones.
-/// 5. Transfers to the binary-supplied `kernel_main`.
+/// 5. Moves onto the kernel root with supervisor write protection on
+///    ([`crate::paging::enter_kernel_root`]), leaving the trampoline's
+///    identity window behind, so no binary runs where a stray kernel access
+///    to a low address lands in memory.
+/// 6. Transfers to the binary-supplied `kernel_main`.
 ///
 /// # Safety
 ///
@@ -87,6 +86,12 @@ pub extern "C" fn tairix_arch_x86_64_main(
     // `boot.s` hands over and nothing else uses.
     if unsafe { crate::percpu::install_boot_tables(boot_tables) }.is_err() {
         refuse("the boot descriptor tables were refused");
+    }
+    // SAFETY: the boot CPU, once, with interrupts disabled, on the
+    // trampoline's root, and with the descriptor tables just installed in
+    // the image's boot data rather than the identity window.
+    if let Err(reason) = unsafe { crate::paging::enter_kernel_root() } {
+        refuse(reason);
     }
     // SAFETY: `kernel_main` is provided by the linked test binary and is
     // documented as `-> !` (see `extern` block above). Calling it once

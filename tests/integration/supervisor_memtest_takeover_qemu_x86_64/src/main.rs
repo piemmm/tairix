@@ -25,11 +25,11 @@
 //! the bounded IPI-halt handshake before the tear-down begins.
 //!
 //! On the wired x86_64 port `memtest_takeover` **never returns**: the caller
-//! quiesces every other CPU, then the `MachineTakeover` body masks interrupts
-//! (`cli`), switches onto a reserved `.bss` stack, installs the reserved boot
-//! page tables, and tests every usable frame on that stack — cycling every
-//! pattern over all of RAM, over and over, rendering the memtest86-style
-//! display (elapsed timer, completed-loop count, error log) to COM1. The
+//! quiesces every other CPU, then the `MachineTakeover` body installs the
+//! kernel root, masks interrupts (`cli`), switches onto a reserved `.bss`
+//! stack, and tests every free frame on that stack — cycling every pattern
+//! over them, over and over, rendering the memtest86-style display (elapsed
+//! timer, completed-loop count, error log) to COM1. The
 //! takeover never resets the board itself; once the guest prints the
 //! completed-test-loop marker the harness issues a QEMU-monitor `system_reset`,
 //! and under `-no-reboot` that reset exits the host process so the runner
@@ -88,7 +88,7 @@ mod kernel {
     /// straight to COM1, so the QEMU transcript records it. It uses the
     /// polled 16550 transmit path directly (no interrupt, no lock), so it
     /// never spins on a wake source even after interrupts are masked and the
-    /// page tables are switched; the display is best-effort and the PASS keys
+    /// kernel root is installed; the display is best-effort and the PASS keys
     /// on the reset.
     struct SerialReport;
 

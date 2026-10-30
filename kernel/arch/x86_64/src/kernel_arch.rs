@@ -623,7 +623,10 @@ impl SecondaryBringup for X86_64Arch {
             match unsafe { crate::smp::start_secondary(target_apic_id, cpu) } {
                 Ok(()) => Ok(()),
                 Err(crate::smp::StartCpuError::CpuIdOutOfRange) => Err(SmpError::InvalidCpu),
-                Err(crate::smp::StartCpuError::NoEntryInstalled) => Err(SmpError::NotReady),
+                Err(
+                    crate::smp::StartCpuError::NoEntryInstalled
+                    | crate::smp::StartCpuError::NoKernelRoot,
+                ) => Err(SmpError::NotReady),
                 Err(crate::smp::StartCpuError::StartTimedOut) => {
                     self.forget_cpu(cpu);
                     Err(SmpError::StartRejected(0))

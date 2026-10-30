@@ -129,13 +129,10 @@ impl InitSpawn for X86_64InitSpawn {
         }
 
         // PID 1's hierarchy is drawn from the kernel's live frame allocator
-        // through the same source every runtime spawn uses. A part without
-        // 1 GiB pages costs one page directory per gigabyte of the identity
-        // window, so a fixed `.bss` reserve here would be a ceiling that a
-        // machine with enough RAM outgrows — the aarch64 sibling can keep its
-        // reserve because its stage-1 format always has 1 GiB blocks and its
-        // cost is flat. A context with no `'static` allocator cannot build
-        // PID 1 at all and falls through to the caller's fail-closed halt.
+        // through the same source every runtime spawn uses, as a fixed
+        // `.bss` reserve would cap what its image may map. A context with no
+        // `'static` allocator cannot build PID 1 at all and falls through to
+        // the caller's fail-closed halt.
         let Some(static_frames) = ctx.static_frames() else {
             return;
         };
@@ -246,9 +243,9 @@ impl InitSpawn for X86_64InitSpawn {
                 // `set_user_thread_pointer`'s contract.
                 unsafe { set_user_thread_pointer(tls_base) };
                 // SAFETY: paging is enabled and `init_root_phys` is the PML4 of
-                // PID 1's space, which maps the low identity + higher-half kernel
-                // window the running dispatcher executes from — exactly
-                // `activate_user_root`'s contract.
+                // PID 1's space, which carries the kernel half the running
+                // dispatcher executes from — exactly `activate_user_root`'s
+                // contract.
                 unsafe { activate_user_root(init_root_phys, tag) };
             });
 
@@ -262,8 +259,8 @@ impl InitSpawn for X86_64InitSpawn {
 
         // PID 1's process address space (`plans/PI.md` 5d-0-ii (b′)): the
         // *same* arch space the snapshot above was frozen from, zeroing
-        // anonymous frames through the same identity direct map the image
-        // build used (PID 1's CR3 carries it). A window the allocator rejects,
+        // anonymous frames through the same direct map the image build used
+        // (PID 1's CR3 carries it). A window the allocator rejects,
         // or a CPU set that cannot be allocated, retains none and PID 1's `mem_map` / `mmio_map` fail closed.
         let live: Option<Arc<ProcessSpace>> = spawn_layout::process_space(
             space,

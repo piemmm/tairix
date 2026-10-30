@@ -98,17 +98,13 @@ mod vbe {
 // --- MMIO map sizing -------------------------------------------------
 
 /// Bookkeeping virtual base of the register-window map (the windows are
-/// reached through the identity map, so this only keys the slot bitmap).
+/// reached through the direct map, so this only keys the slot bitmap).
 const MMIO_VBASE: u64 = 0x6000_0000;
 /// Capacity in pages of the register-window map: the surface is
 /// `FB_BYTES` (4 pages) and the vertical mints three windows (two driver
 /// loads + one verification), each bracketed by two guard pages, so 32
 /// pages leaves comfortable headroom.
 const MMIO_CAP_PAGES: usize = 32;
-
-/// Upper bound of the boot identity map (the bottom 4 GiB); the kernel
-/// image and the framebuffer surface both sit well inside it.
-const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
 
 /// Synthetic owner process id for the driver context.
 const TASK: ProcessId = ProcessId(0x5E5A);
@@ -133,8 +129,8 @@ static mut FRAMEBUFFER: Surface = Surface([0u8; FB_BYTES]);
 /// `FRAMEBUFFER` is a higher-half kernel static (the kernel is linked at
 /// `KERNEL_VMA_BASE + phys`, see `kernel/arch/x86_64/linker.ld`), so its
 /// physical address — what the VBE `PhysBasePtr` must hold and what the
-/// MMIO mapper translates through the low-4-GiB identity map — is its
-/// virtual address minus the higher-half base.
+/// MMIO mapper translates through the direct map — is its virtual address
+/// minus the higher-half base.
 fn framebuffer_phys() -> u64 {
     (ptr::addr_of!(FRAMEBUFFER) as u64) - tairix_arch_x86_64::paging::KERNEL_VMA_BASE
 }
@@ -311,14 +307,20 @@ pub fn run() {
 /// presented pixels reach the scan-out memory after each `present`.
 /// Every failure flips QEMU failure with a breadcrumb.
 fn drive_lifecycle(block: &[u8], phys_base: u64) {
-    // Capability-checked kernel MMIO mapper over the boot identity map.
+    // Capability-checked kernel MMIO mapper over the kernel's direct map.
     let mut grants = CapabilitySet::empty();
     grants.insert(CapabilityId::MMIO_MAP);
     grants.insert(CapabilityId::DRV_LOAD);
     let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK);
-    // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let phys = unsafe { DirectPhysMap::identity(IDENTITY_LIMIT) }
-        .expect("the boot direct map addresses its window");
+    // SAFETY: every root carries the direct map over its live extent, and
+    // nothing tears it down.
+    let phys = unsafe {
+        DirectPhysMap::new(
+            tairix_arch_x86_64::paging::PHYSMAP_VMA_BASE,
+            tairix_arch_x86_64::paging::physmap_bytes(),
+        )
+    }
+    .expect("the boot direct map addresses its window");
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(MMIO_VBASE),

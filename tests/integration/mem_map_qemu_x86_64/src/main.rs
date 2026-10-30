@@ -11,14 +11,14 @@
 //! (`tairix_arch_x86_64::fault`), so the deliberate use-after-unmap `#PF` is
 //! observable rather than fail-closed-and-opaque.
 //!
-//! On `AuditEvent::BootCompleted` the test enables `IA32_EFER.NXE`, installs a
+//! On `AuditEvent::BootCompleted` the test installs a
 //! `tairix_arch_x86_64::fault` observer, builds one hardware-isolated user
 //! address space from the `rxe` fixture program through the production
 //! capability-checked, audited `tairix_kernel_core::spawn_image` caller,
 //! **retains it live**, and installs a `tairix_kernel_core::MemMap` producer
 //! backed by `tairix_kernel_mem::map_anonymous` / `unmap_anonymous` over that
-//! space and its frame pool. It then `iretq`s into the program directly
-//! through `EnterUser::enter_user`; the dispatch callback routes the program's
+//! space and its frame pool. It then `iretq`s into the program directly through
+//! `EnterUser::enter_user`; the dispatch callback routes the program's
 //! `mem_map` / `mem_unmap` `syscall`s through the producer.
 //!
 //! The program maps an anonymous region (FIXED), writes and reads back a

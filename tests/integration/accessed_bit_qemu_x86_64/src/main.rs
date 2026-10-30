@@ -49,14 +49,12 @@ use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlag
 #[cfg(itest_x86_64)]
 use tairix_arch_x86_64::{paging, qemu_exit, serial};
 
-/// Virtual address the test maps its single 4 KiB probe page at: the first
-/// byte past the boot trampoline's identity window, so the mapping is a
-/// fresh 4 KiB leaf (its own PDPT/PD/PT) and never lands inside one of the
-/// window's huge blocks. Derived from the port's published extent rather
-/// than picked.
+/// Virtual address the test maps its single 4 KiB probe page at: an address
+/// of the user half, which a process root leaves empty, so the mapping is a
+/// fresh 4 KiB leaf with its own PDPT/PD/PT.
 #[cfg(itest_x86_64)]
 fn test_vaddr() -> u64 {
-    (paging::BOOT_IDENTITY_GIB as u64) << 30
+    1 << 32
 }
 
 /// A misaligned address, to confirm the fail-closed reject.
@@ -66,8 +64,7 @@ fn misaligned_vaddr() -> u64 {
 }
 
 /// An address mapped nowhere in the test space, to confirm the "not mapped"
-/// fail-closed reject: a gigabyte past the probe page, so it is clear of both
-/// the identity window and the probe's own leaf.
+/// fail-closed reject: a gigabyte past the probe page, clear of its leaf.
 #[cfg(itest_x86_64)]
 fn unmapped_vaddr() -> u64 {
     test_vaddr() + (1 << 30)
@@ -131,7 +128,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
             .write_volatile(PROBE_BYTE);
     }
 
-    let Some(mut space) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
+    let Some(mut space) = paging::AddressSpace::new_process_root(&PAGE_TABLE_POOL) else {
         fail(&mut com1, "page-table pool exhausted building space");
     };
 
@@ -153,8 +150,9 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
         fail(&mut com1, "x86_64 must declare AccessTracking::Supported");
     }
 
-    // SAFETY: the space carries the live identity window (boot stack / RIP) and the
-    // higher-half kernel window, so RIP/RSP stay mapped across the switch.
+    // SAFETY: the space carries the kernel half — the image window holding
+    // this code and the boot stack — so RIP/RSP stay mapped across the
+    // switch.
     unsafe { space.activate() };
     SETUP_DONE.store(true, Ordering::SeqCst);
     let _ = writeln!(

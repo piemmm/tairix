@@ -11,12 +11,16 @@
 //! * [`ApBootSlot`] — the per-AP record the trampoline reads at a fixed
 //!   in-page offset.
 //! * [`TrampolineFrame`] — the typed wrapper around the 4 KiB low
-//!   physical frame; installs the payload and exposes a typed view of
-//!   the boot slot.
+//!   physical frame; installs the payload and writes the boot slot.
 //! * [`init_sipi_sipi`] — the INIT-deassert + INIT + SIPI + SIPI
 //!   sequencer expressed against the existing
 //!   [`crate::apic::Lapic`] / [`crate::apic::LapicMmio`] primitives so
 //!   no new architecture-neutral surface is introduced.
+//!
+//! An AP starts on the start-up root (`paging::startup_root`), which maps
+//! the trampoline page as itself and the kernel's image window, and its
+//! first Rust code joins the kernel root before anything else runs. The
+//! consumer supplies what it runs then, through [`set_secondary_entry`].
 //!
 //! # Why this lives in `kernel/arch/x86_64` and not `kernel/sched`
 //!
@@ -24,25 +28,19 @@
 //! one consumer. AP bring-up is x86_64-specific (aarch64 uses PSCI,
 //! riscv64 uses HSM, wasm32 has no APs); the architecture-neutral
 //! scheduler has no business knowing how a target hardware brings up
-//! its CPUs. The cooperation point is [`crate::smp::ApBootSlot::entry`]
-//! — a plain `extern "C" fn(cpu_id: u32) -> !` that the consumer-side
-//! kernel binary supplies.
+//! its CPUs.
 //!
 //! # `unsafe` discipline
 //!
-//! Every `unsafe` block has a `// SAFETY:` justification. The only
-//! non-trivial one is the acquire load of the in-frame rendezvous flag
-//! ([`TrampolineFrame::load_ready`]). The payload install and the
-//! boot-slot write are plain slice copies; ordering against the SIPI
-//! comes from the caller's release fence. Nothing about the trampoline
-//! page leaks across the crate boundary as a raw pointer.
+//! Every `unsafe` block has a `// SAFETY:` justification. The payload
+//! install and the boot-slot write are plain slice copies, ordered against
+//! the SIPI by the caller's release fence; the `ready` rendezvous the two
+//! CPUs race on is an atomic reached through one shared view, never through
+//! the frame's exclusive one. Nothing about the trampoline page leaks
+//! across the crate boundary as a raw pointer.
 
-// `AtomicU32` is referenced by `TrampolineFrame::load_ready` for the
-// acquire-load against the in-frame `ready` flag the AP `xchg`s into;
-// the `ApBootSlot` struct itself only uses a plain `u32` so it can stay
-// `Copy + Eq` (the asm-side `xchg` atomicity is what the wire protocol
-// requires; the Rust-side struct never receives an AP write directly).
 use core::mem::offset_of;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use core::sync::atomic::{AtomicU32, Ordering};
 
 // The caller-provided `ApStackPool` payload is held in an `UnsafeCell`
@@ -132,60 +130,51 @@ const AP_BOOT_SLOT_WIRE_FITS: () = {
 ///
 /// | offset | size | field                                          |
 /// |--------|------|------------------------------------------------|
-/// |  0x00  |  8   | `cr3`         — bootstrap PML4 physical address |
+/// |  0x00  |  8   | `cr3`         — the start-up root               |
 /// |  0x08  |  8   | `stack_top`   — 16-byte-aligned RSP on entry    |
-/// |  0x10  |  8   | `entry`       — `extern "C" fn(u32) -> !` ptr   |
-/// |  0x18  |  4   | `cpu_id`      — scheduler CPU id (u32)          |
-/// |  0x1C  | 36   | reserved (zero)                                 |
-/// |  0x40  |  4   | `ready`       — AP writes 1 once long mode up   |
+/// |  0x10  |  4   | `cpu_id`      — scheduler CPU id (u32)          |
+/// |  0x14  | 44   | reserved (zero)                                 |
+/// |  0x40  |  4   | `ready`       — 1 once the AP has left the page |
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApBootSlot {
-    /// Bootstrap PML4 physical address loaded into `CR3` by the AP.
+    /// Physical address of the root the trampoline loads into `CR3`, which
+    /// it can only load from 32 bits.
     pub cr3: u64,
-    /// 16-byte-aligned `RSP` value the AP installs before calling
-    /// `entry`.
+    /// 16-byte-aligned `RSP` value the AP installs before its first call.
     pub stack_top: u64,
-    /// Rust callee the AP invokes after long mode is established. The
-    /// callee receives `cpu_id` in `RDI` and is required to be `-> !`.
-    pub entry: u64,
-    /// Scheduler-visible CPU identifier passed to `entry`.
+    /// Scheduler-visible CPU identifier the AP's entry receives.
     pub cpu_id: u32,
-    /// Reserved span so `ready` lands at the assembly-side
-    /// `AP_BOOT_SLOT_READY` offset (`0x40`). Public because the struct
-    /// is `#[repr(C)]` and its byte layout is part of the wire contract
-    /// with `ap_trampoline.s` (invariant audited by
-    /// the `ap_boot_slot_layout_is_locked` host test below), and written
-    /// out with the rest of that contract by
-    /// [`TrampolineFrame::write_slot`].
-    pub reserved: [u8; 36],
-    /// Initial value of the rendezvous flag. Always written as `0`;
-    /// the AP `xchg`s a `1` here once long mode is up. The BSP reads
-    /// the live flag through [`TrampolineFrame::load_ready`] (an
-    /// `Acquire` load), not through this struct.
+    /// Reserved span so `ready` lands in its own cache line, at `0x40`.
+    /// Public because the struct is `#[repr(C)]` and its byte layout is
+    /// part of the wire contract with `ap_trampoline.s`, written out with
+    /// the rest of that contract by [`TrampolineFrame::write_slot`].
+    pub reserved: [u8; 44],
+    /// Initial value of the rendezvous flag. Always written as `0`; the AP
+    /// stores a `1` once it has left the trampoline page.
     pub ready: u32,
 }
 
 impl ApBootSlot {
     /// Build a fresh slot. The `ready` flag starts at `0`.
     ///
-    /// `stack_top` must be 16-byte aligned (System V AMD64 ABI). The
-    /// constructor enforces this so a misaligned stack can never reach
-    /// the asm side.
-    ///
     /// # Errors
     ///
-    /// [`SlotError::StackMisaligned`] if `stack_top % 16 != 0`.
-    pub fn new(cr3: u64, stack_top: u64, entry: u64, cpu_id: u32) -> Result<Self, SlotError> {
+    /// [`SlotError::StackMisaligned`] if `stack_top` breaks the System V
+    /// AMD64 ABI's 16-byte alignment, and [`SlotError::RootUnreachable`] if
+    /// `cr3` lies where the trampoline's 32-bit load cannot name it.
+    pub fn new(cr3: u64, stack_top: u64, cpu_id: u32) -> Result<Self, SlotError> {
         if !stack_top.is_multiple_of(16) {
             return Err(SlotError::StackMisaligned);
+        }
+        if u32::try_from(cr3).is_err() {
+            return Err(SlotError::RootUnreachable);
         }
         Ok(Self {
             cr3,
             stack_top,
-            entry,
             cpu_id,
-            reserved: [0; 36],
+            reserved: [0; 44],
             ready: 0,
         })
     }
@@ -196,6 +185,8 @@ impl ApBootSlot {
 pub enum SlotError {
     /// `stack_top` was not 16-byte aligned.
     StackMisaligned,
+    /// The root lies at or above 4 GiB.
+    RootUnreachable,
 }
 
 // --- Trampoline frame ------------------------------------------------
@@ -205,8 +196,8 @@ pub enum SlotError {
 pub enum InstallError {
     /// The slice's base was not 4 KiB aligned. The whole module reads the
     /// frame at fixed sub-offsets — including the 4-byte-aligned `ready`
-    /// cell `load_ready` reaches as an `AtomicU32` — so an unaligned base
-    /// is refused here rather than assumed downstream.
+    /// cell the two CPUs reach as an `AtomicU32` — so an unaligned base is
+    /// refused here rather than assumed downstream.
     FrameMisaligned,
     /// The slice was not exactly 4 KiB.
     FrameWrongSize,
@@ -245,9 +236,9 @@ impl<'a> TrampolineFrame<'a> {
         if frame.len() != 4096 {
             return Err(InstallError::FrameWrongSize);
         }
-        // Checked, not assumed: `load_ready` reaches the in-frame `ready`
-        // cell as an `AtomicU32`, whose reference would be invalid at an
-        // unaligned address.
+        // Checked, not assumed: the in-frame `ready` cell is reached as an
+        // `AtomicU32`, whose reference would be invalid at an unaligned
+        // address.
         if !frame.as_ptr().addr().is_multiple_of(4096) {
             return Err(InstallError::FrameMisaligned);
         }
@@ -300,60 +291,15 @@ impl<'a> TrampolineFrame<'a> {
         wire[offset_of!(ApBootSlot, cr3)..][..8].copy_from_slice(&slot.cr3.to_ne_bytes());
         wire[offset_of!(ApBootSlot, stack_top)..][..8]
             .copy_from_slice(&slot.stack_top.to_ne_bytes());
-        wire[offset_of!(ApBootSlot, entry)..][..8].copy_from_slice(&slot.entry.to_ne_bytes());
         wire[offset_of!(ApBootSlot, cpu_id)..][..4].copy_from_slice(&slot.cpu_id.to_ne_bytes());
         wire[offset_of!(ApBootSlot, reserved)..][..slot.reserved.len()]
             .copy_from_slice(&slot.reserved);
         wire[offset_of!(ApBootSlot, ready)..][..4].copy_from_slice(&slot.ready.to_ne_bytes());
     }
-
-    /// Acquire-load the `ready` flag from the in-frame [`ApBootSlot`].
-    ///
-    /// Takes `&mut self` although it only reads: the AP writes this
-    /// location from another core while the BSP polls it, so the pointer
-    /// must carry write provenance. Derived from a shared borrow it would
-    /// instead tell the compiler the bytes cannot change for the life of
-    /// the borrow, which licenses hoisting the load out of the caller's
-    /// spin loop — the BSP would then wait for a value it never re-reads.
-    ///
-    /// # Panics
-    /// Never panics in production: `AP_BOOT_SLOT_OFFSET` is `0xF00`,
-    /// `AP_BOOT_SLOT_READY_OFFSET` is `0x40`, so the field starts at
-    /// `0xF40` — 4-byte aligned and 4 bytes wide — inside the 4 KiB
-    /// `self.frame`. The slot region was zeroed in
-    /// [`Self::install`] and overwritten by [`Self::write_slot`] with a
-    /// 4-byte-aligned `u32`.
-    #[must_use]
-    pub fn load_ready(&mut self) -> u32 {
-        let off = AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_READY_OFFSET;
-        // SAFETY: `off + 4 <= 4096`; `off` is 4-byte aligned because
-        // `AP_BOOT_SLOT_OFFSET = 0xF00` and `AP_BOOT_SLOT_READY_OFFSET
-        // = 0x40` are both multiples of 4 and the caller guarantees a
-        // 4 KiB-aligned `frame` base (by passing the bare 4 KiB low
-        // physical frame at `AP_TRAMPOLINE_PHYS = 0x8000`; on the host
-        // the test buffer is a `[u8; 4096]`, and both the slot offset and
-        // that buffer's own alignment keep the field 4-byte aligned).
-        // `AtomicU32` has the same layout and alignment as `u32`, and the
-        // pointer is derived from the exclusive borrow of the frame, so the
-        // shared reference below is the only live reference to the cell.
-        // `Acquire` pairs with the AP's `xchg`-released store in
-        // `ap_trampoline.s`.
-        //
-        // The clippy `cast_ptr_alignment` lint is suppressed here
-        // because the alignment proof above lives in the comments —
-        // clippy cannot see the runtime invariant the BSP installer
-        // upholds, and an `assert!(off % 4 == 0)` would be a runtime
-        // restatement of a compile-time fact (both constants are
-        // statically multiples of 4).
-        #[allow(clippy::cast_ptr_alignment)] // alignment proven above.
-        let p = self.frame[off..off + 4].as_mut_ptr().cast::<AtomicU32>();
-        unsafe { (*p).load(Ordering::Acquire) }
-    }
 }
 
-/// Offset of the `ready` field within `ApBootSlot`. Locked to the
-/// assembly-side `AP_BOOT_SLOT_READY` constant.
-const AP_BOOT_SLOT_READY_OFFSET: usize = 0x40;
+/// Offset of the `ready` field within `ApBootSlot`.
+const AP_BOOT_SLOT_READY_OFFSET: usize = offset_of!(ApBootSlot, ready);
 
 // --- INIT-SIPI-SIPI sequencer ---------------------------------------
 
@@ -430,18 +376,9 @@ pub fn trampoline_payload() -> &'static [u8] {
 
 // --- Secondary entry slot -------------------------------------------
 
-/// The AP entry the boot CPU writes into each [`ApBootSlot`], packed
-/// into a `usize` (the size of a `fn` pointer) so the bring-up path
-/// reads it without a lock. `0` until [`set_secondary_entry`] installs
-/// it.
-///
-/// Unlike aarch64/riscv64 — whose fixed trampolines read a global slot —
-/// the x86_64 trampoline jumps to the per-AP `entry` address stored in
-/// that AP's [`ApBootSlot`]. `start_secondary` therefore reads this
-/// set-once slot and stamps it into every AP's boot slot, so the
-/// consumer installs the entry exactly once (mirroring the other ports'
-/// [`set_secondary_entry`] contract) rather than passing an entry point
-/// per call.
+/// The entry every AP runs once it has joined the kernel root, empty until
+/// [`set_secondary_entry`] installs it — the global slot the sibling ports'
+/// fixed trampolines read too.
 static SECONDARY_ENTRY_FN: FnCell<extern "C" fn(CpuId) -> !> = FnCell::empty();
 
 /// Failure modes of [`set_secondary_entry`].
@@ -461,6 +398,9 @@ pub enum StartCpuError {
     /// starting an AP that would jump to address `0` is refused so the
     /// failure is loud at the call site, not a triple-fault on the AP.
     NoEntryInstalled,
+    /// The kernel root and the start-up root were never built, so the AP
+    /// would have no root to start on or to join.
+    NoKernelRoot,
     /// The AP never published its `ready` flag within the spin budget;
     /// the trampoline frame must not be reused for the next AP, so the
     /// bring-up fails closed rather than racing.
@@ -474,6 +414,7 @@ impl StartCpuError {
         match self {
             Self::CpuIdOutOfRange => "cpu_id_out_of_range",
             Self::NoEntryInstalled => "no_secondary_entry_installed",
+            Self::NoKernelRoot => "no_kernel_root",
             Self::StartTimedOut => "ap_start_timed_out",
         }
     }
@@ -517,8 +458,8 @@ fn clear_secondary_entry_for_tests() {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const AP_READY_SPIN_BUDGET: u64 = 10_000_000;
 
-/// Per-AP bootstrap stack. `0x4000` (16 KiB) matches the boot stack size
-/// in `boot.s`. Aligned to 16 bytes per the System V AMD64 ABI.
+/// Per-AP bootstrap stack, 16 KiB, aligned to 16 bytes per the System V
+/// AMD64 ABI.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[repr(C, align(16))]
 struct ApStack([u8; 16 * 1024]);
@@ -643,15 +584,58 @@ fn ap_stack_top(idx: usize) -> Option<u64> {
     }
 }
 
-/// Typed view of the 4 KiB low frame at [`AP_TRAMPOLINE_PHYS`].
+/// The boot CPU's exclusive view of the 4 KiB frame at
+/// [`AP_TRAMPOLINE_PHYS`], through the direct map, which the boot floor
+/// always holds it in.
+///
+/// # Safety
+///
+/// No other reference to the frame is live while this one is: the boot
+/// CPU serialises AP launches, and the AP being launched reaches the frame
+/// only once the view is dropped and the SIPI sent.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn trampoline_frame_mut() -> &'static mut [u8] {
-    // SAFETY: identity-mapped (boot.s SAFETY-INVARIANT 4); the boot CPU
-    // serialises AP launches (it waits on each AP's `ready` flag before
-    // the next), so no other CPU reads or writes this page concurrently,
-    // and the page is reserved by the image (no allocator hands it out —
-    // the kernel heap lives well above 0x8000).
-    unsafe { core::slice::from_raw_parts_mut(AP_TRAMPOLINE_PHYS as *mut u8, 4096) }
+unsafe fn trampoline_frame_mut() -> &'static mut [u8] {
+    // SAFETY: the boot memory map reserves the frame, so no allocator hands
+    // it out, and the caller's contract makes this the only reference.
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            crate::paging::physmap_virt(AP_TRAMPOLINE_PHYS) as *mut u8,
+            4096,
+        )
+    }
+}
+
+/// The boot slot's `ready` flag, through the direct map: the one view both
+/// the boot CPU and the AP it launches use, so no exclusive borrow of the
+/// frame is live while they race on it.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn ready_flag() -> &'static AtomicU32 {
+    let cell = AP_TRAMPOLINE_PHYS + (AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_READY_OFFSET) as u64;
+    // SAFETY: the boot floor maps the frame for the kernel's life, the cell
+    // is 4-byte aligned at a 4-byte-aligned offset of a page, and every
+    // access to it while an AP may run is atomic.
+    unsafe { &*(crate::paging::physmap_virt(cell) as *const AtomicU32) }
+}
+
+/// Rust side of the AP trampoline: join the kernel root, report the AP
+/// live, and run the installed entry.
+///
+/// Reporting comes after the join, which leaves the trampoline page behind,
+/// so the boot CPU never reuses the page under a CPU still executing it.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[no_mangle]
+extern "C" fn tairix_arch_x86_64_ap_entry(cpu: CpuId) -> ! {
+    // SAFETY: an AP fresh from the trampoline: CPL 0 with interrupts
+    // masked, on the start-up root, whose image window is the kernel root's,
+    // so this code and the AP's stack stay mapped across the load.
+    // `start_secondary` refused to launch it before the root was built.
+    if unsafe { crate::paging::join_kernel_root() } {
+        ready_flag().store(1, Ordering::Release);
+        if let Some(entry) = SECONDARY_ENTRY_FN.load() {
+            entry(cpu);
+        }
+    }
+    crate::reset::park_cpu()
 }
 
 /// [`Delay`] backed by busy-waiting on PIT channel 2 OUT.
@@ -702,12 +686,12 @@ extern "C" fn tairix_arch_x86_64_ap_apic_mode() {
 /// Start the application processor whose LAPIC id is `target_apic_id`
 /// and whose dense id is `cpu`, at the [`AP_TRAMPOLINE_PHYS`] trampoline.
 ///
-/// Installs the trampoline payload, stamps a per-AP [`ApBootSlot`]
-/// (bootstrap `cr3` read from the boot CPU, this AP's reserved stack, the
-/// installed [`set_secondary_entry`] entry, and `cpu` as the context id),
+/// Installs the trampoline payload, stamps a per-AP [`ApBootSlot`] (the
+/// start-up root, this AP's reserved stack, and `cpu` as the context id),
 /// drives the INIT-SIPI-SIPI handshake, then waits for the AP to publish
 /// its `ready` flag before returning — so the shared trampoline frame is
-/// safe to reuse for the next AP.
+/// safe to reuse for the next AP. The AP runs the installed
+/// [`set_secondary_entry`] entry on the kernel root.
 ///
 /// # Errors
 ///
@@ -734,40 +718,29 @@ pub unsafe fn start_secondary(target_apic_id: u32, cpu: CpuId) -> Result<(), Sta
     let Some(stack_top) = ap_stack_top(stack_idx) else {
         return Err(StartCpuError::CpuIdOutOfRange);
     };
-    let entry_addr = secondary_entry_addr();
-    if entry_addr == 0 {
+    if secondary_entry_addr() == 0 {
         return Err(StartCpuError::NoEntryInstalled);
     }
-
-    // The frame address/size are compile-time constants that always satisfy
-    // the installer; treat any rejection as out-of-range rather than
-    // panicking.
-    let Ok(mut frame) = TrampolineFrame::new(trampoline_frame_mut()) else {
+    let Some(root) = crate::paging::startup_root() else {
+        return Err(StartCpuError::NoKernelRoot);
+    };
+    // `stack_top` is 16-byte aligned by construction and the start-up root
+    // is a kernel-image table, so a refusal would be an internal invariant
+    // break, not a caller error.
+    let Ok(slot) = ApBootSlot::new(root, stack_top, cpu) else {
         return Err(StartCpuError::CpuIdOutOfRange);
     };
-    if frame.install(trampoline_payload()).is_err() {
-        return Err(StartCpuError::CpuIdOutOfRange);
+    {
+        // SAFETY: the boot CPU launches one AP at a time, and the view is
+        // dropped before the SIPI lets the AP reach the frame.
+        let Ok(mut frame) = TrampolineFrame::new(unsafe { trampoline_frame_mut() }) else {
+            return Err(StartCpuError::CpuIdOutOfRange);
+        };
+        if frame.install(trampoline_payload()).is_err() {
+            return Err(StartCpuError::CpuIdOutOfRange);
+        }
+        frame.write_slot(&slot);
     }
-
-    // Read CR3 — the boot CPU's PML4; APs inherit it.
-    let cr3: u64;
-    // SAFETY: reading CR3 in ring 0 is well-defined and side-effect-free.
-    unsafe {
-        core::arch::asm!("mov {x}, cr3", x = out(reg) cr3, options(nostack, preserves_flags));
-    }
-    // `stack_top` is 16-byte aligned by construction; a misalignment would be
-    // an internal invariant break, not a caller error. The AP loads the table
-    // base alone: a PCID the boot CPU runs under means nothing before the AP
-    // turns PCIDs on.
-    let Ok(slot) = ApBootSlot::new(
-        cr3 & !crate::paging::CR3_PCID,
-        stack_top,
-        entry_addr as u64,
-        cpu,
-    ) else {
-        return Err(StartCpuError::CpuIdOutOfRange);
-    };
-    frame.write_slot(&slot);
 
     // Every slot byte must be visible to the AP before the SIPI.
     core::sync::atomic::fence(Ordering::Release);
@@ -778,10 +751,10 @@ pub unsafe fn start_secondary(target_apic_id: u32, cpu: CpuId) -> Result<(), Sta
     };
     init_sipi_sipi(&mut lapic, &mut delay, target_apic_id, sipi_vector());
 
-    // Wait for the AP's `xchg`-released `ready` flag before returning, so
-    // the shared frame can be reused for the next AP.
+    // Wait for the AP's released `ready` flag before returning, so the
+    // shared frame can be reused for the next AP.
     let mut spins: u64 = 0;
-    while frame.load_ready() == 0 {
+    while ready_flag().load(Ordering::Acquire) == 0 {
         spins += 1;
         if spins > AP_READY_SPIN_BUDGET {
             // Back to waiting for a start-up, so a CPU that never answered
@@ -842,42 +815,75 @@ mod tests {
         assert_eq!(sipi_vector(), 0x08);
     }
 
+    /// The value `ap_trampoline.s` gives the `.equ` named `name`.
+    fn trampoline_constant(name: &str) -> usize {
+        include_str!("ap_trampoline.s")
+            .lines()
+            .find_map(|line| {
+                let rest = line.trim().strip_prefix(".equ")?.trim_start();
+                let (symbol, value) = rest.split_once(',')?;
+                if symbol.trim() != name {
+                    return None;
+                }
+                let value = value.split("//").next()?.trim();
+                usize::from_str_radix(value.strip_prefix("0x")?, 16).ok()
+            })
+            .unwrap_or_else(|| panic!("ap_trampoline.s defines no `{name}`"))
+    }
+
+    /// The trampoline reads the slot at offsets of its own; they are the
+    /// struct's, and `ready` keeps a cache line of its own.
     #[test]
-    fn ap_boot_slot_layout_is_locked() {
-        // The assembly side references `AP_BOOT_SLOT_CR3` etc. at
-        // hand-chosen offsets. If anyone ever bumps `ApBootSlot` they
-        // must update `ap_trampoline.s` too — this test fails loudly
-        // otherwise.
-        use core::mem::offset_of;
-        assert_eq!(offset_of!(ApBootSlot, cr3), 0x00);
-        assert_eq!(offset_of!(ApBootSlot, stack_top), 0x08);
-        assert_eq!(offset_of!(ApBootSlot, entry), 0x10);
-        assert_eq!(offset_of!(ApBootSlot, cpu_id), 0x18);
-        assert_eq!(offset_of!(ApBootSlot, ready), AP_BOOT_SLOT_READY_OFFSET);
-        // The slot must fit in the trampoline frame from
-        // AP_BOOT_SLOT_OFFSET to end-of-page.
+    fn the_trampoline_reads_the_slot_where_rust_writes_it() {
+        assert_eq!(
+            trampoline_constant("AP_BOOT_SLOT_OFFSET"),
+            AP_BOOT_SLOT_OFFSET
+        );
+        assert_eq!(
+            trampoline_constant("AP_BOOT_SLOT_CR3"),
+            offset_of!(ApBootSlot, cr3)
+        );
+        assert_eq!(
+            trampoline_constant("AP_BOOT_SLOT_STACK_TOP"),
+            offset_of!(ApBootSlot, stack_top)
+        );
+        assert_eq!(
+            trampoline_constant("AP_BOOT_SLOT_CPU_ID"),
+            offset_of!(ApBootSlot, cpu_id)
+        );
+        assert_eq!(AP_BOOT_SLOT_READY_OFFSET, 0x40);
         assert!(AP_BOOT_SLOT_OFFSET + core::mem::size_of::<ApBootSlot>() <= 4096);
     }
 
     #[test]
     fn slot_rejects_misaligned_stack() {
-        let err = ApBootSlot::new(0x1000, 0xDEAD_BEEF, 0x4000, 0).unwrap_err();
+        let err = ApBootSlot::new(0x1000, 0xDEAD_BEEF, 0).unwrap_err();
         assert_eq!(err, SlotError::StackMisaligned);
+    }
+
+    /// The trampoline loads `CR3` from 32 bits in real mode, so a root it
+    /// would truncate is refused rather than handed over.
+    #[test]
+    fn slot_refuses_a_root_the_trampoline_cannot_load() {
+        assert_eq!(
+            ApBootSlot::new(1 << 32, 0x0001_0000, 1).unwrap_err(),
+            SlotError::RootUnreachable
+        );
+        assert!(ApBootSlot::new((1 << 32) - 0x1000, 0x0001_0000, 1).is_ok());
     }
 
     #[test]
     fn slot_constructs_when_inputs_are_valid() {
-        let slot = ApBootSlot::new(0x1000, 0x0001_0000, 0x4000, 3).unwrap();
+        let slot = ApBootSlot::new(0x1000, 0x0001_0000, 3).unwrap();
         assert_eq!(slot.cr3, 0x1000);
         assert_eq!(slot.stack_top, 0x0001_0000);
-        assert_eq!(slot.entry, 0x4000);
         assert_eq!(slot.cpu_id, 3);
         assert_eq!(slot.ready, 0);
     }
 
     /// A 4 KiB-aligned stand-in for the real low physical frame at
     /// `AP_TRAMPOLINE_PHYS`. The alignment is load-bearing, not cosmetic:
-    /// `load_ready` reaches the in-frame `ready` cell as an `AtomicU32`.
+    /// the in-frame `ready` cell is reached as an `AtomicU32`.
     #[repr(C, align(4096))]
     struct FrameBuf([u8; 4096]);
 
@@ -948,17 +954,37 @@ mod tests {
     fn write_slot_persists_into_frame_at_correct_offset() {
         let mut buf = FrameBuf::new(0);
         let payload = [0u8; AP_TRAMPOLINE_LEN];
-        let slot = ApBootSlot::new(0xCAFE_F000, 0x1234_0000, 0x5678_0000, 7).unwrap();
+        let slot = ApBootSlot::new(0xCAFE_F000, 0x1234_0000, 7).unwrap();
         {
             let mut frame = TrampolineFrame::new(&mut buf.0[..]).unwrap();
             frame.install(&payload).unwrap();
             frame.write_slot(&slot);
-            assert_eq!(frame.load_ready(), 0);
         }
-        let cr3_le = &buf.0[AP_BOOT_SLOT_OFFSET..AP_BOOT_SLOT_OFFSET + 8];
-        assert_eq!(u64::from_le_bytes(cr3_le.try_into().unwrap()), 0xCAFE_F000);
-        let cpu_le = &buf.0[AP_BOOT_SLOT_OFFSET + 0x18..AP_BOOT_SLOT_OFFSET + 0x1C];
-        assert_eq!(u32::from_le_bytes(cpu_le.try_into().unwrap()), 7);
+        let field = |offset: usize, len: usize| {
+            let at = AP_BOOT_SLOT_OFFSET + offset;
+            &buf.0[at..at + len]
+        };
+        assert_eq!(
+            u64::from_le_bytes(field(offset_of!(ApBootSlot, cr3), 8).try_into().unwrap()),
+            0xCAFE_F000
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                field(offset_of!(ApBootSlot, stack_top), 8)
+                    .try_into()
+                    .unwrap()
+            ),
+            0x1234_0000
+        );
+        assert_eq!(
+            u32::from_le_bytes(field(offset_of!(ApBootSlot, cpu_id), 4).try_into().unwrap()),
+            7
+        );
+        assert_eq!(
+            u32::from_le_bytes(field(AP_BOOT_SLOT_READY_OFFSET, 4).try_into().unwrap()),
+            0,
+            "a launch starts with the AP not yet reported live"
+        );
     }
 
     /// The slot's byte image is the wire contract, not the struct's
@@ -974,7 +1000,7 @@ mod tests {
         );
         let mut buf = FrameBuf::new(0);
         let payload = [0u8; AP_TRAMPOLINE_LEN];
-        let slot = ApBootSlot::new(0xCAFE_F000, 0x1234_0000, 0x5678_0000, 7).unwrap();
+        let slot = ApBootSlot::new(0xCAFE_F000, 0x1234_0000, 7).unwrap();
         let tail = AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_WIRE_LEN;
         let tail_end = AP_BOOT_SLOT_OFFSET + core::mem::size_of::<ApBootSlot>();
         {
@@ -1075,6 +1101,7 @@ mod tests {
             StartCpuError::NoEntryInstalled.as_str(),
             "no_secondary_entry_installed"
         );
+        assert_eq!(StartCpuError::NoKernelRoot.as_str(), "no_kernel_root");
         assert_eq!(StartCpuError::StartTimedOut.as_str(), "ap_start_timed_out");
     }
 }

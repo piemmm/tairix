@@ -29,6 +29,7 @@ pub(crate) const ASM_SOURCES: &[(&str, &str)] = &[
     ("interrupts.rs", include_str!("interrupts.rs")),
     ("irq.rs", include_str!("irq.rs")),
     ("irqmask.rs", include_str!("irqmask.rs")),
+    ("kernel_root.rs", include_str!("paging/kernel_root.rs")),
     ("lib.rs", include_str!("lib.rs")),
     ("msr.rs", include_str!("msr.rs")),
     ("paging.rs", include_str!("paging.rs")),

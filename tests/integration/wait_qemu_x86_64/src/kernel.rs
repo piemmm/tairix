@@ -23,6 +23,7 @@ use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
 use tairix_arch_x86_64::userentry::USER_MODE;
 use tairix_arch_x86_64::{qemu_exit, syscall_entry};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
@@ -32,8 +33,7 @@ use tairix_kernel_core::{
     RescheduleAction, SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{
-    copy_out, AddressSpace, DirectPhysMap, Frame, PhysAddr, PhysMap, UserAddressSpace, UserStack,
-    VirtAddr,
+    copy_out, AddressSpace, Frame, PhysAddr, UserAddressSpace, UserStack, VirtAddr,
 };
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_sec::{ProcessId, TaskId};
@@ -57,10 +57,6 @@ const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
 /// Per-process stack-canary seed handed to each program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
-
-/// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11).
-const IA32_EFER: u32 = 0xC000_0080;
-const EFER_NXE: u64 = 1 << 11;
 
 /// Physical frames the test hands each spawn build.
 const FRAME_COUNT: usize = 256;
@@ -153,15 +149,10 @@ static PRODUCER: SpinLock<Option<&'static KernelProcessWait<X86_64Arch>>> = Spin
 /// The live scheduler, leaked `'static` so the dispatch callback can resolve
 /// the current task id.
 static SCHED: SpinLock<Option<&'static Scheduler<X86_64Arch>>> = SpinLock::new(None);
-/// The parent's frozen address space + direct map, used to copy the reaped
-/// child's exit code out to the parent's `status` pointer.
-#[allow(clippy::type_complexity)]
-static PARENT_SPACE: SpinLock<
-    Option<(
-        Box<dyn UserAddressSpace + Send + Sync>,
-        Box<dyn PhysMap + Send + Sync>,
-    )>,
-> = SpinLock::new(None);
+/// The parent's frozen address space, used to copy the reaped child's exit
+/// code out to the parent's `status` pointer.
+static PARENT_SPACE: SpinLock<Option<Box<dyn UserAddressSpace + Send + Sync>>> =
+    SpinLock::new(None);
 
 /// Outer audit sink: replays every event to serial and, on the single
 /// [`BOOT_COMPLETED_EVENT_ID`], drives [`run_wait`].
@@ -312,13 +303,13 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 /// faulting or unmapped pointer (fail closed).
 fn copy_status_to_parent(status_va: u64, status: WaitStatus) -> bool {
     let guard = PARENT_SPACE.lock();
-    let Some((space, physmap)) = guard.as_ref() else {
+    let Some(space) = guard.as_ref() else {
         return false;
     };
     let bytes = WaitStatusRecord::encode(status).to_ne_bytes();
     copy_out(
         space.as_ref(),
-        physmap.as_ref(),
+        &SPAWN_TABLE_PHYSMAP,
         VirtAddr::new(status_va),
         &bytes,
     )
@@ -326,9 +317,9 @@ fn copy_status_to_parent(status_va: u64, status: WaitStatus) -> bool {
 }
 
 /// Build one isolated ring-3 address space from `rxe` over the per-space
-/// `pool`, returning its PML4 root and the entry register state. The new space
-/// carries the live identity window and the higher-half kernel window; it is
-/// activated (so the user mappings land in it) and the image is built through
+/// `pool`, returning its PML4 root and the entry register state. The new root
+/// carries the kernel half; it is activated (so the user mappings land in it)
+/// and the image is built through
 /// the production capability-checked, audited `spawn_image` caller. Fails the
 /// test loudly on any error.
 fn build_el0_space(
@@ -337,22 +328,18 @@ fn build_el0_space(
     rxe: &[u8],
     is_parent: bool,
 ) -> (u64, UserEntry) {
-    let Some(arch_space) = paging::AddressSpace::new_boot_identity(pool) else {
+    let Some(arch_space) = paging::AddressSpace::new_process_root(pool) else {
         note(TEST_FAIL, "X4 test: page-table pool exhausted");
         qemu_exit::exit_failure();
     };
     let root_phys = arch_space.pml4_phys();
-    // SAFETY: the new space carries the live identity window and the
-    // higher-half kernel window, so the executing RIP, the current stack, the
-    // per-CPU `swapgs` TLS, the page-table pools, the frame pool, the heap,
-    // `dispatch`, and every LAPIC MMIO access stay mapped across the CR3
-    // switch.
+    // SAFETY: the root carries the kernel half: the image window holding this
+    // code, the current stack and every static, and the direct map the LAPIC
+    // is reached through, so nothing the kernel touches is lost across the
+    // CR3 switch.
     unsafe { arch_space.switch() };
 
     let mut space = AddressSpace::new(arch_space);
-    // SAFETY: the boot code installs this direct map and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::new(KERNEL_VMA_BASE, 1 << 30) }
-        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image,
         image_bytes: rxe,
@@ -377,7 +364,7 @@ fn build_el0_space(
             SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
-            &physmap,
+            &SPAWN_TABLE_PHYSMAP,
             &request,
             next_frame,
         )
@@ -394,8 +381,7 @@ fn build_el0_space(
     // parent calls `wait`, so only its space is kept.
     if is_parent {
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
-        let pm: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
-        *PARENT_SPACE.lock() = Some((frozen, pm));
+        *PARENT_SPACE.lock() = Some(frozen);
     }
 
     (root_phys, entry)
@@ -420,8 +406,8 @@ fn admit(sched: &Scheduler<X86_64Arch>, root_phys: u64, entry: UserEntry) -> u64
             qemu_exit::exit_failure();
         }
         // SAFETY: paging is enabled and `root_phys` is the PML4 of the task's
-        // space, which maps the low identity + higher-half kernel window the
-        // running dispatcher executes from — `activate_user_root`'s contract.
+        // space, which carries the kernel half the running dispatcher
+        // executes from, as `activate_user_root` requires.
         unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
@@ -451,31 +437,6 @@ fn admit(sched: &Scheduler<X86_64Arch>, root_phys: u64, entry: UserEntry) -> u64
 /// `step` loop until the parent reaps the child. Never returns.
 fn run_wait() -> ! {
     note(TEST_START, "x86_64 X4 wait test: starting");
-
-    // Enable `IA32_EFER.NXE` so the W^X No-Execute leaf bit the adapter sets on
-    // data/rodata pages is honoured rather than treated as reserved.
-    // SAFETY: reading and writing `IA32_EFER` is the documented enable
-    // sequence; it runs once on the BSP and only sets bit 11, preserving
-    // `SCE`/`LME`/`LMA` the boot pipeline established.
-    unsafe {
-        let lo: u32;
-        let hi: u32;
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") IA32_EFER,
-            out("eax") lo,
-            out("edx") hi,
-            options(nostack, preserves_flags),
-        );
-        let efer = (((hi as u64) << 32) | lo as u64) | EFER_NXE;
-        core::arch::asm!(
-            "wrmsr",
-            in("ecx") IA32_EFER,
-            in("eax") efer as u32,
-            in("edx") (efer >> 32) as u32,
-            options(nostack, preserves_flags),
-        );
-    }
 
     syscall_entry::set_dispatch_callback(dispatch);
 

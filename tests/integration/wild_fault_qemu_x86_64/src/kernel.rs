@@ -97,9 +97,8 @@ static ALLOCATOR: FreeListAllocator =
 
 /// Physical-frame backing store the live [`FrameAllocator`] serves the
 /// spawn producer from. `align(4096)` so each `PAGE_SIZE` slice is a valid
-/// page frame. A higher-half kernel static, so its physical address is its
-/// virtual address minus [`KERNEL_VMA_BASE`] — inside the low identity
-/// window the producer's page-table walk and each child's own root require.
+/// page frame. A static of the kernel image, so its physical address is its
+/// virtual address minus [`KERNEL_VMA_BASE`].
 #[repr(C, align(4096))]
 struct FramePool([u8; PAGE_SIZE * FRAME_COUNT]);
 
@@ -309,9 +308,8 @@ struct Subsystems {
 fn leak_subsystems(board: &BspBringUp) -> Subsystems {
     let mut memory_map = BootMemoryMap::new();
     memory_map.push(MemoryRegion {
-        // The pool is a higher-half kernel static; its physical address is
-        // its virtual address minus the kernel window base, inside the low
-        // identity window every child root maps.
+        // The pool is a static of the kernel image; its physical address is
+        // its virtual address minus the image window's base.
         start: PhysAddr::new(core::ptr::addr_of!(FRAME_POOL) as u64 - KERNEL_VMA_BASE),
         length: (PAGE_SIZE * FRAME_COUNT) as u64,
         kind: RegionKind::Usable,

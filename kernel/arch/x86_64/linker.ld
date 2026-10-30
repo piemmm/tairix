@@ -19,9 +19,13 @@
  * The early boot trampoline (`.boot.*`) is the one region that must stay at
  * its physical load address: it executes in 32-bit protected mode with
  * paging off, so it is linked 1:1 (VMA == LMA) in low memory. It builds the
- * page tables that map BOTH the low 0..4 GiB identity window (preserved for
- * the direct physical map the DMA/MMIO seam relies on — `kernel/mem` phys.rs)
- * AND the higher-half kernel window, then jumps to the high half.
+ * page tables the boot runs on until the kernel root replaces them — an
+ * identity window to execute from, the higher-half kernel window, and the
+ * direct map's floor — then jumps to the high half.
+ *
+ * The kernel root's image window maps each section below with only the
+ * access it needs (`paging::kernel_root`), from the `__image_*` spans this
+ * script defines, so a section must not be added without a span to map it.
  *
  * Invariants enforced here:
  *   - The multiboot2 header is placed in the first sub-section of the first
@@ -175,6 +179,24 @@ SECTIONS
      * the LMA every section above is loaded at). */
     . = ALIGN(4K);
     __kernel_phys_end = . - KERNEL_VMA_BASE;
+
+    /* The physical spans the kernel root's image window maps, each page
+     * aligned: the boot data it reaches by alias (RW), the code (RX), the
+     * AP payload's source bytes with the read-only data (R), and the
+     * writable data with .bss (RW). The boot code and its GDT are left out:
+     * nothing runs them once the trampoline has jumped high. */
+    __image_boot_data_start = ADDR(.boot.bss);
+    __image_boot_data_end = __boot_phys_end;
+    __image_text_start = ADDR(.text) - KERNEL_VMA_BASE;
+    __image_text_end = ADDR(.ap_trampoline) - KERNEL_VMA_BASE;
+    __image_rodata_start = ADDR(.ap_trampoline) - KERNEL_VMA_BASE;
+    __image_rodata_end = ADDR(.data) - KERNEL_VMA_BASE;
+    __image_data_start = ADDR(.data) - KERNEL_VMA_BASE;
+    __image_data_end = __kernel_phys_end;
+
+    /* The trampoline's higher-half window, and the image window after it,
+     * each map exactly the first GiB. */
+    ASSERT(__kernel_phys_end <= 1024M, "the kernel image must end within its first physical GiB")
 
     /DISCARD/ :
     {

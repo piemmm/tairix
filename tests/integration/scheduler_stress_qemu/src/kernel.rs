@@ -755,12 +755,11 @@ struct ApList {
 
 fn discover_aps(boot_info: u64, bsp_id: u32, com1: &mut serial::Serial) -> Option<ApList> {
     // SAFETY: `boot_info` is the verbatim pointer from `boot.s`
-    // SAFETY-INVARIANT 7. The blob and every table it points at sit in
-    // the identity-mapped 0..4 GiB window, the documented contract of
-    // `BootData::load` / `validated_rsdp`, whose parsers bound every
-    // slice before reading it.
+    // SAFETY-INVARIANT 7, and nothing writes the blob or the tables it leads
+    // to; each is read through the direct map, which refuses a span it does
+    // not hold.
     let data = unsafe { BootData::load(boot_info) }.ok()?;
-    // SAFETY: same identity-window contract as the load above.
+    // SAFETY: as for the load above.
     let rsdp = unsafe { data.validated_rsdp() }?;
     let _ = writeln!(
         com1,
@@ -770,9 +769,7 @@ fn discover_aps(boot_info: u64, bsp_id: u32, com1: &mut serial::Serial) -> Optio
 
     // Locate the MADT via XSDT (preferred) or RSDT.
     //
-    // SAFETY: `rsdp.xsdt_address` / `rsdp.rsdt_address` came from a
-    // firmware-validated RSDP and sit inside the boot trampoline's
-    // 0..4 GiB identity-mapped window (`boot.s` SAFETY-INVARIANT 4).
+    // SAFETY: the boot-time ACPI tables are never modified.
     let madt_bytes = unsafe { acpi::locate_madt(&rsdp) }?;
     let madt = acpi::Madt::parse(madt_bytes).ok()?;
 

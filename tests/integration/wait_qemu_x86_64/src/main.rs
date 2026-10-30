@@ -16,12 +16,12 @@
 //! Like the `mem_map` / timeshare x86_64 siblings, the ring-3 transition needs
 //! the GDT ring-3 selectors, the TSS, and `syscall`/`IA32_LSTAR` entry
 //! installed, so this test boots the production `tairix-kernel` pipeline. On
-//! `AuditEvent::BootCompleted` it enables `IA32_EFER.NXE`, builds a **child**
-//! and a **parent** hardware-isolated ring-3 address space (two PML4s, one
-//! shared frame pool) from the `rxe` fixture program through the production
-//! capability-checked, audited `tairix_kernel_core::spawn_image` caller,
-//! installs a `tairix_kernel_core::KernelProcessWait` producer, records the
-//! parent/child link, and admits each as a resumable user kthread via
+//! `AuditEvent::BootCompleted` it builds a **child** and a **parent**
+//! hardware-isolated ring-3 address space (two PML4s, one shared frame pool)
+//! from the `rxe` fixture program through the production capability-checked,
+//! audited `tairix_kernel_core::spawn_image` caller, installs a
+//! `tairix_kernel_core::KernelProcessWait` producer, records the parent/child
+//! link, and admits each as a resumable user kthread via
 //! `tairix_kernel_core::spawn_user_kthread`. Each task's `pre_resume` hook
 //! reloads CR3 (`tairix_arch_x86_64::paging::activate_user_root`) and repoints
 //! the per-CPU syscall entry stack at the task's **own** kernel stack

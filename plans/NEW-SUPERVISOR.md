@@ -653,15 +653,15 @@ only if a (future, finite) sweep ever returned. Precise per-port design:
 - **x86_64 (done).** `kernel/arch/x86_64/src/takeover.rs` + `takeover.s`:
   every AP is already parked by the arch-neutral quiesce (the caller's
   `quiesce_others` delivers the stop IPI on `TIMER_VECTOR`; each AP halts in
-  `preempt`'s timer dispatch), so the body masks `RFLAGS.IF` (`cli`; no lockup
-  watchdog wired). Long mode cannot drop paging, so instead of flattening the
-  MMU the port switches `sp` to a reserved 64 KiB `.bss` stack
-  (`_takeover_switch_stack`, mapped in every address space), then switches
-  `%cr3` to the **reserved** boot page tables (`boot_pml4`, all in `.boot.bss`,
-  mapping both the higher-half physmap the sweep writes RAM through and the low
-  identity window) so the sweep depends on no page-table frame in the usable RAM
-  it destroys; and runs the arch-neutral `sweep` over usable RAM (never returns;
-  otherwise parks on `hlt`). Wired into `BinArch::machine_takeover` behind the
+  `preempt`'s timer dispatch). Long mode cannot drop paging, so the body
+  installs the kernel root (`paging::park_kernel_root`, refusing
+  `PrepareFailed` if none is published) first, as riscv64 does: its tables
+  are the kernel's own and in use, so the free-run sweep never reaches them,
+  and the sweep writes RAM through its direct map. It then masks `RFLAGS.IF`
+  (`cli`; no lockup watchdog wired), switches `sp` to a reserved 64 KiB `.bss`
+  stack (`_takeover_switch_stack`, mapped in every address space), and runs
+  the arch-neutral `sweep` over usable RAM (never returns; otherwise parks on
+  `hlt`). Wired into `BinArch::machine_takeover` behind the
   supervisor-only `TakeoverGrant`. Proven by
   `tests/integration/supervisor_memtest_takeover_qemu_x86_64`.
 - **wasm32** stays `NotSupported` (a sandbox owns no physical RAM to take over).
@@ -1103,9 +1103,8 @@ runs; the body then masks interrupts, stops the watchdog where wired, brings RAM
 into direct reach on a regime the sweep cannot destroy — riscv64 and aarch64
 install the reserved boot kernel root (`paging::park_kernel_root`; aarch64
 additionally keeps its MMU on, because an MMU-off EL1 would make every access
-Device-nGnRnE, see above), and x86_64 (which cannot drop long-mode paging)
-installs the reserved boot page tables (`%cr3 = boot_pml4` in `.boot.bss`) —
-switches onto a reserved
+Device-nGnRnE, see above), and so does x86_64, which cannot drop long-mode
+paging — switches onto a reserved
 64 KiB `.bss` stack (`_takeover_switch_stack`) the sweep cannot overwrite, and
 runs the caller's arch-neutral `sweep` (Stage-A `sweep_pattern` + Stage-D
 `MemtestUi`). The sweep tests all of RAM continuously and never returns; the

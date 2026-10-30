@@ -7,14 +7,14 @@ use tairix_abi::driver::{MmioMapError, MmioMapper, RegisterWindow};
 use tairix_arch_x86_64::paging;
 
 /// The kernel's mapping of the device registers at `[base, base + len)`, or
-/// [`None`] for a window the live direct map does not wholly hold.
+/// [`None`] for a window at physical `0`, which no device decodes, or one
+/// the live direct map does not wholly hold.
 #[must_use]
 pub fn device_registers(base: u64, len: u64) -> Option<NonNull<u8>> {
-    let end = base.checked_add(len)?;
-    if base == 0 || len == 0 || end > paging::physmap_bytes() {
+    if base == 0 {
         return None;
     }
-    NonNull::new(usize::try_from(paging::physmap_virt(base)).ok()? as *mut u8)
+    paging::physmap_span(base, len)
 }
 
 /// Windows over device registers the kernel programs itself, on no

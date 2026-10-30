@@ -506,10 +506,9 @@ fn decode_entry(ty: u8, body: &[u8]) -> MadtEntry {
 // --- MADT discovery via (X|R)SDT walk (bare-metal only) --------------
 //
 // The following helpers walk the firmware-supplied XSDT (preferred) or
-// RSDT to find the Multiple APIC Description Table. They read raw
-// physical addresses through the boot trampoline's identity-mapped
-// 0..4 GiB window (`boot.s` SAFETY-INVARIANT 4) and are therefore
-// gated to the freestanding x86_64 target.
+// RSDT to find a table by signature. They read the tables through the
+// direct physical map, refusing any the map does not hold, and are
+// therefore gated to the freestanding x86_64 target.
 //
 // Both the `tests/integration/kernel_arch_boot` boot test (Stage 3a
 // (c7-bin)) and the existing `scheduler_stress_qemu`
@@ -667,20 +666,17 @@ impl<'a> Mcfg<'a> {
 ///
 /// # Safety
 ///
-/// * `rsdp.xsdt_address` (or `rsdp.rsdt_address` when `xsdt_address`
-///   is zero) must point at a complete, well-formed ACPI SDT inside
-///   the boot trampoline's 0..4 GiB identity-mapped physical window.
-/// * The firmware tables must remain unmodified for the duration of
-///   the returned slice's `'static` lifetime. The ACPI specification
-///   guarantees this for the boot-time tables.
+/// The firmware tables `rsdp` leads to must remain unmodified for the
+/// returned slice's `'static` lifetime, as the ACPI specification
+/// guarantees for the boot-time tables. Each is read through the direct
+/// map; a table it does not hold, or a pointer naming none, is skipped.
 ///
 /// Returns `None` if no entry of the (X|R)SDT advertises the
 /// [`MADT_SIGNATURE`].
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub unsafe fn locate_madt(rsdp: &Rsdp) -> Option<&'static [u8]> {
-    // SAFETY: forwarded — caller's contract pins the tables into the
-    // identity-mapped window.
+    // SAFETY: forwarded.
     unsafe { locate_sdt(rsdp, MADT_SIGNATURE) }
 }
 
@@ -694,9 +690,7 @@ pub unsafe fn locate_madt(rsdp: &Rsdp) -> Option<&'static [u8]> {
 ///
 /// # Safety
 ///
-/// Identical to [`locate_madt`]: the firmware (X|R)SDT and every table it
-/// references must lie in the identity-mapped 0..4 GiB window and remain
-/// unmodified for the returned slice's `'static` lifetime.
+/// Identical to [`locate_madt`].
 ///
 /// Returns `None` if no entry advertises the [`MCFG_SIGNATURE`] (a
 /// firmware without an ECAM description — the caller falls back or leaves
@@ -704,8 +698,7 @@ pub unsafe fn locate_madt(rsdp: &Rsdp) -> Option<&'static [u8]> {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub unsafe fn locate_mcfg(rsdp: &Rsdp) -> Option<&'static [u8]> {
-    // SAFETY: forwarded — caller's contract pins the tables into the
-    // identity-mapped window.
+    // SAFETY: forwarded.
     unsafe { locate_sdt(rsdp, MCFG_SIGNATURE) }
 }
 
@@ -721,8 +714,7 @@ pub unsafe fn locate_mcfg(rsdp: &Rsdp) -> Option<&'static [u8]> {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub unsafe fn locate_dmar(rsdp: &Rsdp) -> Option<&'static [u8]> {
-    // SAFETY: forwarded — caller's contract pins the tables into the
-    // identity-mapped window.
+    // SAFETY: forwarded.
     unsafe { locate_sdt(rsdp, crate::dmar::DMAR_SIGNATURE) }
 }
 
@@ -738,8 +730,7 @@ pub unsafe fn locate_dmar(rsdp: &Rsdp) -> Option<&'static [u8]> {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub unsafe fn locate_ivrs(rsdp: &Rsdp) -> Option<&'static [u8]> {
-    // SAFETY: forwarded — caller's contract pins the tables into the
-    // identity-mapped window.
+    // SAFETY: forwarded.
     unsafe { locate_sdt(rsdp, crate::ivrs::IVRS_SIGNATURE) }
 }
 
@@ -755,16 +746,15 @@ pub unsafe fn locate_ivrs(rsdp: &Rsdp) -> Option<&'static [u8]> {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub unsafe fn locate_viot(rsdp: &Rsdp) -> Option<&'static [u8]> {
-    // SAFETY: forwarded — caller's contract pins the tables into the
-    // identity-mapped window.
+    // SAFETY: forwarded.
     unsafe { locate_sdt(rsdp, crate::viot::VIOT_SIGNATURE) }
 }
 
 /// Walk the firmware (X|R)SDT pointed at by `rsdp` for the first table
 /// whose signature is `signature`, returning its bytes.
 ///
-/// The one signature-parameterised walk both [`locate_madt`] and
-/// [`locate_mcfg`] share, so the (X|R)SDT traversal is defined once.
+/// The one signature-parameterised walk every `locate_*` shares, so the
+/// (X|R)SDT traversal is defined once.
 ///
 /// # Safety
 ///
@@ -772,113 +762,51 @@ pub unsafe fn locate_viot(rsdp: &Rsdp) -> Option<&'static [u8]> {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 unsafe fn locate_sdt(rsdp: &Rsdp, signature: [u8; 4]) -> Option<&'static [u8]> {
-    if rsdp.xsdt_address != 0 {
-        // SAFETY: forwarded — caller's contract pins the address into
-        // the identity-mapped window.
-        unsafe { locate_sdt_via_xsdt(rsdp.xsdt_address, signature) }
+    find_sdt(rsdp, signature, &|phys, len| {
+        // SAFETY: forwarded — the caller keeps the firmware tables
+        // unmodified for the returned slice's life.
+        unsafe { crate::paging::physmap_slice(phys, len) }
+    })
+}
+
+/// The first table the (X|R)SDT `rsdp` names lists with `signature`, every
+/// table read through `read`: the `len` bytes at a physical address, or
+/// [`None`] where they cannot be reached. A table `read` refuses, or whose
+/// header claims less than itself, is skipped rather than followed.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+fn find_sdt<'t>(
+    rsdp: &Rsdp,
+    signature: [u8; 4],
+    read: &dyn Fn(u64, usize) -> Option<&'t [u8]>,
+) -> Option<&'t [u8]> {
+    // An XSDT entry is an 8-byte address, an RSDT entry a 4-byte one.
+    let (root, entry_len) = if rsdp.xsdt_address != 0 {
+        (rsdp.xsdt_address, 8)
     } else {
-        // SAFETY: forwarded.
-        unsafe { locate_sdt_via_rsdt(u64::from(rsdp.rsdt_address), signature) }
-    }
+        (u64::from(rsdp.rsdt_address), 4)
+    };
+    sdt_at(root, read)?
+        .get(ACPI_SDT_HEADER_LEN..)?
+        .chunks_exact(entry_len)
+        .find_map(|entry| {
+            let mut address = [0u8; 8];
+            address[..entry_len].copy_from_slice(entry);
+            let table = sdt_at(u64::from_le_bytes(address), read)?;
+            (table.get(..4) == Some(&signature[..])).then_some(table)
+        })
 }
 
-/// Walk an XSDT (64-bit entry pointers) for the table matching
-/// `signature`.
-///
-/// # Safety
-///
-/// See [`locate_madt`]. `xsdt_phys` must point at a valid XSDT in the
-/// identity-mapped 0..4 GiB window.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-#[must_use]
-unsafe fn locate_sdt_via_xsdt(xsdt_phys: u64, signature: [u8; 4]) -> Option<&'static [u8]> {
-    // SAFETY: caller's contract — `xsdt_phys` is identity-mapped.
-    let len = unsafe { read_phys_u32(xsdt_phys + 4) } as usize;
+/// The whole SDT at physical `phys`, as long as its header says, or
+/// [`None`] when `read` cannot reach it or the header claims less than
+/// itself.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+fn sdt_at<'t>(phys: u64, read: &dyn Fn(u64, usize) -> Option<&'t [u8]>) -> Option<&'t [u8]> {
+    let header = read(phys, ACPI_SDT_HEADER_LEN)?;
+    let len = u32::from_le_bytes(header.get(4..8)?.try_into().ok()?) as usize;
     if len < ACPI_SDT_HEADER_LEN {
         return None;
     }
-    let n_entries = (len - ACPI_SDT_HEADER_LEN) / 8;
-    for i in 0..n_entries {
-        // SAFETY: caller's contract.
-        let entry =
-            unsafe { read_phys_u64(xsdt_phys + ACPI_SDT_HEADER_LEN as u64 + (i as u64) * 8) };
-        // SAFETY: caller's contract.
-        if let Some(bytes) = unsafe { try_sdt_at(entry, &signature) } {
-            return Some(bytes);
-        }
-    }
-    None
-}
-
-/// Walk an RSDT (32-bit entry pointers) for the table matching
-/// `signature`.
-///
-/// # Safety
-///
-/// See [`locate_madt`]. `rsdt_phys` must point at a valid RSDT in the
-/// identity-mapped 0..4 GiB window.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-#[must_use]
-unsafe fn locate_sdt_via_rsdt(rsdt_phys: u64, signature: [u8; 4]) -> Option<&'static [u8]> {
-    // SAFETY: caller's contract.
-    let len = unsafe { read_phys_u32(rsdt_phys + 4) } as usize;
-    if len < ACPI_SDT_HEADER_LEN {
-        return None;
-    }
-    let n_entries = (len - ACPI_SDT_HEADER_LEN) / 4;
-    for i in 0..n_entries {
-        // SAFETY: caller's contract.
-        let entry = u64::from(unsafe {
-            read_phys_u32(rsdt_phys + ACPI_SDT_HEADER_LEN as u64 + (i as u64) * 4)
-        });
-        // SAFETY: caller's contract.
-        if let Some(bytes) = unsafe { try_sdt_at(entry, &signature) } {
-            return Some(bytes);
-        }
-    }
-    None
-}
-
-/// Inspect a candidate SDT at `phys` and return the byte slice if its
-/// signature matches `signature`.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-unsafe fn try_sdt_at(phys: u64, signature: &[u8; 4]) -> Option<&'static [u8]> {
-    // SAFETY: caller's contract pins `phys` into the identity-mapped
-    // window. We only deref the first four bytes (signature) before
-    // sizing the rest of the slice.
-    let sig = unsafe { core::slice::from_raw_parts(phys as *const u8, 4) };
-    if sig != signature {
-        return None;
-    }
-    // SAFETY: caller's contract; the length is bounded by the
-    // length field which the caller's parser re-validates.
-    let len = unsafe { read_phys_u32(phys + 4) } as usize;
-    // SAFETY: caller's contract.
-    Some(unsafe { core::slice::from_raw_parts(phys as *const u8, len) })
-}
-
-/// Read a 4-byte little-endian `u32` from a physical address.
-///
-/// # Safety
-///
-/// `phys` must be inside the boot trampoline's 0..4 GiB identity map.
-/// The four bytes at `phys..phys+4` must be a valid `u32`.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-unsafe fn read_phys_u32(phys: u64) -> u32 {
-    // SAFETY: caller's contract.
-    unsafe { core::ptr::read_unaligned(phys as *const u32) }
-}
-
-/// Read an 8-byte little-endian `u64` from a physical address.
-///
-/// # Safety
-///
-/// `phys` must be inside the boot trampoline's 0..4 GiB identity map.
-/// The eight bytes at `phys..phys+8` must be a valid `u64`.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-unsafe fn read_phys_u64(phys: u64) -> u64 {
-    // SAFETY: caller's contract.
-    unsafe { core::ptr::read_unaligned(phys as *const u64) }
+    read(phys, len).filter(|table| table.len() == len)
 }
 
 // --- Compile-time sanity check ---------------------------------------
@@ -1356,6 +1284,140 @@ pub(crate) mod tests {
         let s = bytes.iter().fold(0u8, |acc, b| acc.wrapping_add(*b));
         bytes[9] = 0u8.wrapping_sub(s);
         assert_eq!(Mcfg::parse(&bytes).err(), Some(AcpiError::BadLength));
+    }
+
+    /// Physical memory for the table walk: `bytes` laid at physical `base`,
+    /// and nothing anywhere else.
+    struct Memory {
+        base: u64,
+        bytes: Vec<u8>,
+    }
+
+    impl Memory {
+        fn new(base: u64, len: usize) -> Self {
+            Self {
+                base,
+                bytes: vec![0; len],
+            }
+        }
+
+        /// Lay `table` at physical `at`.
+        fn put(&mut self, at: u64, table: &[u8]) {
+            let start = usize::try_from(at - self.base).unwrap();
+            self.bytes[start..start + table.len()].copy_from_slice(table);
+        }
+
+        fn read(&self, phys: u64, len: usize) -> Option<&[u8]> {
+            let start = usize::try_from(phys.checked_sub(self.base)?).ok()?;
+            self.bytes.get(start..start.checked_add(len)?)
+        }
+    }
+
+    /// An SDT whose header says `length` bytes, the rest of it `body`.
+    fn sdt(signature: [u8; 4], length: u32, body: &[u8]) -> Vec<u8> {
+        let mut table = vec![0u8; ACPI_SDT_HEADER_LEN];
+        table[..4].copy_from_slice(&signature);
+        table[4..8].copy_from_slice(&length.to_le_bytes());
+        table.extend_from_slice(body);
+        table
+    }
+
+    /// An SDT of exactly its own length.
+    fn whole_sdt(signature: [u8; 4], body: &[u8]) -> Vec<u8> {
+        let length = u32::try_from(ACPI_SDT_HEADER_LEN + body.len()).unwrap();
+        sdt(signature, length, body)
+    }
+
+    /// A root table's entries: each address in `width` little-endian bytes.
+    fn entries(addresses: &[u64], width: usize) -> Vec<u8> {
+        addresses
+            .iter()
+            .flat_map(|address| address.to_le_bytes()[..width].to_vec())
+            .collect()
+    }
+
+    const BASE: u64 = 0x7FE0_0000;
+    const ROOT: u64 = BASE;
+    const FACP: u64 = BASE + 0x1000;
+    const MADT: u64 = BASE + 0x2000;
+
+    /// The bytes a walk over `memory` finds for `signature` from `rsdp`.
+    fn found(memory: &Memory, rsdp: &Rsdp, signature: [u8; 4]) -> Option<Vec<u8>> {
+        find_sdt(rsdp, signature, &|phys, len| memory.read(phys, len)).map(<[u8]>::to_vec)
+    }
+
+    fn xsdt_rsdp(xsdt: u64) -> Rsdp {
+        Rsdp {
+            revision: 2,
+            rsdt_address: 0,
+            xsdt_address: xsdt,
+        }
+    }
+
+    /// A firmware entry naming memory the kernel cannot reach is passed
+    /// over, never followed: the walk goes on to the table it can.
+    #[test]
+    fn an_sdt_outside_the_map_is_skipped() {
+        let mut memory = Memory::new(BASE, 0x4000);
+        let madt = whole_sdt(MADT_SIGNATURE, &[0xA5; 8]);
+        memory.put(MADT, &madt);
+        memory.put(FACP, &whole_sdt(*b"FACP", &[]));
+        let beyond = BASE + 0x10_0000;
+        memory.put(
+            ROOT,
+            &whole_sdt(*b"XSDT", &entries(&[beyond, FACP, MADT], 8)),
+        );
+        assert_eq!(found(&memory, &xsdt_rsdp(ROOT), MADT_SIGNATURE), Some(madt));
+        assert_eq!(
+            found(&memory, &xsdt_rsdp(beyond), MADT_SIGNATURE),
+            None,
+            "a root outside the map leads nowhere"
+        );
+    }
+
+    /// A table whose header claims less than the header itself, or more
+    /// than the memory holds, is skipped rather than sliced short.
+    #[test]
+    fn an_sdt_claiming_less_than_its_header_is_skipped() {
+        let mut memory = Memory::new(BASE, 0x4000);
+        let short = BASE + 0x3000;
+        memory.put(short, &sdt(MADT_SIGNATURE, 10, &[]));
+        let overlong = BASE + 0x3800;
+        memory.put(overlong, &sdt(MADT_SIGNATURE, 0x1000, &[]));
+        let madt = whole_sdt(MADT_SIGNATURE, &[1, 2, 3]);
+        memory.put(MADT, &madt);
+        memory.put(
+            ROOT,
+            &whole_sdt(*b"XSDT", &entries(&[short, overlong, MADT], 8)),
+        );
+        assert_eq!(found(&memory, &xsdt_rsdp(ROOT), MADT_SIGNATURE), Some(madt));
+        memory.put(ROOT, &sdt(*b"XSDT", 20, &[]));
+        assert_eq!(
+            found(&memory, &xsdt_rsdp(ROOT), MADT_SIGNATURE),
+            None,
+            "a root claiming less than its header lists nothing"
+        );
+    }
+
+    /// Without an XSDT the walk reads the RSDT's 32-bit entries.
+    #[test]
+    fn the_rsdt_walk_reads_four_byte_entries() {
+        let mut memory = Memory::new(BASE, 0x4000);
+        let madt = whole_sdt(MADT_SIGNATURE, &[7; 4]);
+        memory.put(MADT, &madt);
+        memory.put(ROOT, &whole_sdt(*b"RSDT", &entries(&[FACP, MADT], 4)));
+        memory.put(FACP, &whole_sdt(*b"FACP", &[]));
+        let rsdp = Rsdp {
+            revision: 0,
+            rsdt_address: u32::try_from(ROOT).unwrap(),
+            xsdt_address: 0,
+        };
+        assert_eq!(found(&memory, &rsdp, MADT_SIGNATURE), Some(madt));
+        assert_eq!(
+            found(&memory, &rsdp, MCFG_SIGNATURE),
+            None,
+            "a table none lists"
+        );
     }
 
     #[test]

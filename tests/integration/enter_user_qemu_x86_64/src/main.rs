@@ -24,16 +24,15 @@
 //! then, using the Stage-3 paging primitives
 //! (`tairix_arch_x86_64::paging`):
 //!
-//! 1. Builds one `paging::AddressSpace` that identity-maps the low
-//!    32 MiB **and** mirrors the higher-half kernel window, so the kernel
+//! 1. Builds one process root, whose kernel half keeps the kernel
 //!    code/stack/data, the per-CPU `swapgs` TLS, the dispatch callback,
-//!    and this stub's page stay reachable after the CR3 switch.
+//!    and this stub's page reachable after the CR3 switch.
 //! 2. Aliases the page(s) holding the `tairix_sys_cap_query` stub at a
 //!    ring-3 virtual address (`USER_CODE_VA`) **user-accessible,
-//!    executable, not writable** (`map_4k_user(writable = false)` — W^X), and maps a USER read/write stack at
-//!    `USER_STACK_VA`. The kernel's own mappings carry no USER bit, so
-//!    ring 3 can reach *only* the aliased stub and its stack — the
-//!    isolation contract.
+//!    executable, not writable**, and maps a USER read/write,
+//!    non-executable stack at `USER_STACK_VA`. The kernel's own mappings
+//!    carry no USER bit, so ring 3 can reach *only* the aliased stub and
+//!    its stack — the isolation contract.
 //! 3. Overrides the dispatch callback with `record_and_exit`, switches
 //!    CR3 to the new space, and `iretq`s to ring 3 at the stub through
 //!    `UserMode::new().enter_user(...)`.
@@ -107,11 +106,8 @@ mod kernel {
     /// asserts the stub's *marshalling*, not the kernel's grant decision.
     const EXPECTED_CAP: CapabilityId = CapabilityId::TIME_SET;
 
-    /// Ring-3 virtual address the stub code is aliased at. 64 GiB — far
-    /// above the live identity window
-    /// ([`paging::AddressSpace::new_boot_identity`]) — so the alias
-    /// lands on freshly-walked tables under the shared PML4[0]/PDPT, not
-    /// on an identity huge-page leaf. Page aligned and canonical.
+    /// Ring-3 virtual address the stub code is aliased at: 64 GiB, in the
+    /// user half a process root leaves empty. Page aligned and canonical.
     const USER_CODE_VA: u64 = 0x10_0000_0000;
 
     /// Ring-3 virtual address the stack is mapped at (4 MiB above the code
@@ -188,7 +184,7 @@ mod kernel {
     fn run_round_trip() -> ! {
         let page = paging::PAGE_SIZE as u64;
 
-        let Some(mut space) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
+        let Some(mut space) = paging::AddressSpace::new_process_root(&PAGE_TABLE_POOL) else {
             qemu_exit::exit_failure();
         };
 
@@ -201,11 +197,12 @@ mod kernel {
         // keeps the executable alias non-writable (W^X).
         for i in 0..2u64 {
             if space
-                .map_4k_user(
+                .map_4k_user_wx(
                     &PAGE_TABLE_POOL,
                     USER_CODE_VA + i * page,
                     func_page + i * page,
                     false,
+                    true,
                 )
                 .is_none()
             {
@@ -214,15 +211,16 @@ mod kernel {
         }
         let user_entry = USER_CODE_VA | (func_va & (page - 1));
 
-        // ---- Map the ring-3 stack (USER|R|W). ----
+        // ---- Map the ring-3 stack (USER|R|W, never executable). ----
         let stack_phys = core::ptr::addr_of!(USER_STACK) as u64 - paging::KERNEL_VMA_BASE;
         for i in 0..USER_STACK_PAGES {
             if space
-                .map_4k_user(
+                .map_4k_user_wx(
                     &PAGE_TABLE_POOL,
                     USER_STACK_VA + i * page,
                     stack_phys + i * page,
                     true,
+                    false,
                 )
                 .is_none()
             {
@@ -236,10 +234,9 @@ mod kernel {
 
         syscall_entry::set_dispatch_callback(record_and_exit);
 
-        // SAFETY: the new space carries the live identity window and the
-        // higher-half kernel window, so the currently executing RIP, the
-        // current stack, the per-CPU `swapgs` TLS, `record_and_exit`, and the
-        // ring-3 preemption timer ISR's LAPIC MMIO access all stay mapped
+        // SAFETY: the root carries the kernel half: the image window holding
+        // this code, the current stack and every static, and the direct map
+        // the LAPIC is reached through, so nothing the kernel touches is lost
         // across the switch.
         unsafe { space.switch() };
 

@@ -32,7 +32,7 @@
 //     begins with) into EDI so the Rust prologue can tell the protocols
 //     apart, then falls through to the shared `boot_common`.
 //  3. The 4 KiB-aligned `boot_pml4`/`boot_pdpt`/`boot_pdpt_high`/
-//     `boot_pdpt_physmap`/`boot_pds`
+//     `boot_pdpt_physmap`/`boot_pds`/`boot_pds_physmap`
 //     tables sit in `.boot.bss` (linked 1:1 in low memory by `linker.ld`)
 //     and are zero-initialised by the loader (BSS bytes are zero per the
 //     multiboot spec; QEMU's PVH ELF loader zero-fills the
@@ -40,18 +40,12 @@
 //     They live in `.boot.bss` rather than the
 //     high-half `.bss` so the 32-bit trampoline can name them with absolute
 //     32-bit operands before paging is enabled.
-//  4. We identity-map the full 0..4 GiB physical address window via four
-//     page directories chained from PDPT[0..4], each populated with the
-//     512 2 MiB huge-page entries that cover its 1 GiB slot. This is
-//     deliberately broader than the original 32 MiB bootstrap map: it
-//     guarantees that the LAPIC MMIO frame at 0xFEE00000 and the IO-APIC
-//     frame at 0xFEC00000 — both architecturally fixed by Intel — are
-//     reachable, and likewise that any ACPI table the firmware placed in
-//     high memory below 4 GiB is reachable — every address the boot path
-//     must reach *as* a physical address. It is never widened: RAM is
-//     reached through the direct physical map (invariant 10) instead, which
-//     lives in the kernel half and so is not bounded by where user space
-//     begins.
+//  4. The identity window maps the first GiB through one page directory of
+//     2 MiB leaves, `boot_pds`: it is what the trampoline executes from,
+//     and reads its GDT through, from the moment paging is on until it
+//     jumps high. Nothing else reaches a physical address as itself: the
+//     Rust entry leaves this root for the kernel root, which has no
+//     identity window, before the kernel proper runs.
 //  5. The long-mode GDT below has a single 64-bit code segment at
 //     selector 0x08 with L=1 (long mode) and a 64-bit data segment at
 //     selector 0x10. Both are flat (base 0, limit ignored in 64-bit).
@@ -69,29 +63,35 @@
 //     sections are linked at virtual `KERNEL_VMA_BASE (0xFFFFFFFF80000000)
 //     + phys` but loaded into low physical memory. Before the long-mode
 //     jump the trampoline maps that window (PML4[511] -> `boot_pdpt_high`,
-//     `boot_pdpt_high`[510] -> the first-GiB identity PD `boot_pds`), so
-//     virtual `0xFFFFFFFF80000000 + X` resolves to physical `X` for the
-//     whole kernel image. The 0..4 GiB identity map (invariant 4) is kept
-//     so the direct physical map (`kernel/mem` phys.rs: DMA/MMIO/ACPI/
-//     multiboot info) is unaffected. After entering long mode the
+//     `boot_pdpt_high`[510] -> the identity window's directory `boot_pds`),
+//     so virtual `0xFFFFFFFF80000000 + X` resolves to physical `X` for the
+//     whole kernel image. The Rust entry runs on it until it builds the
+//     kernel root, whose own image window maps each section with only the
+//     access it needs. After entering long mode the
 //     trampoline transfers to the high half with an absolute
 //     `movabs`+`jmp *%rax` to `higher_half_entry`, and re-points `%rsp` at
 //     the boot stack's own higher-half alias (`boot_stack_top_high`,
 //     derived in `linker.ld`) so the running stack is mapped under every
 //     translation root and not only under the identity window.
 // 10. The direct physical map's floor: PML4[256] -> `boot_pdpt_physmap`,
-//     whose low four entries point at the identity window's own page
-//     directories (`boot_pds`), so physical `X` is reachable at
+//     whose low four entries point at the page directories
+//     `boot_pds_physmap`, whose 2 MiB leaves are read/write and
+//     non-executable, so physical `X` is reachable at
 //     `paging::PHYSMAP_VMA_BASE + X` for `X` in 0..4 GiB from the first
-//     instruction after paging is on. It costs one table and no leaves of
-//     its own. The kernel widens the remainder of that table once the
-//     firmware memory map is known (`paging::install_boot_physmap`), and
-//     verifies this entry against its own slot constant first, so an
-//     asm/Rust disagreement fails the boot rather than mapping nothing.
+//     instruction after paging is on. The kernel root carries a copy of
+//     that PDPT, with its first directory drawn afresh, so these tables are
+//     never edited while live; it verifies this entry against its own slot
+//     constant first, so an asm/Rust disagreement fails the boot rather
+//     than copying something else. The widening
+//     (`paging::install_boot_physmap`) extends the copy.
 //     Laying the floor here rather than in the boot path is what lets the
 //     LAPIC and IO-APIC register blocks be named at one address: every
 //     consumer of this crate has the map, including one that runs no boot
 //     pipeline of its own.
+// 11. `CR0` is written whole (PE|PG) rather than amended: multiboot2 leaves
+//     its other bits undefined, and a cache-disable bit inherited from the
+//     loader would leave the kernel running uncached. The FPU set-up and the
+//     kernel root's entry add the rest.
 
 .section .multiboot_header, "a"
 .align 8
@@ -170,53 +170,57 @@ boot_common:
     jmp  .Lpoison_guard
 .Lpoison_guard_done:
 
-    // PML4[0] -> PDPT
+    // PML4[0] -> boot_pdpt, PDPT[0] -> boot_pds: the identity window
+    // (SAFETY-INVARIANT 4).
     movl $boot_pdpt, %eax
     orl  $0x3, %eax                                 // P|RW
     movl %eax, boot_pml4
+    movl $boot_pds, %eax
+    orl  $0x3, %eax                                 // P|RW
+    movl %eax, boot_pdpt
 
-    // PDPT[i] -> boot_pds + i*4096 | P|RW, for i in 0..4  (one PD per GiB),
-    // and the same page directories into the direct physical map's own PDPT
-    // (SAFETY-INVARIANT 10): the two windows share the identity leaves, so
-    // the map's floor costs one table and no leaves of its own.
+    // PDS[k] = k*2 MiB | P|RW|PS, for k in 0..512: the first GiB.
     xorl %ecx, %ecx
 1:
-    movl $boot_pds, %eax
-    movl %ecx, %edx
-    shll $12, %edx                                  // ecx * 4096
-    addl %edx, %eax
-    orl  $0x3, %eax                                 // P|RW
-    movl %eax, boot_pdpt(,%ecx,8)
-    movl $0, boot_pdpt+4(,%ecx,8)
-    movl %eax, boot_pdpt_physmap(,%ecx,8)
-    movl $0, boot_pdpt_physmap+4(,%ecx,8)
+    movl %ecx, %eax
+    shll $21, %eax                                  // ecx * 2 MiB
+    orl  $0x83, %eax                                // P|RW|PS
+    movl %eax, boot_pds(,%ecx,8)
     incl %ecx
-    cmpl $4, %ecx
+    cmpl $512, %ecx
     jl   1b
 
-    // PDS[k] = k*2 MiB | P|RW|PS, for k in 0..2048
-    // (identity-map the full 0..4 GiB window; high 32 bits of the PDE
-    //  are always zero because k * 2 MiB < 2^32).
+    // The direct map's floor (SAFETY-INVARIANT 10): PDPT_PHYSMAP[i] ->
+    // boot_pds_physmap + i*4096 | P|RW for i in 0..4, one directory per GiB.
     xorl %ecx, %ecx
 2:
     movl %ecx, %eax
-    shll $21, %eax                                  // ecx * 2 MiB (low 32 bits)
-    orl  $0x83, %eax                                // P|RW|PS
-    movl %eax, boot_pds(,%ecx,8)
-    movl $0, boot_pds+4(,%ecx,8)
+    shll $12, %eax                                  // ecx * 4096
+    addl $boot_pds_physmap, %eax
+    orl  $0x3, %eax                                 // P|RW
+    movl %eax, boot_pdpt_physmap(,%ecx,8)
     incl %ecx
-    cmpl $2048, %ecx
+    cmpl $4, %ecx
     jl   2b
 
-    // Higher-half kernel window (SAFETY-INVARIANT 9). The kernel's Rust
-    // sections are linked at KERNEL_VMA_BASE = 0xFFFFFFFF80000000 + phys
-    // (linker.ld) but loaded into low physical memory. 0xFFFFFFFF80000000
+    // PDS_PHYSMAP[k] = k*2 MiB | P|RW|PS|NX, for k in 0..2048. The low
+    // dword never carries a bit above 31 because k * 2 MiB < 2^32; NX is
+    // bit 63, the high dword's bit 31.
+    xorl %ecx, %ecx
+3:
+    movl %ecx, %eax
+    shll $21, %eax                                  // ecx * 2 MiB
+    orl  $0x83, %eax                                // P|RW|PS
+    movl %eax, boot_pds_physmap(,%ecx,8)
+    movl $0x80000000, boot_pds_physmap+4(,%ecx,8)   // NX
+    incl %ecx
+    cmpl $2048, %ecx
+    jl   3b
+
+    // Higher-half kernel window (SAFETY-INVARIANT 9). 0xFFFFFFFF80000000
     // decodes to PML4[511] -> PDPT[510] -> PD[0]; pointing PDPT[510] at the
-    // already-populated first-GiB identity PD (`boot_pds`) maps virtual
-    // 0xFFFFFFFF80000000 + X to physical X for X in 0..1 GiB, which is
-    // exactly the kernel image's load window. The 0..4 GiB identity map
-    // above is kept intact so the direct physical map (DMA/MMIO, ACPI,
-    // multiboot info, LAPIC/IO-APIC MMIO) keeps working unchanged.
+    // identity window's directory maps virtual 0xFFFFFFFF80000000 + X to
+    // physical X for X in 0..1 GiB, the whole kernel image's load window.
     //
     // PML4[511] -> boot_pdpt_high  (offset 511 * 8 = 0xFF8)
     movl $boot_pdpt_high, %eax
@@ -254,9 +258,8 @@ boot_common:
     orl  $(1 << 8) | (1 << 11), %eax              // LME | NXE
     wrmsr
 
-    // CR0.PG = 1 (paging on); we're now in compatibility mode.
-    movl %cr0, %eax
-    orl  $(1 << 31), %eax
+    // CR0 = PE|PG (SAFETY-INVARIANT 11): paging on, in compatibility mode.
+    movl $((1 << 31) | (1 << 0)), %eax
     movl %eax, %cr0
 
     // Load 64-bit GDT, far-jump to 64-bit code segment.
@@ -329,7 +332,6 @@ higher_half_entry:
 //    name them with absolute 32-bit operands before paging is enabled.
 .section .boot.bss, "aw", @nobits
 .align 4096
-.global boot_pml4
 boot_pml4:
     .skip 4096
 boot_pdpt:
@@ -339,18 +341,18 @@ boot_pdpt:
 boot_pdpt_high:
     .skip 4096
 // PDPT for the direct physical map's floor (SAFETY-INVARIANT 10). Its low
-// entries point at `boot_pds`, the identity window's own directories, and
-// the kernel widens the remainder once the firmware memory map is known.
-// Exposed so `paging.rs` can name the table it must agree with.
+// entries point at `boot_pds_physmap`, and the kernel widens the remainder
+// once the firmware memory map is known. Exposed so `paging.rs` can name
+// the table it must agree with.
 .global boot_pdpt_physmap
 boot_pdpt_physmap:
     .skip 4096
-// Four contiguous PDs, one per GiB of the identity-mapped 0..4 GiB window.
-// See SAFETY-INVARIANT 4. Symbol exposed so the AP bring-up code in
-// `smp.rs` can pass the bootstrap PML4 to APs unchanged. The first-GiB PD
-// is reused by `boot_pdpt_high` to back the higher-half kernel window.
-.global boot_pds
+// The identity window's directory (SAFETY-INVARIANT 4), which also backs
+// the higher-half kernel window.
 boot_pds:
+    .skip 4096
+// Four contiguous directories of the direct map's floor, one per GiB.
+boot_pds_physmap:
     .skip 4096 * 4
 
 // The bootstrap stack and its poison guard follow these tables in
@@ -360,12 +362,14 @@ boot_pds:
 
 // -- Long-mode GDT. Lives in the low `.boot.rodata` section (linker.ld) so
 //    `lgdt` can load it (by its low linear address) before paging is on.
+//    Each descriptor's accessed bit is preset, so loading it writes nothing
+//    to a read-only section.
 .section .boot.rodata, "a"
 .align 8
 gdt64:
     .quad 0                                         // 0x00: null
-    .quad 0x00AF9A000000FFFF                        // 0x08: 64-bit code (L=1)
-    .quad 0x00AF92000000FFFF                        // 0x10: data
+    .quad 0x00AF9B000000FFFF                        // 0x08: 64-bit code (L=1)
+    .quad 0x00AF93000000FFFF                        // 0x10: data
 gdt64_end:
 gdt64_ptr:
     .word gdt64_end - gdt64 - 1

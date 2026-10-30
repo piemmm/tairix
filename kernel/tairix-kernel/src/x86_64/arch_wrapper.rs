@@ -571,11 +571,11 @@ impl KernelArch for BinArch {
     }
 
     fn direct_phys_map(&self) -> Option<&'static (dyn tairix_kernel_mem::PhysMap + Sync)> {
-        // The configured identity direct map (`virtual == physical` over the
-        // discovered-RAM window) through which the kernel reaches any RAM
-        // frame the allocator hands out — the view the shared-memory facility
-        // scrubs region frames through. On a host build there is no ring-0
-        // physical map, so none is offered and `shm_*` stays fail-closed.
+        // The direct physical map, sized from the discovered RAM, through
+        // which the kernel reaches any frame the allocator hands out — the
+        // view the shared-memory facility scrubs region frames through. On a
+        // host build there is no ring-0 physical map, so none is offered and
+        // `shm_*` stays fail-closed.
         #[cfg(all(freestanding, kernel_isa = "x86_64"))]
         {
             Some(&crate::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP)

@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 532 open, 1039 closed, 1571 total.
+**closed**, and a partial fix stays **open**. 534 open, 1044 closed, 1578 total.
 
-### Open (532)
+### Open (534)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -559,9 +559,11 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1538 | `timed` picks up a time server a DHCP lease names only within its bounded ~17-minute configuration ladder, though the network stack's `Network` notice announces an address change; a lease that arrives later leaves the built-in fallback in use until the service restarts | **low**; noticed closing D1535; logged by the user's direction; replacing the ladder with the notice means revisiting TS-7's tiering and churn rules (`plans/TIMESYNC.md`). `userland/system/timed/src/run.rs` |
 | D1540 | two syscall paths allocate a kernel object with an infallible `Arc::new`, so a heap that cannot hold it aborts the kernel rather than failing the call `OutOfMemory`: `call_create`'s registration of the endpoint it built, and the spawn path's child-id cell | **medium**; noticed making the served-volume paths' allocations fallible (`Arc::try_new`), which those paths now are; not absorbed, because a regression test needs an allocation-failure seam the host test allocator (`kernel/core/src/test_alloc.rs`) does not offer. The spawn cell is of a piece with D122. `kernel/core/src/syscalls.rs` `call_create`, the spawn admission |
 | D1559 | every image embeds the build host's absolute paths — the toolchain's `rust-src` and the cargo registry sources, through panic and `#[track_caller]` locations — because no build remaps them, so two hosts with different home directories build different images from the same inputs, and a shipped image names its builder's home directory | **medium, supply chain**; noticed checking what the sleeping lock's site records put in an image (workspace paths are already relative). Not absorbed: the fix is a remapping policy for every image build (cargo `trim-paths`, or `--remap-path-prefix` for the sysroot and the registry), which also decides what a debug image's backtraces and DWARF name, and a reproducibility check that a second host would catch. `.cargo/config.toml`, `tools/xtask` image pipeline |
-| D1571 | the x86_64 boot root, which every kernel thread and the dispatcher run on, identity-maps physical 0–4 GiB read/write/execute — `boot.s` builds its 2 MiB leaves `P\|RW\|PS` with no NX — and the same leaves back the kernel's higher-half window and the direct map's first 4 GiB: a kernel NULL dereference does not fault, a stray write below 4 GiB lands in live memory (the boot page tables included), and the kernel image is writable and executable | **high, hardening**; noticed reviewing the x86_64 fault hunt (a jump to address 3 executed low memory instead of faulting); its own item at the user's direction. The fix runs kernel threads on a root without the identity window, keeping it only for AP start-up, maps the kernel image per section (text RX, rodata R and NX, data RW and NX) and the direct map NX. `tests/SECURITY.md` tracks SMEP, SMAP and `CR0.WP`. `kernel/arch/x86_64/src/boot.s`, `paging.rs` |
+| D1577 | the aarch64 kernel runs from identity RAM gigapages that are read/write and EL1-executable (`PXN` clear), and virtual address 0 is mapped — Device on QEMU `virt`, the kernel's own gigapage on the Pi 4 — so a kernel NULL dereference does not fault, a stray write lands in live memory, and the kernel image is writable and executable | **high, hardening**; the aarch64 sibling of D1571, logged when D1571 was scoped to x86_64 at the user's direction. The kernel's `TTBR1_EL1` regime wants the x86_64 shape: the image mapped per section, the direct map `PXN`, and nothing physical mapped as itself where the kernel runs. `kernel/arch/aarch64/src/paging.rs` (`normal_leaf_attrs`) |
+| D1578 | the riscv64 kernel runs from identity gigapages mapped `R\|W\|X` from virtual address 0, so a kernel NULL dereference does not fault, a stray write lands in live memory, and the kernel image is writable and executable | **high, hardening**; the riscv64 sibling of D1571, logged at the user's direction. The kernel is identity-linked, so the fix is a higher-half link or per-section leaves over the window it runs from. `kernel/arch/riscv64/src/paging.rs` (`new_identity_gigapages`) |
+| D1579 | x86_64 sets neither `CR4.SMEP` nor `CR4.SMAP`, so the kernel can execute a user page, and read or write one outside the guarded user copy | **high, hardening**; logged at the user's direction when D1571 was scoped. SMAP needs `stac`/`clac` around the guarded copy's window (`uaccess`); `tests/SECURITY.md` §5 holds the conformance spec. `kernel/arch/x86_64/src/paging/kernel_root.rs` (`join_kernel_root`, where `CR0.WP` is set) |
 
-### Closed (1039)
+### Closed (1044)
 
 | ID | Subject |
 |---|---|
@@ -1604,6 +1606,11 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D584 | `lib/usb`'s and the QMP client's seams: an unreachable `transfer > INT_TRANSFER_MAX` refusal documented in two rustdocs, `max_packet_at` public with no caller outside the crate, D533's text still naming a clamp that no longer exists, and the QMP client swallowing every failure to set its read timeout, leaving an earlier one of up to 10 s armed — closed: a compile-time assertion holds the longest service interval's payload (`INTERRUPT_ESIT_MAX`) to the transfer buffer, so the refusal and the payload's fallible narrowing are gone and `payload` answers in the bound's width; `max_packet_at` is crate-private; D533 no longer names the clamp; and the human and control monitors share `bound_reads`, which reads only what has arrived where a socket refuses its bound as invalid, as macOS does once its peer has shut both ways, and reports any other failure, its test provoking the refusal on every platform; `no_service_interval_outgrows_the_bound_its_transfer_buffer_is_held_to`, `a_refused_read_bound_reads_only_what_has_arrived` |
 | D1575 | `lib/usb` defined `HS_MAX_ADDITIONAL_TRANSACTIONS`, the two additional transactions a high-speed periodic endpoint may move a microframe, twice — in `device.rs` for interrupt endpoints and `periodic.rs` for isochronous ones — closed: `periodic.rs` holds the one definition and `device.rs` imports it |
 | D1576 | the QMP client bounded each read of a line by the time left when the line was asked for, though one line can take many reads, so a monitor trickling a line, each byte inside that bound, held the wait past its deadline for as long as it trickled; and a line a hang-up cut short was returned as a whole one, so a truncated `{"return"` passed for an answer — closed: each read is bounded by what is left of the deadline, and a hang-up mid-line is the monitor closing; `a_line_trickled_in_is_cut_off_at_the_deadline`, `an_answer_cut_short_by_the_hang_up_is_not_taken_for_one` |
+| D1571 | the x86_64 boot root, which every kernel thread and the dispatcher ran on, identity-mapped physical 0–4 GiB read/write/execute, and the same leaves backed the higher-half kernel window and the direct map's first 4 GiB, so a kernel NULL dereference did not fault, a stray write below 4 GiB landed in live memory, and the kernel image was writable and executable — closed: the boot entry moves every CPU onto the kernel root before the kernel proper runs (`paging::enter_kernel_root`, `join_kernel_root`), which maps nothing physical as itself; its image window maps each section with only the access it needs (text RX, read-only data R+NX, data RW+NX); the direct map is non-executable, its alias of the text and read-only data read only; `CR0.WP` is set on every CPU; every root shares that kernel half; the identity window survives only in the start-up root, as the one read-and-execute page an application processor starts at; and the boot info and ACPI tables are read through the direct map. The roots are built from fresh tables, so no live translation changes page size. `kernel_root::tests`, `a_process_root_maps_nothing_physical_as_itself`, `the_floor_check_ignores_the_accessed_bit` |
+| D1580 | an x86_64 application processor started with its caches disabled: INIT leaves `CR0.CD` and `CR0.NW` set and the start-up trampoline only ORed `PE\|PG` into `CR0`; the boot CPU likewise kept whatever `CR0` bits its loader left, which multiboot2 leaves undefined — closed: both trampolines write `CR0` whole, and the FPU set-up and the kernel root's entry add the rest; `every_boot_entry_writes_cr0_whole` |
+| D1581 | the frame an x86_64 application processor starts at (`0x8000`) was never reserved from the frame allocator, though the firmware reports it usable and every launch overwrites it — closed: the boot memory map reserves it beside the kernel image (`bootmemory::boot_reservations`); `the_ap_start_frame_is_reserved_beside_the_image` |
+| D1582 | x86_64 boot read the loader's hand-off and walked the ACPI tables by dereferencing firmware-supplied physical addresses as pointers, unchecked, so a table or record beyond the identity window faulted the boot rather than being refused or reached — closed: every read goes through the direct map, bounded by its live extent; a span outside it is refused (`BootDataError::Unmapped`) or skipped, and ACPI tables above 4 GiB are reached once the map is widened; `an_sdt_outside_the_map_is_skipped`, `an_sdt_claiming_less_than_its_header_is_skipped`, `the_rsdt_walk_reads_four_byte_entries` |
+| D1583 | two x86_64 inline-assembly blocks setting a `CR4` bit — `paging::enable_pcids` and the `xstate` set-up's `OSXSAVE` — ORed it in with `or`, which writes the status flags, yet declared `options(preserves_flags)`, so the compiler was free to keep a comparison's outcome in `RFLAGS` across them — closed: neither claims to preserve the flags, and `no_block_claiming_to_preserve_the_flags_writes_them` refuses any block of the port that claims to while running an instruction outside the classified set |
 
 ## Scope
 
@@ -5714,18 +5721,16 @@ three costs above:
   allocators' own bounds.
 * **A process pays no pages for the map.** Its tables are drawn once and
   shared; a root's whole share is its own PML4 entries.
-* **The identity window stopped growing.** `new_boot_identity` maps exactly
-  `BOOT_IDENTITY_GIB`, for the addresses that genuinely need to be
-  themselves (the trampoline's tables, the AP start-up trampoline at
-  `0x8000`, the firmware tables and the multiboot2/PVH blob). It is never
-  widened; `widen_boot_identity` is gone, and with it the first of the two
-  residues this entry used to list.
+* **No root the kernel runs on maps anything physical as itself.** What
+  is left of the identity window is the trampoline's own, for the code that
+  turns paging on, and the start-up root's one page at `0x8000` that an
+  application processor starts at (D1571).
 
 **The floor is the trampoline's, not the boot path's.** `boot.s`
-SAFETY-INVARIANT 10 installs `PML4[256] → boot_pdpt_physmap`, whose low four
-entries point at the identity window's own page directories — so the map
-costs one table and no leaves of its own, and physical `X` is reachable at
-`PHYSMAP_VMA_BASE + X` from the first instruction after paging is on. This
+SAFETY-INVARIANT 10 installs `PML4[256] → boot_pdpt_physmap`, whose four
+entries point at the trampoline's own non-executable directories, so
+physical `X` is reachable at `PHYSMAP_VMA_BASE + X` from the first
+instruction after paging is on. This
 is load-bearing rather than an optimisation: the LAPIC register block is
 named at one address (`preempt::LAPIC_BASE_VIRT`), the interrupt paths write
 EOI under whichever root the interrupted task had loaded, and two

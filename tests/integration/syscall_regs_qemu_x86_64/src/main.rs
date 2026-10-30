@@ -138,9 +138,8 @@ mod kernel {
         0x5EED_000C_CCCC_CC0C,
     ];
 
-    /// Ring-3 virtual address the probe code is aliased at (as for the
-    /// sibling enter-user vertical: far above the 32 MiB low identity
-    /// window so the alias lands on freshly-walked tables).
+    /// Ring-3 virtual address the probe code is aliased at, as for the
+    /// sibling enter-user vertical.
     const USER_CODE_VA: u64 = 0x10_0000_0000;
 
     /// Ring-3 virtual address the stack is mapped at (4 MiB above the
@@ -329,7 +328,7 @@ mod kernel {
     fn run_round_trip() -> ! {
         let page = paging::PAGE_SIZE as u64;
 
-        let Some(mut space) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
+        let Some(mut space) = paging::AddressSpace::new_process_root(&PAGE_TABLE_POOL) else {
             qemu_exit::exit_failure();
         };
 
@@ -342,11 +341,12 @@ mod kernel {
         // executable alias non-writable (W^X).
         for i in 0..2u64 {
             if space
-                .map_4k_user(
+                .map_4k_user_wx(
                     &PAGE_TABLE_POOL,
                     USER_CODE_VA + i * page,
                     func_page + i * page,
                     false,
+                    true,
                 )
                 .is_none()
             {
@@ -355,15 +355,16 @@ mod kernel {
         }
         let user_entry = USER_CODE_VA | (func_va & (page - 1));
 
-        // ---- Map the ring-3 stack (USER|R|W). ----
+        // ---- Map the ring-3 stack (USER|R|W, never executable). ----
         let stack_phys = core::ptr::addr_of!(USER_STACK) as u64 - paging::KERNEL_VMA_BASE;
         for i in 0..USER_STACK_PAGES {
             if space
-                .map_4k_user(
+                .map_4k_user_wx(
                     &PAGE_TABLE_POOL,
                     USER_STACK_VA + i * page,
                     stack_phys + i * page,
                     true,
+                    false,
                 )
                 .is_none()
             {
@@ -377,10 +378,9 @@ mod kernel {
 
         syscall_entry::set_dispatch_callback(probe_dispatch);
 
-        // SAFETY: the new space carries the live identity window and the
-        // higher-half kernel window, so the currently executing RIP, the
-        // current stack, the per-CPU `swapgs` TLS, `probe_dispatch`, and the
-        // ring-3 preemption timer ISR's LAPIC MMIO access all stay mapped
+        // SAFETY: the root carries the kernel half: the image window holding
+        // this code, the current stack and every static, and the direct map
+        // the LAPIC is reached through, so nothing the kernel touches is lost
         // across the switch.
         unsafe { space.switch() };
 

@@ -193,6 +193,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Per-task floating-point register state (§4) | One task reading the float registers another task left behind | ✓ SSE per entry, rest at park | ✓ eager | ✓ lazy `FS` | ✓ host |
 | No kernel register state at first user entry (§4) | A new process reading kernel pointers or another task's vector residue | ✓ | ✓ | ✓ | ✓ host |
 | W^X + position-independent executables (§19.2) | Code injection, writable-executable memory | ✓ | ✓ | ✓ | ✓ |
+| Kernel mappings W^X, nothing physical mapped as itself: image mapped per section, direct map non-executable, supervisor writes held to read-only (§19.2) | A NULL or stray kernel pointer landing in live memory; kernel text or read-only data overwritten, or kernel data executed | ✓ | ▢ | ▢ | — |
 | Load-time CFI tag vs syscall-hash (§19.2) | Control-flow hijacking across ABI/IPC | ✓ | ✓ | ✓ | ✓ |
 | Software memory tagging (§19.10) | Use-after-free (software floor) | ✓ | ✓ | ✓ | ✓ |
 | Zero-on-free of secrets (§4) | Secret recovery from reused memory | ✓ | ✓ | ✓ | ✓ |

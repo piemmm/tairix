@@ -31,8 +31,8 @@ use crate::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 const MMIO_CAP_PAGES: usize = 64;
 
 /// Bookkeeping base of the register-window map. Its tables are written into a
-/// space never made live — the CPU reaches the registers through the identity
-/// direct map — and both bases sit above the 32 MiB identity that space maps.
+/// space never made live — the CPU reaches the registers through the direct
+/// map — so the base only keys the window's slots.
 const MMIO_VBASE: u64 = 0x6000_0000;
 
 /// Bookkeeping base of the DMA window (see [`MMIO_VBASE`]).
@@ -78,7 +78,7 @@ pub fn bring_up_virtio_pci(
     let host = crate::pci_host::published().ok_or("virtio-PCI floor: no PCI host")?;
     let phys = &SPAWN_TABLE_PHYSMAP;
 
-    let mmio_space = ArchAddressSpace::new_bookkeeping_identity_32mib(&FLOOR_PT_POOL)
+    let mmio_space = ArchAddressSpace::new_process_root(&FLOOR_PT_POOL)
         .ok_or("virtio-PCI floor: mmio bookkeeping space")?;
     let mmio: &'static mut MmioMap<'static, ArchAddressSpace> = Box::leak(Box::new(
         MmioMap::new(
@@ -111,7 +111,7 @@ pub fn bring_up_virtio_pci(
             .ok_or("virtio-PCI floor: no interrupt controller")?,
         park: hlt_fallback_park,
     };
-    let dma_space = ArchAddressSpace::new_bookkeeping_identity_32mib(&FLOOR_PT_POOL)
+    let dma_space = ArchAddressSpace::new_process_root(&FLOOR_PT_POOL)
         .ok_or("virtio-PCI floor: dma bookkeeping space")?;
     let pool = DmaPool::new(
         AddressSpace::new(dma_space),

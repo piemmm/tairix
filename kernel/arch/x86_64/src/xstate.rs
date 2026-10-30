@@ -432,7 +432,7 @@ pub(crate) unsafe fn init_cpu() -> Result<(), Mismatch> {
                 "mov cr4, {t}",
                 t = out(reg) _,
                 bit = in(reg) CR4_OSXSAVE,
-                options(nostack, preserves_flags),
+                options(nostack),
             );
             core::arch::asm!(
                 "xsetbv",

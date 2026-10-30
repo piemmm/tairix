@@ -510,9 +510,10 @@ QEMU exercise, `tests/integration/enter_user_qemu_x86_64`
 `tools/xtask/src/commands/qemu_tests.rs` and the workspace `Cargo.toml`): the
 production kernel boots, and on `BootCompleted` the test builds a ring-3 address
 space — a USER-accessible, executable, non-writable alias of the
-`tairix_sys_cap_query` stub page (W^X, §19.2) plus a USER read/write stack, using
-the new `paging::map_4k_user` (which OR-s the USER bit into the leaf and every
-intermediate table entry; `map_4k`/`map_4k_user` share one walk, §2.2) — switches
+`tairix_sys_cap_query` stub page (W^X, §19.2) plus a USER read/write,
+non-executable stack, through `paging::map_4k_user_wx` (which OR-s the USER bit
+into the leaf and every intermediate table entry and shares one walk with
+`map_4k`, §2.2) — switches
 CR3, and `iretq`s to ring 3 through `UserMode::new().enter_user(...)`. The stub's
 real `syscall` then traps back through the kernel's `IA32_LSTAR` stub; reaching
 the installed dispatch callback proves the ring-3 entry succeeded, and the

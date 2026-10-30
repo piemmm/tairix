@@ -654,8 +654,8 @@ mod tests {
 
     #[test]
     fn argv_encodes_a_declared_ram_size() {
-        // The direct-map vertical needs more RAM than the boot trampoline's
-        // own identity window, so the declared size must reach the argv.
+        // The direct-map vertical needs more RAM than the floor of the map the
+        // boot trampoline lays, so the declared size must reach the argv.
         let spec = fixture_spec(1).with_ram_mib(5120);
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let pos = argv

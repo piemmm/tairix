@@ -379,9 +379,10 @@ real Raspberry Pi 4 while QEMU/TCG, ignoring Device-memory alignment, passed).
 The arch-neutral engine still tests DRAM under a cacheable mapping because it
 flushes each tested word to the point of coherency (`PhysMap::clean_invalidate`,
 real `dc civac`) around the read-back. **x86_64** cannot drop paging (long mode
-requires it), so it switches `%cr3` to the reserved boot page tables
-(`boot_pml4` in `.boot.bss`), whose higher-half window the sweep reaches
-physical RAM through.
+requires it), so it installs the kernel root (`park_kernel_root`) as riscv64
+does, first, so a refusal (`PrepareFailed`, no root published) leaves the
+machine as it was: its tables are the kernel's own and in use, so the free-run
+sweep never reaches them, and the sweep reaches RAM through its direct map.
 Because the test never resets the machine itself, no port needs a reset conduit.
 Each is proven
 end-to-end by `tests/integration/supervisor_memtest_takeover_qemu_<t>`, which

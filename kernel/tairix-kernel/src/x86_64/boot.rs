@@ -80,13 +80,6 @@ use crate::x86_64::dispatch::{
 use crate::x86_64::init_spawn::X86_64_INIT_SPAWN;
 use crate::x86_64::ioapic_controller::IoApicController;
 
-/// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11). Enabling
-/// `NXE` lets the W^X No-Execute leaf bit the process-image builder sets on
-/// data/rodata pages and the user stack be honoured rather than treated as a
-/// reserved bit that faults the page-table walk.
-const IA32_EFER: u32 = 0xC000_0080;
-const EFER_NXE: u64 = 1 << 11;
-
 // --- BSP boot configuration ----------------------------------------
 
 /// LAPIC-timer period programmed during BSP bring-up.
@@ -242,7 +235,7 @@ pub enum BootError {
     /// boot is unaffected: one TSC is self-monotonic.
     TscNotInvariant,
     /// The direct physical map could not be installed over the discovered
-    /// RAM — no usable run below the boot trampoline's identity window
+    /// RAM — no usable run inside the boot trampoline's floor of it
     /// could host its page tables, or the arch install refused the
     /// request. Every kernel path that reaches a frame by pointer would
     /// then fail closed while the allocator kept handing out frames, so
@@ -382,9 +375,9 @@ pub fn boot(
 ///
 /// # SAFETY-INVARIANT
 ///
-/// `boot_info` must be the verbatim 64-bit pointer the arch crate's boot
-/// trampoline received in `%ebx`, in the identity-mapped 0..4 GiB window
-/// (`boot.s` SAFETY-INVARIANT 7), exactly as [`boot`] requires.
+/// `boot_info` must be the verbatim physical address the arch crate's boot
+/// trampoline received in `%ebx` (`boot.s` SAFETY-INVARIANT 7), exactly as
+/// [`boot`] requires.
 pub fn boot_with_init(
     boot_info: u64,
     heap: &'static tairix_kalloc::FreeListAllocator,
@@ -515,11 +508,11 @@ pub struct BspBringUp {
 }
 
 /// Bring the BSP and its board up: per-CPU tables, the dedicated `#PF`
-/// entry + fault-windowed user copy, NXE, the park root, LAPIC + timer
-/// calibration, the firmware memory map (kernel image reserved, guard
-/// arena carved), the MADT walk, the production syscall-dispatch callback
-/// and user-fault resolver (both resolving through [`DISPATCH_SLOT`]),
-/// `syscall`/TSS entry, and the IO-APIC routing (all pins masked).
+/// entry + fault-windowed user copy, LAPIC + timer calibration, the firmware
+/// memory map (kernel image reserved, guard arena carved), the MADT walk, the
+/// production syscall-dispatch callback and user-fault resolver (both
+/// resolving through [`DISPATCH_SLOT`]), `syscall`/TSS entry, and the IO-APIC
+/// routing (all pins masked).
 ///
 /// This is the single, composable board bring-up every freestanding x86_64
 /// kernel binary runs — the production [`boot`] pipeline and the QEMU
@@ -529,10 +522,10 @@ pub struct BspBringUp {
 ///
 /// # SAFETY-INVARIANT
 ///
-/// `boot_info` must be the verbatim 64-bit pointer the arch crate's boot
-/// trampoline received (the [`boot`] contract): the record and every table
-/// it points at sit in the identity-mapped 0..4 GiB window, and interrupts
-/// are disabled (`IF=0`) for the whole call.
+/// `boot_info` must be the verbatim physical address the arch crate's boot
+/// trampoline received (the [`boot`] contract), nothing may write the record
+/// or a table it points at while the boot reads them, and interrupts are
+/// disabled (`IF=0`) for the whole call.
 pub fn bring_up_bsp(
     boot_info: u64,
     log_sink: &'static (dyn Sink + Sync),
@@ -556,52 +549,24 @@ pub fn bring_up_bsp(
     //     publish the one fatal policy before anything further can fault.
     install_fault_entries();
 
-    // 1c. Enable `IA32_EFER.NXE` so the W^X No-Execute leaf bit the
-    //     process-image builder sets on a ring-3 program's data/rodata
-    //     pages and its stack is honoured. Without it,
-    //     bit 63 is reserved and the first non-executable user mapping the
-    //     `init` spawn seam builds would fault the page-table walk. Enabling
-    //     it on the BSP before any user image is built is the production W^X
-    //     contract; it preserves `SCE`/`LME`/`LMA` the boot trampoline set.
+    // 1c. Boot-info parsing and the direct physical map — before anything
+    //     reaches a register block or a frame by pointer. The kernel root maps
+    //     nothing physical as itself, so the LAPIC register writes the steps
+    //     below make, and every frame the kernel later touches, resolve
+    //     through this map or not at all. The tables it needs are carved out
+    //     of the firmware map first, so the frame allocator never hands them
+    //     out.
     //
-    // SAFETY: BSP after `percpu::init(0)`; interrupts disabled. The
-    // read-modify-write only sets bit 11, leaving every other `IA32_EFER`
-    // bit (long-mode enable/active, syscall enable) intact.
-    unsafe {
-        enable_nxe();
-    }
-
-    // 1d. Publish the trampoline's `CR3` tables as the park root a CPU
-    //     re-installs whenever it leaves a user space's root (task
-    //     suspend, address-space teardown). x86_64 keeps running on the
-    //     `boot.s` tables rather than switching to a Rust-built kernel
-    //     space, so — unlike aarch64/riscv64, where the boot `switch()`
-    //     publishes — the boot path records the active root explicitly,
-    //     before any process space exists to claim the set-once slot.
-    //     (The paging module exists only on the bare-metal target.)
-    #[cfg(all(freestanding, kernel_isa = "x86_64"))]
-    tairix_arch_x86_64::paging::publish_boot_park_root();
-
-    // 1e. Boot-info parsing and the direct physical map — before anything
-    //     reaches a register block or a frame by pointer. The trampoline
-    //     identity-maps only what must be addressed physically, so the LAPIC
-    //     register writes the steps below make, and every frame the kernel
-    //     later touches, resolve through this map or not at all. The tables
-    //     it needs are carved out of the firmware map first, so the frame
-    //     allocator never hands them out.
-    //
-    // SAFETY: `boot_info` is the verbatim trampoline pointer (the
-    // documented invariant of [`boot`]); the blob and every table it
-    // points at sit in the identity-mapped 0..4 GiB window (`boot.s`
-    // SAFETY-INVARIANT 4).
+    // SAFETY: `boot_info` is the verbatim trampoline address (the
+    // documented invariant of [`boot`]), and nothing writes the loader's
+    // blob while the boot reads it.
     let boot_data = unsafe { BootData::load(boot_info) }.map_err(|_| BootError::BootInfoParse)?;
-    // SAFETY: same contract — the loader's command line lies in the window
-    // its record does.
+    // SAFETY: same contract, for the loader's command line.
     let command_line = kept(unsafe { boot_data.command_line() }.unwrap_or(""))?;
     let (mut memory_map, installed_memory_bytes) = build_memory_map(&boot_data)?;
     let direct_map_gib = crate::mem_map::direct_map_gib(
         &memory_map,
-        paging::BOOT_IDENTITY_GIB,
+        paging::BOOT_PHYSMAP_GIB,
         paging::MAX_PHYSMAP_GIB,
     );
     install_direct_physical_map(&mut memory_map, direct_map_gib)?;
@@ -642,17 +607,15 @@ pub fn bring_up_bsp(
     )
     .map_err(|_| BootError::TimerCalibration)?;
 
-    // 4. The RSDP, from the boot info parsed in step 1e.
+    // 4. The RSDP, from the boot info parsed in step 1c.
     //
-    // SAFETY: same identity-window contract as the `BootData::load`
-    // above — the RSDP the loader published sits below 4 GiB.
+    // SAFETY: the same contract as the `BootData::load` above.
     let rsdp = unsafe { boot_data.validated_rsdp() }.ok_or(BootError::NoRsdp)?;
 
     // 5. MADT walk → BSP LAPIC verification.
     //
-    // SAFETY: `rsdp` was validated above; its XSDT/RSDT pointers came
-    // from firmware-published tables in the identity-mapped 0..4 GiB
-    // window (`boot.s` SAFETY-INVARIANT 4).
+    // SAFETY: `rsdp` was validated above, and the boot-time ACPI tables it
+    // leads to are never rewritten.
     let madt_bytes = unsafe { acpi::locate_madt(&rsdp) }.ok_or(BootError::NoMadt)?;
     let madt = acpi::Madt::parse(madt_bytes).map_err(|_| BootError::BadMadt)?;
     verify_bsp_present(&madt, bsp_lapic_id)?;
@@ -791,10 +754,8 @@ pub fn bring_up_bsp(
     // and never touches PCI config or the MSI-X BAR (the kernel owns
     // interrupt routing).
     //
-    // SAFETY: `madt_bytes` and `rsdp` were validated above; their tables
-    // (and the MCFG the ECAM branch reads) sit in the identity-mapped
-    // 0..4 GiB window (`boot.s` SAFETY-INVARIANT 4), and the ECAM window is
-    // re-validated against that window before it is mapped.
+    // SAFETY: `madt_bytes` and `rsdp` were validated above, and the
+    // boot-time ACPI tables they lead to are never rewritten.
     let (tree, malformed_units, console) =
         unsafe { seed_hardware_tree(madt_bytes, &rsdp, &boot_data, command_line, log_sink) };
 
@@ -840,9 +801,8 @@ fn try_boot(
     static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
 
     // The shared BSP/board bring-up: per-CPU tables, `#PF` + user-copy
-    // entries, NXE, park root, LAPIC calibration, memory map + guard
-    // arena, MADT, dispatch callback + user-fault resolver, `syscall`/TSS
-    // entry, IO-APIC routing.
+    // entries, LAPIC calibration, memory map + guard arena, MADT, dispatch
+    // callback + user-fault resolver, `syscall`/TSS entry, IO-APIC routing.
     let board = bring_up_bsp(boot_info, log_sink)?;
 
     // No device tree to stash: the root bring-up re-resolves its transport
@@ -1011,7 +971,7 @@ fn try_boot(
 ///    transport from configuration space itself.
 ///
 /// Fail closed at every step: a malformed ACPI table, an ECAM window
-/// outside the identity map, or an enumeration error each leave the
+/// outside the direct map, or an enumeration error each leave the
 /// affected devices undiscovered and seed whatever *was* collected rather
 /// than failing the boot. The collected tree is returned by value for the
 /// boot record to move into the live inventory, beside the units of a
@@ -1020,10 +980,8 @@ fn try_boot(
 ///
 /// # Safety
 ///
-/// `madt_bytes` and `rsdp` must lie in the boot trampoline's 0..4 GiB
-/// identity-mapped window and stay unmodified for the kernel's lifetime
-/// (the ACPI guarantee); the ECAM window `rsdp`'s MCFG references is
-/// re-validated against that window before it is mapped.
+/// The firmware tables `madt_bytes` and `rsdp` lead to stay unmodified for
+/// the kernel's lifetime (the ACPI guarantee).
 unsafe fn seed_hardware_tree(
     madt_bytes: &[u8],
     rsdp: &acpi::Rsdp,
@@ -1041,8 +999,7 @@ unsafe fn seed_hardware_tree(
     let mut sink = crate::boot_hwtree::CollectingHwNodeSink::new();
     // A discovery error leaves the sink empty; seed whatever was collected.
     let _ = AcpiDiscovery::new(madt_bytes).discover(&mut sink);
-    // SAFETY: forwarded — the caller pins the firmware tables into the
-    // identity-mapped window.
+    // SAFETY: forwarded.
     let table = unsafe { unit_table(rsdp, log) };
     let malformed = match table {
         UnitTable::Malformed(family) => Some(tairix_kernel_core::iommu::MalformedUnits {
@@ -1054,12 +1011,10 @@ unsafe fn seed_hardware_tree(
         }),
         _ => None,
     };
-    // SAFETY: forwarded — the caller pins the firmware tables (and the MCFG
-    // they reference) into the identity-mapped window.
+    // SAFETY: forwarded.
     let platform = unsafe { platform_registers(madt_bytes, rsdp, &table, sink.nodes()) };
     match platform.and_then(|platform| bar_apertures(firmware, platform)) {
-        // SAFETY: forwarded — the caller pins the firmware tables (and the
-        // MCFG the ECAM branch reads) into the identity-mapped window.
+        // SAFETY: forwarded.
         Some(apertures) => unsafe { seed_pci(rsdp, &table, malformed, &apertures, &mut sink, log) },
         None => crate::pci_probe::log_discovery(
             log,
@@ -1112,7 +1067,8 @@ fn bar_apertures(
 ///
 /// # Safety
 ///
-/// `rsdp` and the MCFG it references must lie in the identity-mapped window.
+/// The firmware tables `rsdp` leads to stay unmodified for the kernel's
+/// lifetime.
 unsafe fn platform_registers(
     madt_bytes: &[u8],
     rsdp: &acpi::Rsdp,
@@ -1167,7 +1123,7 @@ unsafe fn platform_registers(
             .for_each(&mut keep),
         UnitTable::Malformed(_) | UnitTable::None => {}
     }
-    // SAFETY: forwarded — the caller pins the MCFG into the identity window.
+    // SAFETY: forwarded.
     if let Some(mcfg) =
         unsafe { acpi::locate_mcfg(rsdp) }.and_then(|bytes| acpi::Mcfg::parse(bytes).ok())
     {
@@ -1202,8 +1158,8 @@ const MALFORMED_UNITS: &str = "iommu.malformed";
 ///
 /// # Safety
 ///
-/// `rsdp` and every table it references must lie in the identity-mapped
-/// 0..4 GiB window, unmodified for the kernel's lifetime.
+/// The firmware tables `rsdp` leads to stay unmodified for the kernel's
+/// lifetime.
 unsafe fn unit_table(rsdp: &acpi::Rsdp, log: &dyn Sink) -> UnitTable<'static> {
     let parsed = |table: Result<UnitTable<'static>, acpi::AcpiError>, family, malformed| {
         table.unwrap_or_else(|_| {
@@ -1255,9 +1211,9 @@ unsafe fn unit_table(rsdp: &acpi::Rsdp, log: &dyn Sink) -> UnitTable<'static> {
 ///
 /// # Safety
 ///
-/// `rsdp` and the MCFG it references must lie in the boot trampoline's
-/// 0..4 GiB identity-mapped window (each ECAM region is validated to lie
-/// wholly within the direct map before it is mapped).
+/// The firmware tables `rsdp` leads to stay unmodified for the kernel's
+/// lifetime; each ECAM region is checked to lie wholly within the direct map
+/// before it is mapped.
 unsafe fn seed_pci(
     rsdp: &acpi::Rsdp,
     table: &UnitTable<'_>,
@@ -1266,8 +1222,7 @@ unsafe fn seed_pci(
     sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
     log: &dyn Sink,
 ) {
-    // SAFETY: forwarded — `rsdp` (and its MCFG) are identity-mapped per the
-    // caller's contract.
+    // SAFETY: forwarded.
     let segments = unsafe { pci_segments(rsdp, apertures, log) };
     let routes = core::cell::RefCell::new(Vec::new());
     let probe = |units: &mut dyn crate::pci_probe::UnitTopology| {
@@ -1385,14 +1340,14 @@ unsafe fn seed_pci(
 ///
 /// # Safety
 ///
-/// `rsdp` must be a validated RSDP whose tables lie in the identity-mapped
-/// 0..4 GiB window (forwarded from [`seed_pci`]).
+/// `rsdp` must be a validated RSDP whose tables stay unmodified for the
+/// kernel's lifetime (forwarded from [`seed_pci`]).
 unsafe fn pci_segments(
     rsdp: &acpi::Rsdp,
     apertures: &tairix_pci::Apertures,
     log: &dyn Sink,
 ) -> Vec<crate::pci_probe::ProbeSegment> {
-    // SAFETY: forwarded — `rsdp` is identity-mapped per the caller.
+    // SAFETY: forwarded.
     let mcfg = unsafe { acpi::locate_mcfg(rsdp) }.and_then(|bytes| {
         let parsed = acpi::Mcfg::parse(bytes).ok();
         if parsed.is_none() {
@@ -1901,22 +1856,6 @@ fn observe_interrupt_driven(
     }
 }
 
-/// Enable the No-Execute-Enable bit in `IA32_EFER` on the current CPU.
-///
-/// # Safety
-///
-/// Must run in ring 0 with interrupts disabled (the BSP after
-/// `percpu::init`). Performs a `rdmsr`/`wrmsr` read-modify-write that only
-/// sets [`EFER_NXE`], preserving every other `IA32_EFER` bit.
-unsafe fn enable_nxe() {
-    use tairix_arch_x86_64::msr;
-
-    // SAFETY: `IA32_EFER` is implemented on every long-mode CPU and the
-    // caller runs in ring 0; writing it back with only `NXE` newly set is the
-    // documented enable sequence, preserving `SCE`/`LME`/`LMA`.
-    unsafe { msr::write(IA32_EFER, msr::read(IA32_EFER) | EFER_NXE) }
-}
-
 /// Widen the direct physical map to `[0, gib GiB)`, reserving the page
 /// tables it needs out of `map` first.
 ///
@@ -1926,12 +1865,12 @@ unsafe fn enable_nxe() {
 /// write through, and reserved so the frame allocator never hands them out
 /// from under the live page tables.
 fn install_direct_physical_map(map: &mut BootMemoryMap, gib: usize) -> Result<(), BootError> {
-    if gib <= paging::BOOT_IDENTITY_GIB {
+    if gib <= paging::BOOT_PHYSMAP_GIB {
         return Ok(());
     }
     let tables = match paging::physmap_table_frames(gib) {
         0 => 0,
-        pages => crate::mem_map::carve_frames_from_map(map, pages, paging::BOOT_IDENTITY_END)
+        pages => crate::mem_map::carve_frames_from_map(map, pages, paging::BOOT_PHYSMAP_END)
             .ok_or(BootError::DirectMapInstall)?,
     };
     // SAFETY: this runs on the BSP before any secondary is brought up and
@@ -1976,20 +1915,13 @@ fn build_memory_map(data: &BootData<'_>) -> Result<(BootMemoryMap, u64), BootErr
         .filter(|region| region.kind == RegionKind::Usable)
         .fold(0u64, |acc, region| acc.saturating_add(region.length));
 
-    // Reserve the running kernel image (boot trampoline through the end of
-    // .bss, which includes the bump heap) out of the firmware-usable RAM.
-    //
-    // The loader (a multiboot2 loader, or QEMU's PVH ELF loader) places this kernel in
-    // memory the boot map reports as usable (`EfiLoaderData`/
-    // `EfiConventionalMemory` on the UEFI path, plain RAM on the PVH
-    // path). Without this carve-out the frame allocator eventually hands
-    // out frames overlapping the running kernel's code and heap, and the
-    // `spawn` image builder's zero-fill / page-table writes corrupt the live
-    // kernel (`plans/PI.md` X4 follow-on). This is the x86_64 sibling of the
-    // aarch64 `mem_map` `[ram_base, __kernel_end)` reservation (`plans/PI.md`
-    // P6c-1) — without it nothing protected the kernel image.
+    // The loader places the kernel in memory the firmware map reports usable,
+    // and the frame an AP starts at is usable too; the allocator handing out
+    // either would corrupt it under the running kernel.
     let (kstart, kend) = kernel_image_phys_bounds();
-    map.reserve_range(kstart, kend);
+    for range in bootmemory::boot_reservations(kstart.as_u64()..kend.as_u64()) {
+        map.reserve_range(PhysAddr::new(range.start), PhysAddr::new(range.end));
+    }
 
     Ok((map, installed_memory_bytes))
 }

@@ -2156,7 +2156,7 @@ static TESTS: &[QemuTest] = &[
             "boot_stack_guard=intact",
         ]),
     },
-    // D146 on x86_64: a read past the boot identity window with no fault
+    // D146 on x86_64: a read of an unmapped user-half address with no fault
     // handler installed; the record names `#PF` (vector 14, error code 0), the
     // faulting address from `CR2`, the interrupted stack, and the CPU by its
     // APIC id, which a kernel that mapped no dense ids cannot translate.
@@ -2751,9 +2751,9 @@ static TESTS: &[QemuTest] = &[
     },
     // `plans/OPEN-DEFECTS.md` D55 deliverable: boot the production
     // `tairix-kernel` pipeline on a guest whose RAM tops the boot
-    // trampoline's own identity window, and prove the kernel can reach all
+    // trampoline's floor of the direct map, and prove the kernel can reach all
     // of it by pointer. The observer grades two records: the boot path
-    // widened the direct map past the trampoline's window (so it sized it
+    // widened the direct map past the trampoline's floor (so it sized it
     // from the discovered memory map, not a build-time constant), and the
     // early-boot RAM self-test wrote and read back a word of *every* usable
     // page through that map — the frames above the old window included.
@@ -3654,10 +3654,10 @@ static TESTS: &[QemuTest] = &[
     // Supervisor's one-way `memtest` takeover through the real
     // published `SupervisorSystem::memtest_takeover` seam. On the wired x86_64
     // port the caller first quiesces every other CPU (the bounded cross-CPU
-    // IPI-halt handshake), then the `MachineTakeover` body masks interrupts,
-    // switches onto a reserved `.bss` stack, installs the reserved boot page
-    // tables, and tests all of RAM continuously on that stack (every pattern
-    // over all of RAM, looping until reset). The takeover never resets the
+    // IPI-halt handshake), then the `MachineTakeover` body installs the kernel
+    // root, masks interrupts, switches onto a reserved `.bss` stack, and tests
+    // all of RAM continuously on that stack (every pattern over all of RAM,
+    // looping until reset). The takeover never resets the
     // board itself; once the guest completes one full test loop the harness
     // issues a QEMU-monitor `system_reset` — so QEMU (`-no-reboot`)
     // exits and the runner registers `Outcome::Pass`. A boot that never

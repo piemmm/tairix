@@ -21,6 +21,7 @@ use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
 use tairix_arch_x86_64::userentry::USER_MODE;
 use tairix_arch_x86_64::{qemu_exit, syscall_entry};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
@@ -29,7 +30,7 @@ use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread_with_stack, Admission, BoxStack,
     KernelStack, RescheduleAction, SpawnMode, SpawnRequest, Yielder,
 };
-use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
+use tairix_kernel_mem::{AddressSpace, Frame, PhysAddr, UserStack};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level, Sink};
@@ -60,10 +61,6 @@ const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
 /// Per-process stack-canary seed handed to each program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
-
-/// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11).
-const IA32_EFER: u32 = 0xC000_0080;
-const EFER_NXE: u64 = 1 << 11;
 
 /// Physical frames the three spawn builds draw from one monotonic cursor, so
 /// the address spaces never share a data frame.
@@ -239,21 +236,18 @@ fn build_space(
     image_bytes: &'static [u8],
     args: &[&[u8]],
 ) -> (u64, UserEntry) {
-    let Some(arch_space) = paging::AddressSpace::new_boot_identity(pool) else {
+    let Some(arch_space) = paging::AddressSpace::new_process_root(pool) else {
         note(TEST_FAIL, "fp isolation: page-table pool exhausted");
         qemu_exit::exit_failure();
     };
     let root_phys = arch_space.pml4_phys();
-    // SAFETY: the new space carries the live identity window and the
-    // higher-half kernel window, so the executing RIP, the current stack, the
-    // per-CPU `swapgs` TLS, the pools, the frame pool, the heap, `dispatch`,
-    // and every LAPIC MMIO access stay mapped across the CR3 switch.
+    // SAFETY: the root carries the kernel half: the image window holding this
+    // code, the current stack and every static, and the direct map the LAPIC
+    // is reached through, so nothing the kernel touches is lost across the
+    // CR3 switch.
     unsafe { arch_space.switch() };
 
     let mut space = AddressSpace::new(arch_space);
-    // SAFETY: the boot code installs this direct map and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::new(KERNEL_VMA_BASE, 1 << 30) }
-        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image,
         image_bytes,
@@ -278,7 +272,7 @@ fn build_space(
             SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
-            &physmap,
+            &SPAWN_TABLE_PHYSMAP,
             &request,
             next_frame,
         )
@@ -308,8 +302,8 @@ fn admit(sched: &Scheduler<X86_64Arch>, cs: ContextSwitchHal, root_phys: u64, en
             qemu_exit::exit_failure();
         }
         // SAFETY: paging is enabled and `root_phys` is the PML4 of the task's
-        // space, which maps the low identity + higher-half kernel window the
-        // running dispatcher executes from — `activate_user_root`'s contract.
+        // space, which carries the kernel half the running dispatcher
+        // executes from, as `activate_user_root` requires.
         unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
@@ -362,29 +356,6 @@ fn run_isolation() -> ! {
         TEST_START,
         "x86_64 fp isolation: building three ring-3 images",
     );
-
-    // Enable `IA32_EFER.NXE` so the W^X No-Execute leaf bit is honoured.
-    // SAFETY: reading and writing `IA32_EFER` is the documented enable
-    // sequence; it runs once on the BSP and only sets bit 11.
-    unsafe {
-        let lo: u32;
-        let hi: u32;
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") IA32_EFER,
-            out("eax") lo,
-            out("edx") hi,
-            options(nostack, preserves_flags),
-        );
-        let efer = (((hi as u64) << 32) | lo as u64) | EFER_NXE;
-        core::arch::asm!(
-            "wrmsr",
-            in("ecx") IA32_EFER,
-            in("eax") efer as u32,
-            in("edx") (efer >> 32) as u32,
-            options(nostack, preserves_flags),
-        );
-    }
 
     syscall_entry::set_dispatch_callback(dispatch);
 

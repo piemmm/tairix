@@ -21,27 +21,28 @@
 //     (`AP_BOOT_SLOT_OFFSET`, currently `0xF00`) inside the same 4 KiB
 //     frame. The BSP must populate the record AND publish-release the
 //     trampoline page before sending the first SIPI.
-//  4. The `ready` flag at `+0x40` inside the boot record is set to 1 by
-//     the AP after long mode is established and its stack is loaded.
-//     The BSP busy-waits on this flag (acquire) before launching the
-//     next AP — the 4 KiB trampoline frame is shared serially.
+//  4. The payload never writes its own page: the Rust entry reports the AP
+//     live (the boot record's `ready` flag) once it has left the page, and
+//     every GDT descriptor's accessed bit is preset. So the start-up root
+//     maps the page read and execute only.
 //  5. The trampoline-internal GDT below has a 32-bit code segment at
-//     selector 0x08 (used for the protected-mode trampoline step) and
-//     a 64-bit code segment at selector 0x10 (L=1, used after entering
-//     long mode). Both have base 0 / limit 4 GiB so they cover the
-//     entire identity-mapped window the BSP set up.
-//  6. The trampoline re-uses the BSP's `boot_pml4` unchanged — the BSP
-//     wrote `slot.cr3` to the bootstrap PML4 phys. APs therefore see
-//     exactly the same identity-mapped 0..4 GiB window the BSP sees.
-//  7. On entry to `tairix_arch_x86_64_ap_main` the AP holds:
+//     selector 0x08 (used for the protected-mode trampoline step), a
+//     64-bit code segment at selector 0x10 (L=1, used after entering
+//     long mode), and a flat data segment at 0x18.
+//  6. `slot.cr3` is the start-up root (`paging::startup_root`), below
+//     4 GiB: the kernel's image window, and this page mapped as itself,
+//     read and execute only. Nothing else of physical memory is mapped.
+//  7. On entry to `tairix_arch_x86_64_ap_entry` the AP holds:
 //        %rdi = slot.cpu_id (zero-extended from the 32-bit field)
-//        %rsi = AP_TRAMPOLINE_PHYS + AP_BOOT_SLOT_OFFSET
 //        %rsp = slot.stack_top (16-byte aligned by the BSP installer)
 //     The Rust callee is `-> !`. If it ever returns the trampoline halts
 //     the AP with interrupts masked (belt-and-braces).
 //  8. Interrupts are disabled on the AP throughout this payload. The
-//     IDTR is invalid; the Rust-side `ap_entry` must install one (or
-//     keep interrupts masked) before re-enabling them.
+//     IDTR is invalid, and the GDTR names this page's GDT, which the kernel
+//     root does not map; the installed secondary entry must install its own
+//     tables before anything loads a segment or takes an interrupt.
+//  9. `CR0` is written whole (PE|PG): INIT leaves the cache-disable bits
+//     set, and an AP must not run uncached.
 
 .section .ap_trampoline, "ax"
 .code16
@@ -57,7 +58,7 @@
 //   [0x000 .. ~0x200]  16-bit + 64-bit code
 //   [0xE00 .. 0xE20]   trampoline-internal GDT (4 × 8 bytes)
 //   [0xEE0 .. 0xEE6]   GDTR record (limit + 32-bit base)
-//   [0xF00 .. 0xF44]   ApBootSlot (read by the AP only; written by BSP)
+//   [0xF00 .. 0xF44]   ApBootSlot (written by the BSP; the AP reads it here)
 //   AP_TRAMPOLINE_LEN  = AP_BOOT_SLOT_OFFSET = 0xF00, i.e. the payload
 //                        proper is the part the BSP copies verbatim.
 .equ AP_GDT_OFFSET,             0xE00
@@ -65,9 +66,7 @@
 .equ AP_BOOT_SLOT_OFFSET,       0xF00
 .equ AP_BOOT_SLOT_CR3,          0x00     // u64
 .equ AP_BOOT_SLOT_STACK_TOP,    0x08     // u64
-.equ AP_BOOT_SLOT_ENTRY,        0x10     // u64 — Rust callee (-> !)
-.equ AP_BOOT_SLOT_CPU_ID,       0x18     // u32
-.equ AP_BOOT_SLOT_READY,        0x40     // u32 (volatile; AP stores 1)
+.equ AP_BOOT_SLOT_CPU_ID,       0x10     // u32
 
 _ap_trampoline_start:
 
@@ -91,9 +90,8 @@ _ap_trampoline_start:
     orl     $(1 << 5), %eax
     movl    %eax, %cr4
 
-    // Load CR3 with the BSP-supplied PML4. We need the 32-bit physical
-    // address; the bootstrap PML4 sits below 4 GiB so the high dword of
-    // slot.cr3 is zero.
+    // Load CR3 with the start-up root (SAFETY-INVARIANT 6), whose high
+    // dword is zero.
     movl    AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_CR3, %eax
     movl    %eax, %cr3
 
@@ -106,9 +104,9 @@ _ap_trampoline_start:
 
     // Enable PE and PG simultaneously in one MOV to CR0. Per SDM §10.8.5
     // ("Initializing IA-32e Mode") this is the supported transition out
-    // of real mode straight into IA-32e compatibility mode.
-    movl    %cr0, %eax
-    orl     $(1 << 0) | (1 << 31), %eax        // PE | PG
+    // of real mode straight into IA-32e compatibility mode. Written whole
+    // (SAFETY-INVARIANT 9).
+    movl    $(1 << 0) | (1 << 31), %eax        // PE | PG
     movl    %eax, %cr0
 
     // Far jump into the 64-bit code segment (selector 0x10) at the
@@ -154,17 +152,9 @@ _ap_long_mode:
     // Argument 1 = cpu_id (zero-extended from u32).
     movl    AP_BOOT_SLOT_CPU_ID(%rsi), %edi
 
-    // Publish "AP is live" *before* calling the Rust entry. The BSP
-    // observes this flag with an acquire-load to know it is safe to
-    // launch the next AP (the trampoline page is serial-reusable per
-    // SAFETY-INVARIANT 4). A release store from this CPU pairs with an
-    // acquire load on the BSP.
-    movl    $1, %eax
-    xchgl   %eax, AP_BOOT_SLOT_READY(%rsi)
-
-    // Indirect call to slot.entry. The Rust contract on that function
-    // pointer is `extern "C" fn(cpu_id: u32) -> !` (SAFETY-INVARIANT 7).
-    movq    AP_BOOT_SLOT_ENTRY(%rsi), %rax
+    // The Rust entry joins the kernel root, which leaves this page behind,
+    // and only then reports the AP live (SAFETY-INVARIANT 4, 7).
+    movabsq $tairix_arch_x86_64_ap_entry, %rax
     call    *%rax
 
     // `-> !` contract violated. Halt forever with interrupts masked.
@@ -182,9 +172,9 @@ _ap_long_mode:
 .org AP_GDT_OFFSET
 ap_gdt:
     .quad 0                                  // 0x00 — null
-    .quad 0x00CF9A000000FFFF                 // 0x08 — 32-bit code (G=1, D=1, base 0, limit 0xFFFFF)
-    .quad 0x00AF9A000000FFFF                 // 0x10 — 64-bit code (G=1, L=1, base 0)
-    .quad 0x00CF92000000FFFF                 // 0x18 — flat data    (G=1, D=1, base 0, limit 0xFFFFF)
+    .quad 0x00CF9B000000FFFF                 // 0x08 — 32-bit code (G=1, D=1, base 0, limit 0xFFFFF)
+    .quad 0x00AF9B000000FFFF                 // 0x10 — 64-bit code (G=1, L=1, base 0)
+    .quad 0x00CF93000000FFFF                 // 0x18 — flat data    (G=1, D=1, base 0, limit 0xFFFFF)
 ap_gdt_end:
 
 // --- GDTR record -----------------------------------------------------

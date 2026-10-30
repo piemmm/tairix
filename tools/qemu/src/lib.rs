@@ -1608,8 +1608,8 @@ impl Spec {
     /// The per-arch default is comfortable headroom for a test kernel, not a
     /// figure any vertical is meant to depend on. A vertical overrides it
     /// when the *amount* of RAM is the thing under test — the x86_64
-    /// direct-map vertical needs more RAM than the boot trampoline's own
-    /// identity window to prove the boot path widens it. Clamped at `>= 1`
+    /// direct-map vertical needs more RAM than the floor of the map the boot
+    /// trampoline lays to prove the boot path widens it. Clamped at `>= 1`
     /// because `-m 0` is rejected by every QEMU we target.
     #[must_use]
     pub fn with_ram_mib(mut self, ram_mib: u32) -> Self {

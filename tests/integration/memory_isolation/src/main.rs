@@ -12,15 +12,14 @@
 //!
 //! ## How it asserts it
 //!
-//! Two distinct `AddressSpace`s are constructed (`tairix_arch_x86_64`'s
-//! Stage-3a-partial paging primitives — see that crate's docs):
+//! Two distinct process roots are constructed
+//! (`tairix_arch_x86_64::paging::AddressSpace::new_process_root`), each
+//! carrying the shared kernel half and an empty user half:
 //!
-//! * **Victim** — identity-maps the first 32 MiB *and* adds a 4 KiB
-//!   mapping at the secret virtual address (the first byte past the live
-//!   identity window) pointing to a
-//!   physical frame initialised with the byte `SECRET_BYTE`.
-//! * **Attacker** — carries the live identity window only. The secret VA
-//!   is not mapped at any level of the attacker's PML4.
+//! * **Victim** — adds a 4 KiB mapping at the secret virtual address
+//!   pointing to a physical frame initialised with the byte `SECRET_BYTE`.
+//! * **Attacker** — adds nothing. The secret VA is not mapped at any level
+//!   of the attacker's PML4.
 //!
 //! The boot CPU then:
 //!
@@ -33,8 +32,8 @@
 //!    (below), which: (a) validates that the error
 //!    code is exactly the not-present supervisor-mode read it expects
 //!    (no other class of fault is acceptable); (b) validates that the
-//!    *victim's* secret frame is still readable via its identity-mapped
-//!    physical address — i.e. the attack did not corrupt the victim's
+//!    *victim's* secret frame is still readable at its physical address,
+//!    through the direct map — i.e. the attack did not corrupt the victim's
 //!    data ("kernel must … keep the victim alive"); (c) reports success
 //!    to QEMU via `isa-debug-exit`.
 //!
@@ -57,15 +56,11 @@ use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
 #[cfg(itest_x86_64)]
 use tairix_arch_x86_64::{fault, paging, qemu_exit, serial};
 
-/// Virtual address only the *victim* address space maps: the first byte
-/// past the boot trampoline's identity window, so no root reaches it
-/// through that window and the *attacker* space is unmapped at every level
-/// of its PML4 hierarchy. Derived from the port's published extent rather
-/// than picked.
+/// Virtual address only the *victim* address space maps: a process root
+/// maps nothing in the user half until told to, so the *attacker* space is
+/// unmapped at every level of its PML4 hierarchy there.
 #[cfg(itest_x86_64)]
-fn secret_vaddr() -> u64 {
-    (paging::BOOT_IDENTITY_GIB as u64) << 30
-}
+const SECRET_VADDR: u64 = 1 << 32;
 
 /// Magic byte written into the secret frame.
 #[cfg(itest_x86_64)]
@@ -128,7 +123,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
         p.write_volatile(SECRET_BYTE);
     }
 
-    let Some(mut victim) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
+    let Some(mut victim) = paging::AddressSpace::new_process_root(&PAGE_TABLE_POOL) else {
         let _ = writeln!(com1, "[memory_isolation] FAIL: pool exhausted (victim)");
         qemu_exit::exit_failure();
     };
@@ -138,7 +133,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // `map_4k` (`plans/WIRING.md` W5b).
     if victim
         .map_page(
-            secret_vaddr(),
+            SECRET_VADDR,
             secret_paddr,
             PageFlags::READ | PageFlags::WRITE,
         )
@@ -153,7 +148,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
         "[memory_isolation] victim PML4 = 0x{victim_pml4:x}, secret_paddr = 0x{secret_paddr:x}"
     );
 
-    let Some(attacker) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
+    let Some(attacker) = paging::AddressSpace::new_process_root(&PAGE_TABLE_POOL) else {
         let _ = writeln!(com1, "[memory_isolation] FAIL: pool exhausted (attacker)");
         qemu_exit::exit_failure();
     };
@@ -164,12 +159,12 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     );
 
     // ---- Phase 1: confirm the victim mapping is genuine. ----
-    // SAFETY: both address spaces carry the live identity window (boot stack
-    // / low physical) and the higher-half kernel window (RIP and the
-    // higher-half-linked code/data), so switching to the victim is sound.
+    // SAFETY: both address spaces carry the kernel half — the image window
+    // holding this code and the boot stack — so switching to the victim is
+    // sound.
     unsafe { victim.activate() };
     // SAFETY: the secret VA is mapped read/write in the victim space.
-    let v_byte = unsafe { core::ptr::read_volatile(secret_vaddr() as *const u8) };
+    let v_byte = unsafe { core::ptr::read_volatile(SECRET_VADDR as *const u8) };
     if v_byte != SECRET_BYTE {
         let _ = writeln!(
             com1,
@@ -181,20 +176,20 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 
     // ---- Phase 2: switch to the attacker and read the same VA. ----
     ATTACKER_ACTIVE.store(true, Ordering::SeqCst);
-    // SAFETY: the attacker space carries the same identity window and higher-half
-    // kernel window, so RIP/RSP stay mapped across the switch; only
-    // the secret VA is absent (the property under test).
+    // SAFETY: the attacker space carries the same kernel half, so RIP/RSP
+    // stay mapped across the switch; only the secret VA is absent (the
+    // property under test).
     unsafe { attacker.activate() };
     let _ = writeln!(
         com1,
         "[memory_isolation] attacker about to read 0x{:x} (expect #PF)",
-        secret_vaddr()
+        SECRET_VADDR
     );
 
     // The next read MUST fault. If it returns, the kernel is broken.
     // SAFETY: we *want* the fault. The handler routes us to QEMU exit so
     // this volatile read never observably completes.
-    let attacker_byte = unsafe { core::ptr::read_volatile(secret_vaddr() as *const u8) };
+    let attacker_byte = unsafe { core::ptr::read_volatile(SECRET_VADDR as *const u8) };
 
     // Reaching this line is a failure: the CPU should have faulted.
     let _ = writeln!(
@@ -256,12 +251,11 @@ fn page_fault_handler(trap: KernelFault) -> ! {
     // `rip` cannot say so, because the compiler chooses how to materialise
     // the `read_volatile`; the faulting address is `CR2`, which the entry
     // hands over, architecturally the faulting linear address.
-    if trap.address != Some(secret_vaddr()) {
+    if trap.address != Some(SECRET_VADDR) {
         let _ = writeln!(
             com1,
             "[memory_isolation] FAIL: CR2 was {:x?}, expected 0x{:x}",
-            trap.address,
-            secret_vaddr()
+            trap.address, SECRET_VADDR
         );
         qemu_exit::exit_failure();
     }
@@ -269,9 +263,10 @@ fn page_fault_handler(trap: KernelFault) -> ! {
     // Final invariant: the victim's data must still be intact at its
     // *physical* address (i.e. the attack did not corrupt anything).
     let secret_paddr = SECRET_PHYS.load(Ordering::SeqCst);
-    // SAFETY: identity-mapped first 32 MiB covers the static `SECRET_FRAME`,
-    // so the physical address dereferences directly under either CR3.
-    let victim_byte = unsafe { core::ptr::read_volatile(secret_paddr as *const u8) };
+    // SAFETY: every root carries the direct map, whose floor holds the
+    // static `SECRET_FRAME`, so the frame reads through it under either CR3.
+    let victim_byte =
+        unsafe { core::ptr::read_volatile(paging::physmap_virt(secret_paddr) as *const u8) };
     if victim_byte != SECRET_BYTE {
         let _ = writeln!(
             com1,

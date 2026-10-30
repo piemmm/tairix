@@ -19,13 +19,11 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_arch_x86_64::panic::handle_panic_via_serial;
-    use tairix_arch_x86_64::{paging, serial};
+    use tairix_arch_x86_64::serial;
 
-    /// A stack top every push below which lands on memory nothing maps: a
-    /// page above the boot identity window. The window's own last bytes are
-    /// not usable for this — they back the firmware ROM, which drops writes
-    /// rather than faulting on them.
-    const STACK_TOP: u64 = ((paging::BOOT_IDENTITY_GIB as u64) << 30) + 0x1000;
+    /// A stack top every push below which lands on memory nothing maps: the
+    /// user half, which the kernel root leaves unmapped.
+    const STACK_TOP: u64 = 0x1_0000_1000;
 
     #[panic_handler]
     fn fatal_double_fault_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
