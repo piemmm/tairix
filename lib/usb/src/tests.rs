@@ -15,9 +15,9 @@ use super::device::{
     DeviceEngine, DeviceIdentity, DeviceRegion, DmaBank, EnumStage, HubDescriptor, HubEvent,
     InterfaceInfo, PeriodicShape, SerialNumber, Serviced, StringHeader, UsbDevice, UsbHost,
     BULK_BUF_LEN, BULK_SLOTS, CONNECT_WINDOW_US, DMA_CHUNK_ALIGN, EVENT_RING_SEGMENT_MIN_TRBS,
-    EVENT_RING_SEGMENT_TRBS, HUB_POWER_ON_GOOD_US, INT_ARM_DEPTH, INT_TRANSFER_MAX, MAX_HUB_DEPTH,
-    PORT_RESET_POLLS, PORT_RESET_POLL_US, PORT_RESET_SETTLE_US, REPORT_QUEUE_CAP, RING_TRBS,
-    SPEED_FULL, SPEED_HIGH, SPEED_LOW, SPEED_SUPER,
+    EVENT_RING_SEGMENT_TRBS, HUB_POWER_ON_GOOD_US, INTERRUPT_ESIT_MAX, INT_ARM_DEPTH,
+    INT_TRANSFER_MAX, MAX_HUB_DEPTH, PORT_RESET_POLLS, PORT_RESET_POLL_US, PORT_RESET_SETTLE_US,
+    REPORT_QUEUE_CAP, RING_TRBS, SPEED_FULL, SPEED_HIGH, SPEED_LOW, SPEED_SUPER,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::transport::{drive_urb, UrbDone, UrbEngine, UrbScope};
@@ -7180,6 +7180,31 @@ fn a_periodic_endpoint_moves_what_its_speed_and_descriptors_allow() {
         .payload(SPEED_SUPER),
         (0, 1024)
     );
+}
+
+/// Whatever a descriptor claims, no speed lets one interval move more than
+/// the bound the transfer buffers are sized against, and the largest shape
+/// reaches it.
+#[test]
+fn no_service_interval_outgrows_the_bound_its_transfer_buffer_is_held_to() {
+    let mut largest = 0;
+    for max_packet in [0, 1, 0x7FF, u16::MAX] {
+        for transactions in [0, 3, u8::MAX] {
+            for companion in [None, Some((0, 0)), Some((u8::MAX, u16::MAX))] {
+                let shape = PeriodicShape {
+                    max_packet,
+                    transactions,
+                    companion,
+                };
+                for speed in 0..=u8::MAX {
+                    let (_, esit) = shape.payload(speed);
+                    assert!(esit <= INTERRUPT_ESIT_MAX, "{shape:?} at {speed}: {esit}");
+                    largest = largest.max(esit);
+                }
+            }
+        }
+    }
+    assert_eq!(largest, INTERRUPT_ESIT_MAX);
 }
 
 #[test]

@@ -20,7 +20,6 @@ impl Qmp {
     /// leave negotiation mode.
     pub(crate) fn connect(path: &Path) -> io::Result<Self> {
         let stream = UnixStream::connect(path)?;
-        stream.set_read_timeout(Some(ANSWER_WITHIN))?;
         let mut qmp = Self {
             stream: BufReader::new(stream),
         };
@@ -60,32 +59,43 @@ impl Qmp {
     /// The next line QEMU writes, if it writes one before `deadline`.
     fn line(&mut self, deadline: Instant) -> io::Result<String> {
         let silent = || io::Error::new(io::ErrorKind::TimedOut, "the control monitor fell silent");
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(silent());
-        }
-        if !self.stream.buffer().contains(&b'\n') {
-            // macOS refuses options on a socket its peer has shut both ways.
-            // Such a read cannot block, and still returns what the monitor
-            // wrote before it went, so the timeout armed before stands.
-            let _ = self.stream.get_ref().set_read_timeout(Some(remaining));
-        }
-        let mut line = String::new();
-        match self.stream.read_line(&mut line) {
-            Ok(0) => Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "the control monitor closed",
-            )),
-            Ok(_) => Ok(line),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                Err(silent())
+        let mut line = Vec::new();
+        loop {
+            let arrived = self.stream.buffer();
+            let end = arrived.iter().position(|&byte| byte == b'\n');
+            let taken = end.map_or(arrived.len(), |at| at + 1);
+            line.extend_from_slice(&arrived[..taken]);
+            self.stream.consume(taken);
+            if end.is_some() {
+                return String::from_utf8(line)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
             }
-            Err(e) => Err(e),
+            // Each read is bounded by what is left, so a line trickled in
+            // cannot hold the wait past the deadline.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(silent());
+            }
+            crate::bound_reads(self.stream.get_ref(), remaining)?;
+            match self.stream.fill_buf() {
+                Ok([]) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "the control monitor closed",
+                    ))
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Err(silent())
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
 }
@@ -123,6 +133,7 @@ mod tests {
     use super::{tap_commands, Qmp};
     use std::io::{self, BufReader, Write};
     use std::os::unix::net::UnixStream;
+    use std::sync::mpsc::{self, RecvTimeoutError};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -156,6 +167,51 @@ mod tests {
             .starts_with(r#"{"return""#));
         let gone = qmp.line(deadline).expect_err("nothing follows the hang-up");
         assert_eq!(gone.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn an_answer_cut_short_by_the_hang_up_is_not_taken_for_one() {
+        let (ours, mut theirs) = UnixStream::pair().expect("a socket pair");
+        theirs
+            .write_all(br#"{"return": {"#)
+            .expect("the monitor starts to answer");
+        drop(theirs);
+        let mut qmp = Qmp {
+            stream: BufReader::new(ours),
+        };
+        let cut = qmp
+            .line(Instant::now() + Duration::from_secs(5))
+            .expect_err("the answer never ended");
+        assert_eq!(cut.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    /// A line trickled in, each byte well inside one read's bound, is still
+    /// cut off at the deadline.
+    #[test]
+    fn a_line_trickled_in_is_cut_off_at_the_deadline() {
+        let (ours, mut theirs) = UnixStream::pair().expect("a socket pair");
+        let (stop, stopped) = mpsc::channel::<()>();
+        let trickle = std::thread::spawn(move || {
+            for _ in 0..1000 {
+                if stopped.recv_timeout(Duration::from_millis(20)) != Err(RecvTimeoutError::Timeout)
+                    || theirs.write_all(b"x").is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let mut qmp = Qmp {
+            stream: BufReader::new(ours),
+        };
+        let asked = Instant::now();
+        let cut = qmp
+            .line(asked + Duration::from_millis(100))
+            .expect_err("the line never ends");
+        assert_eq!(cut.kind(), io::ErrorKind::TimedOut);
+        // The trickle lasts twenty seconds; only a wait it held comes near.
+        assert!(asked.elapsed() < Duration::from_secs(10));
+        drop(stop);
+        trickle.join().expect("the trickle stops");
     }
 
     #[test]

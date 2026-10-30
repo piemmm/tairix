@@ -280,7 +280,7 @@ const HS_ISO_MAX_PACKET: u16 = 1024;
 
 /// The most additional transactions a high-speed periodic endpoint moves per
 /// microframe (USB 2.0 §5.9.1).
-const HS_MAX_ADDITIONAL_TRANSACTIONS: u8 = 2;
+pub(crate) const HS_MAX_ADDITIONAL_TRANSACTIONS: u8 = 2;
 
 /// The most packets a `SuperSpeed` isochronous burst carries, less one.
 const SS_ISO_MAX_BURST: u8 = 15;

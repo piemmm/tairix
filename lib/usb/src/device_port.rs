@@ -1611,7 +1611,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
                 ring_base,
                 Some(Periodic {
                     interval: interrupt_interval(base.speed, iface.int_b_interval),
-                    payload,
+                    payload: u32::from(payload),
                     mult: 0,
                 }),
             ),

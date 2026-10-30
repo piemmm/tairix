@@ -501,7 +501,7 @@ fn check_configuration(buf: &[u8]) {
             for speed in 0..=u8::MAX {
                 let (_, payload) = iface.int_shape.payload(speed);
                 assert!(
-                    usize::try_from(payload).is_ok_and(|bytes| bytes <= INT_TRANSFER_MAX),
+                    usize::from(payload) <= INT_TRANSFER_MAX,
                     "{iface:?} moves {payload} bytes an interval at speed {speed}"
                 );
             }

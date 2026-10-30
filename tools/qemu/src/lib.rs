@@ -4235,6 +4235,24 @@ impl InjectionState {
     }
 }
 
+/// Bound each read of `stream` to `wait`, and say whether a read may wait at
+/// all: where the socket refuses the bound as invalid — macOS refuses any on
+/// a socket its peer has shut both ways — reads take only what has already
+/// arrived, so none can outlast a deadline.
+///
+/// # Errors
+///
+/// Any other failure to bound the reads, or to set the blocking mode.
+pub(crate) fn bound_reads(stream: &UnixStream, wait: Duration) -> io::Result<bool> {
+    let waits = match stream.set_read_timeout(Some(wait)) {
+        Ok(()) => true,
+        Err(refused) if refused.kind() == io::ErrorKind::InvalidInput => false,
+        Err(e) => return Err(e),
+    };
+    stream.set_nonblocking(!waits)?;
+    Ok(waits)
+}
+
 /// The run's one connection to QEMU's human monitor, and where its replies
 /// stand. The monitor echoes each command, prints its reply, then a prompt,
 /// as it prints one when a connection opens, so a reply ends at its prompt.
@@ -4322,12 +4340,7 @@ impl MonitorConn {
     ///
     /// Why there is no reply at all.
     fn ask(&mut self, commands: &[&str], deadline: Instant) -> Result<Vec<String>, String> {
-        // Where the option is refused — macOS refuses it on a socket its peer
-        // has shut both ways — reads take only what has already arrived, so
-        // none can wait past the deadline.
-        let waits = self.stream.set_read_timeout(Some(self.read_slice)).is_ok();
-        self.stream
-            .set_nonblocking(!waits)
+        let waits = bound_reads(&self.stream, self.read_slice)
             .map_err(|e| format!("unavailable: {e}\n"))?;
         // What earlier commands still owe goes first, so what follows answers
         // these alone.
@@ -6072,6 +6085,34 @@ mod tests {
             asked,
             format!("cpu 0\nx /{KEPT_BYTES}xb 0x40123450\nx /{KEPT_BYTES}xb 0x40123458\n")
         );
+    }
+
+    /// A bound the socket refuses leaves no earlier, longer one in force:
+    /// the read takes what has arrived and returns, and a bound it takes
+    /// lets reads wait again.
+    #[test]
+    fn a_refused_read_bound_reads_only_what_has_arrived() {
+        let (ours, mut theirs) = UnixStream::pair().expect("a socket pair");
+        ours.set_read_timeout(Some(Duration::from_secs(60)))
+            .expect("an earlier bound");
+        // Zero is refused as invalid on every platform, as macOS refuses any
+        // bound on a socket its peer has shut both ways.
+        assert!(!bound_reads(&ours, Duration::ZERO).expect("the fallback holds"));
+        let started = Instant::now();
+        let silent = (&ours)
+            .read(&mut [0u8; 1])
+            .expect_err("nothing has arrived");
+        assert_eq!(silent.kind(), io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(bound_reads(&ours, Duration::from_secs(60)).expect("a bound it takes"));
+        // Sent late, so a read that does not wait finds nothing.
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            theirs.write_all(b"!").expect("the late byte is sent");
+        });
+        let waited = (&ours).read(&mut [0u8; 1]).expect("the read waits");
+        assert_eq!(waited, 1);
+        late.join().expect("the sender ends");
     }
 
     /// A socket that refuses a read timeout is read without waiting, so a
