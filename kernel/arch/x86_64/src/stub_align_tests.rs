@@ -471,6 +471,40 @@ fn is_string_op(instruction: &str) -> bool {
         })
 }
 
+/// Every stub entered by gate delivery clears `AC` before its first call into
+/// Rust whenever SMAP is in force: delivery keeps the interrupted `AC`, which
+/// user code may set, and `clac` is defined only where the CPU offers SMAP, so
+/// the stub asks the set in force first.
+#[test]
+fn every_asynchronous_entry_stub_clears_the_alignment_check_flag_under_smap() {
+    for anchor in reached_by(Reached::Gate) {
+        let body = stub(anchor, &[]);
+        let call = body
+            .iter()
+            .position(|i| i.starts_with("call "))
+            .unwrap_or_else(|| panic!("{anchor}: no call into Rust"));
+        let clac = body
+            .iter()
+            .position(|i| i == "clac")
+            .unwrap_or_else(|| panic!("{anchor}: no `clac` on entry"));
+        assert!(
+            clac < call,
+            "{anchor}: `clac` must precede the first call into Rust"
+        );
+        assert_eq!(
+            body[clac - 2..=clac + 1],
+            ["testb ${smap}, {in_force}(%rip)", "jz 4f", "clac", "4:"],
+            "{anchor}: `clac` must run exactly when SMAP is in force"
+        );
+    }
+}
+
+/// Whether `path[at]` leaves the direction flag clear: a `cld`, or the
+/// `popfl` of a whole `RFLAGS` value with it clear.
+fn clears_direction_flag(path: &[String], at: usize) -> bool {
+    path[at] == "cld" || (path[at] == "popfl" && at > 0 && path[at - 1] == "pushl $0x2")
+}
+
 /// Each way the CPU first enters the kernel — the multiboot2 `_start`, the PVH
 /// `pvh_start`, an application processor's start-up trampoline — clears the
 /// direction flag before its first call into Rust or string instruction, since
@@ -493,17 +527,61 @@ fn the_boot_entries_clear_the_direction_flag_before_rust() {
             .position(|line| line == entry)
             .unwrap_or_else(|| panic!("{file}: no `{entry}`"));
         let path = &lines[from..];
-        let cld = path.iter().position(|i| i == "cld");
+        let cleared = (0..path.len()).find(|&at| clears_direction_flag(path, at));
         let first_reader = path
             .iter()
             .position(|i| i.starts_with("call") || is_string_op(i))
             .unwrap_or_else(|| panic!("{file}: `{entry}` reaches no call"));
         assert!(
-            cld.is_some_and(|cld| cld < first_reader),
+            cleared.is_some_and(|cleared| cleared < first_reader),
             "{file}: `{entry}` reaches `{}` before clearing the direction flag",
             path[first_reader]
         );
     }
+}
+
+/// The boot CPU's entry writes `RFLAGS` whole once it has a stack, ahead of
+/// any call or string instruction: neither boot protocol defines it beyond
+/// `VM` and `IF`, and an inherited `AC` would leave every user page open to
+/// the kernel under SMAP. Nothing else in the entry loads `RFLAGS`.
+#[test]
+fn the_boot_entry_writes_rflags_whole() {
+    let (_, source) = ASM_SOURCES
+        .iter()
+        .find(|(name, _)| *name == "boot.s")
+        .unwrap_or_else(|| panic!("boot.s is not inspected"));
+    let lines = instructions("boot.s", source);
+    let from = lines
+        .iter()
+        .position(|line| line == "boot_common:")
+        .unwrap_or_else(|| panic!("boot.s: no `boot_common:`"));
+    let path = &lines[from..];
+    let stack = path
+        .iter()
+        .position(|i| i == "movl $boot_stack_top, %esp")
+        .unwrap_or_else(|| panic!("boot.s: no boot stack"));
+    let write = path
+        .windows(2)
+        .position(|pair| pair == ["pushl $0x2", "popfl"])
+        .unwrap_or_else(|| panic!("boot.s: `RFLAGS` is not written whole"));
+    let first_reader = path
+        .iter()
+        .position(|i| i.starts_with("call") || is_string_op(i))
+        .unwrap_or_else(|| panic!("boot.s: `boot_common` reaches no call"));
+    assert!(
+        stack < write,
+        "boot.s: `RFLAGS` is written before there is a stack"
+    );
+    assert!(
+        write < first_reader,
+        "boot.s: `{}` runs first",
+        path[first_reader]
+    );
+    assert_eq!(
+        lines.iter().filter(|i| i.starts_with("popf")).count(),
+        1,
+        "boot.s loads `RFLAGS` once"
+    );
 }
 
 /// Each boot entry establishes `CR0` rather than amending it: INIT leaves an

@@ -43,6 +43,8 @@
 //     tables before anything loads a segment or takes an interrupt.
 //  9. `CR0` is written whole (PE|PG): INIT leaves the cache-disable bits
 //     set, and an AP must not run uncached.
+// 10. INIT leaves `RFLAGS` at `0x2`, so `AC` is clear when the Rust entry
+//     holds the AP to SMAP; nothing here sets it.
 
 .section .ap_trampoline, "ax"
 .code16

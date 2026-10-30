@@ -194,6 +194,9 @@ no ambient root, signed code) are designed in from the kernel up.
 | No kernel register state at first user entry (§4) | A new process reading kernel pointers or another task's vector residue | ✓ | ✓ | ✓ | ✓ host |
 | W^X + position-independent executables (§19.2) | Code injection, writable-executable memory | ✓ | ✓ | ✓ | ✓ |
 | Kernel mappings W^X, nothing physical mapped as itself: image mapped per section, direct map non-executable, supervisor writes held to read-only (§19.2) | A NULL or stray kernel pointer landing in live memory; kernel text or read-only data overwritten, or kernel data executed | ✓ | ▢ | ▢ | — |
+| Kernel cannot execute a user page (§19.2) | Kernel control flow redirected into user-supplied code (ret2usr) | ✓ SMEP | ✓ `PXN` | ✓ ISA | — |
+| Kernel cannot touch a user page but through its validated copy (§19.2) | A kernel bug or confused deputy reading or writing user memory in place | ✓ SMAP | ▢ | ▢ | — |
+| User code cannot read the descriptor-table registers (§19.2) | Kernel addresses disclosed to user code | ✓ UMIP | — | — | — |
 | Load-time CFI tag vs syscall-hash (§19.2) | Control-flow hijacking across ABI/IPC | ✓ | ✓ | ✓ | ✓ |
 | Software memory tagging (§19.10) | Use-after-free (software floor) | ✓ | ✓ | ✓ | ✓ |
 | Zero-on-free of secrets (§4) | Secret recovery from reused memory | ✓ | ✓ | ✓ | ✓ |

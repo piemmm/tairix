@@ -292,7 +292,7 @@ pub unsafe extern "C" fn tairix_arch_x86_64_external_irq_common() {
         "subq $8, %rsp",
         crate::fp_frame_save!(),
         crate::scrub_nonargument_gprs!(),
-        crate::clear_direction_flag!(),
+        crate::clear_entry_flags!(),
         "xorl %ecx, %ecx",
         "xorl %edx, %edx",
         "xorl %r8d, %r8d",
@@ -326,6 +326,8 @@ pub unsafe extern "C" fn tairix_arch_x86_64_external_irq_common() {
         verw_sel = sym crate::sidechannel::VERW_SELECTOR,
         frame_cs = const crate::interrupts::WORD_ISR_FRAME_CS,
         frame_top = const crate::interrupts::WORD_ISR_FRAME_TOP,
+        smap = const crate::protection::Protections::SMAP.bits(),
+        in_force = sym crate::protection::IN_FORCE,
         options(att_syntax),
     )
 }

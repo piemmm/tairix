@@ -73,9 +73,11 @@ pub const QEMU_BINARY: &str = "qemu-system-x86_64";
 /// still seeds.
 const ENTROPY_FEATURES: &str = "+rdrand,+rdseed,enforce";
 
-/// The default CPU model: QEMU's baseline `qemu64` plus the entropy
-/// features every model carries (`RDRAND`/`RDSEED`, `enforce`).
-pub const CPU: &str = "qemu64,+rdrand,+rdseed,enforce";
+/// The default CPU model: QEMU's baseline `qemu64` plus the supervisor
+/// protections the kernel holds every CPU to where offered (SMEP, SMAP,
+/// UMIP), so a vertical runs under them, and the entropy features every model
+/// carries (`RDRAND`/`RDSEED`, `enforce`).
+pub const CPU: &str = "qemu64,+smep,+smap,+umip,+rdrand,+rdseed,enforce";
 
 /// How the board lays its CPUs out.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -576,6 +578,32 @@ mod tests {
         let dense = render(&build_argv(&fixture_spec(2), Path::new("/tmp/k.elf")));
         assert_eq!(after(&dense, "-smp").as_deref(), Some("2"));
         assert!(!dense.iter().any(|a| a.contains("socket-id")));
+    }
+
+    /// The default model offers every supervisor protection the kernel holds a
+    /// CPU to, so a vertical runs under them; an override offers only what it
+    /// names, so a vertical can run without them.
+    #[test]
+    fn the_default_model_offers_the_supervisor_protections_and_an_override_need_not() {
+        let model = |spec: &Spec| {
+            let argv = render(&build_argv(spec, Path::new("/tmp/k.elf")));
+            let at = argv.iter().position(|a| a == "-cpu").expect("a CPU model");
+            argv[at + 1].clone()
+        };
+        let default = model(&fixture_spec(1));
+        for feature in ["+smep", "+smap", "+umip"] {
+            assert!(
+                default.split(',').any(|f| f == feature),
+                "{default} lacks {feature}"
+            );
+        }
+        let plain = model(&fixture_spec(1).with_x86_64_cpu("qemu64"));
+        assert!(
+            !plain
+                .split(',')
+                .any(|f| ["+smep", "+smap", "+umip"].contains(&f)),
+            "{plain}"
+        );
     }
 
     #[test]

@@ -518,7 +518,7 @@ macro_rules! define_isr {
                 "movq %rsp, %rdi",
                 $crate::fp_frame_save!(),
                 $crate::scrub_nonargument_gprs!(),
-                $crate::clear_direction_flag!(),
+                $crate::clear_entry_flags!(),
                 "xorl %ecx, %ecx",
                 "xorl %edx, %edx",
                 "xorl %esi, %esi",
@@ -550,6 +550,8 @@ macro_rules! define_isr {
                 verw_sel = sym $crate::sidechannel::VERW_SELECTOR,
                 frame_cs = const $crate::interrupts::ISR_FRAME_CS,
                 frame_top = const $crate::interrupts::ISR_FRAME_TOP,
+                smap = const $crate::protection::Protections::SMAP.bits(),
+                in_force = sym $crate::protection::IN_FORCE,
                 options(att_syntax),
             )
         }
@@ -621,13 +623,15 @@ macro_rules! exception_isr_body {
                 "andq $-16, %rsp",
                 "ldmxcsr {kernel_mxcsr}(%rip)",
                 $crate::scrub_nonargument_gprs!(),
-                $crate::clear_direction_flag!(),
+                $crate::clear_entry_flags!(),
                 "call {dispatch}",
                 // The dispatcher diverges; a return is a kernel bug.
                 "ud2",
                 vector = const $vector,
                 dispatch = sym $dispatch,
                 kernel_mxcsr = sym $crate::fpu::KERNEL_MXCSR,
+                smap = const $crate::protection::Protections::SMAP.bits(),
+                in_force = sym $crate::protection::IN_FORCE,
                 options(att_syntax),
             )
         }
@@ -720,7 +724,7 @@ pub unsafe extern "C" fn tairix_arch_x86_64_isr_default() {
         "andq $-16, %rsp",
         "ldmxcsr {kernel_mxcsr}(%rip)",
         crate::scrub_nonargument_gprs!(),
-        crate::clear_direction_flag!(),
+        crate::clear_entry_flags!(),
         "xorl %ecx, %ecx",
         "xorl %edx, %edx",
         "xorl %esi, %esi",
@@ -730,6 +734,8 @@ pub unsafe extern "C" fn tairix_arch_x86_64_isr_default() {
         "ud2",
         handler = sym default_interrupt,
         kernel_mxcsr = sym crate::fpu::KERNEL_MXCSR,
+        smap = const crate::protection::Protections::SMAP.bits(),
+        in_force = sym crate::protection::IN_FORCE,
         options(att_syntax),
     )
 }

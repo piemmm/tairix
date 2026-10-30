@@ -45,14 +45,14 @@ New work targets the CVE classes these do **not** yet hit.
 
 ### 1.3 Honest reach (§2.1, §2.6)
 
-TAIRiX today has **no SMEP/SMAP/`clac`/`stac`**; KPTI/IBPB are `Pending` and
-tied to **Stage 6** (`sidechannel.rs` states this). A live ring-3 entry path
-*does* now exist — the Arch HAL `EnterUser` `iretq` primitive
+x86_64 holds every CPU to SMEP, SMAP and UMIP where the CPU offers them
+(§5); aarch64 and riscv64 do not yet bar the kernel from user pages
+(`plans/OPEN-DEFECTS.md`), and KPTI/IBPB are `Pending` and tied to
+**Stage 6** (`sidechannel.rs` states this). A live ring-3 entry path exists —
+the Arch HAL `EnterUser` `iretq` primitive
 (`kernel/arch/x86_64/src/userentry.rs`), exercised end-to-end by
-`enter_user_qemu_x86_64` — but the silicon-enforced ring barrier (SMEP/SMAP,
-KPTI) and the per-access `copy_from_user` hardware fault trap are not yet
-wired. Tests for the full ring-break classes (SMAP bypass, `copy_from_user`
-page faults) are therefore mostly Stage-6 work. Today we land:
+`enter_user_qemu_x86_64` — as does the per-access `copy_from_user` hardware
+fault trap (§5). Today we land:
 
 1. host-level invariant tests against code that already exists,
 2. QEMU CPU-control-register / entry-path tests that **gate** Stage 6, and
@@ -213,12 +213,24 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   section layouts and the bound on the tables they draw. aarch64 and riscv64
   still run on read/write/executable identity mappings (open rows in
   `plans/OPEN-DEFECTS.md`).
-- **SMEP/SMAP/UMIP control bits (CWE-862; ret2usr / SMAP-bypass).** *Not yet
-  implemented.* Add the bits to the Arch-HAL CPU-control surface and write the
-  §17.2/§19.1 QEMU conformance test asserting `CR4.SMEP`/`CR4.SMAP` are set and
-  that a kernel read/exec of a user page faults. Until the bits land this is
-  the **spec that gates the feature** — a real failing-until-implemented
-  target, **not** `#[ignore]` (§2.5).
+- **SMEP/SMAP/UMIP control bits (CWE-862; ret2usr / SMAP-bypass).** *Landed on
+  x86_64* (`plans/OPEN-DEFECTS.md` D1579): joining the kernel root holds every
+  CPU to `CR0.WP` and, where the CPU offers them, `CR4.SMEP`, `CR4.SMAP` and
+  `CR4.UMIP` (`kernel/arch/x86_64/src/protection.rs`); the boot CPU settles the
+  set and a CPU that cannot hold it does not join. The kernel reaches user
+  memory only through the direct map, so it never sets `AC`, and every entry
+  clears the `AC` user code may set. Host tests: `protection::tests` (the
+  CPUID decode, the `CR4` bits, the join rule),
+  `every_asynchronous_entry_stub_clears_the_alignment_check_flag_under_smap`,
+  `the_boot_entry_writes_rflags_whole`, and the `IA32_FMASK` tests above.
+  QEMU: every x86_64 vertical runs on a model offering all three (`tools/qemu`
+  `CPU`); `uaccess_fault_qemu_x86_64` asserts the `CR4` bits and the boot's
+  record of them, and that a guarded copy reading a mapped user page through
+  its user address faults while the same bytes copy through the direct map;
+  `preempt_el0_qemu_x86_64` and one `cross_cpu_tlb_shootdown_qemu_x86_64`
+  enrolment run plain `qemu64`, so entries are taken, and an application
+  processor joins, where `clac` does not exist. A kernel instruction fetch from a user
+  page is not provoked on the metal: `CR4.SMEP` is asserted set instead.
 - **`copy_from_user` TOCTOU & non-canonical user pointers (CWE-367 / CWE-822).**
   *Host validator landed:* `syscall_entry.rs::validate_user_buffer` rejects a
   null, non-canonical, kernel-range, or wrapping user `(ptr, len)` buffer
@@ -255,16 +267,18 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   zero-on-free info-leak, DMA descriptor fuzzing, slab metadata fault-injection,
   audit-log chain-tamper. All map to named CVE classes against already-landed
   code.
-- **Highest yield but Stage-6-gated:** SMEP/SMAP enforcement and KPTI.
-  Write the conformance/spec tests now as the gate; implement in Stage 6.
-  (The `copy_from_user` hardware fault trap has landed — §5 — with per-port
-  QEMU verticals, and so has x86_64's `CR0.WP` with its kernel W^X.)
+- **Highest yield but Stage-6-gated:** KPTI, and the aarch64/riscv64
+  equivalents of SMAP. Write the conformance/spec tests now as the gate;
+  implement in Stage 6. (The `copy_from_user` hardware fault trap has landed —
+  §5 — with per-port QEMU verticals, and so have x86_64's `CR0.WP` with its
+  kernel W^X and its SMEP, SMAP and UMIP.)
 - **Regression-guard, not bug-finding:** the side-channel barrier /
   `is_release_ready` honesty tests.
 - **What these tests cannot prove:** they validate the *detector*, not that
   corruption is impossible; software tagging is probabilistic (tag wrap,
   §19.10). State this in the test. Hardware-enforced detection (MTE faults,
-  SMEP/SMAP page faults on a corrupted PTE) is Arch-HAL/Stage-6-gated.
+  and on aarch64/riscv64 the faults their SMAP equivalents would raise) is
+  Arch-HAL/Stage-6-gated.
 
 ## 7. Definition of Done (§7)
 
@@ -296,5 +310,6 @@ reverted before the task is done (§2.5, §7).
 3. **Audit-log chain-tamper** tests (§19.4).
 4. **Ring-boundary QEMU tests:** `fmask`/RFLAGS, `swapgs`/stack-pivot, `sysret`
    non-canonical RIP, GDT/TSS/IST invariants.
-5. **Stage-6-gated conformance specs:** SMEP/SMAP, `copy_from_user`
-   TOCTOU, KPTI — written now as the gate the feature must pass.
+5. **Stage-6-gated conformance specs:** the aarch64/riscv64 SMAP
+   equivalents, `copy_from_user` TOCTOU, KPTI — written now as the gate the
+   feature must pass.

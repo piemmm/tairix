@@ -90,18 +90,27 @@ macro_rules! scrub_nonargument_gprs {
     };
 }
 
-/// Template text clearing the direction flag before a stub's first call into
-/// Rust. Interrupt, exception, and trap-gate delivery keep the interrupted
-/// context's `DF` — only `syscall` clears it, through `IA32_FMASK` — while the
-/// System V AMD64 ABI requires `DF=0` at every function's entry, and the
-/// kernel's `memcpy`/`memset` (`compiler_builtins`) are `rep movs`/`rep stos`
-/// loops that read it. The interrupted context's own `DF` comes back with
-/// `iretq`.
+/// Template text clearing the flags Rust must not inherit, before a stub's
+/// first call into it. Interrupt, exception, and trap-gate delivery keep the
+/// interrupted context's `DF` and `AC` — only `syscall` clears them, through
+/// `IA32_FMASK`. The System V AMD64 ABI requires `DF=0` at every function's
+/// entry, and the kernel's `memcpy`/`memset` (`compiler_builtins`) are
+/// `rep movs`/`rep stos` loops that read it. An `AC` user code set would open
+/// every user page to the kernel while SMAP is in force; `clac` exists only on
+/// a CPU offering SMAP, so it runs only while the kernel holds it. `iretq`
+/// brings the interrupted flags back. The `naked_asm!` it is spliced into
+/// binds `smap` and `in_force`.
 #[doc(hidden)]
 #[macro_export]
-macro_rules! clear_direction_flag {
+macro_rules! clear_entry_flags {
     () => {
-        "cld\n"
+        concat!(
+            "cld\n",
+            "testb ${smap}, {in_force}(%rip)\n",
+            "jz 4f\n",
+            "clac\n",
+            "4:\n",
+        )
     };
 }
 

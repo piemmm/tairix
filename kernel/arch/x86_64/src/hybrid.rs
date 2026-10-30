@@ -191,8 +191,7 @@ fn detect_intel_core_class() -> CoreClass {
     if max_leaf < LEAF_HYBRID_INFO {
         return CoreClass::Performance;
     }
-    let features = core::arch::x86_64::__cpuid_count(0x07, 0);
-    let hybrid = (features.edx >> 15) & 1 == 1;
+    let hybrid = (crate::cpuid::structured_extended_features().edx >> 15) & 1 == 1;
     if !hybrid {
         return CoreClass::Performance;
     }

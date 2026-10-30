@@ -285,7 +285,7 @@ pub unsafe extern "C" fn page_fault_isr() {
         "subq $8, %rsp",
         crate::fp_frame_save!(),
         crate::scrub_nonargument_gprs!(),
-        crate::clear_direction_flag!(),
+        crate::clear_entry_flags!(),
         "call {dispatch}",
         // The dispatcher returned: the fault is resolved. Restore the
         // interrupted state, drop the hardware error code, and retry the
@@ -317,6 +317,8 @@ pub unsafe extern "C" fn page_fault_isr() {
         verw_sel = sym crate::sidechannel::VERW_SELECTOR,
         frame_cs = const crate::interrupts::WORD_ISR_FRAME_CS,
         frame_top = const crate::interrupts::WORD_ISR_FRAME_TOP,
+        smap = const crate::protection::Protections::SMAP.bits(),
+        in_force = sym crate::protection::IN_FORCE,
         options(att_syntax),
     )
 }

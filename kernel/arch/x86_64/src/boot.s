@@ -92,6 +92,11 @@
 //     its other bits undefined, and a cache-disable bit inherited from the
 //     loader would leave the kernel running uncached. The FPU set-up and the
 //     kernel root's entry add the rest.
+// 12. `RFLAGS` is written whole (`0x2`, the reserved bit alone) once there is
+//     a stack: neither boot protocol defines it beyond `VM` and `IF`, an
+//     inherited `DF` would run Rust's string instructions backwards, and an
+//     inherited `AC` would leave every user page open to the kernel under
+//     SMAP.
 
 .section .multiboot_header, "a"
 .align 8
@@ -151,10 +156,10 @@ pvh_start:
 .size pvh_start, . - pvh_start
 
 boot_common:
-    // Neither boot protocol defines the direction flag; Rust needs it clear.
-    cld
     movl $boot_stack_top, %esp
     xorl %ebp, %ebp
+    pushl $0x2                                      // RFLAGS (SAFETY-INVARIANT 12)
+    popfl
 
     // Poison the guard reserved below the stack, before anything descends
     // it, so a later overrun is a disturbed sentinel the panic path can

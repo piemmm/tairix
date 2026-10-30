@@ -25,7 +25,12 @@
 //!    address returns the fault error; a copy writing it returns the
 //!    fault error — each taking a *real* kernel-mode `#PF` whose
 //!    redirect lets execution continue to the next check.
-//! 3. The fatal `fault` observer reports FAILURE: reaching it means the
+//! 3. The kernel holds the CPU to every supervisor protection the guest's
+//!    model offers: `CR4.SMEP`, `CR4.SMAP` and `CR4.UMIP` are set, the boot
+//!    recorded all three, and a guarded copy reading a mapped user page
+//!    through its user address faults while the same bytes copy through the
+//!    direct map — so SMAP is enforced, with `AC` clear, not merely enabled.
+//! 4. The fatal `fault` observer reports FAILURE: reaching it means the
 //!    window redirect did not absorb the deliberate fault.
 //!
 //! ## How it differs from the production `tairix-kernel` binary
@@ -47,13 +52,18 @@ mod kernel {
     use core::sync::atomic::{AtomicU32, Ordering};
 
     use tairix_arch_api::fatal::KernelFault;
+    use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
     use tairix_arch_api::uaccess::conformance::{self, Verdict};
+    use tairix_arch_api::uaccess::copy_user_span;
+    use tairix_arch_x86_64::paging::{self, AddressSpace, PageTablePool};
+    use tairix_arch_x86_64::protection::{self, Protections};
     use tairix_arch_x86_64::qemu_exit;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::x86_64::boot::KERNEL_BOOT_PROTECTIONS;
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use tairix_log::{log, Event, EventId, Field, Level, Sink};
+    use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 
     /// A page-aligned canonical virtual address the production kernel
     /// space leaves unmapped (256 GiB: far beyond the low identity
@@ -75,6 +85,25 @@ mod kernel {
     /// Set once the conformance run has been driven so a duplicate
     /// `BootCompleted` cannot re-enter the test logic.
     static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
+
+    /// Set when the boot recorded every protection in force.
+    static PROTECTIONS_RECORDED: AtomicU32 = AtomicU32::new(0);
+
+    /// A user-half address the probe root maps [`PROBE_PAGE`] at.
+    const USER_PROBE_VA: u64 = 1 << 32;
+
+    /// The byte every word of [`PROBE_PAGE`] holds.
+    const PROBE_BYTE: u8 = 0x5A;
+
+    /// The page the SMAP probe reads by a user address and through the
+    /// direct map. Never written, so a read proves which mapping reached it.
+    #[repr(C, align(4096))]
+    struct ProbePage([u8; 4096]);
+
+    static PROBE_PAGE: ProbePage = ProbePage([PROBE_BYTE; 4096]);
+
+    /// Page tables of the root the SMAP probe maps the page into.
+    static PROBE_POOL: PageTablePool = PageTablePool::new();
 
     /// The global allocator's arena.
     static HEAP: Heap = Heap::ZERO;
@@ -123,8 +152,90 @@ mod kernel {
         fail("fault escaped the copy window redirect")
     }
 
+    /// The guest's model offers SMEP, SMAP and UMIP, so the kernel holds the
+    /// CPU to all three, and under SMAP a kernel read of a user page faults
+    /// even inside the guarded copy, while the same bytes copy through the
+    /// direct map.
+    fn check_protections() -> Result<(), &'static str> {
+        const HELD: u64 = (1 << 11) | (1 << 20) | (1 << 21);
+        if protection::in_force() != Protections::ALL {
+            return Err("the kernel does not hold every protection the guest offers");
+        }
+        let cr4: u64;
+        // SAFETY: reading `CR4` at CPL 0 changes nothing.
+        unsafe { core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack)) };
+        if cr4 & HELD != HELD {
+            return Err("CR4 does not hold SMEP, SMAP and UMIP");
+        }
+        if PROTECTIONS_RECORDED.load(Ordering::Acquire) == 0 {
+            return Err("the boot did not record the protections in force");
+        }
+        let phys = core::ptr::addr_of!(PROBE_PAGE) as u64 - paging::KERNEL_VMA_BASE;
+        let Some(mut root) = AddressSpace::new_process_root(&PROBE_POOL) else {
+            return Err("no probe root");
+        };
+        if root
+            .map_page(USER_PROBE_VA, phys, PageFlags::READ | PageFlags::USER)
+            .is_err()
+        {
+            return Err("the probe page would not map");
+        }
+        // The user address must reach the page, so its fault can only be
+        // SMAP's.
+        if root
+            .translate(USER_PROBE_VA)
+            .is_none_or(|(to, flags)| to != phys || !flags.contains(PageFlags::USER))
+        {
+            return Err("the probe's user address does not reach the page");
+        }
+        // SAFETY: the root carries the kernel half, so this code, its stack
+        // and every static stay mapped across the switch; the test ends on
+        // this root.
+        unsafe { root.switch() };
+        let mut scratch = [0u8; 64];
+        // SAFETY: `scratch` is writable for its length; the source is a
+        // mapped user page, which SMAP refuses the kernel, so the window's
+        // fix-up absorbs the fault.
+        let through_user = unsafe {
+            copy_user_span(
+                scratch.as_mut_ptr(),
+                USER_PROBE_VA as *const u8,
+                scratch.len(),
+            )
+        };
+        if through_user.is_ok() {
+            return Err("a kernel read of a user page did not fault");
+        }
+        // SAFETY: as above, from the page's direct-map alias, which is the
+        // kernel's own mapping of it.
+        let through_map = unsafe {
+            copy_user_span(
+                scratch.as_mut_ptr(),
+                paging::physmap_virt(phys) as *const u8,
+                scratch.len(),
+            )
+        };
+        if through_map.is_err() || scratch != [PROBE_BYTE; 64] {
+            return Err("the direct map did not read the page");
+        }
+        Ok(())
+    }
+
+    /// Whether `event` is the boot's record of every protection in force.
+    fn records_every_protection(event: &Event<'_>) -> bool {
+        event.id == KERNEL_BOOT_PROTECTIONS
+            && event.level == Level::Info
+            && ["smep", "smap", "umip"].iter().all(|key| {
+                event
+                    .fields
+                    .iter()
+                    .any(|field| field.key == *key && field.value == FieldValue::Bool(true))
+            })
+    }
+
     /// Drive the shared checks: positive control, then a real `#PF` on
-    /// the read side and the write side of the window. Never returns.
+    /// the read side and the write side of the window, then the
+    /// supervisor protections. Never returns.
     fn run_checks() -> ! {
         note(
             Level::Info,
@@ -139,6 +250,9 @@ mod kernel {
         let verdict = unsafe { conformance::run(UNMAPPED_VA as *mut u8, &mut scratch) };
         match verdict {
             Verdict::Pass => {
+                if let Err(why) = check_protections() {
+                    fail(why);
+                }
                 note(
                     Level::Info,
                     UA_TEST_PASS,
@@ -153,14 +267,18 @@ mod kernel {
     }
 
     /// Sink that forwards every event to the serial log (so the QEMU
-    /// transcript captures the boot timeline) and, on the single
-    /// [`BOOT_COMPLETED_EVENT_ID`], drives [`run_checks`].
+    /// transcript captures the boot timeline), notes the boot's record of the
+    /// protections in force, and, on the single [`BOOT_COMPLETED_EVENT_ID`],
+    /// drives [`run_checks`]. The boot logs and audits through it alike.
     struct BootCompletedSink;
 
     impl Sink for BootCompletedSink {
         fn write_event(&self, event: &Event<'_>) {
             SerialSink::new().write_event(event);
 
+            if records_every_protection(event) {
+                PROTECTIONS_RECORDED.store(1, Ordering::Release);
+            }
             if event.id == BOOT_COMPLETED_EVENT_ID
                 && TEST_DRIVEN
                     .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
@@ -194,7 +312,7 @@ mod kernel {
         boot(
             multiboot_info,
             &ALLOCATOR,
-            &SERIAL_SINK,
+            &AUDIT_SINK,
             &AUDIT_SINK,
             tairix_log::Level::Info,
         )

@@ -31,13 +31,13 @@ const LEAF1_ECX_SSE42: u32 = 20;
 const LEAF1_ECX_AESNI: u32 = 25;
 const LEAF1_ECX_OSXSAVE: u32 = 27;
 const LEAF1_ECX_AVX: u32 = 28;
-const LEAF1_ECX_RDRAND: u32 = 30;
+pub(crate) const LEAF1_ECX_RDRAND: u32 = 30;
 const LEAF1_EDX_SSE2: u32 = 26;
 
 // --- CPUID leaf 7 sub-leaf 0: EBX feature bits ---
 const LEAF7_EBX_AVX2: u32 = 5;
 const LEAF7_EBX_ERMS: u32 = 9;
-const LEAF7_EBX_RDSEED: u32 = 18;
+pub(crate) const LEAF7_EBX_RDSEED: u32 = 18;
 const LEAF7_EBX_SHA: u32 = 29;
 
 /// `XCR0` bits the operating system must have enabled before an AVX
@@ -116,16 +116,9 @@ impl CpuFeatures for CpuFeatureDetect {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             // `CPUID` is unconditionally available on every x86_64 CPU
-            // and side-effect-free. Leaf 7 requires the max-basic-leaf
-            // bound, so read leaf 0's EAX first and treat an absent leaf
-            // 7 as "no leaf-7 features" (fail closed to fewer bits).
-            let basic = core::arch::x86_64::__cpuid(0);
+            // and side-effect-free.
             let leaf1 = core::arch::x86_64::__cpuid(1);
-            let leaf7_ebx = if basic.eax >= 7 {
-                core::arch::x86_64::__cpuid_count(7, 0).ebx
-            } else {
-                0
-            };
+            let leaf7_ebx = crate::cpuid::structured_extended_features().ebx;
             // `XGETBV` exists only once the OS has set `CR4.OSXSAVE`.
             let xcr0 = if (leaf1.ecx >> LEAF1_ECX_OSXSAVE) & 1 == 1 {
                 // SAFETY: `OSXSAVE` set means `XGETBV` is enabled; `ECX = 0`

@@ -266,6 +266,18 @@ fn build_el0_space(image: &LoadImage) -> (u64, UserEntry) {
 fn run_preempt() -> ! {
     note(TEST_START, "x86_64 P-1c test: building ring-3 spinner");
 
+    // The enrolment runs a model offering no supervisor protection, so every
+    // entry below is taken where `clac` does not exist.
+    if tairix_arch_x86_64::protection::in_force()
+        != tairix_arch_x86_64::protection::Protections::offered(0, 0)
+    {
+        note(
+            TEST_FAIL,
+            "P-1c test: the model offers a supervisor protection",
+        );
+        qemu_exit::exit_failure();
+    }
+
     syscall_entry::set_dispatch_callback(dispatch);
 
     // Arm the production tickless ring-3-preemption path verbatim: install the ring-3-preemption callback the

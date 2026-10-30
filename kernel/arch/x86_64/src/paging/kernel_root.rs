@@ -62,10 +62,6 @@ const STARTUP_ROOT_TABLES: usize = 1 + PAGES_PER_FINE_CHAIN;
 /// Tables both roots are built from, which live as long as the kernel.
 const ROOT_TABLES: usize = KERNEL_ROOT_TABLES + STARTUP_ROOT_TABLES;
 
-/// `CR0.WP`: supervisor writes honour a read-only leaf.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-const CR0_WP: u64 = 1 << 16;
-
 /// A physical span `[start, end)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Span {
@@ -354,8 +350,9 @@ pub(crate) fn startup_root() -> Option<u64> {
     }
 }
 
-/// Build the kernel root and move the boot CPU onto it, with supervisor write
-/// protection on.
+/// Build the kernel root, settle the protections every CPU runs the kernel
+/// under ([`crate::protection`]), and move the boot CPU onto the root under
+/// them.
 ///
 /// The root carries the kernel half every root shares and nothing else: no
 /// user half, and nothing physical mapped as itself. Building it also builds
@@ -372,9 +369,10 @@ pub(crate) fn startup_root() -> Option<u64> {
 ///
 /// # Safety
 ///
-/// Once, on the boot CPU, with interrupts disabled, on the boot trampoline's
-/// root, after the boot CPU's descriptor tables are installed: the
-/// trampoline's identity window and the GDT inside it are left behind here.
+/// Once, on the boot CPU, with interrupts disabled and `RFLAGS.AC` clear, on
+/// the boot trampoline's root, after the boot CPU's descriptor tables are
+/// installed: the trampoline's identity window and the GDT inside it are left
+/// behind here.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub(crate) unsafe fn enter_kernel_root() -> Result<(), &'static str> {
     const EXHAUSTED: &str = "the kernel root's page tables ran out";
@@ -413,6 +411,7 @@ pub(crate) unsafe fn enter_kernel_root() -> Result<(), &'static str> {
     let startup = build_startup_root(image, crate::smp::AP_TRAMPOLINE_PHYS, &ROOT_TABLE_POOL)
         .ok_or(EXHAUSTED)?;
     STARTUP_ROOT.store(startup, Ordering::Release);
+    crate::protection::settle();
     PARK_ROOT.publish(root);
     // SAFETY: the caller's contract; the kernel root maps this code and the
     // boot stack through its image window as the trampoline's root does.
@@ -423,33 +422,27 @@ pub(crate) unsafe fn enter_kernel_root() -> Result<(), &'static str> {
     }
 }
 
-/// Load the kernel root on the calling CPU and turn supervisor write
-/// protection on, so a read-only mapping holds against the kernel as it does
-/// against ring 3. Returns `false`, changing nothing, before the root is
-/// built.
+/// Load the kernel root on the calling CPU and hold the CPU to the kernel's
+/// protections ([`crate::protection`]). Returns `false`, changing nothing,
+/// before the root is built or on a CPU that does not offer every protection
+/// in force.
 ///
 /// # Safety
 ///
-/// CPL 0 with interrupts disabled, on a root that maps the calling code and
-/// stack as the kernel root does — the boot trampoline's root and the
-/// start-up root both do.
+/// CPL 0 with interrupts disabled and `RFLAGS.AC` clear, on a root that maps
+/// the calling code and stack as the kernel root does — the boot trampoline's
+/// root and the start-up root both do.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub(crate) unsafe fn join_kernel_root() -> bool {
+    let Some(protections) = crate::protection::to_hold() else {
+        return false;
+    };
     if !park_kernel_root(true) {
         return false;
     }
-    // SAFETY: `CR0.WP` only makes a supervisor write honour a read-only leaf,
-    // and nothing the kernel runs writes through one.
-    unsafe {
-        core::arch::asm!(
-            "mov {t}, cr0",
-            "or {t}, {wp}",
-            "mov cr0, {t}",
-            t = out(reg) _,
-            wp = const CR0_WP,
-            options(nostack),
-        );
-    }
+    // SAFETY: the caller's contract, on the kernel root, which maps no user
+    // page.
+    unsafe { crate::protection::hold(protections) };
     true
 }
 

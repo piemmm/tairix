@@ -36,6 +36,7 @@ pub(crate) const ASM_SOURCES: &[(&str, &str)] = &[
     ("percpu.rs", include_str!("percpu.rs")),
     ("pio.rs", include_str!("pio.rs")),
     ("preempt.rs", include_str!("preempt.rs")),
+    ("protection.rs", include_str!("protection.rs")),
     ("qemu_exit.rs", include_str!("qemu_exit.rs")),
     ("reset.rs", include_str!("reset.rs")),
     ("serial.rs", include_str!("serial.rs")),

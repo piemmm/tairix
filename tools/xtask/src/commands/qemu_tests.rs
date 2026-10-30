@@ -4099,7 +4099,9 @@ static TESTS: &[QemuTest] = &[
     // at each other. Each step blocks until the acknowledge lands, so
     // reaching PASS proves all three ran on a second real core and a
     // regression in any of them times out instead. Two CPUs and a 60-second
-    // budget.
+    // budget. Plain `qemu64`, which offers no SMEP, SMAP or UMIP, so the AP
+    // joins under an empty set and its shootdown entry skips `clac`; the
+    // x2APIC run below offers all three.
     QemuTest {
         package: "tairix-test-cross-cpu-tlb-shootdown-qemu-x86-64",
         binary: "tairix-test-cross-cpu-tlb-shootdown-qemu-x86-64",
@@ -4118,7 +4120,7 @@ static TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         bounded_pointer_script: false,
-        x86_64_cpu: None,
+        x86_64_cpu: Some("qemu64"),
         serial: &[],
         expect: Expect::Pass,
     },
@@ -4889,7 +4891,9 @@ static TESTS: &[QemuTest] = &[
     // mid-loop after each preemption — still completed and exited; a preemption
     // that never fires (the `step` spins forever inside ring 3) or a botched
     // resume (the task never exits) times out (fail-loud). Single CPU; a
-    // 120-second budget covers the multi-tick busy loop under QEMU TCG.
+    // 120-second budget covers the multi-tick busy loop under QEMU TCG. Plain
+    // `qemu64`, which offers no SMEP, SMAP or UMIP, so every entry runs where
+    // `clac` does not exist; the guest fails if the kernel holds any of them.
     QemuTest {
         package: "tairix-test-preempt-el0-qemu-x86-64",
         binary: "tairix-test-preempt-el0-qemu-x86-64",
@@ -4908,7 +4912,7 @@ static TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         bounded_pointer_script: false,
-        x86_64_cpu: None,
+        x86_64_cpu: Some("qemu64"),
         serial: &[],
         expect: Expect::Pass,
     },

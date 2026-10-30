@@ -621,14 +621,17 @@ fn ready_flag() -> &'static AtomicU32 {
 /// live, and run the installed entry.
 ///
 /// Reporting comes after the join, which leaves the trampoline page behind,
-/// so the boot CPU never reuses the page under a CPU still executing it.
+/// so the boot CPU never reuses the page under a CPU still executing it. An AP
+/// that cannot hold the kernel's protections never reports, so the boot CPU's
+/// wait for it times out and the kernel runs without it.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn tairix_arch_x86_64_ap_entry(cpu: CpuId) -> ! {
     // SAFETY: an AP fresh from the trampoline: CPL 0 with interrupts
-    // masked, on the start-up root, whose image window is the kernel root's,
-    // so this code and the AP's stack stay mapped across the load.
-    // `start_secondary` refused to launch it before the root was built.
+    // masked and `AC` clear since INIT, on the start-up root, whose image
+    // window is the kernel root's, so this code and the AP's stack stay
+    // mapped across the load. `start_secondary` refused to launch it before
+    // the root was built.
     if unsafe { crate::paging::join_kernel_root() } {
         ready_flag().store(1, Ordering::Release);
         if let Some(entry) = SECONDARY_ENTRY_FN.load() {

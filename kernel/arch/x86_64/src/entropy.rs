@@ -64,13 +64,8 @@ impl PlatformEntropy for PlatformRng {
 mod hw {
     use super::EntropyError;
 
-    /// `CPUID` leaf 1, `ECX` bit 30: `RDRAND` is supported.
-    const CPUID_LEAF_FEATURES: u32 = 1;
-    const ECX_RDRAND_BIT: u32 = 1 << 30;
-
-    /// `CPUID` leaf 7 sub-leaf 0, `EBX` bit 18: `RDSEED` is supported.
-    const CPUID_LEAF_EXTENDED_FEATURES: u32 = 7;
-    const EBX_RDSEED_BIT: u32 = 1 << 18;
+    use crate::cpufeatures::{LEAF1_ECX_RDRAND, LEAF7_EBX_RDSEED};
+    use crate::cpuid::structured_extended_features;
 
     /// Bounded retry budget for a single 64-bit hardware draw.
     ///
@@ -88,16 +83,9 @@ mod hw {
     pub(super) fn fill(out: &mut [u8]) -> Result<(), EntropyError> {
         // CPUID is universal on x86_64, side-effect-free, and requires no
         // target feature, so these intrinsics are safe to call directly.
-        let features_ecx = core::arch::x86_64::__cpuid(CPUID_LEAF_FEATURES).ecx;
-        let max_leaf = core::arch::x86_64::__cpuid(0).eax;
-        let extended_ebx = if max_leaf >= CPUID_LEAF_EXTENDED_FEATURES {
-            core::arch::x86_64::__cpuid_count(CPUID_LEAF_EXTENDED_FEATURES, 0).ebx
-        } else {
-            0
-        };
-
-        let use_rdseed = extended_ebx & EBX_RDSEED_BIT != 0;
-        let use_rdrand = features_ecx & ECX_RDRAND_BIT != 0;
+        let features_ecx = core::arch::x86_64::__cpuid(1).ecx;
+        let use_rdseed = structured_extended_features().ebx & (1 << LEAF7_EBX_RDSEED) != 0;
+        let use_rdrand = features_ecx & (1 << LEAF1_ECX_RDRAND) != 0;
         if !use_rdseed && !use_rdrand {
             return Err(EntropyError::Unavailable);
         }

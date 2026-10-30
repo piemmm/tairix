@@ -47,10 +47,10 @@ extern "C" {
 ///    IDTR `boot.s` leaves. A binary observes its own faults through the
 ///    fault-handler slot, and the kernel replaces the tables with its
 ///    per-CPU ones.
-/// 5. Moves onto the kernel root with supervisor write protection on
-///    ([`crate::paging::enter_kernel_root`]), leaving the trampoline's
-///    identity window behind, so no binary runs where a stray kernel access
-///    to a low address lands in memory.
+/// 5. Moves onto the kernel root under the kernel's protections
+///    ([`crate::paging::enter_kernel_root`], [`crate::protection`]), leaving
+///    the trampoline's identity window behind, so no binary runs where a
+///    stray kernel access to a low address or a user page lands in memory.
 /// 6. Transfers to the binary-supplied `kernel_main`.
 ///
 /// # Safety
@@ -87,9 +87,10 @@ pub extern "C" fn tairix_arch_x86_64_main(
     if unsafe { crate::percpu::install_boot_tables(boot_tables) }.is_err() {
         refuse("the boot descriptor tables were refused");
     }
-    // SAFETY: the boot CPU, once, with interrupts disabled, on the
-    // trampoline's root, and with the descriptor tables just installed in
-    // the image's boot data rather than the identity window.
+    // SAFETY: the boot CPU, once, with interrupts disabled and `AC` clear
+    // (`boot.s` writes `RFLAGS` whole), on the trampoline's root, and with
+    // the descriptor tables just installed in the image's boot data rather
+    // than the identity window.
     if let Err(reason) = unsafe { crate::paging::enter_kernel_root() } {
         refuse(reason);
     }

@@ -14,6 +14,8 @@
 //!   a Rust callback registered by the test (`idt`).
 //! * The kernel's own translation root, process roots, and the page-table
 //!   walk (`paging`).
+//! * The protections every CPU runs the kernel under: `CR0.WP` and, where
+//!   offered, SMEP, SMAP and UMIP (`protection`).
 //! * The QEMU `isa-debug-exit` helper that translates a Pass/Fail result
 //!   into the exit code `tools/qemu` recognises (`qemu_exit`).
 //!
@@ -114,6 +116,7 @@ pub mod coreclock;
 /// `tairix-arch-api` dependency this module's traits live in.
 #[cfg(feature = "sched-arch")]
 pub mod cpufeatures;
+mod cpuid;
 pub mod cpumap;
 /// Boot-CPU model-name discovery: the CPUID processor brand string
 /// (leaves `0x8000_0002..=0x8000_0004`) the boot facts report.
@@ -205,6 +208,7 @@ pub mod pio;
 #[cfg(feature = "sched-arch")]
 pub mod platform;
 pub mod preempt;
+pub mod protection;
 pub mod pvh;
 pub mod qemu_exit;
 pub mod reset;

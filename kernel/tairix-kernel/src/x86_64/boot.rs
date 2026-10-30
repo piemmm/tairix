@@ -297,6 +297,12 @@ const KERNEL_BOOT_INIT_FAILED: EventId = EventId(4099);
 /// and may not be renumbered.
 const KERNEL_BOOT_TSC_INVARIANCE: EventId = EventId(4098);
 
+/// Security-relevant boot decision: which supervisor protections every CPU
+/// runs the kernel under (`tairix_arch_x86_64::protection`). Logged on every
+/// boot, at Warn where the CPU offers fewer than all of them. The id is part
+/// of the audit contract and may not be renumbered.
+pub const KERNEL_BOOT_PROTECTIONS: EventId = EventId(4105);
+
 // --- Retained boot audit log ----------------------------------------
 
 /// The retained, tail-able in-memory boot audit ring for this port.
@@ -443,6 +449,36 @@ fn log_tsc_invariance(sink: &(dyn Sink + Sync), invariant: bool) {
     );
 }
 
+fn log_protections(sink: &(dyn Sink + Sync)) {
+    use tairix_arch_x86_64::protection::{self, Protections};
+    let held = protection::in_force();
+    let field = |key, protection| Field {
+        key,
+        value: tairix_log::FieldValue::Bool(held.contains(protection)),
+    };
+    let (level, message) = if held.contains(Protections::ALL) {
+        (Level::Info, "supervisor protections in force")
+    } else {
+        (
+            Level::Warn,
+            "the cpu does not offer every supervisor protection",
+        )
+    };
+    tairix_log::log(
+        sink,
+        &Event {
+            level,
+            id: KERNEL_BOOT_PROTECTIONS,
+            message,
+            fields: &[
+                field("smep", Protections::SMEP),
+                field("smap", Protections::SMAP),
+                field("umip", Protections::UMIP),
+            ],
+        },
+    );
+}
+
 fn log_init_failure(sink: &(dyn Sink + Sync), err: BootError) {
     tairix_log::log(
         sink,
@@ -548,6 +584,7 @@ pub fn bring_up_bsp(
     // 1b. Arm the guarded user copy the `#PF` entry redirects into and
     //     publish the one fatal policy before anything further can fault.
     install_fault_entries();
+    log_protections(log_sink);
 
     // 1c. Boot-info parsing and the direct physical map — before anything
     //     reaches a register block or a frame by pointer. The kernel root maps
