@@ -12,7 +12,7 @@ name: ci
 # *not* in `ci`: it lives in the time-limited GitHub soaks. This workflow runs
 # the full fuzz+proptest registry in parallel for a minimum of 120 s each via
 # `tools/ci/soak.sh` (the same thin parallel-soak wrapper the nightly `soak`
-# workflow uses), and the nightly `soak` workflow runs the 24 h budget. Each
+# workflow uses), and the nightly `soak` workflow runs a seven-hour window. Each
 # soak run draws a fresh seed, logged per job, so consecutive runs explore new
 # inputs and any failure replays from its logged seed (pipeline logic lives in
 # `cargo xtask`, never in tools/ci).
@@ -146,10 +146,10 @@ jobs:
 
       # Run every fuzz harness and proptest model in parallel for
       # a minimum of 120 s each. soak.sh enumerates both registries (the
-      # single source of truth) and fans them out one process per target, all
-      # sharing the 120 s per-job budget set with `--secs`. This is more than
-      # the per-PR `--quick` gate inside `cargo xtask ci` and well short of the
-      # nightly 24 h `soak` workflow. Fails closed: any harness crash, hang, or
+      # single source of truth) and fans them out one process per target, each
+      # given 120 s of its own run by `--secs`. This is more than the per-PR
+      # `--once` gate inside `cargo xtask ci` and well short of the nightly
+      # seven-hour `soak` window. Fails closed: any harness crash, hang, or
       # invariant/counterexample failure fails the job.
       - name: Run soaks (fuzz + proptest, parallel, >= 120 s each)
         env:

@@ -107,20 +107,25 @@ Two clocks bound a soak, and they are deliberately different:
   by a whole pass — a pass formats and fills a whole volume, so it is far
   too coarse to start one that cannot finish in time.
 - **The deadline** is when the orchestrator gives up on a child and kills
-  its process group. It is that child's own budget plus an ordinary
-  step's allowance (the shared `soak_deadline` every soak orchestrator
-  uses), which covers building and starting the test binary with room to
-  spare. A deadline shorter than the budget would kill every soak longer
-  than it — work doing exactly what it was told to — and report it as a
-  hang.
+  its process group: what is left of that child's budget plus an ordinary
+  step's allowance (the `child_deadline` every soak orchestrator shares,
+  in `tools/xtask/src/commands/soak.rs`). A deadline shorter than the
+  budget would kill every soak longer than it — work doing exactly what it
+  was told to — and report it as a hang.
+
+A budget given as `--until T`, the close of a soak window, is the same
+instant for every target however long each waited to be built: the harness
+stops at the close (`TAIRIX_SOAK_UNTIL`, beside the budget), and one that
+reaches it already shut runs its single smoke pass.
 
 ## Parallelism
 
 The nightly soak runs every target **in parallel**, one job and one log
 each, through `tools/ci/soak.sh`'s `fssoak` kind (also part of `all`),
-alongside the fuzz, proptest, and repeated-test jobs. Every job gets the
-whole wall-clock budget and they overlap, so the window is the budget,
-not the sum of the jobs. The registry is the single source of truth —
+alongside the fuzz, proptest, and repeated-test jobs. The jobs overlap, so
+the soak costs one budget rather than the sum of them, and under
+`soak.sh --window` every job is finished when the window closes. The
+registry is the single source of truth —
 `soak.sh` enumerates `cargo xtask fssoak --list` and never hard-codes
 the filesystem list, so the randomized targets run concurrently with the
 fixed-sequence ones. Each ≥ 1 GiB volume in

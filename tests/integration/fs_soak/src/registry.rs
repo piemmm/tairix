@@ -1,13 +1,13 @@
 //! The closed registry of soak filesystems and the per-target runner.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite};
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{EntropySource, Keying, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
-use tairix_fuzzseed::FSSOAK_SEED_ENV;
+use tairix_fuzzseed::{room_for_another_pass, FSSOAK_SEED_ENV};
 
 use crate::{exercise, random_exercise, RamBlock};
 
@@ -195,49 +195,9 @@ fn soak(
     }
 }
 
-/// Whether `deadline` still leaves room for another pass expected to take
-/// about `pass`; always `false` without a deadline, so a plain `cargo test`
-/// runs a single pass.
-///
-/// A pass formats and fills a whole volume, so it is far too coarse to start
-/// one that cannot finish in time: checking only that the deadline has not yet
-/// passed overruns the budget by a full pass every run, and it is then the
-/// orchestrator's hung-child deadline — sized for building and starting the
-/// binary, not for another pass — that ends the soak.
-fn room_for_another_pass(deadline: Option<Instant>, pass: Duration) -> bool {
-    matches!(deadline, Some(end) if end.saturating_duration_since(Instant::now()) > pass)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{room_for_another_pass, run_target, TARGETS};
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn no_deadline_runs_a_single_pass() {
-        assert!(!room_for_another_pass(None, Duration::ZERO));
-    }
-
-    #[test]
-    fn a_pass_that_would_not_finish_in_time_is_not_started() {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        assert!(
-            !room_for_another_pass(Some(deadline), Duration::from_secs(30)),
-            "a 30 s pass must not start with 10 s of budget left"
-        );
-        assert!(room_for_another_pass(
-            Some(deadline),
-            Duration::from_secs(1)
-        ));
-    }
-
-    #[test]
-    fn an_elapsed_deadline_stops_the_soak() {
-        let past = Instant::now()
-            .checked_sub(Duration::from_secs(1))
-            .expect("an instant one second in the past exists");
-        assert!(!room_for_another_pass(Some(past), Duration::ZERO));
-    }
+    use super::{run_target, TARGETS};
 
     #[test]
     fn an_unknown_filesystem_fails_closed() {

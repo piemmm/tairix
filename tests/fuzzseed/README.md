@@ -12,7 +12,9 @@ filesystem soak. It is the single place (`AGENTS.md` §2.2) that:
 - **logs the seed at the start of each test**, with the exact `VAR=value` to
   reproduce it (`announce` / `start`);
 - bounds the work: a **single smoke iteration** by default, or a
-  wall-clock soak loop (`budget_deadline` / `within_budget`);
+  wall-clock soak loop (`budget_deadline` / `within_budget`) that a soak
+  window's close (`SOAK_UNTIL_ENV`) cuts short, and the one rule a coarse
+  soak uses to start no pass it cannot finish (`room_for_another_pass`);
 - owns the **one generator** every harness and randomised test draws from,
   `Prng` (SplitMix64): every output bit is mixed, so `below`, `at_most`,
   `pick`, `next_u8`…`next_u64`, and `fill` may be used for any choice. A

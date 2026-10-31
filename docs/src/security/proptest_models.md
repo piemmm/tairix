@@ -63,17 +63,21 @@ normal suite stays quick. The orchestrator turns the same models into
 wall-clock runs:
 
 ```text
-cargo xtask proptest                # --quick: ≥ 5 s per model (the CI budget)
+cargo xtask proptest --once         # one iteration per model (the `ci` gate)
+cargo xtask proptest                # --quick: ≥ 5 s per model
 cargo xtask proptest --soak         # ≥ 24 h per model (nightly)
 cargo xtask proptest --list         # list the registered models
 cargo xtask proptest --target sec   # run one model
 cargo xtask proptest --secs 5       # custom budget (local iteration / tests)
+cargo xtask proptest --until T      # run to T (Unix seconds), a soak window's close
 cargo xtask proptest --seed 42      # reproduce a logged run's programs
 ```
 
 The orchestrator exports `TAIRIX_PROPTEST_BUDGET_SECS`. A model reads it
 and, when it is positive, keeps running fresh batches until the budget
-elapses; when unset it runs the fixed sweep.
+elapses; when unset it runs the fixed sweep. Under `--until` the close
+travels beside it as `TAIRIX_SOAK_UNTIL`, and the model stops there however
+long it waited to be built.
 
 ### Seeding: deterministic CI, progressing soaks
 
@@ -91,10 +95,11 @@ sweep reproducible.
 
 ## CI integration
 
-`cargo xtask proptest --quick` is part of `cargo xtask ci`, running right
-after the fuzz gate. It **fails closed**: a counterexample, hang, or
-invariant failure in any model fails the pipeline. The 24-hour `--soak`
-mode is run by the nightly job outside `ci`.
+`cargo xtask proptest --once` is part of `cargo xtask ci`: one iteration of
+each model with a fresh, logged seed. It **fails closed**: a counterexample,
+hang, or invariant failure in any model fails the pipeline. The wall-clock
+soak runs outside `ci`, nightly — the seven-hour window `soak.yml` runs, or a
+standalone builder's 24-hour `--soak`.
 
 ## Draft discipline
 

@@ -85,18 +85,23 @@ once, so the normal suite stays quick. The dedicated orchestrator turns
 the same harnesses into wall-clock runs:
 
 ```text
-cargo xtask fuzz            # --quick: ≥ 5 s per harness (the CI budget)
+cargo xtask fuzz --once     # one iteration per harness (the `ci` gate)
+cargo xtask fuzz            # --quick: ≥ 5 s per harness
 cargo xtask fuzz --soak     # ≥ 24 h per harness (nightly)
 cargo xtask fuzz --list     # list the registered harnesses
 cargo xtask fuzz --target fuzz_decode   # run one harness
 cargo xtask fuzz --secs 5   # custom budget (local iteration / tests)
+cargo xtask fuzz --until T  # run to T (Unix seconds), a soak window's close
 cargo xtask fuzz --seed 42  # reproduce a logged run's input stream
 ```
 
 The orchestrator exports `TAIRIX_FUZZ_BUDGET_SECS`. A harness reads it
 and, when it is a positive value, keeps drawing fresh inputs from the
 *same continuing* PRNG stream until the budget elapses; when it is unset
-the harness runs its smoke sweep exactly once.
+the harness runs its smoke sweep exactly once. Under `--until` it also
+exports the close as `TAIRIX_SOAK_UNTIL`, and the harness stops there
+however long it waited to be built — or, reaching a window already shut,
+runs its smoke sweep once.
 
 ## Seeding: fresh per run, logged for replay
 
@@ -151,8 +156,9 @@ after the supply-chain gate: `ci` runs each harness a single time (a
 fresh, logged seed) rather than for a budget, so it stays fast and
 exercises new inputs each run. It **fails closed**: a crash, hang, or
 invariant failure in any harness fails the pipeline, so a regression in
-a decoder cannot merge. The time-limited soaks — the per-PR parallel
-`tools/ci/soak.sh` step and the nightly 24-hour `--soak` job — run
+a decoder cannot merge. The time-limited soaks — the per-push parallel
+`tools/ci/soak.sh` step and the nightly soak (the seven-hour window
+`soak.yml` runs, or a standalone builder's 24-hour `--soak`) — run
 outside the `ci` pipeline and carry the wall-clock fuzzing budget.
 
 ## Regression corpus

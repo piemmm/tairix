@@ -23,7 +23,8 @@
 //!    logged seed ([`budget_deadline`] returns `None`, so the harness loop
 //!    body runs a single time). The soak orchestrators export a budget
 //!    environment variable and the harness loops its continuing stream until
-//!    [`within_budget`] says the time is up.
+//!    [`within_budget`] says the time is up — the budget's end, or the close
+//!    of the soak window it shares with every other job, whichever is first.
 //! 4. **One generator to draw from.** [`Prng`] is the only one; a harness
 //!    carrying its own is a defect, because a weak generator hides whole
 //!    branches while the harness still reports green.
@@ -43,6 +44,7 @@
 //! test tooling).
 
 use std::cell::Cell;
+use std::ffi::OsStr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -92,6 +94,11 @@ pub const RNGSOAK_BUDGET_ENV: &str = "TAIRIX_RNGSOAK_BUDGET_SECS";
 /// Bytes per generator the `cargo xtask rngsoak` orchestrator exports for one
 /// pass; unset selects the harness's own smoke count.
 pub const RNGSOAK_BYTES_ENV: &str = "TAIRIX_RNGSOAK_BYTES";
+
+/// The close of a soak window, in whole seconds since the Unix epoch, which
+/// an orchestrator given `--until` exports beside the budget: no budgeted run
+/// outlasts it, however long the harness waited to be built.
+pub const SOAK_UNTIL_ENV: &str = "TAIRIX_SOAK_UNTIL";
 
 /// Hash `x` to a well-spread 64-bit value, so even sequential inputs (a
 /// counter, a job index) map to unrelated outputs. Equal to the first draw
@@ -163,14 +170,41 @@ pub fn start(test_name: &str, seed_env: &str) -> u64 {
 ///
 /// `budget_env` is read as a number of seconds: a positive value turns the
 /// harness into a budgeted soak loop; unset, empty, zero, or unparseable keeps
-/// the single-iteration smoke behaviour.
+/// the single-iteration smoke behaviour. A soak window ([`SOAK_UNTIL_ENV`])
+/// cuts the budget short at its close, and a run that starts after the close
+/// makes only the smoke iteration.
 #[must_use]
 pub fn budget_deadline(budget_env: &str) -> Option<Instant> {
     let secs: u64 = std::env::var(budget_env).ok()?.parse().ok()?;
     if secs == 0 {
         return None;
     }
-    Some(Instant::now() + Duration::from_secs(secs))
+    let close = std::env::var_os(SOAK_UNTIL_ENV).map(|raw| parse_close(&raw));
+    let span = soak_span(Duration::from_secs(secs), close, SystemTime::now())?;
+    Some(Instant::now() + span)
+}
+
+/// The window close a [`SOAK_UNTIL_ENV`] value names. One that does not read
+/// as a time is taken as long past, so a harness that cannot tell when the
+/// window shuts stops at its smoke iteration rather than outrunning it.
+fn parse_close(raw: &OsStr) -> SystemTime {
+    raw.to_str()
+        .and_then(|text| text.parse().ok())
+        .and_then(|secs| UNIX_EPOCH.checked_add(Duration::from_secs(secs)))
+        .unwrap_or(UNIX_EPOCH)
+}
+
+/// How long a run of `budget` starting at `now` may soak: the budget, cut
+/// short at the window's `close`, or `None` once the window has closed.
+fn soak_span(budget: Duration, close: Option<SystemTime>, now: SystemTime) -> Option<Duration> {
+    let Some(close) = close else {
+        return Some(budget);
+    };
+    close
+        .duration_since(now)
+        .ok()
+        .filter(|left| !left.is_zero())
+        .map(|left| budget.min(left))
 }
 
 /// `true` while a budgeted soak still has time left; always `false` for the
@@ -179,6 +213,18 @@ pub fn budget_deadline(budget_env: &str) -> Option<Instant> {
 #[must_use]
 pub fn within_budget(deadline: Option<Instant>) -> bool {
     matches!(deadline, Some(end) if Instant::now() < end)
+}
+
+/// Whether `deadline` leaves room for another pass expected to take about
+/// `pass`, the length of the last; always `false` without a deadline, so a
+/// smoke run makes a single pass.
+///
+/// A soak whose passes are coarse must not start one it cannot finish:
+/// checking only that the deadline has not yet passed overruns it by a whole
+/// pass every run.
+#[must_use]
+pub fn room_for_another_pass(deadline: Option<Instant>, pass: Duration) -> bool {
+    matches!(deadline, Some(end) if end.saturating_duration_since(Instant::now()) > pass)
 }
 
 /// Greatest common divisor (Euclid), used to pick a stride that makes the
@@ -439,10 +485,11 @@ impl Drop for Counted {
 #[cfg(test)]
 mod tests {
     use super::{
-        budget_deadline, budgeted_sweep, entropy_seed, expand_seed, resolve_seed, splitmix64,
-        within_budget, Prng,
+        budget_deadline, budgeted_sweep, entropy_seed, expand_seed, parse_close, resolve_seed,
+        room_for_another_pass, soak_span, splitmix64, within_budget, Prng,
     };
-    use std::time::{Duration, Instant};
+    use std::ffi::OsStr;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     const SEEDS: [u64; 5] = [0, 1, 42, 0xDEAD_BEEF, u64::MAX];
 
@@ -506,6 +553,82 @@ mod tests {
             .checked_sub(Duration::from_secs(1))
             .expect("an instant one second in the past exists");
         assert!(!within_budget(Some(past)));
+    }
+
+    fn at(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn without_a_window_the_budget_stands() {
+        let budget = Duration::from_secs(60);
+        assert_eq!(soak_span(budget, None, at(1_000)), Some(budget));
+    }
+
+    #[test]
+    fn a_window_closing_first_cuts_the_budget_short() {
+        // The defect this exists for: a harness that spent most of the window
+        // waiting to be built still ran its whole budget after it, and the
+        // soak outlived the window by the longest build.
+        let budget = Duration::from_secs(3_600);
+        assert_eq!(
+            soak_span(budget, Some(at(1_010)), at(1_000)),
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn a_window_closing_after_the_budget_leaves_it_alone() {
+        let budget = Duration::from_secs(5);
+        assert_eq!(soak_span(budget, Some(at(2_000)), at(1_000)), Some(budget));
+    }
+
+    #[test]
+    fn a_closed_window_leaves_only_the_smoke_iteration() {
+        let budget = Duration::from_secs(3_600);
+        assert_eq!(soak_span(budget, Some(at(1_000)), at(1_000)), None);
+        assert_eq!(soak_span(budget, Some(at(999)), at(1_000)), None);
+    }
+
+    #[test]
+    fn a_close_that_is_not_a_time_reads_as_long_past() {
+        for raw in [
+            "",
+            "soon",
+            "-5",
+            "1.5",
+            "99999999999999999999",
+            "18446744073709551615",
+        ] {
+            assert_eq!(parse_close(OsStr::new(raw)), UNIX_EPOCH, "{raw:?}");
+        }
+        assert_eq!(parse_close(OsStr::new("1700000000")), at(1_700_000_000));
+    }
+
+    #[test]
+    fn no_deadline_makes_a_single_pass() {
+        assert!(!room_for_another_pass(None, Duration::ZERO));
+    }
+
+    #[test]
+    fn a_pass_that_would_not_finish_in_time_is_not_started() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert!(
+            !room_for_another_pass(Some(deadline), Duration::from_secs(30)),
+            "a 30 s pass must not start with 10 s left"
+        );
+        assert!(room_for_another_pass(
+            Some(deadline),
+            Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn an_elapsed_deadline_starts_no_further_pass() {
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("an instant one second in the past exists");
+        assert!(!room_for_another_pass(Some(past), Duration::ZERO));
     }
 
     #[test]

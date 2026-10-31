@@ -61,8 +61,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::{
-    await_within, effective_timeout, report_elapsed, soak_deadline, spawn_in_own_group,
-    WaitFailure, DEFAULT_COMMAND_TIMEOUT,
+    await_within, effective_timeout, report_elapsed, spawn_in_own_group, WaitFailure,
+    DEFAULT_COMMAND_TIMEOUT,
 };
 
 /// What a [`Job`] actually does when run.
@@ -116,22 +116,6 @@ impl Job {
     pub fn with_budget(mut self, budget: Duration) -> Self {
         self.budget = budget;
         self
-    }
-
-    /// Budget this job to outlast an inner soak of `harness`, through the
-    /// shared [`soak_deadline`] policy every soak orchestrator uses.
-    ///
-    /// A soaking fuzz harness or property model is *supposed* to run for its
-    /// whole budget, so the job must outlast it or the runner would kill work
-    /// doing exactly what it was asked to — a nightly 24-hour soak most of
-    /// all. `None` — a single smoke iteration rather than a soak — simply
-    /// keeps the ordinary budget.
-    #[must_use]
-    pub fn with_soak_budget(self, harness: Option<Duration>) -> Self {
-        match harness {
-            Some(soak) => self.with_budget(soak_deadline(soak)),
-            None => self,
-        }
     }
 
     /// Pair a label with a closure that performs the job and reports its own
@@ -468,24 +452,6 @@ mod tests {
             started.elapsed() < Duration::from_secs(60),
             "the runner must not wait out a hung job, took {:?}",
             started.elapsed()
-        );
-    }
-
-    #[test]
-    fn a_soaking_job_outlasts_the_soak_it_is_running() {
-        // A nightly soak runs for its whole budget by design; budgeting the
-        // job at or below that would kill work doing exactly what was asked.
-        let soak = Duration::from_hours(24);
-        let job = ok_job("soaker").with_soak_budget(Some(soak));
-        assert!(
-            job.budget > soak,
-            "a soaking job must outlast its own soak, got {:?} for {soak:?}",
-            job.budget
-        );
-        // No soak means no reason to depart from the ordinary budget.
-        assert_eq!(
-            ok_job("smoke").with_soak_budget(None).budget,
-            ok_job("d").budget
         );
     }
 

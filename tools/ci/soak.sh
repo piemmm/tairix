@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# soak.sh — run the nightly 24 h soaks (fuzz, proptest, and the repeated-test
+# soak.sh — run the nightly soaks (fuzz, proptest, and the repeated-test
 # soak) with every harness, model, and the test matrix running IN PARALLEL,
 # one log per job.
 #
@@ -7,16 +7,22 @@
 # their registries concurrently in-process (bounded by host parallelism).
 # This script still fans the registry out into one process per target so the
 # nightly soak gets per-target isolation and one log file per target: a crash
-# in one harness leaves the others' logs intact, and every target shares the
-# single 24 h wall-clock budget. Both orchestrators expose `--target NAME`
-# (and `--list`), and the registries stay the single source of truth — this
-# script never hard-codes the target list.
+# in one harness leaves the others' logs intact. Both orchestrators expose
+# `--target NAME` (and `--list`), and the registries stay the single source of
+# truth — this script never hard-codes the target list.
 #
-# `cargo xtask test --soak` is the test-matrix counterpart: it repeats it
-# matrix for the same 24 h budget so a flake too rare to surface in the
-# per-PR single-pass run (where `ci` runs each test once) still gets a full
-# night of exposure. It is a single job
-# (the matrix is one unit), launched alongside the fuzz/proptest fan-out.
+# Each job's budget counts from its own start (24 h, or `--secs N`), so the
+# soak outlasts it by however long the slowest job waited to be built — every
+# job compiles behind one build lock. `--window N` instead closes the soak N
+# seconds after this script starts: every job is handed that close (`--until`),
+# its build comes out of the window, and the test matrix starts no pass it
+# cannot finish inside it, so a scheduled soak ends on time.
+#
+# `cargo xtask test --soak` is the test-matrix counterpart: it repeats the
+# matrix for the same budget so a flake too rare to surface in the per-PR
+# single-pass run (where `ci` runs each test once) still gets a full night of
+# exposure. It is a single job (the matrix is one unit), launched alongside the
+# fuzz/proptest fan-out.
 #
 # Scheduling priority: the test matrix is the ONLY job with a hard, no-retry
 # wall-clock deadline per job (its QEMU verticals fail closed on timeout); the
@@ -44,7 +50,7 @@
 #
 # Usage:
 #   tools/ci/soak.sh [fuzz|proptest|fssoak|rngsoak|test|both|all] [--sequential] \
-#                    [--secs N] [--dry-run]
+#                    [--secs N | --window N] [--dry-run]
 #
 #   (no kind)      same as `both`: the fuzz and proptest soaks
 #   fuzz           run only the fuzz harnesses
@@ -55,7 +61,8 @@
 #   both           run the fuzz and proptest soaks
 #   all            run fuzz, proptest, both soaks, and the test soak
 #   --sequential   run jobs one at a time (default is parallel)
-#   --secs N       override the per-job budget (for smoke runs; CI uses 24 h)
+#   --secs N       give each job N seconds of its own run (smoke runs; default 24 h)
+#   --window N     finish every job within N seconds of the soak's start
 #   --dry-run      print the planned jobs and exit without running anything
 #
 # Exit status is non-zero if any job fails — fail closed.
@@ -65,10 +72,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "$HERE/lib.sh"
 
+usage="usage: soak.sh [fuzz|proptest|fssoak|rngsoak|test|both|all] [--sequential] [--secs N | --window N] [--dry-run]"
 kind="both"
 sequential=0
 dry_run=0
 secs=""
+window=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -81,25 +90,56 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -gt 0 ] || { echo "soak: --secs requires a number" >&2; exit 2; }
             secs="$1"
             ;;
+        --window)
+            shift
+            window="${1-}"
+            # Digits only, and few enough for 64-bit shell arithmetic, which
+            # would otherwise evaluate the value as an expression or wrap it.
+            case "$window" in
+                '' | *[!0-9]*)
+                    echo "soak: --window expects a whole number of seconds, got '$window'" >&2
+                    exit 2
+                    ;;
+            esac
+            if [ "${#window}" -gt 18 ]; then
+                echo "soak: --window $window is longer than any soak" >&2
+                exit 2
+            fi
+            ;;
         *)
             echo "soak: unexpected argument '$1'" >&2
-            echo "usage: soak.sh [fuzz|proptest|fssoak|rngsoak|test|both|all] [--sequential] [--secs N] [--dry-run]" >&2
+            echo "$usage" >&2
             exit 2
             ;;
     esac
     shift
 done
 
+# The window opens before anything else runs, so preparing the checkout and
+# building the orchestrator come out of it too.
+budget_args=()
+if [ -n "$window" ]; then
+    if [ -n "$secs" ]; then
+        echo "soak: --secs and --window are mutually exclusive" >&2
+        exit 2
+    fi
+    if [ "$sequential" -eq 1 ]; then
+        echo "soak: --window needs the jobs to overlap; with --sequential every job after the first would find it closed" >&2
+        exit 2
+    fi
+    until_epoch=$(( $(date +%s) + 10#$window ))
+    budget_args=(--until "$until_epoch")
+elif [ -n "$secs" ]; then
+    budget_args=(--secs "$secs")
+fi
+
 ci_prepare
 
 stamp="$(ci_stamp)"
 soak_dir="$TAIRIX_CI_LOGDIR/soak-$stamp"
 mkdir -p "$soak_dir"
-
-# Optional per-job budget override, applied to both orchestrators.
-budget_args=()
-if [ -n "$secs" ]; then
-    budget_args=(--secs "$secs")
+if [ -n "$window" ]; then
+    echo "soak: every job ends within the ${window} s window (closes at Unix time $until_epoch)"
 fi
 
 # Parallel arrays describing each launched job (bash 3.2 has no associative
@@ -152,7 +192,7 @@ launch_raw() {
 }
 
 # launch <label> <xtask-subcommand> <target>: a fuzz/proptest/fssoak/rngsoak
-# soak job for one registry target, sharing the per-job budget. These are the
+# soak job for one registry target, under the soak's budget. These are the
 # deadline-free throughput soaks, so they run at the lowered
 # `$throughput_nice` priority.
 launch() {
@@ -172,9 +212,8 @@ if [ "$kind" = "both" ] || [ "$kind" = "all" ] || [ "$kind" = "proptest" ]; then
     done < <(enumerate proptest)
 fi
 # The docs/src/filesystem/soak.md filesystem soak: one job per registered
-# target, each
-# formatting a ≥1 GiB RAM volume and exercising it for the per-job
-# budget. The registry (`cargo xtask fssoak --list`) is the single
+# target, each formatting a ≥1 GiB RAM volume and exercising it for the
+# soak's budget. The registry (`cargo xtask fssoak --list`) is the single
 # source of truth, so this never hard-codes the filesystem list.
 if [ "$kind" = "all" ] || [ "$kind" = "fssoak" ]; then
     while IFS= read -r f; do
@@ -183,7 +222,7 @@ if [ "$kind" = "all" ] || [ "$kind" = "fssoak" ]; then
 fi
 # The statistical random-generator soak: one job per registered generator,
 # each drawing sequences from it and accumulating them into one SP 800-22
-# two-level verdict for the per-job budget. The registry (`cargo xtask
+# two-level verdict for the soak's budget. The registry (`cargo xtask
 # rngsoak --list`) is the single source of truth, so this never hard-codes
 # the generator list.
 if [ "$kind" = "all" ] || [ "$kind" = "rngsoak" ]; then
@@ -192,7 +231,7 @@ if [ "$kind" = "all" ] || [ "$kind" = "rngsoak" ]; then
     done < <(enumerate rngsoak)
 fi
 # The repeated-test soak: one job that repeats the whole test matrix
-# (host + the bare-metal QEMU verticals) for the per-job budget. `cargo xtask
+# (host + the bare-metal QEMU verticals) for the soak's budget. `cargo xtask
 # test` owns the repeat loop, so the budget covers the matrix as a unit.
 # The test matrix runs at normal priority (`-`): it is the deadline-bound job
 # the throughput soaks above yield to.

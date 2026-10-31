@@ -26,9 +26,9 @@
 //!   build, so the next compile is still incremental
 //! - `test`         — `cargo test --workspace --all-targets`; `--count N`
 //!   (alias `--iterations N`) repeats the whole matrix N times to surface
-//!   flaky tests, defaulting to one run; `--soak` (tuned by `--secs N`)
-//!   instead repeats it for a wall-clock budget (24 h by default), which the
-//!   nightly `soak` workflow uses to run the tests repeatedly for 24 h.
+//!   flaky tests, defaulting to one run; `--soak` instead repeats it for a
+//!   wall-clock budget — 24 h, `--secs N`, or until the `--until T` close of a
+//!   soak window — starting no pass it cannot finish inside it.
 //!   `--shuffle` starts each host pass in a randomised order (the seed is in
 //!   the step's label; `--shuffle-seed N` pins it) so a suite that passes
 //!   only in the harness's alphabetical order fails instead of hiding — `ci`
@@ -85,9 +85,10 @@
 //! - `supply-chain` — verify the committed source-hash allow-list
 //!   against `Cargo.lock` and enforce the RUSTSEC advisory SLA;
 //!   `--write-pins` regenerates the pins from the lockfile
-//! - `fuzz`         — drive the in-tree fuzz harnesses for a wall-clock
-//!   budget: `--quick` (≥ 60 s each, the `ci` budget) or
-//!   `--soak` (≥ 24 h each, nightly)
+//! - `fuzz`         — drive the in-tree fuzz harnesses: `--once` (one
+//!   iteration each, the `ci` gate), `--quick` (≥ 5 s each) or `--soak`
+//!   (≥ 24 h each), any budget overridden by `--secs N` or by `--until T`,
+//!   the close of a soak window every harness shares
 //! - `source-text`  — reject a control byte other than tab and newline in
 //!   source text, which `grep` and its kin then read as binary
 //! - `charter-cite` — reject a comment or package description that cites a
@@ -120,9 +121,8 @@
 //!   all read-only, non-compiling checks run at once so their costs overlap),
 //!   then `docs-check` (rustdoc/link failures are the common first trip and
 //!   need only a doc build, so they run ahead of the compile-heavy stages),
-//!   `clippy`, `test` (run 20× on a GitHub Actions runner to catch flaky
-//!   tests; once locally so a pre-push `ci` is not punishingly slow),
-//!   `cargo deny check`, `fuzz --quick`, `proptest --quick`, `miri`,
+//!   `clippy`, `test --qemu` (each test once, in a shuffled order),
+//!   `cargo deny check`, `fuzz --once`, `proptest --once`, `miri`,
 //!   the release crypto constant-time tests, and the image gate
 //! - `ci-long`      — the same checks as `ci`, but for a dedicated long-lived
 //!   runner: every test-executing stage (the host test matrix, the scene tier
@@ -467,19 +467,6 @@ pub(crate) const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_mins(45);
 /// image gate's kernel and driver/app cross-compiles and by the QEMU matrix
 /// build, never by default.
 pub(crate) const LONG_BUILD_COMMAND_TIMEOUT: Duration = Duration::from_hours(2);
-
-/// Wall-clock deadline for a child that is *meant* to run for `budget`: a
-/// soaking fuzz harness, property model, or filesystem soak.
-///
-/// Such a child is doing exactly what it was asked while its budget runs, so
-/// its deadline is that budget plus an ordinary step's allowance — far more
-/// than compiling and starting one test binary needs, and thus reached only by
-/// a child that has genuinely stopped making progress. Handing one
-/// [`DEFAULT_COMMAND_TIMEOUT`] instead kills every soak whose budget outlasts
-/// it, so the one definition lives here and every soak orchestrator uses it.
-pub(crate) fn soak_deadline(budget: Duration) -> Duration {
-    budget.saturating_add(DEFAULT_COMMAND_TIMEOUT)
-}
 
 /// Environment variable that raises every [`Context::run`] /
 /// [`Context::run_with_timeout`] budget for a slower machine, without
@@ -885,30 +872,6 @@ mod tests {
             "grandchild pid {grandchild_pid} should have been killed along with the rest \
              of the process group, not left running"
         );
-    }
-
-    #[test]
-    fn soak_deadline_outlasts_the_budget_it_covers() {
-        // A soak child still running near the end of its budget is doing the
-        // work it was asked to; a deadline at or below the budget kills it.
-        for budget in [
-            Duration::from_secs(5),
-            Duration::from_hours(7),
-            Duration::from_hours(24),
-        ] {
-            let deadline = soak_deadline(budget);
-            assert!(
-                deadline > budget,
-                "deadline {deadline:?} must outlast the budget {budget:?}"
-            );
-            assert_eq!(deadline, budget + DEFAULT_COMMAND_TIMEOUT);
-        }
-    }
-
-    #[test]
-    fn soak_deadline_saturates_instead_of_overflowing() {
-        // An operator-supplied budget must never turn a deadline into a panic.
-        assert_eq!(soak_deadline(Duration::MAX), Duration::MAX);
     }
 
     #[test]

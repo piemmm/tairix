@@ -79,9 +79,9 @@ code on a machine we own — see `github-runner/README.md`):
   (`cargo xtask ci-long`, 2 × 20 executions of every test) on demand
   (`workflow_dispatch`), on its own `long`-labelled runner instance.
 - `.github/workflows/soak.yml` runs the nightly seven-hour soak window
-  (`soak.sh all`: fuzz, proptest, and the repeated-test soak) on its own
-  `soak`-labelled runner instance, because a multi-hour job exceeds the
-  GitHub-hosted per-job time cap.
+  (`soak.sh all --window 25200`: fuzz, proptest, and the repeated-test soak)
+  on its own `soak`-labelled runner instance, because a multi-hour job exceeds
+  the GitHub-hosted per-job time cap.
 
 Each workflow provisions the pinned build toolchains it needs into the runner's
 persistent cache — the clang/lld the CCOMPAT tests require and, via
@@ -94,16 +94,24 @@ GitHub Actions runner — not both.
 
 ## The 24 h soaks, in parallel
 
-`cargo xtask fuzz --soak` and `cargo xtask proptest --soak` each run their
-registries **sequentially**, 24 h per target — so the full nightly would take
-`(harnesses + models) x 24 h`. `soak.sh` reads each registry via
-`cargo xtask <fuzz|proptest> --list` (so the target list is never duplicated
-here) and launches one `--soak --target <name>` process per target, all sharing
-a single 24 h wall clock. The §7 repeated-test soak adds one more job,
-`cargo xtask test --qemu --soak`, that repeats the whole test matrix for the
-same budget. Its purpose is **detection, not tolerance**: it exists to *catch*
-a defect too rare for the per-PR single-pass run (where `ci` runs each test
-once), so the bug can be fixed — never to make an intermittent failure
+`soak.sh` reads each registry via `cargo xtask <fuzz|proptest|fssoak|rngsoak>
+--list` (so the target list is never duplicated here) and launches one
+`--soak --target <name>` process per target, all running at once. The §7
+repeated-test soak adds one more job, `cargo xtask test --qemu --soak`, that
+repeats the whole test matrix for the same budget.
+
+The budget has two forms. By default (24 h) or with `--secs N`, each job gets
+the whole budget counted from its own start, so the soak lasts as long as the
+slowest job's build plus the budget — every job compiles behind one build
+lock. `--window N` instead finishes every job within N seconds of the soak's
+start: each job is handed the window's close (`--until`), its build comes out
+of the window, a harness that reaches a closed window makes only its smoke
+iteration, and the test matrix starts no pass it cannot finish inside it. A
+scheduled soak with a hard stop — the nightly workflow — uses the window.
+
+The repeated-test soak's purpose is **detection, not tolerance**: it exists to
+*catch* a defect too rare for the per-PR single-pass run (where `ci` runs each
+test once), so the bug can be fixed — never to make an intermittent failure
 acceptable. Each job writes its own log under
 `<logdir>/soak-<UTC-stamp>/<job>.log`, and the script exits non-zero if any job
 fails — §7/§19.6/§19.7 fail closed. Any failure it surfaces is a real defect to
@@ -139,7 +147,8 @@ tools/ci/soak.sh fuzz            # only the §19.6 fuzz harnesses
 tools/ci/soak.sh proptest        # only the §19.7 proptest models
 tools/ci/soak.sh test            # only the §7 repeated-test soak
 tools/ci/soak.sh --sequential    # one at a time (low-resource hosts)
-tools/ci/soak.sh --secs 30       # short budget for a smoke run
+tools/ci/soak.sh --secs 30       # 30 s for each job, a smoke run
+tools/ci/soak.sh all --window 3600   # every job done within the hour
 ```
 
 ## Configuration (environment variables)

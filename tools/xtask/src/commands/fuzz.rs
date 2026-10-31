@@ -25,10 +25,10 @@
 //! handshake, and record transport.
 
 use std::ffi::OsString;
-use std::time::Duration;
 
 use crate::commands::parallel::{self, Job};
 use crate::commands::seed;
+use crate::commands::soak::{self, Budget, Flags, Mode};
 use crate::Context;
 
 /// One in-tree fuzz harness the orchestrator knows how to run.
@@ -738,52 +738,15 @@ pub const TARGETS: &[Target] = &[
     },
 ];
 
-/// How long to run each harness.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Mode {
-    /// `--once`: a single smoke iteration per harness, with a fresh, logged
-    /// seed. This is the per-PR `ci` gate: `ci` runs each test once (on a
-    /// developer machine and a CI runner alike); the wall-clock soak coverage
-    /// is the time-limited GitHub soak, not `ci`.
-    Once,
-    /// `--quick`: a short wall-clock budget (≥ 5 s per harness), used by the
-    /// time-limited GitHub `ci` soak step (`tools/ci/soak.sh`).
-    Quick,
-    /// `--soak`: the nightly budget (≥ 24 h per harness).
-    Soak,
-}
-
-impl Mode {
-    /// Per-harness wall-clock budget, or `None` for [`Mode::Once`] (a single
-    /// smoke iteration with no budget — the harness draws one input).
-    #[must_use]
-    pub fn budget(self) -> Option<Duration> {
-        match self {
-            // A single iteration: no wall-clock budget is exported, so the
-            // harness runs its single smoke iteration.
-            Mode::Once => None,
-            // "runs each harness for ≥ 5 s" (the GitHub soak step).
-            Mode::Quick => Some(Duration::from_secs(5)),
-            // "runs each harness for ≥ 24 h".
-            Mode::Soak => Some(Duration::from_hours(24)),
-        }
-    }
-}
-
 /// Parsed `fuzz` invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Options {
-    /// Selected budget.
-    pub mode: Mode,
+    /// How long each harness runs; `None` is one smoke iteration.
+    pub budget: Option<Budget>,
     /// Optional harness filter (`--target <name>`); runs all when `None`.
     pub only: Option<String>,
     /// `--list`: print the registry and exit without running anything.
     pub list: bool,
-    /// Override the per-harness budget in seconds (`--secs <n>`).
-    ///
-    /// Exists so the orchestrator's own unit tests and local smoke runs do
-    /// not have to wait the full budget; CI never passes it.
-    pub secs: Option<u64>,
     /// Reproduce an earlier run by fixing its PRNG seed (`--seed <n>`).
     ///
     /// Unset (the default, including in `ci`) draws a fresh per-harness seed
@@ -793,17 +756,16 @@ pub struct Options {
     pub seed: Option<u64>,
 }
 
-/// Parse `fuzz` arguments. `--quick` is the default when neither budget flag
-/// is given.
+/// Parse `fuzz` arguments. `--quick` is the default when no budget flag is
+/// given.
 ///
 /// # Errors
-/// Returns a usage error for an unknown flag, a missing flag value, a
-/// non-numeric `--secs`, or a `--quick`/`--soak` conflict.
+/// Returns a usage error for an unknown flag, a missing or unreadable flag
+/// value, or two budget flags that contradict each other.
 pub fn parse(args: &[OsString]) -> Result<Options, String> {
-    let mut mode: Option<Mode> = None;
+    let mut budget = Flags::default();
     let mut only: Option<String> = None;
     let mut list = false;
-    let mut secs: Option<u64> = None;
     let mut seed: Option<u64> = None;
 
     let mut iter = args.iter();
@@ -814,10 +776,11 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
                 arg.display()
             ));
         };
+        if budget.take("fuzz", flag, &mut iter)? {
+            continue;
+        }
         match flag {
-            "--once" => set_mode(&mut mode, Mode::Once)?,
-            "--quick" => set_mode(&mut mode, Mode::Quick)?,
-            "--soak" => set_mode(&mut mode, Mode::Soak)?,
+            "--once" => budget.set_mode("fuzz", Mode::Once)?,
             "--list" => list = true,
             "--target" => {
                 let value = iter
@@ -828,59 +791,23 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
                     .ok_or_else(|| "fuzz: `--target` value is not valid UTF-8".to_string())?;
                 only = Some(name.to_string());
             }
-            "--secs" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| "fuzz: `--secs` requires a number".to_string())?;
-                let parsed = value
-                    .to_str()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .ok_or_else(|| {
-                        format!("fuzz: `--secs` expects a u64, got {}", value.display())
-                    })?;
-                secs = Some(parsed);
-            }
-            "--seed" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| "fuzz: `--seed` requires a number".to_string())?;
-                let parsed = value
-                    .to_str()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .ok_or_else(|| {
-                        format!("fuzz: `--seed` expects a u64, got {}", value.display())
-                    })?;
-                seed = Some(parsed);
-            }
+            "--seed" => seed = Some(soak::parse_u64("fuzz", "--seed", iter.next())?),
             other => {
                 return Err(format!(
                     "fuzz: unexpected argument {other:?}; usage: \
-                     cargo xtask fuzz [--once | --quick | --soak] [--target NAME] [--secs N] \
-                     [--seed N] [--list]"
+                     cargo xtask fuzz [--once | --quick | --soak] [--target NAME] \
+                     [--secs N | --until T] [--seed N] [--list]"
                 ));
             }
         }
     }
 
     Ok(Options {
-        mode: mode.unwrap_or(Mode::Quick),
+        budget: budget.budget("fuzz", Mode::Quick)?,
         only,
         list,
-        secs,
         seed,
     })
-}
-
-fn set_mode(slot: &mut Option<Mode>, mode: Mode) -> Result<(), String> {
-    match slot {
-        Some(existing) if *existing != mode => {
-            Err("fuzz: `--once`, `--quick`, and `--soak` are mutually exclusive".to_string())
-        }
-        _ => {
-            *slot = Some(mode);
-            Ok(())
-        }
-    }
 }
 
 /// Resolve the harnesses an [`Options`] selects, preserving registry order.
@@ -913,13 +840,6 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
         return Ok(());
     }
 
-    // An explicit `--secs N` always wins; otherwise the mode supplies the
-    // budget (`--once` is `None`: a single smoke iteration, no budget env).
-    let budget: Option<Duration> = match opts.secs {
-        Some(s) if s > 0 => Some(Duration::from_secs(s)),
-        Some(_) => None,
-        None => opts.mode.budget(),
-    };
     let targets = selected(opts)?;
     // Each harness is an independent, budget-bounded host process, so the
     // registry runs concurrently rather than paying the sum of every
@@ -928,7 +848,7 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
     let jobs: Vec<Job> = targets
         .iter()
         .enumerate()
-        .map(|(i, t)| job_for(ctx, t, budget, opts.seed, i))
+        .map(|(i, t)| job_for(ctx, t, opts.budget, opts.seed, i))
         .collect();
     let concurrency = parallel::default_concurrency(jobs.len());
     parallel::run(jobs, concurrency)
@@ -947,7 +867,7 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
 pub(crate) fn job_for(
     ctx: &Context,
     target: &Target,
-    budget: Option<Duration>,
+    budget: Option<Budget>,
     seed: Option<u64>,
     index: usize,
 ) -> Job {
@@ -967,28 +887,27 @@ pub(crate) fn job_for(
     // A budget turns the harness into a soak loop; without one the harness
     // runs its single smoke iteration.
     if let Some(budget) = budget {
-        cmd.env(
-            tairix_fuzzseed::FUZZ_BUDGET_ENV,
-            budget.as_secs().to_string(),
-        );
+        budget.export(&mut cmd, tairix_fuzzseed::FUZZ_BUDGET_ENV);
     }
     // Each harness reads this seed instead of its built-in constant, so a fresh
     // seed (the default) makes every run explore new inputs while an explicit
     // seed reproduces a logged crash exactly.
     let job_seed = seed::job_seed(seed, index);
     cmd.env(seed::FUZZ_SEED_ENV, job_seed.to_string());
-    let budget_desc = match budget {
-        Some(b) => format!("{} s", b.as_secs()),
-        None => "1 iteration".to_string(),
-    };
-    let label = format!("fuzz {} ({budget_desc}, seed {job_seed})", target.test);
-    Job::new(label, cmd).with_soak_budget(budget)
+    let label = format!(
+        "fuzz {} ({}, seed {job_seed})",
+        target.test,
+        soak::describe(budget)
+    );
+    Job::new(label, cmd).with_budget(soak::child_deadline(budget))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, selected, Mode, TARGETS};
+    use super::{parse, selected, TARGETS};
+    use crate::commands::soak::{Budget, NIGHTLY, QUICK};
     use std::ffi::OsString;
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn argv(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
@@ -997,7 +916,7 @@ mod tests {
     #[test]
     fn defaults_to_quick_running_every_target() {
         let opts = parse(&argv(&[])).expect("empty args parse");
-        assert_eq!(opts.mode, Mode::Quick);
+        assert_eq!(opts.budget, Some(Budget::For(QUICK)));
         assert!(opts.only.is_none());
         assert!(!opts.list);
         assert_eq!(selected(&opts).expect("all targets").len(), TARGETS.len());
@@ -1006,27 +925,24 @@ mod tests {
     #[test]
     fn once_flag_selects_a_single_iteration_with_no_budget() {
         let opts = parse(&argv(&["--once"])).expect("once parses");
-        assert_eq!(opts.mode, Mode::Once);
-        // No wall-clock budget: the harness runs its single smoke iteration.
-        assert!(Mode::Once.budget().is_none());
-    }
-
-    #[test]
-    fn quick_budget_meets_the_five_second_floor() {
-        // the charter mandates ≥ 5 s per harness for the budgeted soak step.
-        assert!(Mode::Quick.budget().expect("quick is budgeted").as_secs() >= 5);
-    }
-
-    #[test]
-    fn soak_budget_meets_the_twenty_four_hour_floor() {
-        // the charter mandates ≥ 24 h per harness for the nightly soak.
-        assert!(Mode::Soak.budget().expect("soak is budgeted").as_secs() >= 24 * 60 * 60);
+        assert_eq!(opts.budget, None);
     }
 
     #[test]
     fn soak_flag_selects_the_soak_budget() {
         let opts = parse(&argv(&["--soak"])).expect("soak parses");
-        assert_eq!(opts.mode, Mode::Soak);
+        assert_eq!(opts.budget, Some(Budget::For(NIGHTLY)));
+    }
+
+    #[test]
+    fn until_runs_every_harness_to_the_window_close() {
+        let opts = parse(&argv(&["--soak", "--until", "1700000000"])).expect("until parses");
+        assert_eq!(
+            opts.budget,
+            Some(Budget::Until(
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+            ))
+        );
     }
 
     #[test]
@@ -1046,18 +962,19 @@ mod tests {
     #[test]
     fn conflicting_budget_flags_are_rejected() {
         assert!(parse(&argv(&["--quick", "--soak"])).is_err());
+        assert!(parse(&argv(&["--once", "--soak"])).is_err());
     }
 
     #[test]
     fn repeating_the_same_budget_flag_is_accepted() {
         let opts = parse(&argv(&["--quick", "--quick"])).expect("idempotent flag");
-        assert_eq!(opts.mode, Mode::Quick);
+        assert_eq!(opts.budget, Some(Budget::For(QUICK)));
     }
 
     #[test]
     fn secs_override_parses_and_wins() {
-        let opts = parse(&argv(&["--secs", "3"])).expect("secs parses");
-        assert_eq!(opts.secs, Some(3));
+        let opts = parse(&argv(&["--soak", "--secs", "3"])).expect("secs parses");
+        assert_eq!(opts.budget, Some(Budget::For(Duration::from_secs(3))));
     }
 
     #[test]

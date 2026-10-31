@@ -37,7 +37,7 @@ pub mod statistics;
 
 use std::time::Instant;
 
-use tairix_fuzzseed::RNGSOAK_SEED_ENV;
+use tairix_fuzzseed::{room_for_another_pass, RNGSOAK_SEED_ENV};
 
 pub use battery::{Accumulator, Verdict, MINIMUM_SEQUENCES};
 pub use generators::{build, Stream, CONTROLS, TARGETS};
@@ -101,10 +101,7 @@ pub fn run_target(name: &str, bytes: u64, deadline: Option<Instant>) -> Result<(
     loop {
         let began = Instant::now();
         accumulate(generator.as_mut(), bytes, &mut accumulator)?;
-        // A pass draws and tests a whole batch, so starting one that cannot
-        // finish would overrun the budget by a full pass every run.
-        let room = matches!(deadline, Some(end) if end.saturating_duration_since(Instant::now()) > began.elapsed());
-        if !room {
+        if !room_for_another_pass(deadline, began.elapsed()) {
             break;
         }
     }

@@ -22,7 +22,7 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 533 open, 1048 closed, 1581 total.
+**closed**, and a partial fix stays **open**. 533 open, 1049 closed, 1582 total.
 
 ### Open (533)
 
@@ -562,7 +562,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1577 | the aarch64 kernel runs from identity RAM gigapages that are read/write and EL1-executable (`PXN` clear), and virtual address 0 is mapped — Device on QEMU `virt`, the kernel's own gigapage on the Pi 4 — so a kernel NULL dereference does not fault, a stray write lands in live memory, and the kernel image is writable and executable | **high, hardening**; the aarch64 sibling of D1571, logged when D1571 was scoped to x86_64 at the user's direction. The kernel's `TTBR1_EL1` regime wants the x86_64 shape: the image mapped per section, the direct map `PXN`, and nothing physical mapped as itself where the kernel runs. `kernel/arch/aarch64/src/paging.rs` (`normal_leaf_attrs`) |
 | D1578 | the riscv64 kernel runs from identity gigapages mapped `R\|W\|X` from virtual address 0, so a kernel NULL dereference does not fault, a stray write lands in live memory, and the kernel image is writable and executable | **high, hardening**; the riscv64 sibling of D1571, logged at the user's direction. The kernel is identity-linked, so the fix is a higher-half link or per-section leaves over the window it runs from. `kernel/arch/riscv64/src/paging.rs` (`new_identity_gigapages`) |
 
-### Closed (1048)
+### Closed (1049)
 
 | ID | Subject |
 |---|---|
@@ -1614,6 +1614,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1584 | the aarch64 kernel ran with no `PAN`, so EL1 could read and write any user page directly, outside the guarded user copy — closed: the boot CPU settles whether PAN is in force from `ID_AA64MMFR1_EL1`, each CPU sets `PSTATE.PAN` as it starts and one that cannot does not join, and translation comes on with `SCTLR_EL1.SPAN` clear, so every exception taken to EL1 sets PAN again (`protection`). The kernel reaches user memory only through the direct map, so it never clears PAN; the watchdog's stack-link probe also refuses an EL0 page (`paging::el1_may_read`), and a kernel-only write-combined or DMA-coherent leaf, which EL0 could reach before, is EL1's alone. The boot records `pan` (`KERNEL_BOOT_PROTECTIONS`), at Warn where the CPU lacks it, as the Raspberry Pi 4's Cortex-A72 does. `protection::tests`, `non_cacheable_leaves_reach_el0_only_when_asked`, `protections::tests`, `uaccess_fault_qemu_aarch64` and `cross_cpu_tlb_shootdown_qemu_aarch64` (both on `cortex-a76`) |
 | D1585 | the riscv64 kernel ran with `sstatus.SUM` set, so S-mode could read and write any user page directly, outside the guarded user copy — closed: every hart clears `SUM` as it arms its trap vector and nothing in the port sets it again. The user entry no longer sets it, the fault retry never grants S-mode a user page, and a task's first floating-point use is retried with a zeroed file without the kernel reading the instruction, which lies in user memory (a genuinely illegal one traps again, fatally). `sum_tests`, `a_fault_is_retried_only_where_the_leaf_grants_the_access`, `uaccess_fault_qemu_riscv64`, `fp_isolation_qemu_riscv64` |
 | D1586 | the aarch64 and riscv64 fault-time access-bit fix-ups wrote back a leaf they had read with no lock, so an unmap or permission change made on another CPU in between was undone, restoring a mapping to a frame its space had freed; and the accessed-bit clear on x86_64 and riscv64 could drop a Dirty bit the hardware walk set meanwhile — closed: the fix-up sets the bit only by an exchange from the leaf its walk read (`frames::Leaf::set_while`), every software access to a live table is atomic (`frames::descriptors`), a table is linked with `LINK_ORDERING` and followed with `WALK_ORDERING`, and the clear is an atomic `fetch_and`. Noticed closing D1585. `frames::tests`, `an_access_flag_fix_up_never_restores_a_leaf_unmapped_after_its_walk`, `a_fault_time_retry_never_restores_a_leaf_unmapped_after_its_walk`, `kernel/arch/api/tests/loom.rs` |
+| D1587 | the nightly soak workflow was cancelled at its 7.5 h timeout every night by construction: each job's 7 h budget began only when its harness started, after up to 25 minutes queued behind the one build lock; the repeated-test soak counted from after its 70-minute build and read its budget only after each 1.7 h pass; and the timeout sat below the 7 h 45 min `cargo xtask` itself grants a soaking child — closed: `soak.sh --window` opens one window as it starts and hands every job its close (`--until`), which the harness stops at (`tairix_fuzzseed::SOAK_UNTIL_ENV`, the smoke iteration once it has passed); the test matrix starts no pass it cannot finish (`tairix_fuzzseed::room_for_another_pass`, the rule `fs_soak` and `rng_soak` now share instead of copying); a child is killed an ordinary step after the close (`soak::child_deadline`); and the workflow's backstop covers the window, that step, setup and upload. `soak::tests`, `a_window_closing_first_cuts_the_budget_short`, `run_budget_soak_starts_no_pass_it_cannot_finish`, `the_nightly_workflow_outlasts_its_window_and_the_wind_down` |
 
 ## Scope
 
@@ -4819,13 +4820,12 @@ to take. `fssoak::run` handed each `cargo test` child `Context::run`,
 whose budget is the 45-minute ordinary-step allowance, while exporting a
 seven-hour budget to that same child: any budget above 45 minutes was
 therefore unreachable by construction, so the nightly could never have
-passed. The fuzz and proptest orchestrators already had the right rule in
-`parallel::Job::with_soak_budget`, which is why only `fssoak` failed.
-Fixed by lifting that rule into one shared `soak_deadline(budget)`
-(`tools/xtask/src/main.rs`) — the budget plus an ordinary step's
-allowance, saturating — and routing both `with_soak_budget` and
-`fssoak::run` through it, so a fourth orchestrator cannot reintroduce the
-divergence. The budget/device-size environment names now come from
+passed. The fuzz and proptest orchestrators already had the right rule,
+which is why only `fssoak` failed. The rule now lives once,
+`soak::child_deadline` (`tools/xtask/src/commands/soak.rs`) — what is left
+of the budget plus an ordinary step's allowance, saturating — and every soak
+orchestrator bounds its children through it, so another cannot reintroduce
+the divergence. The budget/device-size environment names now come from
 `tairix-fuzzseed` too, where the fuzz/proptest names already live, so the
 side that exports and the side that reads cannot drift.
 
@@ -4863,13 +4863,12 @@ was a work-heavy guest starved into real silence, not a progressing guest cut
 off by a ceiling. Nothing here addressed it; the weighted QEMU concurrency
 budget did.
 
-**Regression cover.** `soak_deadline` outlasts every budget it is given
-and saturates instead of overflowing; every `fssoak` mode's deadline
-outlasts its budget, with the ordinary-step budget asserted too short to
-stand in for it; the pass-boundary predicate refuses a pass that would
-not finish, admits one that would, and runs exactly one pass without a
-deadline; a declared ceiling replaces the derived one while leaving the
-silence budget untouched, and is floored at that budget; every takeover
+**Regression cover.** `child_deadline` outlasts every budget it is given
+by an ordinary step and saturates instead of overflowing; the
+pass-boundary predicate (`tairix_fuzzseed::room_for_another_pass`) refuses
+a pass that would not finish, admits one that would, and runs exactly one
+pass without a deadline; a declared ceiling replaces the derived one while
+leaving the silence budget untouched, and is floored at that budget; every takeover
 vertical's declared ceiling outlasts its derived one. End-to-end:
 `cargo xtask fssoak --target fat32 --secs 25` now runs its child under a
 2725 s deadline (was 2700 s) and stops at 20.11 s, inside its budget; the

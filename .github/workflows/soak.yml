@@ -9,9 +9,12 @@ name: soak
 # to catch in the per-PR single-pass test run (where `ci` runs each test once)
 # without holding the soak runner all day.
 #
-# The run starts at 00:00 UTC every day and is budgeted to run for seven
-# hours, a fixed overnight window. GitHub's cron is UTC-only, so the schedule
-# is a single midnight-UTC tick with no timezone juggling.
+# The run starts at 00:00 UTC every day and lasts a fixed seven-hour window:
+# `soak.sh --window` hands every job the window's close, so what a job spends
+# building comes out of the window rather than being added after it, and the
+# test matrix starts no pass it cannot finish inside it. GitHub's cron is
+# UTC-only, so the schedule is a single midnight-UTC tick with no timezone
+# juggling.
 #
 # These cannot run on GitHub-hosted runners: a hosted job is hard-capped well
 # below a seven-hour window. They therefore run on a *self-hosted Linux runner*
@@ -48,8 +51,8 @@ on:
         type: choice
         default: all
         options: [all, both, fuzz, proptest, fssoak, test]
-      secs:
-        description: "Per-job budget override in seconds (blank = seven-hour window; use a small value for a smoke run)"
+      window:
+        description: "Window in seconds (blank = the seven-hour window; a small value makes a smoke run)"
         type: string
         default: ""
 
@@ -94,10 +97,14 @@ jobs:
     # it; the two run concurrently on the same host (see the runner README for
     # registering both runner instances).
     runs-on: [self-hosted, linux, soak]
-    # Seven-hour window + parallel fan-out + setup headroom. soak.sh enforces
-    # the real per-job budget; this is just a backstop so a wedged job cannot
-    # run past the window.
-    timeout-minutes: 450
+    env:
+      # Seven hours: every soak job is finished this long after the soak starts.
+      TAIRIX_SOAK_WINDOW_SECS: 25200
+    # A backstop no healthy run reaches: the window, then the 45 minutes
+    # `cargo xtask` lets a wedged job run past the close before it kills and
+    # names it, then 30 minutes for setup (a cold runner builds QEMU) and 10
+    # for collecting and uploading the logs.
+    timeout-minutes: 505
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -161,15 +168,10 @@ jobs:
           # Keep soak logs out of the tracked tree; upload them
           # below so a failing reproducer can be pulled off the run.
           TAIRIX_CI_LOGDIR: ${{ runner.temp }}/tairix-soak-logs
-        run: |
-          KIND="${{ github.event.inputs.kind || 'all' }}"
-          SECS="${{ github.event.inputs.secs }}"
-          # An explicit dispatch override always wins (smoke runs). Otherwise
-          # run the fixed seven-hour window (7 * 60 * 60 = 25200 seconds).
-          if [ -z "$SECS" ]; then
-            SECS=25200
-          fi
-          tools/ci/soak.sh "$KIND" --secs "$SECS"
+          # Dispatch inputs reach the script as data, never as script text.
+          KIND: ${{ github.event.inputs.kind || 'all' }}
+          WINDOW: ${{ github.event.inputs.window || env.TAIRIX_SOAK_WINDOW_SECS }}
+        run: tools/ci/soak.sh "$KIND" --window "$WINDOW"
 
       - name: Upload soak logs
         # Logs are the whole point on failure: a crashing input becomes a

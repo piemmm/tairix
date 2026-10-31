@@ -49,6 +49,7 @@ mod qemu_tests;
 mod rngsoak;
 mod sbom;
 mod seed;
+mod soak;
 mod sound_encode;
 mod source_text;
 mod source_tree;
@@ -533,37 +534,30 @@ fn dir_size(path: &Path) -> u64 {
 /// The `userland/gui/*` crates excluded from the headless image.
 const GUI_CRATES: &[&str] = &["tairix-wm", "tairix-taskbar"];
 
-/// Default wall-clock budget for `cargo xtask test --soak`: 24 h.
-///
-/// Matches the fuzz/proptest soak floor. The nightly `soak`
-/// workflow repeats the whole test matrix for this long via
-/// `tools/ci/soak.sh` so a flake too rare to surface in the per-PR
-/// single-pass run still gets a full night of exposure. Flake-hunting
-/// repetition lives in the time-limited GitHub soaks, not in `ci`: a
-/// developer-machine and per-PR `ci` run executes the matrix exactly once.
-pub const TEST_SOAK_SECS: u64 = 24 * 60 * 60;
-
 /// How many times the test matrix repeats.
 ///
-/// `ci` and `--count N` drive a fixed number of passes; the nightly soak
-/// drives a wall-clock budget instead. Either way the *whole* matrix
-/// (host, then opt-in QEMU and wasm) is one pass, so a duration budget is
-/// not multiplied across stages.
+/// `ci` and `--count N` drive a fixed number of passes; a soak drives a
+/// wall-clock budget instead. Either way the *whole* matrix (host, then
+/// opt-in QEMU and wasm) is one pass, so a budget is not multiplied across
+/// stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunBudget {
     /// Run the matrix exactly this many times (always ≥ 1).
     Count(u32),
-    /// Repeat the matrix until this wall-clock budget elapses.
-    Duration(Duration),
+    /// Repeat the matrix until the budget runs out. A span counts from the
+    /// first pass; a window's close stays put, so the matrix build spends it.
+    Soak(soak::Budget),
 }
 
 impl RunBudget {
     /// Run `body` once per matrix pass, passing the 1-based pass number.
     ///
-    /// `Count(n)` runs exactly `n` passes (clamped to ≥ 1). `Duration`
-    /// always runs at least one pass and keeps going until the budget
-    /// elapses; the clock is checked *after* each pass, so a pass already
-    /// in flight always finishes and the suite is never cut off mid-run.
+    /// `Count(n)` runs exactly `n` passes (clamped to ≥ 1). `Soak` always
+    /// runs one pass and starts another only while one as long as the last
+    /// still fits before the budget's end: a pass of the whole matrix is long,
+    /// so starting one that cannot finish overruns the budget by most of a
+    /// pass. A pass in flight always finishes; the suite is never cut off
+    /// mid-run.
     fn for_each<F>(self, mut body: F) -> Result<(), String>
     where
         F: FnMut(u64) -> Result<(), String>,
@@ -575,13 +569,16 @@ impl RunBudget {
                 }
                 Ok(())
             }
-            RunBudget::Duration(budget) => {
-                let start = Instant::now();
+            RunBudget::Soak(budget) => {
+                let deadline = budget
+                    .deadline()
+                    .ok_or_else(|| "test: the soak ends past the clock's range".to_string())?;
                 let mut pass = 0u64;
                 loop {
                     pass += 1;
+                    let began = Instant::now();
                     body(pass)?;
-                    if start.elapsed() >= budget {
+                    if !tairix_fuzzseed::room_for_another_pass(Some(deadline), began.elapsed()) {
                         return Ok(());
                     }
                 }
@@ -598,7 +595,7 @@ impl RunBudget {
     fn describe(self) -> String {
         match self {
             RunBudget::Count(n) => format!("{n} pass(es)"),
-            RunBudget::Duration(d) => format!("soaking for {}s", d.as_secs()),
+            RunBudget::Soak(budget) => format!("soaking for {}", soak::describe(Some(budget))),
         }
     }
 }
@@ -670,25 +667,29 @@ impl TestOptions {
 /// Parse the `test` subcommand arguments.
 ///
 /// Recognises `--qemu`, `--wasm`, `--scenes`, `--count N` (alias
-/// `--iterations N`), `--soak`, `--secs N`, `--shuffle`, and
+/// `--iterations N`), `--soak`, `--secs N`, `--until T`, `--shuffle`, and
 /// `--shuffle-seed N`; everything else is forwarded verbatim to `cargo test`.
 /// `--count` rejects a missing, non-numeric, or zero value rather than
 /// silently defaulting, so a typo can never quietly collapse the matrix to a
 /// single run. A fixed count and a wall-clock budget are mutually exclusive:
-/// combining `--count` with `--soak`/`--secs` is an error rather than a silent
-/// precedence rule.
+/// combining `--count` with `--soak`/`--secs`/`--until` is an error rather
+/// than a silent precedence rule.
 fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
     let mut forward = Vec::with_capacity(args.len());
     let mut run_qemu = false;
     let mut run_wasm = false;
     let mut run_scenes = false;
     let mut count: Option<u32> = None;
-    let mut soak = false;
-    let mut secs: Option<u64> = None;
+    let mut soak_flags = soak::Flags::default();
     let mut only: Option<String> = None;
     let mut order = PassOrder::Alphabetical;
     let mut iter = args.iter();
     while let Some(a) = iter.next() {
+        if let Some(flag) = a.to_str() {
+            if soak_flags.take_override("test", flag, &mut iter)? {
+                continue;
+            }
+        }
         if a == "--qemu" {
             run_qemu = true;
         } else if a == "--wasm" {
@@ -696,7 +697,7 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
         } else if a == "--scenes" {
             run_scenes = true;
         } else if a == "--soak" {
-            soak = true;
+            soak_flags.set_mode("test", soak::Mode::Soak)?;
         } else if a == "--only" {
             let value = iter
                 .next()
@@ -716,11 +717,6 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
                 )
             })?;
             count = Some(parse_iteration_count(value)?);
-        } else if a == "--secs" {
-            let value = iter
-                .next()
-                .ok_or_else(|| "test: `--secs` requires an integer argument".to_string())?;
-            secs = Some(parse_secs(value)?);
         } else if a == "--shuffle" {
             if order == PassOrder::Alphabetical {
                 order = PassOrder::Shuffled(None);
@@ -735,20 +731,13 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
         }
     }
 
-    // A duration budget (`--soak`, optionally tuned by `--secs`) and a fixed
-    // pass count are two ways of saying the same thing; allowing both would
-    // need an arbitrary precedence rule, so fail closed instead.
-    let duration = match (soak, secs) {
-        (_, Some(s)) => Some(Duration::from_secs(s)),
-        (true, None) => Some(Duration::from_secs(TEST_SOAK_SECS)),
-        (false, None) => None,
-    };
-    if duration.is_some() && count.is_some() {
-        return Err(
-            "test: `--count`/`--iterations` cannot be combined with `--soak`/`--secs`; \
-             choose a fixed pass count or a wall-clock budget"
-                .to_string(),
-        );
+    // A wall-clock budget and a fixed pass count are two ways of saying the
+    // same thing; allowing both would need an arbitrary precedence rule, so
+    // fail closed instead.
+    if soak_flags.given() && count.is_some() {
+        return Err("test: `--count`/`--iterations` cannot be combined with \
+             `--soak`/`--secs`/`--until`; choose a fixed pass count or a wall-clock budget"
+            .to_string());
     }
     // `--only` scopes the QEMU matrix, so it is meaningless without it —
     // refuse rather than silently ignore a filter the caller relied on.
@@ -761,8 +750,8 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
                 .to_string(),
         );
     }
-    let budget = match duration {
-        Some(d) => RunBudget::Duration(d),
+    let budget = match soak_flags.budget("test", soak::Mode::Once)? {
+        Some(budget) => RunBudget::Soak(budget),
         None => RunBudget::Count(count.unwrap_or(1)),
     };
 
@@ -801,16 +790,6 @@ fn parse_iteration_count(value: &OsString) -> Result<u32, String> {
     Ok(count)
 }
 
-/// Parse a `--secs` value: a non-negative number of seconds.
-fn parse_secs(value: &OsString) -> Result<u64, String> {
-    let text = value
-        .to_str()
-        .ok_or_else(|| "test: `--secs` value is not valid UTF-8".to_string())?;
-    text.parse::<u64>().map_err(|_| {
-        format!("test: invalid `--secs` value {text:?}; expected a non-negative integer")
-    })
-}
-
 fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // `--qemu` opts in to the bare-metal QEMU integration tests in
     // `tests/integration/*`. Per they share the test
@@ -821,10 +800,10 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // `--count N` (alias `--iterations N`) runs the whole matrix N times;
     // it defaults to one, and `ci` runs the matrix exactly once. The
     // flake-hunting repetition lives in the time-limited GitHub soaks:
-    // `--soak` (tuned by `--secs N`) repeats the matrix for a wall-clock
-    // budget, which the nightly `soak` workflow uses to run the tests for
-    // 24 h. `--count N` remains for the orchestrator's own tests and ad-hoc
-    // local repeat runs.
+    // `--soak` repeats the matrix for a wall-clock budget, tuned by
+    // `--secs N` or ended at the close of the nightly workflow's window by
+    // `--until T`. `--count N` remains for the orchestrator's own tests and
+    // ad-hoc local repeat runs.
     //
     // `--shuffle` randomises each host pass's start order; see
     // [`host_order_args`] for why the gate wants it.
@@ -1305,43 +1284,26 @@ fn run_supply_chain(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_fuzz(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    // drive the in-tree fuzz harnesses for a wall-clock budget.
-    // `--quick` (the default and the `ci` budget) runs each ≥ 60 s;
-    // `--soak` runs each ≥ 24 h for the nightly job. The harness set and
-    // the budget live in `commands/fuzz.rs`.
     let opts = fuzz::parse(args)?;
     eprintln!("xtask: [fuzz] {}", ctx.workspace_root.display());
     fuzz::run(ctx, &opts)
 }
 
 fn run_proptest(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    // Bronze: drive the stateful capability models for a wall-clock
-    // budget. `--quick` (the default and the `ci` budget) runs each ≥ 5 s;
-    // `--soak` runs each ≥ 24 h for the nightly job. The model set and the
-    // budget live in `commands/proptest.rs`.
     let opts = proptest::parse(args)?;
     eprintln!("xtask: [proptest] {}", ctx.workspace_root.display());
     proptest::run(ctx, &opts)
 }
 
 fn run_fssoak(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    // `docs/src/filesystem/soak.md`: drive the in-RAM filesystem soak for a
-    // wall-clock budget. `--quick` runs each filesystem ≥ 5 s; `--soak`
-    // runs each ≥ 24 h for the nightly job. The target set and the budget
-    // live in `commands/fssoak.rs`; the parallel per-filesystem fan-out is
-    // `tools/ci/soak.sh`'s job, not `ci`'s.
     let opts = fssoak::parse(args)?;
     eprintln!("xtask: [fssoak] {}", ctx.workspace_root.display());
     fssoak::run(ctx, &opts)
 }
 
 fn run_rngsoak(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    // Drive the statistical battery over each unpredictable generator for a
-    // wall-clock budget. `--quick` runs each ≥ 5 s; `--soak` runs each ≥ 24 h
-    // for the nightly job. The target set and the budget live in
-    // `commands/rngsoak.rs`; the parallel per-generator fan-out is
-    // `tools/ci/soak.sh`'s job, not `ci`'s — `ci` gets its coverage from the
-    // harness's own fixed-seed smoke pass in the host test phase.
+    // `ci` gets its coverage from the harness's own fixed-seed smoke pass in
+    // the host test phase.
     let opts = rngsoak::parse(args)?;
     eprintln!("xtask: [rngsoak] {}", ctx.workspace_root.display());
     rngsoak::run(ctx, &opts)
@@ -2544,11 +2506,12 @@ mod tests {
         kernel_build_profile, kernel_diag_feature_args, parse_image_args, parse_run_args,
         parse_test_options, run_session_spec, Command, HostLane, PassOrder, Path, RunBudget,
         RunMachine, CI_STAGES, CI_TEST_ARGS, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS,
-        PLATFORM_IMAGE_DRIVER_STORE, TEST_SOAK_SECS,
+        PLATFORM_IMAGE_DRIVER_STORE,
     };
+    use crate::commands::soak::{Budget, NIGHTLY};
     use crate::Context;
     use std::ffi::OsString;
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn image_args(args: &[&str]) -> Result<tairix_mkimage::ImageKind, String> {
         let args: Vec<OsString> = args.iter().map(OsString::from).collect();
@@ -3094,15 +3057,11 @@ mod tests {
         assert_eq!(opts.forward, argv(&["--", "--nocapture"]));
     }
 
-    /// `--soak` with no override selects the 24 h budget the nightly soak
-    /// workflow relies on to run the tests repeatedly for a full night.
+    /// `--soak` with no override selects the nightly floor.
     #[test]
     fn soak_flag_selects_the_twenty_four_hour_budget() {
         let opts = parse_test_options(&argv(&["--qemu", "--soak"])).expect("parse");
-        assert_eq!(
-            opts.budget,
-            RunBudget::Duration(Duration::from_secs(TEST_SOAK_SECS))
-        );
+        assert_eq!(opts.budget, RunBudget::Soak(Budget::For(NIGHTLY)));
         assert!(opts.run_qemu);
     }
 
@@ -3110,14 +3069,58 @@ mod tests {
     #[test]
     fn secs_overrides_the_soak_budget() {
         let opts = parse_test_options(&argv(&["--soak", "--secs", "120"])).expect("parse");
-        assert_eq!(opts.budget, RunBudget::Duration(Duration::from_secs(120)));
+        assert_eq!(
+            opts.budget,
+            RunBudget::Soak(Budget::For(Duration::from_secs(120)))
+        );
     }
 
     /// `--secs` alone is enough to select a duration budget.
     #[test]
     fn secs_without_soak_sets_a_duration_budget() {
         let opts = parse_test_options(&argv(&["--secs", "30"])).expect("parse");
-        assert_eq!(opts.budget, RunBudget::Duration(Duration::from_secs(30)));
+        assert_eq!(
+            opts.budget,
+            RunBudget::Soak(Budget::For(Duration::from_secs(30)))
+        );
+    }
+
+    /// `--until` ends the soak at the window's close, the form
+    /// `tools/ci/soak.sh --window` passes.
+    #[test]
+    fn until_ends_the_soak_at_the_window_close() {
+        let opts = parse_test_options(&argv(&["--qemu", "--soak", "--until", "1700000000"]))
+            .expect("parse");
+        assert_eq!(
+            opts.budget,
+            RunBudget::Soak(Budget::Until(
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+            ))
+        );
+        assert!(
+            opts.forward.is_empty(),
+            "nothing is forwarded to cargo test"
+        );
+    }
+
+    #[test]
+    fn secs_and_until_conflict_is_rejected() {
+        let err = parse_test_options(&argv(&["--secs", "30", "--until", "1700000000"]))
+            .expect_err("two ends rejected");
+        assert!(
+            err.contains("mutually exclusive"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn count_and_until_conflict_is_rejected() {
+        let err = parse_test_options(&argv(&["--count", "2", "--until", "1700000000"]))
+            .expect_err("conflict rejected");
+        assert!(
+            err.contains("cannot be combined"),
+            "unexpected error: {err}"
+        );
     }
 
     /// A fixed count and a wall-clock budget are mutually exclusive; rather
@@ -3135,16 +3138,16 @@ mod tests {
     #[test]
     fn non_numeric_secs_is_rejected() {
         let err = parse_test_options(&argv(&["--secs", "soon"])).expect_err("non-numeric rejected");
-        assert!(err.contains("invalid `--secs`"), "unexpected error: {err}");
+        assert!(
+            err.contains("`--secs` expects a u64"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
     fn secs_without_a_value_is_rejected() {
         let err = parse_test_options(&argv(&["--secs"])).expect_err("missing value rejected");
-        assert!(
-            err.contains("requires an integer"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("requires a number"), "unexpected error: {err}");
     }
 
     /// `Count` runs exactly the requested number of passes, in order.
@@ -3160,18 +3163,56 @@ mod tests {
         assert_eq!(passes, vec![1, 2, 3]);
     }
 
-    /// A zero-second duration budget still runs one full pass: the clock is
-    /// checked after the body, so the matrix is never cut off before a run.
+    /// A spent budget still runs one full pass: the matrix is never cut off
+    /// before a run, and a soak that ran nothing would report a pass for it.
     #[test]
-    fn run_budget_duration_runs_at_least_one_pass() {
+    fn run_budget_soak_runs_at_least_one_pass() {
+        for budget in [Budget::For(Duration::ZERO), Budget::Until(UNIX_EPOCH)] {
+            let mut passes = 0u64;
+            RunBudget::Soak(budget)
+                .for_each(|_| {
+                    passes += 1;
+                    Ok(())
+                })
+                .expect("soak budget runs");
+            assert_eq!(passes, 1, "{budget:?}");
+        }
+    }
+
+    /// The nightly window's regression: the clock was read only after a pass,
+    /// so a pass started just inside the budget overran it by most of a pass.
+    #[test]
+    fn run_budget_soak_starts_no_pass_it_cannot_finish() {
+        // Each pass takes at least 600 ms, so after the first at most 400 ms
+        // of the one-second budget remain: too few for another.
         let mut passes = 0u64;
-        RunBudget::Duration(Duration::from_secs(0))
+        RunBudget::Soak(Budget::For(Duration::from_secs(1)))
             .for_each(|_| {
                 passes += 1;
+                std::thread::sleep(Duration::from_millis(600));
                 Ok(())
             })
-            .expect("duration budget runs");
+            .expect("soak budget runs");
         assert_eq!(passes, 1);
+    }
+
+    #[test]
+    fn run_budget_soak_starts_a_pass_that_fits() {
+        // An instant pass leaves nearly the whole hour, so a second starts;
+        // failing it ends the loop without waiting the hour out.
+        let mut passes = 0u64;
+        let err = RunBudget::Soak(Budget::For(Duration::from_secs(3_600)))
+            .for_each(|pass| {
+                passes += 1;
+                if pass == 2 {
+                    Err("stop".to_string())
+                } else {
+                    Ok(())
+                }
+            })
+            .expect_err("the second pass stops the loop");
+        assert_eq!(err, "stop");
+        assert_eq!(passes, 2);
     }
 
     /// A failing pass aborts the loop immediately and propagates the error

@@ -7,7 +7,7 @@
 #
 # With no arguments it runs `ci` — the full per-PR gate: fmt,
 # clippy, deps-check, cfg-check, test, docs-check, deny, supply-chain,
-# fuzz --quick, proptest --quick, model-check, spec-review, abi-check.
+# fuzz --once, proptest --once, model-check, spec-review, abi-check.
 #
 # Examples:
 #   tools/ci/ci-run.sh                                   # full gate
