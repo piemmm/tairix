@@ -433,7 +433,8 @@ host-tested end to end.
   every surface reads a mount record's figures through, so this
   application computes none of its own); the production seam walks the
   System Information API `MOUNT_LIST` pages, one row per attached volume
-  (`tairix_procinfo::for_each_mount`). Each
+  the session can open (`tairix_procinfo::for_each_mount`; another user's
+  private volume, withheld from it, is none, `VolumeInfo::of`). Each
   row states available of total, matching the header. The overlay lists one row
   per volume (an unreported size renders `-`, never a zero-byte disk),
   Enter re-roots the whole session at the chosen target, and a refused

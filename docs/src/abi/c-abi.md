@@ -28,20 +28,20 @@ developer can pull in exactly what they need, plus the umbrella
 | `include/tairix/tairix_appinfo.h` | `tairix_appinfo_header_t` and the `TAIRIX_APPINFO_*` / `TAIRIX_BUNDLE_*` / `TAIRIX_MIME_*` constants, `TAIRIX_SYSTEM_LIBRARIES_DIR`, the `TAIRIX_BUNDLE_ENTRY_*` names, and the `TAIRIX_LIBRARY_SCOPE_*` discriminants |
 | `include/tairix/tairix_rxe.h` | `tairix_load_header_t` and the `TAIRIX_LOAD_MAGIC` / `TAIRIX_RXE_PAGE_SIZE` / `TAIRIX_LOAD_MAX_SEGMENTS` / `TAIRIX_LOAD_MAX_NEEDED` / `TAIRIX_LIBREF_MAX` / `TAIRIX_LOAD_FLAG_PIE` / `TAIRIX_SEG_FLAG_*` / `*_WIRE_LEN` constants and the `TAIRIX_RXE_PERMISSION_*` discriminants |
 | `include/tairix/tairix_process.h` | `tairix_process_start_header_t` / `tairix_string_slot_t` — the process startup vector handed to a freshly spawned program — and the `TAIRIX_PROCESS_START_MAGIC` / `TAIRIX_PROCESS_START_MAX_*` / `*_WIRE_LEN` constants |
-| `include/tairix/tairix_sysinfo.h` | the System Information wire types (`tairix_sysinfo_request_header_t`, the `tairix_page_request_t` every list query's payload begins with, `tairix_process_record_t`, `tairix_kernel_memory_stats_t`, `tairix_uptime_t`, `tairix_load_average_t`, `tairix_system_identity_t`, `tairix_mount_record_t`, the account and resource-limit records, and the `tairix_dma_unit_record_t` / `tairix_dma_group_record_t` / `tairix_dma_node_record_t` translation records with their `TAIRIX_DMA_*` discriminants) and the `TAIRIX_SYSINFO_*` framing / query-id / registry constants, the `TAIRIX_PROCESS_STATE_*` discriminants, the `TAIRIX_MOUNT_*` mount-availability and `TAIRIX_MOUNT_MEDIUM_*` storage-medium discriminants (`TAIRIX_MOUNT_MEDIUM_UNKNOWN` is what a decoder yields for a medium it does not recognise), the `TAIRIX_*_MAX` / `TAIRIX_*_LEN` buffer caps, and the `*_WIRE_LEN` sizes |
+| `include/tairix/tairix_sysinfo.h` | the System Information wire types (`tairix_sysinfo_request_header_t`, the `tairix_page_request_t` every list query's payload begins with, `tairix_process_record_t`, `tairix_kernel_memory_stats_t`, `tairix_uptime_t`, `tairix_load_average_t`, `tairix_system_identity_t`, `tairix_mount_record_t`, `tairix_view_binding_record_t`, the account and resource-limit records, and the `tairix_dma_unit_record_t` / `tairix_dma_group_record_t` / `tairix_dma_node_record_t` translation records with their `TAIRIX_DMA_*` discriminants) and the `TAIRIX_SYSINFO_*` framing / query-id / registry constants, the `TAIRIX_PROCESS_STATE_*` discriminants, the `TAIRIX_MOUNT_*` mount-availability states, `TAIRIX_MOUNT_NO_OWNER` and the `TAIRIX_VOLUME_CLASS_*` discriminants, the `tairix_blk_medium_t` a mount record carries and its `TAIRIX_BLK_*` codes (`TAIRIX_BLK_TRANSPORT_UNDECLARED` for a mount whose medium nothing declared), the `TAIRIX_*_MAX` / `TAIRIX_*_LEN` buffer caps, and the `*_WIRE_LEN` sizes |
 | `include/tairix/tairix_driver.h` | the driver-class ABI: `tairix_driver_manifest_t` + `TAIRIX_DRIVER_MANIFEST_*` / `TAIRIX_DRIVER_SIGNER_PUBKEY_LEN` / `TAIRIX_DRIVER_SIGNATURE_LEN` constants, the `TAIRIX_DRIVER_KIND_*` / `TAIRIX_BUFFER_CLASS_*` discriminants, the `TAIRIX_DRIVER_ERROR_*` codes, the `TAIRIX_DRIVER_HANDLE_NONE` sentinel; **and the driver-class POD types**: the storage/bus/display/filesystem/input/net structs (`tairix_block_geometry_t`, `tairix_discard_capability_t`, `tairix_health_snapshot_t`, `tairix_bus_device_t`, `tairix_display_mode_t`, `tairix_accel_caps_t`, `tairix_node_info_t`, `tairix_dir_entry_t`, `tairix_node_times_t`, `tairix_input_event_t`, `tairix_mac_address_t`), the `TAIRIX_VIRTIO_PCI_*` / `TAIRIX_MAC_ADDRESS_LEN` / `TAIRIX_MOUNT_FLAG_*` / `TAIRIX_NODE_ID_NONE` constants, and the `TAIRIX_DISPLAY_FORMAT_*` / `TAIRIX_NODE_KIND_*` / `TAIRIX_WRITE_REFUSAL_*` / `TAIRIX_INPUT_EVENT_KIND_*` discriminants |
-| `include/tairix/tairix_syscall.h` | `TAIRIX_SYS_*`, `TAIRIX_SYSCALL_MAX_ARGS`, and one prototype per syscall entry point |
+| `include/tairix/tairix_syscall.h` | `TAIRIX_SYS_*`, `TAIRIX_SYSCALL_MAX_ARGS`, one prototype per syscall entry point, and the records and values the calls exchange — among them the `spawn()` attach block (`tairix_spawn_attach_t`), the path records, and the attach frame `image_attach()` and `fsserve_attach()` share (`tairix_attach_head_t`, `tairix_attach_reply_t`, `tairix_image_attach_reply_t`, with the `TAIRIX_PRESENTATION_*`, `TAIRIX_ATTACH_FLAG_*` / `TAIRIX_IMAGE_ATTACH_FLAG_*`, `TAIRIX_VOLUME_FS_*`, `TAIRIX_IMAGE_ATTACH_OUTCOME_*` and `TAIRIX_IMAGE_REFUSAL_*` values) |
 
 Including the umbrella `tairix_abi.h` pulls in the whole surface; a program
 that only needs, say, the time types can include `tairix_time.h` directly.
 
-The header set now covers the whole `lib/abi` public `#[repr(C)]` type
-surface; a completeness test in the generator pins every such type's
-size/align and asserts it has a C `typedef`, so a new type cannot silently
-escape the C view. The `tairix_sys_*` trap-stub runtime (`lib/abi-sys`), the
-crt0 startup object (`lib/crt0`), and the loader/bundle integration (below)
-have all landed; the remaining C-ABI work (an end-to-end C program + its
-fuzzing) is staged in `plans/CCOMPAT.md` (stage CC5).
+A completeness test in the generator pins each `#[repr(C)]` type it lists —
+its size, its alignment, and that it has a C `typedef`. The System
+Information and served-filesystem records with no C mirror yet, and a
+completeness test that finds every such type itself, are staged in
+`plans/CCOMPAT.md` (CC1.1, CC1.2). The `tairix_sys_*` trap-stub runtime
+(`lib/abi-sys`), the crt0 startup object (`lib/crt0`), and the loader/bundle
+integration (below) have all landed.
 
 A handful of `driver/*` items are deliberately **not** in the header: the
 Rust-only error enums (`WindowError`, `MmioMapError`) and the opaque
@@ -106,6 +106,13 @@ bytes for an IPC message header or a port name) used when a value is
 serialised into a byte buffer. The encode/decode helpers in `lib/abi` are
 little-endian on every target, so the serialised byte image does not depend
 on host endianness.
+
+The argument records `tairix_syscall.h` declares — the `spawn()` attach
+block, the path records, the attach frame's head and replies — are their
+encoding: naturally aligned with no padding, so on the little-endian Tier-1
+targets a C caller fills or reads the struct in place. An attach frame is
+the `tairix_attach_head_t` followed directly by the name and then the target
+bytes.
 
 The trap-issuing implementation of each `tairix_sys_<name>` lives in the
 user-space stub library `lib/abi-sys` (`tairix-abi-sys`), the curated

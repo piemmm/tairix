@@ -12,10 +12,11 @@
 //! preference from the inherited environment (plans/APPS.md §5 — the
 //! shell exports it; the tool invents no second source), and runs the
 //! parsed command against the production seams: the shared
-//! `tairix_procinfo::IpcTransport` for the `sysinfo-v1` `MOUNT_LIST`
-//! query, `RtDetacher`, which encodes the `VolumeDetachRequest` and
-//! issues the `volume_detach` syscall (the kernel checks `CAP_FS_MOUNT`
-//! and audits every decision — no authority lives here), the shared
+//! `tairix_procinfo::IpcTransport` for the `sysinfo-v1` `MOUNT_LIST` and
+//! `VIEW_LIST` queries, `RtDetacher`, which canonicalises a path through
+//! `realpath`, encodes the `VolumeDetachRequest` and issues the
+//! `volume_detach` syscall (the kernel decides who may detach and audits
+//! every decision — no authority lives here), the shared
 //! `tairix_help::BundleHelp` for the short-help switches, and
 //! `Stdout`/`Stderr`, which write to the inherited standard streams
 //! (with the `--force` advisory on fd 3, best-effort). The tool binds
@@ -32,22 +33,29 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
+    extern crate alloc;
+
+    use alloc::string::String;
 
     use tairix_abi::volume::{VolumeDetachRequest, VOLUME_DETACH_LEN, VOLUME_ID_LEN};
-    use tairix_abi::Errno;
+    use tairix_abi::{Errno, RealpathMode};
     use tairix_help::BundleHelp;
     use tairix_procinfo::IpcTransport;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
     use tairix_unmount::{parse, run, Detacher};
 
     /// The production [`Detacher`]: encode the detach frame and issue the
-    /// `volume_detach` syscall. It adds no authority — the kernel
-    /// verifies `CAP_FS_MOUNT`, re-validates the identity against the
+    /// `volume_detach` syscall. It adds no authority — the kernel decides
+    /// who may detach the volume, re-validates the identity against the
     /// attached volumes, and audits the decision; a refusal surfaces as
     /// the exact [`Errno`] the kernel chose.
     struct RtDetacher;
 
     impl Detacher for RtDetacher {
+        fn user(&self) -> Option<u32> {
+            tairix_rt::self_origin().ok().map(|origin| origin.uid())
+        }
+
         fn detach(&self, volume_id: [u8; VOLUME_ID_LEN], force: bool) -> Result<(), Errno> {
             let request = VolumeDetachRequest { volume_id, force };
             let mut frame = [0u8; VOLUME_DETACH_LEN];
@@ -59,15 +67,20 @@ mod program {
                 Err(Errno::from_syscall(ret))
             }
         }
+
+        fn canonical(&self, path: &str) -> Result<String, Errno> {
+            tairix_rt::realpath(path, RealpathMode::Existing)
+        }
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
     ///
-    /// Exit codes: `0` on success (or the short help), `1` when the
-    /// volume could not be resolved, the kernel refused the detach, or the
-    /// command line was not understood.
+    /// Exit codes: `0` on success (or the short help), then as
+    /// `UnmountError::status` gives them: `1` for a command line not
+    /// understood or a detach the caller may not make, `2` for a failed
+    /// service or terminal, `32` for an unmount that failed.
     fn main() -> i32 {
         let Some(arguments) = tairix_help::arguments("unmount") else {
             return tairix_help::MISUSE;
@@ -94,7 +107,7 @@ mod program {
             Ok(()) => 0,
             Err(err) => {
                 write_stderr_line(format_args!("unmount: {err}"));
-                1
+                err.status()
             }
         }
     }

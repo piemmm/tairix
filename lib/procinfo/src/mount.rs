@@ -36,7 +36,8 @@ pub const VOLUME_SERVICE_PAGE: u16 = tairix_abi::reply_page(VolumeIoStatsRecord:
 /// to `sink`, in the order the service lists them.
 ///
 /// The query is [`SysinfoQueryId::MOUNT_LIST`], which the service serves
-/// ungated: the mount table is system-wide and secret-free.
+/// ungated: the mount table is system-wide, with another principal's private
+/// volume [withheld](MountRecord::is_withheld).
 ///
 /// `sink` answers [`WalkStep::Continue`] to be given the next record or
 /// [`WalkStep::Stop`] to end the walk there, which is how a caller bounds
@@ -89,7 +90,9 @@ pub fn for_each_volume_service(
 }
 
 /// Page through the view bindings ([`SysinfoQueryId::VIEW_LIST`]) and hand
-/// each to `sink`, on the terms of [`for_each_mount`].
+/// each to `sink`, on the terms of [`for_each_mount`]: a binding of another
+/// principal's private volume is left out, but for its `/Storage` catalog
+/// entry, which is [withheld](ViewBindingRecord::withheld).
 ///
 /// # Errors
 ///
@@ -242,9 +245,14 @@ pub fn render_binding(view: &ViewBindingRecord, volume: Option<&MountRecord>) ->
     };
     let marker = availability_marker(volume.availability())
         .map_or_else(String::new, |marker| format!(" [{marker}]"));
+    // A record withheld from this caller names no source; the field stays,
+    // so a line splits into the same words.
+    let source = match volume.source_bytes() {
+        b"" => String::from("none"),
+        _ => crate::source_text(volume),
+    };
     format!(
-        "{}{subtree} on {target} type {} ({options}){marker}",
-        field_lossy(volume.source_bytes()),
+        "{source}{subtree} on {target} type {} ({options}){marker}",
         field_lossy(volume.fstype_bytes()),
     )
 }
@@ -648,6 +656,35 @@ mod tests {
                 alloc::format!("usb1 on /Storage/usb1 type fat32 (rw,noexec) {marker}")
             );
         }
+    }
+
+    #[test]
+    fn a_volume_withheld_from_the_caller_still_has_a_source_word() {
+        let theirs = volume(b"Letters.adf", b"/Storage/letters", b"affs", 7).withheld();
+        assert_eq!(
+            render_binding(
+                &view(b"/Storage/letters", b"/", MountFlags::NOEXEC, 7),
+                Some(&theirs)
+            ),
+            "none on /Storage/letters type affs (rw,noexec)"
+        );
+    }
+
+    #[test]
+    fn a_source_the_record_cut_is_listed_as_cut() {
+        let long = [b'w'; tairix_abi::sysinfo::MOUNT_SOURCE_MAX + 9];
+        let cut = volume(&long, b"/Storage/wb", b"affs", 8);
+        assert!(cut.source_cut());
+        let line = render_binding(
+            &view(b"/Storage/wb", b"/", MountFlags::NOEXEC, 8),
+            Some(&cut),
+        );
+        let (source, rest) = line.split_once(' ').expect("words");
+        assert_eq!(
+            source.strip_suffix('…').map(str::len),
+            Some(tairix_abi::sysinfo::MOUNT_SOURCE_MAX)
+        );
+        assert_eq!(rest, "on /Storage/wb type affs (rw,noexec)");
     }
 
     #[test]

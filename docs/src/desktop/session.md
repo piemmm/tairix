@@ -482,11 +482,15 @@ run.
 
 **Activation** resolves by entry kind: a directory opens the file manager
 *at that path* (passed as the program's own first argument, which the file
-manager now honours); an application bundle launches directly; a plain file
-resolves its association through the catalog the session holds and launches
-that application with the file as its argument; and a file nothing is
-associated with is refused, stating the reason on the error stream rather
-than failing silently. Every launch rides the session's existing
+manager now honours); an application bundle launches directly; a disk image
+is mounted for the user on the session's mount worker
+(`tairix_browse::mount::MountWorker`, since an attach waits for a driver) and
+its volume opened in the file manager, a refusal raised as the desktop's own
+alert ([disk images](../filesystem/images.md)); a plain file resolves its
+association through the catalog the session holds and launches that
+application with the file as its argument; and a file nothing is associated
+with is refused, stating the reason on the error stream rather than failing
+silently. Every launch rides the session's existing
 [asynchronous launch path](#launch-bookkeeping), so the compositor never
 blocks on one.
 

@@ -21,7 +21,7 @@
 //! name spelling, or a dirty reserved tail refuses rather than guessing.
 
 use crate::driver::net::MAC_ADDRESS_LEN;
-use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::le::{decode_bool, put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::reply::{decode_status_reply, encode_status_reply, PAGE_HEADER_LEN, STATUS_REPLY_LEN};
 use crate::time::Duration64;
 use crate::Errno;
@@ -990,16 +990,6 @@ fn decode_settings(bytes: &[u8]) -> Result<NetworkSettings, Errno> {
         tcp_ecn: decode_bool(bytes[13])?,
         socket_budget_bytes,
     })
-}
-
-/// Decode a wire boolean: exactly `0` or `1`, failing closed on any
-/// other byte (a smuggled non-boolean value is rejected, not truncated).
-fn decode_bool(byte: u8) -> Result<bool, Errno> {
-    match byte {
-        0 => Ok(false),
-        1 => Ok(true),
-        _ => Err(Errno::OutOfRange),
-    }
 }
 
 /// Refuse a request whose reserved tail (from `from` to the end of the
@@ -2023,11 +2013,7 @@ impl NetInterfaceStateRecord {
         let mut name = [0u8; IF_NAME_LEN];
         name.copy_from_slice(&bytes[..16]);
         validate_if_name(&name)?;
-        let link_up = match bytes[16] {
-            0 => false,
-            1 => true,
-            _ => return Err(Errno::OutOfRange),
-        };
+        let link_up = decode_bool(bytes[16])?;
         let addr_count = bytes[17];
         if addr_count as usize > NET_IF_MAX_ADDRS {
             return Err(Errno::OutOfRange);

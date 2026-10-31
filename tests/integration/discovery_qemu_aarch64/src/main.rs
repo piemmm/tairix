@@ -22,9 +22,10 @@
 //!
 //! ## Why the PASS keys on the lookups' exits *then* the shell's exit
 //!
-//! The audit sink counts the three `dns-sd` exits and reports PASS on the
-//! **next** audited `exit` — the shell's, typed only after the last marker
-//! appeared, so every answer provably reached the transcript first.
+//! The run passes on the login shell's audited exit after a lookup's
+//! (`tairix_itest_witness::FixtureExit`); the runner types it only after the
+//! last marker appeared, so every answer provably reached the transcript
+//! first, and no other process's exit ends the run.
 //! `discoveryd`'s own start records reach the transcript for diagnosis; the
 //! answers subsume them, since none can be printed without the service and its
 //! decoder. The harness also requires the peer's verdict that the guest asked
@@ -38,10 +39,9 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicU8, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
@@ -51,11 +51,8 @@ mod kernel {
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
     /// The audited `comm` of a `dns-sd` process: the bundle's name, and the
-    /// command word the runner types.
+    /// command word the runner types for each lookup.
     const DNS_SD_COMMAND: &str = "dns-sd";
-
-    /// The lookups the runner types: the browse, the resolve, the host.
-    const LOOKUPS: u8 = 3;
 
     /// The global allocator's arena.
     static HEAP: Heap = Heap::ZERO;
@@ -72,22 +69,16 @@ mod kernel {
     /// passed every check (pinned in `kernel/syscall/src/audit.rs`).
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
-    /// The `dns-sd` exits seen so far.
-    static LOOKUPS_EXITED: AtomicU8 = AtomicU8::new(0);
+    /// The run's end: the shell's exit after a lookup's.
+    static END: FixtureExit = FixtureExit::new(&[DNS_SD_COMMAND], SYSCALL_INVOKED_EVENT_ID);
 
-    /// Sink that replays every audit record through the serial sink and
-    /// reports PASS on the first audited `exit` after the last lookup's.
+    /// Replays every event to the serial console and ends the run at [`END`].
     struct DiscoverySink;
 
     impl Sink for DiscoverySink {
         fn write_event(&self, event: &Event<'_>) {
             SerialSink::new().write_event(event);
-            if event.id != SYSCALL_INVOKED_EVENT_ID || field_str(event, "sc") != Some("exit") {
-                return;
-            }
-            if field_str(event, "comm") == Some(DNS_SD_COMMAND) {
-                LOOKUPS_EXITED.fetch_add(1, Ordering::AcqRel);
-            } else if LOOKUPS_EXITED.load(Ordering::Acquire) >= LOOKUPS {
+            if END.passed(event) {
                 qemu_exit::exit_success();
             }
         }

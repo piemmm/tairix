@@ -5779,13 +5779,52 @@ mod resolve {
 }
 
 #[test]
+fn a_stand_in_is_known_as_one_until_a_driver_serves_again() {
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    let handle = DriverHandle::from_raw(0x5E1).expect("a handle");
+    cell.register(handle, RwMockFs::new(), "vol", "memfs", [0x33; 16], None)
+        .expect("registers");
+    let (nodes, stand_in) = cell.reach(handle).expect("registered");
+    assert!(!stand_in, "its own driver answers it");
+    let names = crate::fs::VolumeNames {
+        source: "vol",
+        fstype: "memfs",
+        volume_id: [0x33; 16],
+    };
+    cell.register_stand_in(handle, RwMockFs::new(), names, Arc::clone(&nodes))
+        .expect("stands in");
+    let (same, stand_in) = cell.reach(handle).expect("registered");
+    assert!(
+        Arc::ptr_eq(&same, &nodes) && stand_in,
+        "the same registration, answered by the stand-in"
+    );
+    cell.register_with_nodes(
+        handle,
+        RwMockFs::new(),
+        "vol",
+        "memfs",
+        [0x33; 16],
+        None,
+        nodes,
+    )
+    .expect("served again");
+    assert!(!cell.reach(handle).expect("registered").1);
+    let elsewhere = DriverHandle::from_raw(0x5E2).expect("a handle");
+    assert!(cell.reach(elsewhere).is_none());
+}
+
+#[test]
 fn a_network_volume_registers_its_lanes_and_its_owner() {
     let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     let handle = DriverHandle::from_raw(0x4E37).expect("a handle");
     let lanes = [RwMockFs::new(), RwMockFs::new(), RwMockFs::new()];
     let id = [0x5A; 16];
+    let owner = tairix_abi::sysinfo::MountOwner {
+        uid: 1000,
+        private: true,
+    };
     let driver = cell
-        .register_network(handle, lanes, "//nas/share", "smb3", id, Some(1000))
+        .register_network(handle, lanes, "//nas/share", "smb3", id, Some(owner))
         .expect("registers");
     assert_eq!(driver.lane_count(), 3);
     assert_eq!(cell.volume_of(&id), Some((handle, Some(1000))));

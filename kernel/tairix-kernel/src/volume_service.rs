@@ -107,8 +107,9 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::fsserve::{is_served_endpoint, ServeOffer};
 use tairix_abi::hwtree::HwDeviceClass;
+use tairix_abi::imageattach::ImageAttach;
 use tairix_abi::netattach::{AttachReply, FsserveCtl, NetworkAttach, NetworkOffer, OfferId};
-use tairix_abi::sysinfo::MountAvailability;
+use tairix_abi::sysinfo::{MountAvailability, VolumeClass};
 use tairix_abi::volume::{
     FormatName, VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeFsType, VolumeInfo,
 };
@@ -121,8 +122,8 @@ use tairix_kernel_core::fs::blkclient::BlkClient;
 use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::fs::served::ServedFs;
 use tairix_kernel_core::fs::{
-    ChunkSink, ChunkSource, JournaledBlock, OfferingServer, Principal, RetainedWrites,
-    ServeChannel, VolumeNodes,
+    AnswerSink, ChunkSink, ChunkSource, ImageSource, JournaledBlock, OfferingServer, Principal,
+    RetainedWrites, ServeChannel, VolumeNames, VolumeNodes,
 };
 use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::sharedreg::kernel_hold;
@@ -141,13 +142,18 @@ use tairix_util::fallible::concatenated;
 use crate::block_cache::{BlockCache, REMOVABLE_DISK_OWNER};
 use crate::hwtree_store::HwTreeStore;
 use crate::kernel_fs::KernelFs;
-use crate::served_volume::ServedVolume;
+use crate::served_volume::{Granted, ServedVolume};
 use crate::shared_block::{OwnedBlockWindow, SharedBlock};
 use crate::system_mount::{cached, publish_volume_identity, LATE_FILESYSTEM, VOLUME_FOREST};
 use crate::volume_policy::{Presented, PresentedFs, LATE_STORAGE_GID};
 
 #[path = "network_volume.rs"]
 mod network;
+
+#[path = "image_volume.rs"]
+mod image;
+
+pub(crate) use image::image_volumes_node;
 
 /// Audit event: a runtime volume was first served by its driver, mounted,
 /// and its root published (drives.md `fs.hotplug.root_added`).
@@ -589,16 +595,18 @@ pub struct RuntimeVolumeService {
     /// only for lookups and brief mutations, never across device I/O, and
     /// is taken inside the registry guard, never around it.
     devices: SpinLock<Vec<DeviceSlot>>,
-    /// The volumes drivers serve, in ascending order of the id their grants
-    /// name. Taken alone or inside the registry guard, and held only for a
-    /// lookup or an edit.
-    served: SpinLock<Vec<Arc<ServedVolume>>>,
+    /// The volumes drivers serve, device and image volumes alike, in
+    /// ascending order of the id their grants name. Taken alone or inside
+    /// either registry's guard, and held only for a lookup or an edit.
+    served: SpinLock<Vec<Arc<dyn Granted>>>,
     /// The next mount handle to mint.
     next_handle: AtomicU64,
     /// The next served-volume id to mint.
     next_served: AtomicU64,
     /// The volumes network filesystem servers offer and serve.
     network: network::NetworkVolumes,
+    /// The volumes disk-image files hold.
+    images: image::ImageVolumes,
 }
 
 /// One served block device's place in the registry: the lock every whole
@@ -722,19 +730,25 @@ struct ServeTarget {
     conflicted: bool,
 }
 
-/// Publish into `tree` the node a volume of `fstype` is served through: its
-/// format's driver binds it, and inherits the grant on served volume `served`
-/// alone.
+/// Publish into `tree` the node a volume of `fstype` is served through, as
+/// [`volume_node`] builds it.
 fn publish_volume_node(
     tree: &HwTreeStore,
     publisher: u32,
     fstype: VolumeFsType,
     served: u64,
 ) -> Result<u32, Errno> {
+    tree.publish_child(publisher, volume_node(publisher, fstype, served)?)
+}
+
+/// The node under `publisher` a volume of `fstype` is served through: its
+/// format's driver binds it, and inherits the grant on served volume `served`
+/// alone.
+fn volume_node(publisher: u32, fstype: VolumeFsType, served: u64) -> Result<HwNode, Errno> {
     let mut node = HwNode::new(0, publisher, HwDeviceClass::Storage);
     node.push_match_key(HwMatchKey::compatible(fstype.served_compatible())?)?;
     node.push_resource(HwResource::volume(served))?;
-    tree.publish_child(publisher, node)
+    Ok(node)
 }
 
 /// The facts of an attached volume a detach acts on, snapshotted out of the
@@ -766,6 +780,7 @@ impl RuntimeVolumeService {
             next_handle: AtomicU64::new(VOLUME_HANDLE_BASE + 1),
             next_served: AtomicU64::new(1),
             network: network::NetworkVolumes::new(),
+            images: image::ImageVolumes::new(),
         }
     }
 
@@ -936,30 +951,36 @@ impl RuntimeVolumeService {
         Ok(VolumeClaim { service: self, id })
     }
 
-    /// Whether an attached volume holds the catalog name `name`, mounted or
+    /// Whether a device volume holds the catalog name `name`, mounted or
     /// still awaiting its driver.
-    fn name_reserved(&self, name: &str) -> bool {
+    fn device_name_reserved(&self, name: &str) -> bool {
         self.state.lock().iter().any(|v| v.name == name)
     }
 
+    /// Whether any volume this service attaches holds the catalog name
+    /// `name`, or awaits its driver to take it.
+    fn name_reserved(&self, name: &str) -> bool {
+        self.device_name_reserved(name) || self.images.reserves(name, None)
+    }
+
     /// Build the served volume over `window` and enter it under a fresh id.
-    fn new_served(
+    fn new_served<W: Block + Send + 'static>(
         &self,
-        window: VolumeWindow,
+        window: W,
         read_only: bool,
-    ) -> Result<Arc<ServedVolume>, Errno> {
+    ) -> Result<Arc<ServedVolume<W>>, Errno> {
         let id = self.next_served.fetch_add(1, Ordering::Relaxed);
         let served = Arc::try_new(ServedVolume::new(id, window, read_only)?)
             .map_err(|_| Errno::OutOfMemory)?;
         let mut registry = self.served.lock();
         registry.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
         let at = registry.partition_point(|v| v.id() < id);
-        registry.insert(at, Arc::clone(&served));
+        registry.insert(at, Arc::clone(&served) as Arc<dyn Granted>);
         Ok(served)
     }
 
     /// The served volume a grant names.
-    fn served(&self, volume: u64) -> Result<Arc<ServedVolume>, Errno> {
+    fn served(&self, volume: u64) -> Result<Arc<dyn Granted>, Errno> {
         let registry = self.served.lock();
         registry
             .binary_search_by_key(&volume, |v| v.id())
@@ -980,7 +1001,11 @@ impl RuntimeVolumeService {
     /// Take `served` out of service and out of the registry, and withdraw
     /// `node`, so its driver is unloaded. The grant the driver holds on it
     /// names nothing from here on, and a served volume's id is never reused.
-    fn retire_served(&self, served: Option<&ServedVolume>, node: Option<(u32, u32)>) {
+    fn retire_served<W: Block + Send>(
+        &self,
+        served: Option<&ServedVolume<W>>,
+        node: Option<(u32, u32)>,
+    ) {
         if let Some(served) = served {
             served.retire();
             let mut registry = self.served.lock();
@@ -1028,6 +1053,7 @@ impl RuntimeVolumeService {
             }
             let _ = LATE_FILESYSTEM.unregister(entry.handle);
             let _ = VOLUME_FOREST.unpublish(&entry.id);
+            self.retire_images_on(entry.handle);
         }
     }
 
@@ -1441,40 +1467,22 @@ impl RuntimeVolumeService {
         name: &str,
         cause: Option<&'static str>,
     ) {
-        let name_field = Field {
-            key: "volume",
-            value: FieldValue::Str(name),
-        };
-        match cause {
-            Some(cause) => {
-                log(
-                    audit,
-                    &Event {
-                        level: Level::Warn,
-                        id,
-                        message,
-                        fields: &[
-                            name_field,
-                            Field {
-                                key: "cause",
-                                value: FieldValue::Str(cause),
-                            },
-                        ],
-                    },
-                );
-            }
-            None => {
-                log(
-                    audit,
-                    &Event {
-                        level: Level::Info,
-                        id,
-                        message,
-                        fields: &[name_field],
-                    },
-                );
-            }
+        if let Some(cause) = cause {
+            record(audit, Level::Warn, id, message, name, cause);
+            return;
         }
+        log(
+            audit,
+            &Event {
+                level: Level::Info,
+                id,
+                message,
+                fields: &[Field {
+                    key: "volume",
+                    value: FieldValue::Str(name),
+                }],
+            },
+        );
     }
 }
 
@@ -1536,8 +1544,13 @@ fn register_with_health(
     volume_id: [u8; 16],
     health: VolumeIoSource,
 ) -> Result<(), ()> {
+    let names = VolumeNames {
+        source,
+        fstype,
+        volume_id,
+    };
     LATE_FILESYSTEM
-        .register_served(handle, driver, source, fstype, volume_id, watch)
+        .register_served(handle, driver, names, watch, None, VolumeClass::Local)
         .map_err(|_| ())?;
     let _ = LATE_FILESYSTEM.set_io_source(handle, health);
     Ok(())
@@ -1688,11 +1701,22 @@ fn mount_template(map_gid: Option<GroupId>) -> Metadata {
 /// under (`plans/DEVICES.md` D3d); formats with a real owner model keep
 /// their on-disk records.
 fn identity_map_gid(fstype: VolumeFsType) -> Option<GroupId> {
+    if records_owners(fstype) {
+        None
+    } else {
+        LATE_STORAGE_GID.get()
+    }
+}
+
+/// Whether `fstype` records an owner model of its own for every node.
+const fn records_owners(fstype: VolumeFsType) -> bool {
     match fstype {
-        VolumeFsType::Fat32 | VolumeFsType::Adfs | VolumeFsType::Iso9660 | VolumeFsType::Udf => {
-            LATE_STORAGE_GID.get()
-        }
-        VolumeFsType::ARXFS | VolumeFsType::Ext4 => None,
+        VolumeFsType::ARXFS | VolumeFsType::Ext4 => true,
+        VolumeFsType::Fat32
+        | VolumeFsType::Adfs
+        | VolumeFsType::Iso9660
+        | VolumeFsType::Udf
+        | VolumeFsType::Affs => false,
     }
 }
 
@@ -1756,7 +1780,7 @@ fn recognise_extent<B: Block>(
     let mut extent = ByteDevice::new(window).ok()?;
     match tairix_fsprobe::recognise(&mut extent).ok()?? {
         Recognised::Volume(volume) => Some(volume),
-        Recognised::RaidMember(_) => None,
+        Recognised::RaidMember(_) | Recognised::RigidDiskBlock => None,
     }
 }
 
@@ -1944,8 +1968,26 @@ impl VolumeService for RuntimeVolumeService {
 
     fn detach(&self, request: &VolumeDetachRequest, caller: &Principal<'_>) -> Result<(), Errno> {
         let wiring = self.wiring()?;
+        if self.images.holds(&request.volume_id) {
+            return self.detach_image(
+                wiring.audit,
+                &request.volume_id,
+                request.force,
+                Some(caller),
+                "ejected",
+            );
+        }
         if self.network.holds(&request.volume_id) {
-            return self.network.detach(wiring, request, caller);
+            let host = core::cell::Cell::new(None);
+            let detached = self.network.detach(wiring, request, caller, &|on, force| {
+                host.set(Some(on));
+                self.settle_image_dependents(on, force, wiring.audit)
+            });
+            // An image that entered as the share was detached is stranded with it.
+            if let Some(host) = host.get() {
+                self.retire_images_on(host);
+            }
+            return detached;
         }
         if !caller.may_mount() {
             let name = self
@@ -1993,6 +2035,9 @@ impl VolumeService for RuntimeVolumeService {
 
     fn awaiting_server(&self, volume: u64) -> Result<(), Errno> {
         self.wiring()?;
+        if self.images.serves(volume) {
+            return self.images.awaiting_server(volume);
+        }
         let state = self.state.lock();
         let entry = state
             .iter()
@@ -2006,6 +2051,9 @@ impl VolumeService for RuntimeVolumeService {
 
     fn serve(&self, volume: u64, offer: &ServeOffer, channel: ServeChannel) -> Result<(), Errno> {
         let wiring = self.wiring()?;
+        if self.images.serves(volume) {
+            return self.serve_image(wiring, volume, offer, channel);
+        }
         // Taken in turn with the attaches, recoveries and detaches on the
         // volume's device, so a serve never races one.
         let (endpoint, window) = self.served_device(volume)?;
@@ -2046,6 +2094,9 @@ impl VolumeService for RuntimeVolumeService {
 
     fn refuse(&self, volume: u64, why: DriverError) -> Result<(), Errno> {
         let wiring = self.wiring()?;
+        if self.images.serves(volume) {
+            return self.refuse_image(wiring, volume, why);
+        }
         let (endpoint, window) = self.served_device(volume)?;
         let pin = self.pin_device(endpoint, window)?;
         let _op = pin.op.lock();
@@ -2079,7 +2130,21 @@ impl VolumeService for RuntimeVolumeService {
 
     fn offer_ctl(&self, server: u64, offer: OfferId, op: FsserveCtl) -> Result<(), Errno> {
         let wiring = self.wiring()?;
-        self.network.ctl(wiring, server, offer, op)
+        if let Some(host) = self.network.ctl(wiring, server, offer, op)? {
+            self.retire_images_on(host);
+        }
+        Ok(())
+    }
+
+    fn attach_image(
+        &self,
+        caller: &Principal<'_>,
+        source: ImageSource,
+        attach: &ImageAttach<'_>,
+        answer: AnswerSink<'_>,
+    ) -> Result<(), Errno> {
+        let wiring = self.wiring()?;
+        self.attach_image_volume(wiring, caller, source, attach, answer)
     }
 }
 
@@ -2134,6 +2199,10 @@ impl RuntimeVolumeService {
             served,
         } = target;
         let refused = |cause: &'static str, errno: Errno| -> Errno { refuse(&name, cause, errno) };
+        // Ahead of this volume's own locks: an image volume's flush reaches
+        // the file it holds on this one.
+        self.settle_image_dependents(handle, force, audit)
+            .map_err(|(cause, errno)| refused(cause, errno))?;
         let vfs = LATE_FILESYSTEM
             .vfs()
             .map_err(|err| refused("no_mount_table", err))?;
@@ -2265,6 +2334,69 @@ impl Forced {
     }
 }
 
+/// Record `id`, `message`, about the volume `name` for `cause`.
+fn record(
+    audit: &'static (dyn Sink + Sync),
+    level: Level,
+    id: EventId,
+    message: &'static str,
+    name: &str,
+    cause: &str,
+) {
+    log(
+        audit,
+        &Event {
+            level,
+            id,
+            message,
+            fields: &[
+                Field {
+                    key: "volume",
+                    value: FieldValue::Str(name),
+                },
+                Field {
+                    key: "cause",
+                    value: FieldValue::Str(cause),
+                },
+            ],
+        },
+    );
+}
+
+/// Record `id`, `message`: the volume `name` was retired for `cause`, and
+/// what became of it.
+fn record_retired(
+    audit: &'static (dyn Sink + Sync),
+    id: EventId,
+    message: &'static str,
+    name: &str,
+    cause: &str,
+    outcome: &str,
+) {
+    log(
+        audit,
+        &Event {
+            level: Level::Warn,
+            id,
+            message,
+            fields: &[
+                Field {
+                    key: "volume",
+                    value: FieldValue::Str(name),
+                },
+                Field {
+                    key: "cause",
+                    value: FieldValue::Str(cause),
+                },
+                Field {
+                    key: "outcome",
+                    value: FieldValue::Str(outcome),
+                },
+            ],
+        },
+    );
+}
+
 /// Audit a completed detach: the clean withdrawal, or the force-unmount and
 /// what it gave up.
 fn audit_detach_outcome(audit: &'static (dyn Sink + Sync), name: &str, forced: Option<Forced>) {
@@ -2304,6 +2436,83 @@ fn audit_detach_outcome(audit: &'static (dyn Sink + Sync), name: &str, forced: O
             ],
         },
     );
+}
+
+/// What a detach gave up to take its volume down.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct GivenUp {
+    /// The descriptors it revoked.
+    revoked: usize,
+    /// Its driver could not flush what it held.
+    unflushed: bool,
+}
+
+/// Take the volume registered for `handle`, published as `volume_id`, out of
+/// the namespace under every one of its lanes: its holds settled — let go
+/// when `force` — and its driver asked to flush unless the volume is `lost`,
+/// then its projections, registration and identity withdrawn.
+///
+/// # Errors
+///
+/// `(cause, errno)` for what kept it attached: nodes held or a refused flush
+/// without `force`, a volume `lost` without `force`, or a projection that
+/// cannot leave.
+fn take_down(
+    handle: DriverHandle,
+    volume_id: [u8; 16],
+    force: bool,
+    lost: bool,
+) -> Result<GivenUp, (&'static str, Errno)> {
+    let vfs = LATE_FILESYSTEM
+        .vfs()
+        .map_err(|errno| ("no_mount_table", errno))?;
+    if lost && !force {
+        return Err(("volume_unavailable_lost", Errno::DeviceFault));
+    }
+    let binds = if force {
+        BindsWithin::Withdraw
+    } else {
+        BindsWithin::Refuse
+    };
+    // Asked before a hold is let go, so a volume the table would keep loses
+    // nothing to a detach that cannot happen.
+    vfs.mounts()
+        .detachable(handle, binds)
+        .map_err(|err| ("not_detachable", err.to_errno()))?;
+    let driver = LATE_FILESYSTEM.driver(handle).ok();
+    let nodes = LATE_FILESYSTEM.nodes(handle);
+    let mut lanes = driver.as_deref().map(DriverLock::lock_all);
+    let revoked = settle_holds(
+        nodes.as_deref(),
+        lanes
+            .as_mut()
+            .map(tairix_kernel_core::fs::node::AllLanes::first),
+        force,
+    );
+    if revoked != 0 && !force {
+        return Err(("nodes_open", Errno::Busy));
+    }
+    let mut unflushed = false;
+    if !lost {
+        let flushed = lanes.as_mut().map_or(Ok(()), |lanes| lanes.first().flush());
+        if let Err(err) = flushed {
+            if !force {
+                return Err(("filesystem_flush_failed", err.as_errno()));
+            }
+            unflushed = true;
+        }
+    }
+    vfs.mounts_write()
+        .detach(handle, binds)
+        .map_err(|err| ("not_detachable", err.to_errno()))?;
+    if let Some(lanes) = lanes.as_mut() {
+        for fs in lanes.each() {
+            *fs = Box::new(UnavailableFs);
+        }
+    }
+    let _ = LATE_FILESYSTEM.unregister(handle);
+    let _ = VOLUME_FOREST.unpublish(&volume_id);
+    Ok(GivenUp { revoked, unflushed })
 }
 
 /// How many descriptors hold pins of `nodes` once the releases waiting are
@@ -2811,6 +3020,7 @@ impl RuntimeVolumeService {
                         Pending::Lost(_) => MountAvailability::UnavailableLost,
                     },
                 );
+                self.retire_images_on(handle);
                 match pending {
                     Pending::Retained(retained) => {
                         log(
@@ -2854,15 +3064,13 @@ impl RuntimeVolumeService {
     /// finds the handle unregistered in between. Parks on nothing.
     fn stand_in(handle: DriverHandle, name: &str, format: FormatName, id: [u8; 16]) {
         if let Some(nodes) = LATE_FILESYSTEM.nodes(handle) {
-            let _ = LATE_FILESYSTEM.register_with_nodes(
-                handle,
-                Box::new(UnavailableFs),
-                name,
-                format.as_str(),
-                id,
-                None,
-                nodes,
-            );
+            let names = VolumeNames {
+                source: name,
+                fstype: format.as_str(),
+                volume_id: id,
+            };
+            let _ =
+                LATE_FILESYSTEM.register_stand_in(handle, Box::new(UnavailableFs), names, nodes);
         }
     }
 
@@ -2874,7 +3082,12 @@ impl RuntimeVolumeService {
         let Ok(wiring) = self.wiring() else {
             return;
         };
-        self.network.server_lost(server, wiring.audit);
+        self.network.server_lost(server, wiring.audit, &mut |host| {
+            self.retire_images_on(host);
+        });
+        if let Some(host) = self.image_server_lost(server, wiring.audit) {
+            self.retire_images_on(host);
+        }
         let lost = {
             let mut state = self.state.lock();
             state
@@ -2913,6 +3126,7 @@ impl RuntimeVolumeService {
                 MountAvailability::Recovering
             },
         );
+        self.retire_images_on(handle);
         Self::audit_event(
             wiring.audit,
             VOLUME_SERVER_LOST,

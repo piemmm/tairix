@@ -62,10 +62,10 @@ pub trait HwTreeService {
     /// Block until the hardware tree moves (reactive re-match and hotplug)
     /// or the mount table does — the root volume being mounted is when the
     /// administrator's configuration becomes readable — or until
-    /// `timeout_ns` elapses; `u64::MAX` waits indefinitely. Returns once
-    /// either moved, [`Errno::TimedOut`] if the deadline elapsed with neither
+    /// `timeout_ns` elapses; `u64::MAX` waits indefinitely. Returns which
+    /// moved, [`Errno::TimedOut`] if the deadline elapsed with neither
     /// moving, or fails closed with the reported [`Errno`].
-    fn wait_for_change(&mut self, timeout_ns: u64) -> Result<(), Errno>;
+    fn wait_for_change(&mut self, timeout_ns: u64) -> Result<Woken, Errno>;
 
     /// Report the decoded snapshot header (its generation and node count)
     /// after a read.
@@ -73,6 +73,16 @@ pub trait HwTreeService {
 
     /// Report one decoded node of the snapshot, in wire order.
     fn on_node(&mut self, node: &HwNode);
+}
+
+/// Which of [`WAKE_SOURCES`] ended the device manager's wait.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Woken {
+    /// The hardware tree moved, so it is read again.
+    Tree,
+    /// The mount table moved. A move of the tree fires its own source, so the
+    /// tree as last read still stands.
+    Mounts,
 }
 
 /// What the device manager's wait is woken by, as wait-set members: the
@@ -109,10 +119,10 @@ pub const WAKE_SOURCES: [(WaitSourceKind, u64); 2] = [
 /// queues behind these milestones, so it is short.
 const DEFERRED_RETRY_NS: u64 = 250_000_000;
 
-/// (Re)fetch the catalogue while it has not yet been obtained, then read the
-/// current tree through `tree` (reporting and collecting its nodes), unload
-/// the drivers of nodes that left it, and match-and-load each node through
-/// `store`, returning the generation the snapshot was taken at.
+/// (Re)fetch the catalogue while it has not yet been obtained, then — reading
+/// the current tree through `tree` again (reporting and collecting its nodes)
+/// only once it has moved since `read` was taken — unload the drivers of nodes
+/// that left it and match-and-load each node through `store`.
 ///
 /// The unload, match and channel passes run only when the node ids or the
 /// roles the nodes serve differ from the last snapshot's, the catalogue just
@@ -156,7 +166,7 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
     state: &mut AutoloadState,
     settle: &mut BootSettle,
     devices: &mut Devices,
-    tree_buf: &mut Vec<u8>,
+    read: &mut TreeRead,
     reply_buf: &mut [u8],
     sink: &dyn Sink,
 ) -> Result<(), Errno> {
@@ -183,36 +193,22 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
             }
         }
     }
-    // A tree larger than the starting buffer is read in full, never refused.
-    let len = read_snapshot(tree_buf, HW_TREE_READ_START, |buf| tree.read_tree(buf))?;
-    // Decode the snapshot once: report each node and collect it (`HwNode`
-    // is `Copy`), so the immutable borrow of `tree_buf` ends before the
-    // match-and-load pass writes into the disjoint `reply_buf`. The walk
-    // yields no more nodes than the snapshot promised, so the pushes stay
-    // inside this reservation.
-    let snapshot = snapshot_nodes(&tree_buf[..len]).ok_or(Errno::BadMagic)?;
-    let header = snapshot.header();
-    let mut nodes: Vec<HwNode> = Vec::new();
-    nodes
-        .try_reserve_exact(snapshot.len())
-        .map_err(|_| Errno::OutOfMemory)?;
-    for node in snapshot {
-        tree.on_node(&node);
-        nodes.push(node);
+    if read.stale {
+        read.again(tree)?;
+        state.generation = read.generation;
     }
-    tree.on_header(&header);
-    state.generation = header.generation();
+    let nodes = &read.nodes;
     let now_ns = tree.now_ns();
     state.now_ns = now_ns;
-    let present = node_ids(&nodes)?;
-    let serving = serving_roles(&nodes)?;
+    let present = node_ids(nodes)?;
+    let serving = serving_roles(nodes)?;
     // A node id is never reissued, so a snapshot with the same ids and serving
     // roles, no driver ended, no restart due and nothing left over from the
     // last pass gives the tree passes nothing to do.
     let restructured = catalogue_arrived
         || present != state.observed
         || serving != state.serving
-        || state.any_ended(&nodes)
+        || state.any_ended(nodes)
         || state.restart_due()
         || netbind.has_deferred_work()
         || audiobind.has_deferred_work();
@@ -234,7 +230,7 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
             state,
             sink,
         );
-        match_and_load(&nodes, drivers, &candidates, store, reply_buf, state, sink);
+        match_and_load(nodes, drivers, &candidates, store, reply_buf, state, sink);
     }
     // Deliver the stack-wide `net.*` policy to the network stack once,
     // before binding any channel, so a freshly-bound interface adopts it at
@@ -247,8 +243,8 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
         // `netchan` / `audiochan` node a bound driver emitted) to its
         // service, each endpoint once, fail-soft (a service not yet up is
         // retried).
-        bind_new_channels(&nodes, netbind, netstack, sink);
-        audiobind::bind_new_channels(&nodes, audiobind, audiod, sink);
+        bind_new_channels(nodes, netbind, netstack, sink);
+        audiobind::bind_new_channels(nodes, audiobind, audiod, sink);
     }
     // After the hand-off, so an interface that bound this cycle is configured
     // in the same reaction.
@@ -257,12 +253,12 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
     if settle.observe(
         now_ns,
         catalogue.is_some(),
-        pending(&nodes, state, channels_owed),
+        pending(nodes, state, channels_owed),
         sink,
     ) {
         tree.settled();
     }
-    let moves = devices.update(&nodes, &state.observed, &present);
+    let moves = devices.update(nodes, &state.observed, &present);
     for event in iter::repeat_n(SoundEvent::DeviceDetached, moves.left)
         .chain(iter::repeat_n(SoundEvent::DeviceAttached, moves.arrived))
     {
@@ -271,6 +267,48 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
     state.observed = present;
     state.serving = serving;
     Ok(())
+}
+
+/// The hardware tree as last read: the buffer a read fills, which grows to
+/// the tree and is kept, and the nodes decoded from it.
+struct TreeRead {
+    buf: Vec<u8>,
+    nodes: Vec<HwNode>,
+    generation: u64,
+    /// The tree may have moved since: the next reaction reads it again.
+    stale: bool,
+}
+
+impl TreeRead {
+    /// Nothing read yet.
+    const fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            nodes: Vec::new(),
+            generation: 0,
+            stale: true,
+        }
+    }
+
+    /// Read the tree from `tree` and decode it, reporting each node.
+    fn again<T: HwTreeService>(&mut self, tree: &mut T) -> Result<(), Errno> {
+        // A tree larger than the starting buffer is read in full, never refused.
+        let len = read_snapshot(&mut self.buf, HW_TREE_READ_START, |buf| tree.read_tree(buf))?;
+        let snapshot = snapshot_nodes(&self.buf[..len]).ok_or(Errno::BadMagic)?;
+        let header = snapshot.header();
+        self.nodes.clear();
+        self.nodes
+            .try_reserve_exact(snapshot.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        for node in snapshot {
+            tree.on_node(&node);
+            self.nodes.push(node);
+        }
+        tree.on_header(&header);
+        self.generation = header.generation();
+        self.stale = false;
+        Ok(())
+    }
 }
 
 /// What the boot's settling still waits on in `nodes`: each node a driver was
@@ -343,11 +381,12 @@ fn serving_roles(nodes: &[HwNode]) -> Result<Vec<(u32, u8)>, Errno> {
 ///   into. The tree snapshot is read into a separate, service-owned
 ///   buffer that grows to fit the discovered tree (`read_tree_growing`), so the caller never picks a tree-size ceiling and a
 ///   load (writing `reply_buf`) never clobbers the snapshot mid-decode.
-/// * `budget` — bounds the number of *reactions* (re-reads after a change):
-///   [`None`] runs for the life of the service (the production device
-///   manager waits forever), while [`Some(n)`](Some) returns [`Ok`] after
-///   `n` reactions — the bounded form the host tests drive. The initial read
-///   is always performed before the first wait.
+/// * `budget` — bounds the number of *reactions* to a wake: [`None`] runs for
+///   the life of the service (the production device manager waits forever),
+///   while [`Some(n)`](Some) returns [`Ok`] after `n` reactions — the bounded
+///   form the host tests drive. The tree is read before the first wait and
+///   again only on a wake for a move of the tree itself; a move of the mount
+///   table or a deadline reacts over the tree as last read.
 ///
 /// The catalogue is fetched lazily and retried while it has not been
 /// obtained: the kernel store service binds its endpoint after the boot tree
@@ -401,11 +440,10 @@ pub fn run<T: HwTreeService + Presence, C: DriverStoreCall>(
     let mut state = AutoloadState::default();
     let mut settle = BootSettle::default();
     let mut devices = Devices::default();
-    // The snapshot buffer the service owns for its lifetime: it starts
-    // empty and `read_tree_growing` sizes it to the discovered tree on the
-    // first read, growing it later only if the tree ever grows past it
-    // (no caller-picked ceiling).
-    let mut tree_buf: Vec<u8> = Vec::new();
+    // The snapshot the service keeps for its lifetime: its buffer starts
+    // empty and is sized to the discovered tree on the first read, growing
+    // later only if the tree ever grows past it (no caller-picked ceiling).
+    let mut read = TreeRead::new();
 
     react_once(
         tree,
@@ -423,7 +461,7 @@ pub fn run<T: HwTreeService + Presence, C: DriverStoreCall>(
         &mut state,
         &mut settle,
         &mut devices,
-        &mut tree_buf,
+        &mut read,
         reply_buf,
         sink,
     )?;
@@ -458,9 +496,11 @@ pub fn run<T: HwTreeService + Presence, C: DriverStoreCall>(
             .map_or(u64::MAX, |at| at.saturating_sub(now_ns));
         let timeout_ns = deferred_ns.min(settling_ns).min(restart_ns);
         match tree.wait_for_change(timeout_ns) {
-            // Changed, or the deadline elapsed with work still outstanding:
-            // either way re-react so the deferred milestone is retried.
-            Ok(()) | Err(Errno::TimedOut) => {}
+            Ok(Woken::Tree) => read.stale = true,
+            // The mount table moved, or the deadline elapsed with work still
+            // outstanding: either way re-react, over the tree as last read, so
+            // the deferred milestone is retried.
+            Ok(Woken::Mounts) | Err(Errno::TimedOut) => {}
             Err(err) => return Err(err),
         }
         react_once(
@@ -479,7 +519,7 @@ pub fn run<T: HwTreeService + Presence, C: DriverStoreCall>(
             &mut state,
             &mut settle,
             &mut devices,
-            &mut tree_buf,
+            &mut read,
             reply_buf,
             sink,
         )?;
@@ -581,14 +621,14 @@ mod tests {
             Ok(snapshot.len())
         }
 
-        fn wait_for_change(&mut self, timeout_ns: u64) -> Result<(), Errno> {
+        fn wait_for_change(&mut self, timeout_ns: u64) -> Result<Woken, Errno> {
             if let Some(err) = self.wait_error {
                 return Err(err);
             }
             self.waits += 1;
             self.waited_under.push(timeout_ns);
             self.clock += self.tick;
-            Ok(())
+            Ok(Woken::Tree)
         }
 
         fn on_header(&mut self, _header: &HwTreeHeader) {}
@@ -1581,6 +1621,8 @@ mod tests {
     struct FixedSnapshotTree {
         snapshot: Vec<u8>,
         reads: usize,
+        /// What each wait reports moved, in turn; the tree once these run out.
+        woken: Vec<Woken>,
     }
 
     quiet_presence!(FixedSnapshotTree);
@@ -1595,8 +1637,12 @@ mod tests {
             Ok(self.snapshot.len())
         }
 
-        fn wait_for_change(&mut self, _timeout_ns: u64) -> Result<(), Errno> {
-            Ok(())
+        fn wait_for_change(&mut self, _timeout_ns: u64) -> Result<Woken, Errno> {
+            Ok(if self.woken.is_empty() {
+                Woken::Tree
+            } else {
+                self.woken.remove(0)
+            })
         }
 
         fn on_header(&mut self, _header: &HwTreeHeader) {}
@@ -1623,7 +1669,11 @@ mod tests {
             snapshot.len() > HW_TREE_READ_START,
             "the test tree must exceed the initial buffer to exercise the grow"
         );
-        let mut tree = FixedSnapshotTree { snapshot, reads: 0 };
+        let mut tree = FixedSnapshotTree {
+            snapshot,
+            reads: 0,
+            woken: Vec::new(),
+        };
         let mut store = ScriptedStore::new(vec![(7, vec![bind(5, target)])]);
         let sink = RecordingSink::new();
         // Heap-allocated (not a 64 KiB stack array) so the test matches the
@@ -1650,6 +1700,46 @@ mod tests {
             tree.reads > 1,
             "the snapshot should not have fit the initial buffer"
         );
+    }
+
+    /// A move of the mount table re-reacts over the tree as last read: only a
+    /// move of the tree is read again, and a node already loaded is not loaded
+    /// twice.
+    #[test]
+    fn a_mount_table_move_reacts_over_the_tree_as_last_read() {
+        let target = HwMatchKey::virtio(0x4242);
+        let nodes = vec![
+            HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+            input_node(2, target),
+        ];
+        let snapshot = encode(1, &nodes);
+        assert!(snapshot.len() <= HW_TREE_READ_START, "one read holds it");
+        let mut tree = FixedSnapshotTree {
+            snapshot,
+            reads: 0,
+            woken: vec![Woken::Mounts, Woken::Mounts, Woken::Tree],
+        };
+        let mut store = ScriptedStore::new(vec![(7, vec![bind(5, target)])]);
+        let sink = RecordingSink::new();
+        let mut reply_buf = vec![0u8; 64 * 1024];
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &mut NoAudiod,
+            &mut NoAudioBaseline,
+            &mut NoConfig,
+            &mut NoIfConfig,
+            &sink,
+            &mut reply_buf,
+            Some(3),
+        )
+        .expect("every reaction runs");
+        assert_eq!(
+            tree.reads, 2,
+            "the first reaction's read, then the tree's move"
+        );
+        assert_eq!(store.loads().as_slice(), &[(7, 2)]);
     }
 
     /// A hardware tree enumerated once at boot that never changes again —
@@ -1683,7 +1773,7 @@ mod tests {
             Ok(self.snapshot.len())
         }
 
-        fn wait_for_change(&mut self, timeout_ns: u64) -> Result<(), Errno> {
+        fn wait_for_change(&mut self, timeout_ns: u64) -> Result<Woken, Errno> {
             if timeout_ns == u64::MAX {
                 return Err(Errno::WouldBlock);
             }

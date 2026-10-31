@@ -11,9 +11,20 @@ unmount — détacher un volume monté
 Met hors service le volume monté sous `name` : le système de fichiers
 et le périphérique sont vidés, le montage sous `/Storage` est retiré
 et la racine durable `id::` du volume est révoquée. `name` est le nom
-de catalogue du volume (`usb1`) ou son point de montage
-(`/Storage/usb1`), comparé à la liste des montages de l'API
-d'informations système.
+de catalogue du volume (`usb1`), un répertoire où il est monté
+(`/Storage/usb1`, ou celui auquel `mount image répertoire` l'a lié),
+ou le nom de fichier de l'image disque depuis laquelle il a été monté
+(`Workbench.adf`), comparé aux listes des montages et des vues de l'API
+d'informations système ; un nom de fichier que porte aussi l'image d'un
+autre utilisateur désigne la vôtre. Un nom de fichier qui pourrait
+désigner plus d'un volume, ou dont la liste ne garde que le début, n'en
+désigne aucun : nommez alors le volume par l'endroit où il est
+monté.
+Un chemin peut être relatif ou finir par une barre oblique : il est
+résolu comme `mount` en résout un. Le volume privé d'un autre
+utilisateur ne montre ni son nom de fichier ni les répertoires auxquels
+il est lié : il se nomme donc par l'endroit où il est monté sous
+`/Storage`.
 
 Un volume dont le périphérique a été retiré alors qu'il portait
 encore des écritures non validées reste visible comme
@@ -29,9 +40,11 @@ retiré et ce qui a été sacrifié est consigné dans le journal d'audit.
 Sur un volume sain, `--force` vide et détache toujours proprement ;
 rien n'est abandonné quand une validation propre est possible.
 
-Le détachement exige l'autorité de montage (`CAP_FS_MOUNT`) ; le
-noyau la vérifie et audite chaque décision. Les volumes de démarrage
-permanents et les liaisons de vue du système ne se détachent pas.
+Vous pouvez détacher une image disque ou un partage réseau que vous
+avez monté vous-même ; tout autre volume exige l'autorité de montage
+(`CAP_FS_MOUNT`). Le noyau la vérifie et audite chaque décision. Les
+volumes de démarrage permanents et les liaisons de vue du système ne
+se détachent pas.
 
 ## OPTIONS
 
@@ -39,22 +52,27 @@ permanents et les liaisons de vue du système ne se détachent pas.
   fichiers y sont ouverts, qu'un programme y travaille ou que ses
   données non validées ne peuvent pas être validées, en coupant du
   volume les fichiers ouverts et en abandonnant les données retenues.
-- `-?, --help` — afficher l'aide courte de cette commande.
+- `-h, -?, --help` — afficher l'aide courte de cette commande.
 
 ## EXAMPLES
 
 - `unmount usb1` — détacher proprement le volume monté comme `usb1`.
 - `unmount /Storage/usb1` — la même chose, nommé par son point de
   montage.
+- `unmount Workbench.adf` — détacher l'image disque montée depuis
+  `Workbench.adf`.
 - `unmount --force usb1` — retirer un volume indisponible en
   abandonnant ses données retenues non validées.
 
 ## EXIT STATUS
 
 - `0` — le volume a été détaché (ou l'aide courte a été écrite).
-- `1` — le volume est introuvable, non détachable, ou le noyau a
-  refusé le détachement. Une ligne de commande non comprise sort aussi
-  avec `1`.
+- `1` — la ligne de commande n'a pas été comprise, ou l'appelant ne peut
+  pas détacher le volume.
+- `2` — le service d'informations système, ou l'écriture sur le
+  terminal, a échoué.
+- `32` — le volume n'était pas monté ou n'est pas détachable, le chemin
+  qui le nomme n'a pu être résolu, ou son détachement a échoué.
 
 ## ENVIRONMENT
 

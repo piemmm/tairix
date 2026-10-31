@@ -100,16 +100,24 @@ pub struct HeldExit {
 }
 
 /// The exits a departure released — those of the anchors whose sessions it
-/// emptied — innermost first.
+/// emptied — innermost first, and whether it ended a session at all.
 #[derive(Clone, Debug, Default)]
 pub struct Released {
     exits: [Option<HeldExit>; SESSION_DEPTH_MAX as usize],
+    ended: bool,
 }
 
 impl Released {
     /// Every exit released, innermost first.
     pub fn iter(&self) -> impl Iterator<Item = HeldExit> + '_ {
         self.exits.iter().map_while(|exit| *exit)
+    }
+
+    /// Whether the departure emptied a session or left the one it anchored
+    /// ending: only then has anything that ends with a session to be told.
+    #[must_use]
+    pub const fn ended_a_session(&self) -> bool {
+        self.ended
     }
 
     /// A departure frees at most its chain, which [`SESSION_DEPTH_MAX`]
@@ -193,9 +201,11 @@ impl SessionTree {
         }
     }
 
-    /// Whether `session` or any session enclosing it is ending. A session the
-    /// tree no longer holds has no members left to join.
-    fn closed(&self, session: ProcId) -> bool {
+    /// Whether `session` or any session enclosing it is ending, or has ended:
+    /// a session the tree no longer holds has no members left to join. The
+    /// root never closes.
+    #[must_use]
+    pub fn closed(&self, session: ProcId) -> bool {
         let mut at = session;
         while at != ROOT_SESSION {
             match self.nodes.get(&at) {
@@ -402,6 +412,7 @@ impl SessionTree {
             self.members.remove(&(at, member));
             if self.members_after(at, None).next().is_none() {
                 self.nodes.remove(&at);
+                released.ended = true;
                 if let Some(exit) = node.held {
                     released.push(exit);
                 }
@@ -410,6 +421,7 @@ impl SessionTree {
         }
         if let Some(node) = self.nodes.get_mut(&instance) {
             node.ending = true;
+            released.ended = true;
         }
         released
     }

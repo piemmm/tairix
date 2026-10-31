@@ -6,9 +6,8 @@
 //! `-P` selects the POSIX portable format, `--total` appends a summary
 //! row, and the unit options (`-k`, `-h`, `-H`/`--si`, `-B <size>`)
 //! select the reporting scale, the later selection winning as in the
-//! GNU tool. `-l` restricts the report to local filesystems (every
-//! TAIRiX mount today — the option filters nothing away, exactly as on
-//! an all-local Linux machine). Short help is the reserved `-?`/`--help`
+//! GNU tool. `-l` restricts the report to local filesystems, leaving out
+//! the network shares. Short help is the reserved `-?`/`--help`
 //! pair (plans/APPS.md §4); `-h` keeps its GNU meaning
 //! (human-readable), exactly as `ls` and `du`.
 
@@ -58,6 +57,8 @@ pub struct Options {
     pub portability: bool,
     /// Append a summary row labelled `total` (`--total`).
     pub grand_total: bool,
+    /// Leave out the network shares (`-l`).
+    pub local: bool,
     /// The reporting scale; the default is 1024-byte blocks.
     pub scale: SizeScale,
 }
@@ -73,6 +74,7 @@ impl Default for Options {
             inodes: false,
             portability: false,
             grand_total: false,
+            local: false,
             scale: SizeScale::Blocks(1024),
         }
     }
@@ -172,7 +174,8 @@ impl Options {
             Flag::HumanReadable => self.scale = SizeScale::HumanBinary,
             Flag::Si => self.scale = SizeScale::HumanDecimal,
             Flag::Kibibytes => self.scale = SizeScale::Blocks(1024),
-            Flag::Local | Flag::Help => {}
+            Flag::Local => self.local = true,
+            Flag::Help => {}
             Flag::Portability => self.portability = true,
             Flag::PrintType => self.print_type = true,
             Flag::Total => self.grand_total = true,
@@ -294,11 +297,13 @@ mod tests {
     }
 
     #[test]
-    fn local_is_accepted_and_filters_nothing() {
-        // Every TAIRiX mount is local, so `-l`/`--local` is the identity
-        // filter — accepted for GNU script compatibility.
-        assert_eq!(report(&["-l"]), Options::default());
-        assert_eq!(report(&["--local"]), Options::default());
+    fn local_restricts_the_report_to_local_filesystems() {
+        let local = Options {
+            local: true,
+            ..Options::default()
+        };
+        assert_eq!(report(&["-l"]), local);
+        assert_eq!(report(&["--local"]), local);
     }
 
     #[test]

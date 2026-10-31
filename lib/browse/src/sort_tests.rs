@@ -24,6 +24,8 @@ fn volume_root(
             filesystem: String::from(filesystem),
             free,
             availability,
+            owner: None,
+            volume_id: [0; 16],
         },
     }));
     root

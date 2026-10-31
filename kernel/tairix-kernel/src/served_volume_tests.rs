@@ -10,7 +10,7 @@ use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::volume::{VolumeCtl, VolumeCtlOp};
 use tairix_abi::{DriverError, Errno};
 
-use super::ServedVolume;
+use super::{Granted, ServedVolume};
 use crate::test_support::{RamBlock, BLOCK_SIZE};
 
 /// A RAM device that says when it is let go.
@@ -172,4 +172,54 @@ fn a_volume_retired_under_a_transfer_lets_its_window_go_with_its_last_holder() {
         dropped.load(Ordering::SeqCst),
         "the window goes with the last holder"
     );
+}
+
+#[test]
+fn a_volume_refusing_writes_lets_the_one_under_way_land_and_takes_no_more() {
+    let (volume, _) = volume(16, false);
+    let volume = Arc::new(volume);
+    let (inside, entered) = mpsc::channel();
+    let (go, gate) = mpsc::channel::<()>();
+    let writer = {
+        let volume = Arc::clone(&volume);
+        thread::spawn(move || {
+            volume.write(2, BLOCK_SIZE, &mut |_, chunk| {
+                inside.send(()).unwrap();
+                gate.recv().unwrap();
+                chunk.fill(0xA5);
+                Ok(())
+            })
+        })
+    };
+    entered.recv().unwrap();
+    assert!(!volume.read_only());
+    let refuser = {
+        let volume = Arc::clone(&volume);
+        thread::spawn(move || volume.refuse_writes())
+    };
+    go.send(()).unwrap();
+    assert_eq!(writer.join().unwrap(), Ok(()), "the write under way lands");
+    refuser.join().unwrap();
+    assert!(volume.read_only());
+    let mut back = vec![0u8; BLOCK_SIZE];
+    read(&volume, 2, &mut back).expect("reads still cross");
+    assert!(back.iter().all(|&byte| byte == 0xA5));
+    assert_eq!(write(&volume, 2, &[0; BLOCK_SIZE]), Err(Errno::ReadOnly));
+    assert_eq!(
+        volume.ctl(&VolumeCtl {
+            op: VolumeCtlOp::Discard,
+            lba: 0,
+            blocks: 1,
+        }),
+        Err(Errno::ReadOnly)
+    );
+    let info = volume
+        .ctl(&VolumeCtl {
+            op: VolumeCtlOp::Info,
+            lba: 0,
+            blocks: 0,
+        })
+        .expect("described")
+        .expect("a description");
+    assert!(info.read_only, "it describes itself as it now is");
 }

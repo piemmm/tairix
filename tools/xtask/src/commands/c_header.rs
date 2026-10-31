@@ -1876,13 +1876,31 @@ fn sysinfo_emit_query_ids(out: &mut String) {
     out.push('\n');
 }
 
+/// Emit who owns a mount record's volume and what kind of volume it is, read
+/// from `lib/abi` and spelled by an exhaustive match, so a class added there
+/// fails this build until it is named here.
+fn sysinfo_emit_mount_owners(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::sysinfo::{VolumeClass, MOUNT_NO_OWNER};
+    out.push_str("/* A mount record's owner, or a view binding's binder, when there is none. */\n");
+    let _ = writeln!(out, "#define TAIRIX_MOUNT_NO_OWNER {MOUNT_NO_OWNER:#x}u");
+    out.push_str("/* The kind of volume a mount record describes (uint8_t). */\n");
+    emit_u8_discriminants(out, "TAIRIX_VOLUME_CLASS", |raw| {
+        VolumeClass::from_u8(raw).ok().map(|class| match class {
+            VolumeClass::Local => "LOCAL",
+            VolumeClass::Network => "NETWORK",
+            VolumeClass::Image => "IMAGE",
+        })
+    });
+}
+
 /// Emit the bytes of a storage-medium record (`tairix_blk_medium_t`), every
 /// value read from the `lib/abi` definitions rather than re-typed, so the C
 /// view cannot drift from the Rust encoder it publishes.
 fn sysinfo_emit_mount_media(out: &mut String) {
     use std::fmt::Write as _;
     use tairix_abi::blkio::{
-        BlkRemovabilityEvidence, BlkRotationEvidence, BlkTransport, BLK_EVIDENCE_NONE,
+        BlkForm, BlkRemovabilityEvidence, BlkRotationEvidence, BlkTransport, BLK_EVIDENCE_NONE,
         BLK_FACT_UNKNOWN, BLK_REMOVABILITY_FIXED, BLK_REMOVABILITY_REMOVABLE,
         BLK_ROTATION_NON_ROTATING, BLK_ROTATION_ROTATING, BLK_TRANSPORT_UNDECLARED,
     };
@@ -1930,6 +1948,13 @@ fn sysinfo_emit_mount_media(out: &mut String) {
             BlkRemovabilityEvidence::Transport => "TRANSPORT",
             BlkRemovabilityEvidence::Inquiry => "INQUIRY",
             BlkRemovabilityEvidence::MediumAbsent => "MEDIUM_ABSENT",
+        })
+    });
+    emit_u8_discriminants(out, "TAIRIX_BLK_FORM", |raw| {
+        BlkForm::from_u8(raw).map(|form| match form {
+            BlkForm::Unspecified => "UNSPECIFIED",
+            BlkForm::OpticalDisc => "OPTICAL_DISC",
+            BlkForm::FloppyDisk => "FLOPPY_DISK",
         })
     });
 }
@@ -2062,6 +2087,7 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
     for (name, state) in mount_availabilities {
         let _ = writeln!(out, "#define {name} ((uint8_t){}u)", state.as_u8());
     }
+    sysinfo_emit_mount_owners(out);
     sysinfo_emit_mount_media(out);
     sysinfo_emit_account_bounds(out);
     sysinfo_emit_dma_states(out);
@@ -2235,15 +2261,16 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
     "/* What a block device is: its transport (TAIRIX_BLK_TRANSPORT_*), then\n\
          * whether its medium rotates and whether it can leave the unit\n\
          * (TAIRIX_BLK_ROTATION_*, TAIRIX_BLK_REMOVABILITY_*), each with the\n\
-         * evidence that established it. `rpm` is the nominal rotation rate of a\n\
-         * rotating medium and zero otherwise. */\n\
+         * evidence that established it, then the form its medium takes\n\
+         * (TAIRIX_BLK_FORM_*). `rpm` is the nominal rotation rate of a rotating\n\
+         * medium and zero otherwise. */\n\
          typedef struct tairix_blk_medium {\n\
          \x20   uint8_t transport;\n\
          \x20   uint8_t rotation;\n\
          \x20   uint8_t rotation_evidence;\n\
          \x20   uint8_t removability;\n\
          \x20   uint8_t removability_evidence;\n\
-         \x20   uint8_t reserved;\n\
+         \x20   uint8_t form;\n\
          \x20   uint16_t rpm;\n\
          } tairix_blk_medium_t;\n\n",
     "/* One mount-table entry. `flags` is a MountFlags bitmap (AGENTS.md sec.5.3);\n\
@@ -2255,8 +2282,14 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * `usage` is the backing volume's space accounting (all-zero when none is\n\
          * known). `volume_id` is the volume's stable published identity (all-zero\n\
          * when the mount has none), the identity a volume_detach request names.\n\
-         * `owner` is the uid that attached a network volume, 0xFFFFFFFF for one\n\
-         * no one owns; `volume_class` is 0 for a local volume, 1 for a network one.\n\
+         * `owner` is the uid that attached a network or disk-image volume,\n\
+         * TAIRIX_MOUNT_NO_OWNER for one no one owns; `volume_class` is a\n\
+         * TAIRIX_VOLUME_CLASS_*; `private_to_owner` is 1 for a volume presented\n\
+         * to its owner alone, which another principal is listed without its\n\
+         * source or usage, else 0; `withheld` is 1 on the record so listed, whose\n\
+         * empty source and all-zero usage are then unknown rather than absent;\n\
+         * `source_cut` is 1 when the source is only the first bytes of a longer\n\
+         * name, cut between characters to fit.\n\
          * The inline source/target/fstype buffers are valid for their respective\n\
          * *_len byte counts. */\n\
          typedef struct tairix_mount_record {\n\
@@ -2270,7 +2303,9 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t volume_id[TAIRIX_VOLUME_ID_LEN];\n\
          \x20   uint32_t owner;\n\
          \x20   uint8_t volume_class;\n\
-         \x20   uint8_t reserved0[3];\n\
+         \x20   uint8_t private_to_owner;\n\
+         \x20   uint8_t withheld;\n\
+         \x20   uint8_t source_cut;\n\
          \x20   uint8_t source[TAIRIX_MOUNT_SOURCE_MAX];\n\
          \x20   uint8_t target[TAIRIX_MOUNT_TARGET_MAX];\n\
          \x20   uint8_t fstype[TAIRIX_MOUNT_FSTYPE_MAX];\n\
@@ -2280,16 +2315,22 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * MountFlags it narrows that volume to. `volume_id` is the attached\n\
          * volume's, the key of its tairix_mount_record_t; a binding showing no\n\
          * volume (the /Storage catalog) has an empty subtree and an all-zero\n\
-         * volume_id. `binder` is the uid that made a view_bind binding,\n\
-         * 0xFFFFFFFF for one the system made. The inline target/subtree buffers\n\
-         * are valid for their *_len byte counts. */\n\
+         * volume_id, and one withheld from its reader an empty subtree.\n\
+         * `binder` is the uid that made a view_bind binding,\n\
+         * TAIRIX_MOUNT_NO_OWNER for one the system made; `owner` is the uid that\n\
+         * attached the volume it shows, TAIRIX_MOUNT_NO_OWNER for one no one owns,\n\
+         * and `private_to_owner` 1 when that volume is presented to its owner\n\
+         * alone. The inline target/subtree buffers are valid for their *_len byte\n\
+         * counts. */\n\
          typedef struct tairix_view_binding_record {\n\
          \x20   uint32_t flags;\n\
          \x20   uint8_t target_len;\n\
          \x20   uint8_t subtree_len;\n\
-         \x20   uint8_t reserved0[2];\n\
+         \x20   uint8_t private_to_owner;\n\
+         \x20   uint8_t reserved0;\n\
          \x20   uint8_t volume_id[TAIRIX_VOLUME_ID_LEN];\n\
          \x20   uint32_t binder;\n\
+         \x20   uint32_t owner;\n\
          \x20   uint8_t target[TAIRIX_MOUNT_TARGET_MAX];\n\
          \x20   uint8_t subtree[TAIRIX_MOUNT_TARGET_MAX];\n\
          } tairix_view_binding_record_t;\n\n",
@@ -2950,6 +2991,7 @@ fn generate_syscall() -> String {
     emit_wait_contract(&mut out);
     emit_fs_contract(&mut out);
     emit_spawn_attach_contract(&mut out);
+    emit_attach_contract(&mut out);
     emit_readdir_contract(&mut out);
     emit_dir_watch_contract(&mut out);
     emit_grant_contract(&mut out);
@@ -4019,6 +4061,170 @@ fn emit_spawn_attach_contract(out: &mut String) {
     );
     out.push_str(
         "    uint64_t share;\n    tairix_path_at_t working_directory;\n} tairix_spawn_attach_t;\n\n",
+    );
+}
+
+/// Emit the attach frame `image_attach()` and `fsserve_attach()` share, then
+/// the replies they write, every value read from `lib/abi`. The head and both
+/// replies are naturally aligned with no padding, so on the little-endian
+/// Tier-1 targets each struct's bytes are the encoding the kernel decodes.
+fn emit_attach_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::fsserve::FSSERVE_VERSION;
+    use tairix_abi::imageattach::{
+        IMAGE_ATTACH_FLAG_ADOPT, IMAGE_ATTACH_FLAG_EXPECTS, IMAGE_ATTACH_FLAG_WRITABLE,
+        IMAGE_ATTACH_MAX, IMAGE_ATTACH_VERSION,
+    };
+    use tairix_abi::netattach::{
+        ATTACH_FLAG_READ_ONLY, ATTACH_HEAD_LEN, NETWORK_ATTACH_MAX, PRESENTATION_EXPLICIT,
+        PRESENTATION_PRIVATE, PRESENTATION_SHARED,
+    };
+    use tairix_abi::volume::{VolumeFsType, VOLUME_NAME_MAX};
+    out.push_str(
+        "/* The frame image_attach() and fsserve_attach() take: a tairix_attach_head_t,\n\
+         * name_len bytes of the catalog name, then target_len bytes of the directory\n\
+         * the volume is also bound at, and nothing after. An image attach's version\n\
+         * is TAIRIX_IMAGE_ATTACH_VERSION and a network attach's TAIRIX_FSSERVE_VERSION;\n\
+         * an image attach with no name is named by the kernel. `presentation` is a\n\
+         * TAIRIX_PRESENTATION_*, and uid, gid, dir_mode and file_mode are zero but\n\
+         * for EXPLICIT. A network attach may set TAIRIX_ATTACH_FLAG_READ_ONLY and\n\
+         * has `own` zero. An image attach may set READ_ONLY or\n\
+         * TAIRIX_IMAGE_ATTACH_FLAG_WRITABLE, not both, and\n\
+         * TAIRIX_IMAGE_ATTACH_FLAG_EXPECTS, which makes `own` the TAIRIX_VOLUME_FS_*\n\
+         * the file must hold; without it `own` is zero. TAIRIX_IMAGE_ATTACH_FLAG_ADOPT\n\
+         * takes up a volume of the file attached already for the caller's login\n\
+         * session too. Anything else is refused. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_IMAGE_ATTACH_VERSION {IMAGE_ATTACH_VERSION}u"
+    );
+    let _ = writeln!(out, "#define TAIRIX_FSSERVE_VERSION {FSSERVE_VERSION}u");
+    let _ = writeln!(out, "#define TAIRIX_ATTACH_HEAD_LEN {ATTACH_HEAD_LEN}u");
+    let _ = writeln!(out, "#define TAIRIX_IMAGE_ATTACH_MAX {IMAGE_ATTACH_MAX}u");
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_NETWORK_ATTACH_MAX {NETWORK_ATTACH_MAX}u"
+    );
+    let _ = writeln!(out, "#define TAIRIX_VOLUME_NAME_MAX {VOLUME_NAME_MAX}u");
+    for (name, value) in [
+        ("TAIRIX_PRESENTATION_PRIVATE", PRESENTATION_PRIVATE),
+        ("TAIRIX_PRESENTATION_SHARED", PRESENTATION_SHARED),
+        ("TAIRIX_PRESENTATION_EXPLICIT", PRESENTATION_EXPLICIT),
+    ] {
+        let _ = writeln!(out, "#define {name} ((uint8_t){value}u)");
+    }
+    for (name, value) in [
+        ("TAIRIX_ATTACH_FLAG_READ_ONLY", ATTACH_FLAG_READ_ONLY),
+        (
+            "TAIRIX_IMAGE_ATTACH_FLAG_EXPECTS",
+            IMAGE_ATTACH_FLAG_EXPECTS,
+        ),
+        (
+            "TAIRIX_IMAGE_ATTACH_FLAG_WRITABLE",
+            IMAGE_ATTACH_FLAG_WRITABLE,
+        ),
+        ("TAIRIX_IMAGE_ATTACH_FLAG_ADOPT", IMAGE_ATTACH_FLAG_ADOPT),
+    ] {
+        let _ = writeln!(out, "#define {name} ((uint8_t){value:#x}u)");
+    }
+    emit_u8_discriminants(out, "TAIRIX_VOLUME_FS", |raw| {
+        VolumeFsType::from_u8(raw).ok().map(|fs| match fs {
+            VolumeFsType::ARXFS => "ARXFS",
+            VolumeFsType::Ext4 => "EXT4",
+            VolumeFsType::Fat32 => "FAT32",
+            VolumeFsType::Iso9660 => "ISO9660",
+            VolumeFsType::Udf => "UDF",
+            VolumeFsType::Adfs => "ADFS",
+            VolumeFsType::Affs => "AFFS",
+        })
+    });
+    out.push_str(
+        "typedef struct tairix_attach_head {\n\
+         \x20   uint16_t version;\n\
+         \x20   uint8_t presentation;\n\
+         \x20   uint8_t flags;\n\
+         \x20   uint32_t uid;\n\
+         \x20   uint32_t gid;\n\
+         \x20   uint16_t dir_mode;\n\
+         \x20   uint16_t file_mode;\n\
+         \x20   uint8_t name_len;\n\
+         \x20   uint8_t own;\n\
+         \x20   uint16_t target_len;\n\
+         } tairix_attach_head_t;\n\n",
+    );
+    emit_attach_replies(out);
+}
+
+/// Emit the replies `fsserve_attach()` and `image_attach()` write.
+fn emit_attach_replies(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::imageattach::{
+        ImageRefusal, IMAGE_ATTACH_OUTCOME_ALREADY_ATTACHED, IMAGE_ATTACH_OUTCOME_ATTACHED,
+        IMAGE_ATTACH_OUTCOME_NAME_REFUSED, IMAGE_ATTACH_OUTCOME_REFUSED,
+        IMAGE_ATTACH_OUTCOME_TARGET_REFUSED, IMAGE_ATTACH_REPLY_LEN,
+    };
+    use tairix_abi::netattach::{ATTACH_REPLY_FLAG_READ_ONLY, ATTACH_REPLY_LEN};
+    use tairix_abi::volume::{VOLUME_ID_LEN, VOLUME_NAME_MAX};
+    out.push_str(
+        "/* What an attach answers: the volume's identity, which a detach names, and\n\
+         * the name it took in /Storage, valid for name_len bytes; `flags` holds\n\
+         * TAIRIX_ATTACH_REPLY_FLAG_READ_ONLY for a volume that takes no writes.\n\
+         * fsserve_attach() writes one alone, image_attach() one within a\n\
+         * tairix_image_attach_reply_t whose `outcome` is a\n\
+         * TAIRIX_IMAGE_ATTACH_OUTCOME_*: a REFUSED one names a TAIRIX_IMAGE_REFUSAL_*,\n\
+         * a TARGET_REFUSED one in `refused_errno` the TAIRIX_E_* the directory the\n\
+         * volume was also to be shown at refused it with, and a NAME_REFUSED one\n\
+         * there the TAIRIX_E_* the name asked for it was refused with, each\n\
+         * leaving `volume` zero and nothing attached; every field an outcome does\n\
+         * not name is zero. */\n",
+    );
+    let _ = writeln!(out, "#define TAIRIX_ATTACH_REPLY_LEN {ATTACH_REPLY_LEN}u");
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_ATTACH_REPLY_FLAG_READ_ONLY ((uint8_t){ATTACH_REPLY_FLAG_READ_ONLY:#x}u)"
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_IMAGE_ATTACH_REPLY_LEN {IMAGE_ATTACH_REPLY_LEN}u"
+    );
+    for (name, value) in [
+        ("ATTACHED", IMAGE_ATTACH_OUTCOME_ATTACHED),
+        ("ALREADY_ATTACHED", IMAGE_ATTACH_OUTCOME_ALREADY_ATTACHED),
+        ("REFUSED", IMAGE_ATTACH_OUTCOME_REFUSED),
+        ("TARGET_REFUSED", IMAGE_ATTACH_OUTCOME_TARGET_REFUSED),
+        ("NAME_REFUSED", IMAGE_ATTACH_OUTCOME_NAME_REFUSED),
+    ] {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_IMAGE_ATTACH_OUTCOME_{name} ((uint8_t){value}u)"
+        );
+    }
+    for raw in 0..=u8::MAX {
+        if let Ok(refusal) = ImageRefusal::from_u8(raw) {
+            let _ = writeln!(
+                out,
+                "#define TAIRIX_IMAGE_REFUSAL_{} ((uint8_t){raw}u)",
+                refusal.as_str().to_ascii_uppercase()
+            );
+        }
+    }
+    let _ = write!(
+        out,
+        "typedef struct tairix_attach_reply {{\n\
+         \x20   uint8_t volume_id[{VOLUME_ID_LEN}];\n\
+         \x20   uint8_t name_len;\n\
+         \x20   uint8_t flags;\n\
+         \x20   uint8_t reserved0[6];\n\
+         \x20   uint8_t name[{VOLUME_NAME_MAX}];\n\
+         }} tairix_attach_reply_t;\n\
+         typedef struct tairix_image_attach_reply {{\n\
+         \x20   uint8_t outcome;\n\
+         \x20   uint8_t refusal;\n\
+         \x20   uint8_t reserved0[2];\n\
+         \x20   int32_t refused_errno;\n\
+         \x20   tairix_attach_reply_t volume;\n\
+         }} tairix_image_attach_reply_t;\n\n"
     );
 }
 
@@ -5903,8 +6109,8 @@ mod tests {
     #[test]
     fn sysinfo_header_publishes_the_medium_record() {
         use tairix_abi::blkio::{
-            BlkMedium, BlkRemovability, BlkRemovabilityEvidence, BlkRotation, BlkRotationEvidence,
-            BlkTransport, BLK_MEDIUM_LEN,
+            BlkForm, BlkMedium, BlkRemovability, BlkRemovabilityEvidence, BlkRotation,
+            BlkRotationEvidence, BlkTransport, BLK_MEDIUM_LEN,
         };
         let h = body("tairix_sysinfo.h");
         assert!(
@@ -5915,7 +6121,7 @@ mod tests {
                 "    uint8_t rotation_evidence;\n",
                 "    uint8_t removability;\n",
                 "    uint8_t removability_evidence;\n",
-                "    uint8_t reserved;\n",
+                "    uint8_t form;\n",
                 "    uint16_t rpm;\n",
                 "} tairix_blk_medium_t;\n",
             )),
@@ -5938,7 +6144,11 @@ mod tests {
         field("BLK_ROTATION_EVIDENCE_ATA_IDENTIFY", record[2]);
         field("BLK_REMOVABILITY_FIXED", record[3]);
         field("BLK_REMOVABILITY_EVIDENCE_INQUIRY", record[4]);
-        assert_eq!(record[5], 0, "reserved");
+        field("BLK_FORM_UNSPECIFIED", record[5]);
+        field(
+            "BLK_FORM_FLOPPY_DISK",
+            BlkMedium::encode(Some(medium.with_form(BlkForm::FloppyDisk)))[5],
+        );
         assert_eq!(u16::from_le_bytes([record[6], record[7]]), 0x1C20, "rpm");
         field("BLK_TRANSPORT_UNDECLARED", BlkMedium::encode(None)[0]);
         for transport in BlkTransport::ALL {
@@ -6311,7 +6521,7 @@ mod tests {
             ("tairix_sysinfo.h", "} tairix_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),
             ("tairix_sysinfo.h", "} tairix_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),
             ("tairix_sysinfo.h", "} tairix_mount_record_t;", size_of::<MountRecord>(), 232, align_of::<MountRecord>(), 8),
-            ("tairix_sysinfo.h", "} tairix_view_binding_record_t;", size_of::<ViewBindingRecord>(), 156, align_of::<ViewBindingRecord>(), 4),
+            ("tairix_sysinfo.h", "} tairix_view_binding_record_t;", size_of::<ViewBindingRecord>(), 160, align_of::<ViewBindingRecord>(), 4),
             ("tairix_driver.h", "} tairix_volume_stats_t;", size_of::<VolumeStats>(), 48, align_of::<VolumeStats>(), 8),
             ("tairix_driver.h", "} tairix_driver_manifest_t;", size_of::<DriverManifest>(), 140, align_of::<DriverManifest>(), 4),
             ("tairix_driver.h", "} tairix_driver_bind_key_t;", size_of::<DriverBindKey>(), 80, align_of::<DriverBindKey>(), 4),
@@ -6544,6 +6754,297 @@ mod tests {
         assert_eq!(
             4 + 4 + 8 + 8 + 4 * 8 + 4 + 4 + 16 + 4 + 4 + tairix_abi::LimitKind::COUNT * 16 + 8 + 16,
             tairix_abi::SPAWN_ATTACH_LEN
+        );
+    }
+
+    fn assert_line(h: &str, line: &str) {
+        assert!(h.contains(line), "missing `{line}` in:\n{h}");
+    }
+
+    /// Assert `h` defines `TAIRIX_{name}` as the byte `value`.
+    fn assert_byte(h: &str, name: &str, value: u8) {
+        assert_line(h, &format!("#define TAIRIX_{name} ((uint8_t){value}u)"));
+    }
+
+    /// Assert `h` defines the flag `TAIRIX_{name}` as `value`.
+    fn assert_flag(h: &str, name: &str, value: u8) {
+        assert_line(h, &format!("#define TAIRIX_{name} ((uint8_t){value:#x}u)"));
+    }
+
+    /// Where `field` lies in the struct `tag` declares.
+    fn field_at(h: &str, tag: &str, field: &str) -> usize {
+        c_field_offsets(h, tag)
+            .into_iter()
+            .find(|(name, _)| name == field)
+            .map_or_else(|| panic!("{tag} has no `{field}`"), |(_, at)| at)
+    }
+
+    /// The attach head is the head `lib/abi` encodes, each field at the byte
+    /// the encoder writes it at, so a C caller fills the struct in place.
+    #[test]
+    fn syscall_header_lays_the_attach_head_out_as_lib_abi_encodes_it() {
+        use tairix_abi::imageattach::{
+            ImageAccess, ImageAttach, IMAGE_ATTACH_FLAG_EXPECTS, IMAGE_ATTACH_FLAG_WRITABLE,
+            IMAGE_ATTACH_MAX, IMAGE_ATTACH_VERSION,
+        };
+        use tairix_abi::netattach::{Presentation, ATTACH_HEAD_LEN, NETWORK_ATTACH_MAX};
+        use tairix_abi::volume::{VolumeFsType, VOLUME_NAME_MAX};
+        let h = body("tairix_syscall.h");
+        let attach = ImageAttach {
+            name: Some("vol"),
+            presentation: Presentation::Explicit {
+                uid: 0x0403_0201,
+                gid: 0x0807_0605,
+                dir_mode: 0o750,
+                file_mode: 0o640,
+            },
+            access: ImageAccess::Writable,
+            target: Some("/Users/ada/disk"),
+            expects: Some(VolumeFsType::Affs),
+            adopt: false,
+        };
+        let mut frame = [0; IMAGE_ATTACH_MAX];
+        let len = attach.encode(&mut frame).expect("a frame in shape");
+        let frame = &frame[..len];
+        let at = |field: &str| field_at(&h, "tairix_attach_head", field);
+        let word = |field: &str| u16::from_le_bytes([frame[at(field)], frame[at(field) + 1]]);
+        let long = |field: &str| {
+            let at = at(field);
+            u32::from_le_bytes([frame[at], frame[at + 1], frame[at + 2], frame[at + 3]])
+        };
+        assert_eq!(word("version"), IMAGE_ATTACH_VERSION);
+        assert_byte(&h, "PRESENTATION_EXPLICIT", frame[at("presentation")]);
+        assert_eq!(
+            frame[at("flags")],
+            IMAGE_ATTACH_FLAG_WRITABLE | IMAGE_ATTACH_FLAG_EXPECTS
+        );
+        assert_flag(&h, "IMAGE_ATTACH_FLAG_WRITABLE", IMAGE_ATTACH_FLAG_WRITABLE);
+        assert_flag(&h, "IMAGE_ATTACH_FLAG_EXPECTS", IMAGE_ATTACH_FLAG_EXPECTS);
+        assert_eq!(long("uid"), 0x0403_0201);
+        assert_eq!(long("gid"), 0x0807_0605);
+        assert_eq!(word("dir_mode"), 0o750);
+        assert_eq!(word("file_mode"), 0o640);
+        assert_eq!(usize::from(frame[at("name_len")]), "vol".len());
+        assert_byte(&h, "VOLUME_FS_AFFS", frame[at("own")]);
+        assert_eq!(usize::from(word("target_len")), "/Users/ada/disk".len());
+        assert_eq!(
+            at("target_len") + 2,
+            ATTACH_HEAD_LEN,
+            "the head ends at the name"
+        );
+        assert_eq!(&frame[ATTACH_HEAD_LEN..ATTACH_HEAD_LEN + 3], b"vol");
+        for line in [
+            format!("#define TAIRIX_ATTACH_HEAD_LEN {ATTACH_HEAD_LEN}u"),
+            format!("#define TAIRIX_IMAGE_ATTACH_VERSION {IMAGE_ATTACH_VERSION}u"),
+            format!("#define TAIRIX_IMAGE_ATTACH_MAX {IMAGE_ATTACH_MAX}u"),
+            format!("#define TAIRIX_NETWORK_ATTACH_MAX {NETWORK_ATTACH_MAX}u"),
+            format!("#define TAIRIX_VOLUME_NAME_MAX {VOLUME_NAME_MAX}u"),
+        ] {
+            assert_line(&h, &line);
+        }
+    }
+
+    /// The presentations, the read-only flag, the network attach's version and
+    /// every filesystem an image attach may expect are named by the values
+    /// `lib/abi` encodes.
+    #[test]
+    fn syscall_header_names_every_attach_value() {
+        use tairix_abi::imageattach::{ImageAccess, ImageAttach, IMAGE_ATTACH_MAX};
+        use tairix_abi::netattach::{NetworkAttach, Presentation, NETWORK_ATTACH_MAX};
+        use tairix_abi::volume::VolumeFsType;
+        let h = body("tairix_syscall.h");
+        let at = |field: &str| field_at(&h, "tairix_attach_head", field);
+        let mut frame = [0; NETWORK_ATTACH_MAX];
+        for (presentation, name) in [
+            (Presentation::Private, "PRESENTATION_PRIVATE"),
+            (Presentation::Shared, "PRESENTATION_SHARED"),
+        ] {
+            let attach = NetworkAttach {
+                name: "share",
+                presentation,
+                read_only: true,
+                target: None,
+            };
+            attach.encode(&mut frame).expect("a frame in shape");
+            assert_byte(&h, name, frame[at("presentation")]);
+            assert_flag(&h, "ATTACH_FLAG_READ_ONLY", frame[at("flags")]);
+            let version = u16::from_le_bytes([frame[at("version")], frame[at("version") + 1]]);
+            assert_line(&h, &format!("#define TAIRIX_FSSERVE_VERSION {version}u"));
+        }
+        let mut frame = [0; IMAGE_ATTACH_MAX];
+        let read_only = ImageAttach {
+            name: None,
+            presentation: Presentation::Private,
+            access: ImageAccess::ReadOnly,
+            target: None,
+            expects: None,
+            adopt: false,
+        };
+        read_only.encode(&mut frame).expect("a frame in shape");
+        assert_flag(&h, "ATTACH_FLAG_READ_ONLY", frame[at("flags")]);
+        for fs in VolumeFsType::ALL {
+            let value = fs.as_u8();
+            assert!(
+                h.lines()
+                    .any(|line| line.starts_with("#define TAIRIX_VOLUME_FS_")
+                        && line.ends_with(&format!(" ((uint8_t){value}u)"))),
+                "no TAIRIX_VOLUME_FS_* names {value}:\n{h}"
+            );
+        }
+        assert_eq!(
+            h.matches("#define TAIRIX_VOLUME_FS_").count(),
+            VolumeFsType::ALL.len()
+        );
+    }
+
+    /// Both attach replies are the replies `lib/abi` encodes, each field at
+    /// the byte the encoder writes it at, and every outcome and refusal is
+    /// named by its code, so a C caller reads the reply in place.
+    #[test]
+    fn syscall_header_lays_the_attach_replies_out_as_lib_abi_encodes_them() {
+        use tairix_abi::imageattach::{ImageAttachReply, ImageRefusal, IMAGE_ATTACH_REPLY_LEN};
+        use tairix_abi::netattach::{AttachReply, ATTACH_REPLY_LEN};
+        use tairix_abi::volume::{VOLUME_ID_LEN, VOLUME_NAME_MAX};
+        let h = body("tairix_syscall.h");
+        let mut volume_id = [0; VOLUME_ID_LEN];
+        for (index, slot) in volume_id.iter_mut().enumerate() {
+            *slot = u8::try_from(index).expect("small") + 0xA0;
+        }
+        let reply = AttachReply::new(volume_id, "vol", true).expect("a name the catalog takes");
+        let wire = reply.encode();
+        assert_eq!(
+            c_field_offsets(&h, "tairix_attach_reply"),
+            vec![
+                ("volume_id".to_owned(), 0),
+                ("name_len".to_owned(), VOLUME_ID_LEN),
+                ("flags".to_owned(), VOLUME_ID_LEN + 1),
+                ("name".to_owned(), VOLUME_ID_LEN + 8),
+            ]
+        );
+        assert_eq!(wire[..VOLUME_ID_LEN], volume_id);
+        assert_eq!(wire[VOLUME_ID_LEN], 3);
+        assert_flag(&h, "ATTACH_REPLY_FLAG_READ_ONLY", wire[VOLUME_ID_LEN + 1]);
+        assert_eq!(&wire[VOLUME_ID_LEN + 8..VOLUME_ID_LEN + 11], b"vol");
+        assert_eq!(VOLUME_ID_LEN + 8 + VOLUME_NAME_MAX, ATTACH_REPLY_LEN);
+        assert_line(
+            &h,
+            &format!("#define TAIRIX_ATTACH_REPLY_LEN {ATTACH_REPLY_LEN}u"),
+        );
+        assert_line(&h, &format!("    uint8_t volume_id[{VOLUME_ID_LEN}];"));
+        assert_line(&h, &format!("    uint8_t name[{VOLUME_NAME_MAX}];"));
+
+        assert_eq!(
+            c_field_offsets_with(
+                &h,
+                "tairix_image_attach_reply",
+                &[("tairix_attach_reply_t", ATTACH_REPLY_LEN, 1)]
+            ),
+            vec![
+                ("outcome".to_owned(), 0),
+                ("refusal".to_owned(), 1),
+                ("refused_errno".to_owned(), 4),
+                ("volume".to_owned(), 8),
+            ]
+        );
+        assert_eq!(8 + ATTACH_REPLY_LEN, IMAGE_ATTACH_REPLY_LEN);
+        assert_line(
+            &h,
+            &format!("#define TAIRIX_IMAGE_ATTACH_REPLY_LEN {IMAGE_ATTACH_REPLY_LEN}u"),
+        );
+        for (outcome, name) in [
+            (
+                ImageAttachReply::Attached(reply),
+                "IMAGE_ATTACH_OUTCOME_ATTACHED",
+            ),
+            (
+                ImageAttachReply::AlreadyAttached(reply),
+                "IMAGE_ATTACH_OUTCOME_ALREADY_ATTACHED",
+            ),
+        ] {
+            let wire = outcome.encode();
+            assert_byte(&h, name, wire[0]);
+            assert_eq!(wire[1], 0, "an attached volume carries no refusal");
+            assert_eq!(wire[8..], reply.encode());
+        }
+        let mut refusals = 0;
+        for raw in 0..=u8::MAX {
+            let Ok(refusal) = ImageRefusal::from_u8(raw) else {
+                continue;
+            };
+            refusals += 1;
+            let wire = ImageAttachReply::Refused(refusal).encode();
+            assert_byte(&h, "IMAGE_ATTACH_OUTCOME_REFUSED", wire[0]);
+            assert_byte(
+                &h,
+                &format!("IMAGE_REFUSAL_{}", refusal.as_str().to_ascii_uppercase()),
+                wire[1],
+            );
+            assert!(
+                wire[8..].iter().all(|&b| b == 0),
+                "a refusal names no volume"
+            );
+        }
+        assert_eq!(refusals, ImageRefusal::ALL.len(), "every refusal decodes");
+        assert_eq!(h.matches("#define TAIRIX_IMAGE_REFUSAL_").count(), refusals);
+    }
+
+    /// A refused target and a refused name are each named by the outcome
+    /// `lib/abi` encodes, the errno where the encoder writes it, and nothing
+    /// else.
+    #[test]
+    fn syscall_header_names_the_refused_target_and_name_outcomes() {
+        use tairix_abi::imageattach::ImageAttachReply;
+        let h = body("tairix_syscall.h");
+        for (reply, outcome) in [
+            (
+                ImageAttachReply::TargetRefused(Errno::NotEmpty),
+                "IMAGE_ATTACH_OUTCOME_TARGET_REFUSED",
+            ),
+            (
+                ImageAttachReply::NameRefused(Errno::NotEmpty),
+                "IMAGE_ATTACH_OUTCOME_NAME_REFUSED",
+            ),
+        ] {
+            let wire = reply.encode();
+            assert_byte(&h, outcome, wire[0]);
+            assert_eq!(wire[4..8], Errno::NotEmpty.as_i32().to_le_bytes());
+            assert!(
+                wire[1..4].iter().chain(&wire[8..]).all(|&b| b == 0),
+                "{outcome} names no refusal and no volume"
+            );
+        }
+    }
+
+    /// A mount record's class and an unowned record's owner word are named in
+    /// the header by the values `lib/abi` encodes.
+    #[test]
+    fn sysinfo_header_names_the_volume_classes_and_the_unowned_word() {
+        use tairix_abi::sysinfo::{VolumeClass, MOUNT_NO_OWNER};
+        let h = body("tairix_sysinfo.h");
+        for (class, name) in [
+            (VolumeClass::Local, "LOCAL"),
+            (VolumeClass::Network, "NETWORK"),
+            (VolumeClass::Image, "IMAGE"),
+        ] {
+            let line = format!(
+                "#define TAIRIX_VOLUME_CLASS_{name} ((uint8_t){}u)",
+                class as u8
+            );
+            assert!(h.contains(&line), "missing `{line}` in:\n{h}");
+        }
+        let classes = (0..=u8::MAX)
+            .filter(|&raw| VolumeClass::from_u8(raw).is_ok())
+            .count();
+        assert_eq!(h.matches("#define TAIRIX_VOLUME_CLASS_").count(), classes);
+        assert!(
+            h.contains(&format!(
+                "#define TAIRIX_MOUNT_NO_OWNER {MOUNT_NO_OWNER:#x}u"
+            )),
+            "{h}"
+        );
+        assert!(
+            !h.contains("0xFFFFFFFF"),
+            "the sentinel is named, never re-typed:\n{h}"
         );
     }
 

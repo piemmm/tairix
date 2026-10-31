@@ -381,8 +381,10 @@ report an all-zero accounting; their card says the format tracks no fixed
 capacity rather than drawing a full bar or an invented percentage.
 
 **The pane needs no capability the bundle does not already hold.** `MOUNT_LIST`
-is ungated — the mount table is system-wide and secret-free, and `df` reads it
-the same way. The per-device I/O counters that *are* gated
+is ungated — every volume is listed, another principal's own one withheld,
+without what it was attached from or how full it is — and `df` reads it the
+same way. A withheld volume gets no card: what it would state as absent is
+only another user's to see. The per-device I/O counters that *are* gated
 (`CAP_SYSINFO_KERNEL`) stay the Switchboard's alone: a pane reporting how full
 each volume is does not need them, and the health a capsule states is already
 in the mount record as the live availability overlay a degraded or recovering
@@ -858,7 +860,8 @@ the staged source of truth; the shape of it is:
   and memory, each from its own ungated `sysinfo-v1` query, so one refusal
   costs one row rather than the pane; Date & Time states the wall clock and
   which source it came from. Storage draws
-  one card per mounted volume from the ungated `MOUNT_LIST` query, derived by
+  one card per mounted volume not withheld from the user, from the ungated
+  `MOUNT_LIST` query, derived by
   the shared volume view model every other surface reads, so it needs no
   capability beyond the two the bundle already requests; the per-device I/O
   counters that do need `CAP_SYSINFO_KERNEL` stay the Switchboard's alone.

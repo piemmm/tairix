@@ -76,7 +76,7 @@ pub use listing::{DirPosition, ListEnd, Listing, ResumeName};
 pub use mount::{Attachment, BindsWithin, ChildMounts, MountTable, Projection};
 pub use mounted::{
     FilesystemAlreadyInstalled, IdentityAlreadyInstalled, LateFilesystem, LateIdentity,
-    MountedFilesystemService, RegisterError,
+    MountedFilesystemService, RegisterError, VolumeNames,
 };
 pub use node::{
     Acting, At, Authority, Cwd, DriverGuard, DriverLock, FrozenAuthority, Grant, NodeHandle,
@@ -90,8 +90,8 @@ pub use service::{
 };
 pub use vfs::Vfs;
 pub use volsvc::{
-    ChunkSink, ChunkSource, NullVolumeService, OfferingServer, Principal, ServeChannel,
-    VolumeService, NULL_VOLUME_SERVICE,
+    AnswerSink, ChunkSink, ChunkSource, ImageSource, NullVolumeService, OfferingServer, Principal,
+    ServeChannel, VolumeService, NULL_VOLUME_SERVICE,
 };
 pub use volumes::{VolumeForest, VolumePublishError, NULL_VOLUME_FOREST};
 

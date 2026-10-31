@@ -1,8 +1,9 @@
 //! TAIRiX `unmount` — detach a runtime-attached volume (Stage 6
 //! `userland/apps/`, `plans/DEVICES.md` D4b).
 //!
-//! `unmount NAME` takes the volume mounted under `NAME` (its catalog
-//! name or its mount-point path) out of service: the kernel flushes the
+//! `unmount NAME` takes the volume `NAME` names — its catalog name, a
+//! directory it is mounted on, or the file name of the disk image it was
+//! mounted from — out of service: the kernel flushes the
 //! filesystem and the device, retracts the mount, and withdraws the
 //! volume's durable `id::` root. A volume whose serving device vanished
 //! with uncommitted writes (*unavailable-dirty*/*unavailable-lost*, the
@@ -15,13 +16,16 @@
 //! The tool is a resolver and presenter, not a policy point:
 //!
 //! * **Resolving** `NAME` to the volume's stable 16-byte identity goes
-//!   through the ungated `sysinfo-v1` `MOUNT_LIST` query (the shared
-//!   `lib/procinfo` paging walk `mount` and `df` use too), whose records
-//!   carry each mount's volume identity and availability.
-//! * **Detaching** is privileged — the kernel's `volume_detach` path
-//!   requires `CAP_FS_MOUNT` and re-validates everything; this tool only
-//!   presents the request through the injected [`Detacher`] seam and
-//!   reports the kernel's decision.
+//!   through the ungated `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries
+//!   (the shared `lib/procinfo` namespace `mount` and `df` read too), whose
+//!   records carry each mount's volume identity and availability; a path is
+//!   canonicalised first, as util-linux canonicalises a mount point.
+//! * **Detaching** is the kernel's decision: its `volume_detach` path lets
+//!   the user who attached a disk image or a network share detach it,
+//!   requires `CAP_FS_MOUNT` for every other volume, and re-validates
+//!   everything; this tool only presents the request through the injected
+//!   [`Detacher`] seam and reports the kernel's decision. A name two users'
+//!   images share resolves to the caller's own.
 //!
 //! # Fail closed
 //!

@@ -36,6 +36,8 @@ fn facts(free: Option<u64>, availability: MountAvailability) -> VolumeFacts {
         filesystem: String::from("arxfs"),
         free,
         availability,
+        owner: None,
+        volume_id: [0; 16],
     }
 }
 

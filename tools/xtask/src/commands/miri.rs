@@ -845,6 +845,72 @@ pub const TARGETS: &[Target] = &[
 /// replays exactly.
 const MIRIFLAGS: &str = "-Zmiri-strict-provenance";
 
+/// The flag every interpreted build adds to the caller's `RUSTFLAGS`: `sha2`'s
+/// portable backend, so every host interprets one SHA-256. No interpreter on
+/// an AArch64 host executes the SHA-2 instructions its hardware backend issues,
+/// and that backend reads its round constants through one-element borrows,
+/// which Stacked Borrows refuses (`plans/OPEN-DEFECTS.md` D1588).
+const SHA2_PORTABLE: &str = "--cfg sha2_backend=\"soft\"";
+
+/// Tests whose code reaches an operation the interpreter cannot execute on a
+/// host of one architecture: a run there skips them, and a run on any other
+/// host interprets them. What is skipped reports no undefined behaviour; it
+/// is refused, as an operation the isolated stage refuses is.
+struct HostRefusal {
+    /// The enrolled package whose library holds them.
+    package: &'static str,
+    /// The host architecture, as [`std::env::consts::ARCH`] names it.
+    arch: &'static str,
+    /// libtest `--skip` patterns.
+    skip: &'static [&'static str],
+    /// What the interpreter refuses there.
+    reason: &'static str,
+}
+
+const HOST_REFUSALS: &[HostRefusal] = &[HostRefusal {
+    package: "tairix-raster",
+    arch: "aarch64",
+    skip: &[
+        "accel::tests::every_blur_candidate",
+        "accel::tests::the_blur_candidate_is_chosen",
+        "accel::tests::every_candidate_this_host_runs",
+    ],
+    reason: "the NEON blur's rounded mean shifts each lane by a count held in a register \
+             (`vshlq_u64`), which the interpreter cannot execute; the NEON blend and scan \
+             kernels are interpreted, and the matrix runs the NEON blur against the portable \
+             one natively",
+}];
+
+/// The refusals that bind `target` on a host of `arch`.
+fn refusals_on<'a>(
+    target: &'a Target,
+    arch: &'a str,
+) -> impl Iterator<Item = &'static HostRefusal> + 'a {
+    HOST_REFUSALS
+        .iter()
+        .filter(move |refusal| refusal.package == target.package && refusal.arch == arch)
+}
+
+/// What the test binary of `target` is handed on a host of `arch`: its scope's
+/// filter and exclusions, then what the interpreter refuses there.
+fn harness_args(target: &Target, arch: &str) -> Vec<&'static str> {
+    let mut args = target.scope.harness_args();
+    for refusal in refusals_on(target, arch) {
+        for pattern in refusal.skip {
+            args.extend(["--skip", pattern]);
+        }
+    }
+    args
+}
+
+/// The caller's `RUSTFLAGS` with [`SHA2_PORTABLE`] added.
+fn rustflags() -> String {
+    match std::env::var("RUSTFLAGS") {
+        Ok(caller) if !caller.trim().is_empty() => format!("{caller} {SHA2_PORTABLE}"),
+        _ => SHA2_PORTABLE.to_string(),
+    }
+}
+
 /// Parsed `miri` arguments.
 pub struct Options {
     /// Restrict the run to one package.
@@ -933,6 +999,17 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     }
 
     let targets = selected(&opts)?;
+    for target in &targets {
+        for refusal in refusals_on(target, std::env::consts::ARCH) {
+            eprintln!(
+                "xtask: [{}] skips {} on this {} host: {}",
+                scope_label(target),
+                refusal.skip.join(", "),
+                refusal.arch,
+                refusal.reason
+            );
+        }
+    }
     // Each package is an independent host process, so the set runs
     // concurrently under the shared bounded runner rather than paying the sum
     // of the interpreter's costs.
@@ -989,6 +1066,7 @@ fn base_command(ctx: &Context, target: &Target, seed: u64) -> Command {
         "MIRIFLAGS",
         format!("{MIRIFLAGS} -Zmiri-env-forward={}", seed::FUZZ_SEED_ENV),
     );
+    cmd.env("RUSTFLAGS", rustflags());
     cmd
 }
 
@@ -1015,7 +1093,7 @@ fn scope_label(target: &Target) -> String {
 /// One package's whole interpreted test run, in a single process.
 fn whole_job(ctx: &Context, target: &Target, seed: u64) -> Job {
     let mut cmd = base_command(ctx, target, seed);
-    let harness = target.scope.harness_args();
+    let harness = harness_args(target, std::env::consts::ARCH);
     if !harness.is_empty() {
         cmd.arg("--").args(harness);
     }
@@ -1064,7 +1142,7 @@ fn enumerate(ctx: &Context, target: &Target, seed: u64) -> Result<Vec<String>, S
     let mut cmd = base_command(ctx, target, seed);
     cmd.arg("--")
         .arg("--list")
-        .args(target.scope.harness_args());
+        .args(harness_args(target, std::env::consts::ARCH));
     let label = format!("{} --list", scope_label(target));
     let listing = capture(&label, cmd)?;
     parse_listing(&listing).map_err(|why| format!("{label}: {why}"))
@@ -1155,7 +1233,8 @@ fn capture(label: &str, mut cmd: Command) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        deal, parse, parse_listing, selected, shard_count, Scope, Spread, SHARD_TESTS, TARGETS,
+        deal, harness_args, parse, parse_listing, selected, shard_count, Scope, Spread,
+        HOST_REFUSALS, SHARD_TESTS, TARGETS,
     };
     use std::ffi::OsString;
 
@@ -1230,6 +1309,35 @@ mod tests {
         assert!(parse(&args(&["--seed"])).is_err());
         assert!(parse(&args(&["--seed", "not-a-number"])).is_err());
         assert!(parse(&args(&["--what"])).is_err());
+    }
+
+    /// A host's refusal names an enrolled package, says why, and is skipped
+    /// on that host alone.
+    #[test]
+    fn a_host_refusal_is_skipped_on_its_host_alone() {
+        for refusal in HOST_REFUSALS {
+            let target = TARGETS
+                .iter()
+                .find(|target| target.package == refusal.package)
+                .unwrap_or_else(|| panic!("{} is not enrolled", refusal.package));
+            assert!(!refusal.reason.trim().is_empty(), "{}", refusal.package);
+            assert!(!refusal.skip.is_empty(), "{}", refusal.package);
+            let there = harness_args(target, refusal.arch);
+            for pattern in refusal.skip {
+                assert!(
+                    there.windows(2).any(|pair| pair == ["--skip", *pattern]),
+                    "{pattern} is skipped on {}",
+                    refusal.arch
+                );
+            }
+            let elsewhere = harness_args(target, "a host of another architecture");
+            assert_eq!(
+                elsewhere,
+                target.scope.harness_args(),
+                "{}",
+                refusal.package
+            );
+        }
     }
 
     /// A narrowed scope must say why, so a future reader can tell a

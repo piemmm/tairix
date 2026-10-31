@@ -2119,7 +2119,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             for exit in removed.released.iter() {
                 crate::syscalls::retire_number(self.process_wait, exit.process, exit.status);
             }
-            crate::procsignal::end_session(self.caps, self.audit, removed.record.proc_id());
+            if removed.released.ended_a_session() {
+                crate::procsignal::end_session(self.caps, self.audit, removed.record.proc_id());
+            }
         }
 
         let mut handle_buf = [0u8; 16];

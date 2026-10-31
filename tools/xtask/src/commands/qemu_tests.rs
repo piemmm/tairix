@@ -567,6 +567,14 @@ enum FsDisk {
     /// the three drivers down to the volume the disc is attached as. Only this
     /// disk carries the fixture; no production image ships it.
     OpticalRootDisk,
+    /// The encrypted root whose read-only `/System` volume carries the
+    /// standard store, with `mount` and `unmount`, the signed ADFS, AmigaDOS
+    /// and ISO 9660 drivers and the test-only `images` fixture bundle, and
+    /// whose root volume holds an Acorn floppy, an Amiga floppy and the RISC
+    /// OS disc in the account's home ([`disk_image_plants`]) — the disk-image
+    /// vertical's backing (`plans/DISK-IMAGES.md` DI7). Only this disk
+    /// carries the fixture; no production image ships it.
+    ImagesRootDisk,
     /// The [`Self::AudioRootDisk`] layout with the HD Audio driver in place of
     /// the virtio sound driver: the HD Audio verticals' backing
     /// (`plans/SOUND.md` SND11). The kernel discovers QEMU's `intel-hda`
@@ -1294,6 +1302,14 @@ const OPTICAL_COMMAND_LINE: &str = "optical\n";
 /// `exit` that completes its PASS chain: the `optical` fixture's pass, read
 /// from its own definition so the script and the program cannot drift.
 const OPTICAL_PASS_PREFIX: &str = tairix_test_optical::PASS_MARKER;
+
+/// The bare command word the disk-image vertical types at the shell, with its
+/// newline. Pinned to the fixture's own `COMMAND` by a unit test below.
+const IMAGES_COMMAND_LINE: &str = "images\n";
+
+/// Serial marker the disk-image vertical waits for before typing the shell
+/// `exit` that completes its PASS chain: the `images` fixture's pass.
+const IMAGES_PASS_PREFIX: &str = tairix_test_images::PASS_MARKER;
 
 /// Serial marker the stream-socket vertical waits for before typing the
 /// shell `exit` that completes its PASS chain: the `tcpecho` client's success
@@ -7205,11 +7221,9 @@ static TESTS: &[QemuTest] = &[
     // prints `MEMSOAK PASS baseline=… final=…` and exits 0; on any failure it
     // prints the reason and parks forever (it never exits), so the run times
     // out fail-loud with the numbers in the transcript. The guest audit sink
-    // arms on the fixture's audited `exit` (`sc=exit`, `comm=memsoak`) and
-    // reports PASS on the next audited `exit` — the shell's, typed only after
-    // the `MEMSOAK PASS` marker appeared — so the numeric verdict provably
-    // reached the transcript before the run ended (the session-ceiling
-    // arm-then-exit discipline). A 300-second budget covers boot + bounded
+    // passes on the shell's audited `exit` after the fixture's
+    // (`FixtureExit`), typed only after the `MEMSOAK PASS` marker appeared. A
+    // 300-second budget covers boot + bounded
     // PBKDF2 + the 36-cycle soak on QEMU TCG (each cycle is a full spawn/reap
     // plus two sysinfod round trips, on top of the session-ceiling verticals'
     // 120-second boot-and-dialogue baseline); single CPU like the other
@@ -7260,9 +7274,8 @@ static TESTS: &[QemuTest] = &[
     // stall at least the budget, `sampled=blocking`, and a load-relative
     // `pc` plus `bt`. A record that arrives *wrong* fails the run at once
     // with which expectation it missed; an accepted one arms the PASS, which
-    // fires on the next audited `exit` — the shell's, typed only after the
-    // `STALLTRACE PROVOKED` marker appeared — so the report provably reached
-    // the transcript before the run ended (the arm-then-exit discipline).
+    // fires on the shell's audited `exit` after the fixture's (`FixtureExit`),
+    // typed only after the `STALLTRACE PROVOKED` marker appeared.
     // This is what proves the aarch64 trampoline publishes a usable frame
     // and that the `copy_in`-backed walk reads a real chain off a stalling
     // user stack; the state machine itself is host-tested. A 300-second
@@ -7316,11 +7329,9 @@ static TESTS: &[QemuTest] = &[
     // fully verified transfer the client prints `TCPECHO PASS …` and exits 0;
     // on any shortfall it prints the reason and parks forever (it never
     // exits), so the run times out fail-loud with the reason in the transcript.
-    // The guest audit sink arms on the client's audited `exit` (`sc=exit`,
-    // `comm=tcpecho`) and reports PASS on the next audited `exit` — the
-    // shell's, typed only after the `TCPECHO PASS` marker appeared — so the
-    // report provably reached the transcript before the run ended (the
-    // session-ceiling arm-then-exit discipline). The harness additionally
+    // The guest audit sink passes on the shell's audited `exit` after the
+    // client's (`FixtureExit`), typed only after the `TCPECHO PASS` marker
+    // appeared. The harness additionally
     // requires the echo peer to report the whole transfer received and echoed,
     // so neither side can pass alone. A 300-second budget covers boot +
     // bounded PBKDF2 + the two-process net bring-up + the loss-recovered
@@ -7887,6 +7898,47 @@ static TESTS: &[QemuTest] = &[
         ],
         expect: Expect::Pass,
     },
+    // `plans/DISK-IMAGES.md` DI7: the disk-image vertical. The root volume
+    // holds an Acorn ADFS floppy, an AmigaDOS floppy and the RISC OS disc in
+    // the account's home, the system's (`FsDisk::ImagesRootDisk`). The
+    // scripted root shell runs `images`, which copies each into the home,
+    // mounts the copy with the real `mount` — the kernel recognising which
+    // format each holds, publishing its volume node under the virtual bus,
+    // and `devmgr` loading the format's driver against it — reads it, writes
+    // the floppies and is refused on the disc and on a planted original the
+    // account may only read, ejects each with the real `unmount`, and mounts
+    // the floppies again to read back what it wrote. The guest sink arms on
+    // the fixture's exit and passes on the shell's, typed only once
+    // `IMAGES PASS` appeared; a failing fixture parks with its reason, so the
+    // run times out loudly.
+    QemuTest {
+        package: "tairix-test-images-qemu-aarch64",
+        binary: "tairix-test-images-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::ImagesRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, IMAGES_COMMAND_LINE),
+            (IMAGES_PASS_PREFIX, Duration::ZERO, "exit\n"),
+        ],
+        expect: Expect::Pass,
+    },
     // `plans/SOUND.md` SND7: the same vertical over QEMU's USB speaker
     // behind a `qemu-xhci` controller (`FsDisk::UsbAudioRootDisk`). The
     // kernel discovers the controller's PCI function, `devmgr` autoloads the
@@ -8100,11 +8152,9 @@ static TESTS: &[QemuTest] = &[
     // boundary. On a fully verified exchange the server prints `TCPSERVE PASS …`
     // and exits 0; on any shortfall it prints the reason and parks forever (it
     // never exits), so the run times out fail-loud with the reason in the
-    // transcript. The guest audit sink arms on the server's audited `exit`
-    // (`sc=exit`, `comm=tcpserve`) and reports PASS on the next audited `exit`
-    // — the shell's, typed only after the `TCPSERVE PASS` marker appeared — so
-    // the report provably reached the transcript before the run ended (the
-    // session-ceiling arm-then-exit discipline). The harness additionally
+    // transcript. The guest audit sink passes on the shell's audited `exit`
+    // after the server's (`FixtureExit`), typed only after the `TCPSERVE PASS`
+    // marker appeared. The harness additionally
     // requires the client peer to report the whole transfer echoed and
     // verified, so neither side can pass alone. A 300-second budget covers
     // boot + bounded PBKDF2 + the two-process net bring-up + the loss-recovered
@@ -8356,10 +8406,9 @@ static TESTS: &[QemuTest] = &[
     //   command interpreter are exercised live and the tool exits cleanly of
     //   its own accord rather than being killed.
     //
-    // The guest audit sink arms on `telnet`'s own audited `exit`
-    // (`comm=telnet`) and reports PASS on the **next** audited `exit` — the
-    // shell's, typed only after the echo marker appeared — so the round trip
-    // provably reached the transcript before the run ended. The harness
+    // The guest audit sink passes on the shell's audited `exit` after
+    // `telnet`'s (`FixtureExit`), typed only after the echo marker appeared.
+    // The harness
     // additionally requires the peer's own verdict, which names the first step
     // the client failed to complete, so neither side can pass alone. A
     // 300-second budget covers boot + bounded PBKDF2 + the two-process net
@@ -9420,13 +9469,10 @@ static TESTS: &[QemuTest] = &[
     // child's stdout, and `cat < nums.txt` reads it back through a wired
     // stdin — `776005` is content only the written file could produce.
     // Each line is typed only after its marker appeared; every marker is
-    // output, never an echo of a typed line. The guest audit sink arms on
-    // the round trip `cat`'s audited `exit` (`sc=exit`, `comm=cat` — the
-    // last scripted tool, which only runs after every pipeline step
-    // completed) and reports PASS on the next audited `exit` — the
-    // shell's, typed only after the content marker appeared — so the
-    // verified bytes provably reached the transcript before the run ended
-    // (the session-ceiling arm-then-exit discipline). A 120-second budget
+    // output, never an echo of a typed line. The guest audit sink passes on
+    // the shell's audited `exit` after the round trip `cat`'s (`FixtureExit`;
+    // `cat` is the last scripted tool), typed only after the content marker
+    // appeared. A 120-second budget
     // covers boot + bounded PBKDF2 + the multi-exchange dialogue on QEMU
     // TCG; single CPU like the other full-boot verticals.
     QemuTest {
@@ -9501,12 +9547,10 @@ static TESTS: &[QemuTest] = &[
     // leaving the alternate screen; the shell prompt reappearing is the
     // intact-screen witness, after which the runner types `exit`. Each
     // line is typed only after its marker appeared; every marker is
-    // output, never an echo of a typed line. The guest audit sink arms on
-    // `sysmon`'s audited `exit` (`sc=exit`, `comm=sysmon`) and reports
-    // PASS on the next audited `exit` — the shell's, typed only after the
-    // restored prompt appeared — so the verified frames provably reached
-    // the transcript before the run ended (the session-ceiling
-    // arm-then-exit discipline). A 120-second budget covers boot + bounded
+    // output, never an echo of a typed line. The guest audit sink passes on
+    // the shell's audited `exit` after `sysmon`'s (`FixtureExit`), typed only
+    // after the restored prompt appeared. A 120-second budget covers boot +
+    // bounded
     // PBKDF2 + the interactive session on QEMU TCG; single CPU like the
     // other full-boot verticals.
     QemuTest {
@@ -12032,9 +12076,9 @@ fn library_plant(
     Ok((components, conf))
 }
 
-/// Split an absolute `/System/…` path into the root-volume-relative
-/// components a plant names. `/System/Settings` and `/System/Logs` are the
-/// writable exceptions rebased onto this volume, so a document planted here
+/// Split an absolute path into the root-volume-relative components a plant
+/// names: a home under `/Users`, or `/System/Settings` and `/System/Logs`, the
+/// writable exceptions rebased onto this volume, so a document planted there
 /// is the one a booted guest actually reads — the read-only `/System` volume
 /// is shadowed at those prefixes and anything planted there is unreachable.
 fn root_volume_components(t: &QemuTest, path: &str) -> Result<Vec<String>, String> {
@@ -12287,7 +12331,60 @@ fn root_plants(
         .map(|(components, text)| (components, text.into_bytes()))
         .collect();
     plants.extend(user_saver_plants(t, apps)?);
+    plants.extend(disk_image_plants(t)?);
     Ok(plants)
+}
+
+/// The disk images the disk-image vertical plants in its account's home,
+/// the system's, so the account may only read them: an Acorn ADFS floppy and
+/// an AmigaDOS floppy each holding the fixture's `ReadMe`, and the RISC OS
+/// disc (`plans/DISK-IMAGES.md` DI7).
+fn disk_image_plants(t: &QemuTest) -> Result<Vec<RootPlant>, String> {
+    use tairix_abi::driver::filesystem::{
+        FilesystemRead as _, FilesystemWrite as _, NodeKind, NodeSecurity,
+    };
+    use tairix_test_images::{
+        ACORN, ACORN_TEXT, AMIGA, AMIGA_LABEL, AMIGA_TEXT, DISC, PLANTED, README,
+    };
+
+    if t.fs_disk != FsDisk::ImagesRootDisk {
+        return Ok(Vec::new());
+    }
+    let fail = |what: &str, err: tairix_abi::DriverError| {
+        format!("test --qemu ({}): {what}: {err:?}", t.package)
+    };
+    let device = |sectors| {
+        tairix_mkimage::device::MemBlock::new(sectors).map_err(|err| fail("an image's device", err))
+    };
+    let readme = NodeSecurity::new(0o644, 0, 0);
+
+    let mut acorn =
+        tairix_drv_fs_adfs::Adfs::format(device(1600)?, tairix_drv_fs_adfs::AdfsVariant::E)
+            .map_err(|err| fail("the Acorn floppy", err))?;
+    let root = acorn.root();
+    let file = acorn
+        .create(root, README.as_bytes(), NodeKind::RegularFile, &readme)
+        .and_then(|file| acorn.write_all(file, 0, ACORN_TEXT))
+        .and_then(|()| acorn.flush())
+        .map_err(|err| fail("the Acorn floppy's ReadMe", err));
+    file?;
+    let acorn = acorn.into_device().into_bytes();
+
+    let amiga = tairix_test_amiga_image::ffs_volume(
+        device(tairix_test_amiga_image::FLOPPY_BLOCKS)?,
+        AMIGA_LABEL,
+        README.as_bytes(),
+        AMIGA_TEXT,
+    )
+    .map_err(|err| fail("the Amiga floppy", err))?
+    .into_bytes();
+
+    let planted = |name: &str| root_volume_components(t, &format!("{PLANTED}/{name}"));
+    Ok(vec![
+        (planted(ACORN)?, acorn),
+        (planted(AMIGA)?, amiga),
+        (planted(DISC)?, tairix_test_iso9660_image::riscos_disc()),
+    ])
 }
 
 /// Borrow [`root_plants`] output as the component-slice pairs the image
@@ -12631,6 +12728,12 @@ fn device_stores(
             return Ok((
                 super::image_apps::optical_store_files(ctx, arch, profile)?,
                 super::image_drivers::optical_driver_store_files(ctx, arch, profile)?,
+            ));
+        }
+        FsDisk::ImagesRootDisk => {
+            return Ok((
+                super::image_apps::images_store_files(ctx, arch, profile)?,
+                super::image_drivers::images_driver_store_files(ctx, arch, profile)?,
             ));
         }
         _ => return Ok((EMPTY, EMPTY)),
@@ -18804,6 +18907,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         | FsDisk::HdaAudioRootDisk
         | FsDisk::LifecycleAudioRootDisk
         | FsDisk::OpticalRootDisk
+        | FsDisk::ImagesRootDisk
         | FsDisk::RtcRootDisk => Some(net_root_fs_disk_image(t, stores)?),
     })
 }
@@ -18847,6 +18951,7 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
         FsDisk::HdaAudioRootDisk => (device_drivers, device_apps, "hda-audio-root.img"),
         FsDisk::LifecycleAudioRootDisk => (device_drivers, device_apps, "lifecycle-audio-root.img"),
         FsDisk::OpticalRootDisk => (device_drivers, device_apps, "optical-root.img"),
+        FsDisk::ImagesRootDisk => (device_drivers, device_apps, "images-root.img"),
         FsDisk::EcnRootDisk => (net_only_drivers, apps_with_tcpecho_ecn, "ecn-root.img"),
         FsDisk::ListenRootDisk => (net_only_drivers, apps_with_tcpserve, "listen-root.img"),
         FsDisk::NetToolRootDisk => (net_only_drivers, apps, "net-tool-root.img"),
@@ -19843,16 +19948,16 @@ mod tests {
         AARCH64_TARGET, APPBAR_LAUNCHED_SLOT, APPBAR_SETTLED_MARKER, APPBAR_SLOT_MARKER,
         AUDIOCUE_LINE, AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX,
         AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER,
-        DESKTOP_PRESSURE_ICONS_DRAWN_DUMP, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, IPI_SMP_AARCH64,
-        KEYBOARD_ONLY_ARMED_OCCURRENCES, LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL,
-        LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER, MEMSOAK_PASS_PREFIX, OPTICAL_COMMAND_LINE,
-        OPTICAL_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL, RISCV64_TARGET, SCRIPTED_LIFECYCLE,
-        STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER, STARTUP_PLAYED_MARKER,
-        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
-        SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
-        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
-        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
-        VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
+        DESKTOP_PRESSURE_ICONS_DRAWN_DUMP, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
+        IMAGES_COMMAND_LINE, IMAGES_PASS_PREFIX, IPI_SMP_AARCH64, KEYBOARD_ONLY_ARMED_OCCURRENCES,
+        LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL, LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER,
+        MEMSOAK_PASS_PREFIX, OPTICAL_COMMAND_LINE, OPTICAL_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL,
+        RISCV64_TARGET, SCRIPTED_LIFECYCLE, STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER,
+        STARTUP_PLAYED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
+        SUPERVISOR_MOUNT_SCRIPT, SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX,
+        TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
+        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
+        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -21322,6 +21427,21 @@ mod tests {
         let pass = tairix_test_optical::pass_line();
         assert!(pass.starts_with(OPTICAL_PASS_PREFIX), "{pass}");
         assert!(!tairix_test_optical::swap_line().contains(OPTICAL_PASS_PREFIX));
+    }
+
+    /// The disk-image vertical types the fixture's own command word and waits
+    /// for the pass line the fixture prints.
+    #[test]
+    fn images_script_matches_the_fixture_vocabulary() {
+        assert_eq!(
+            IMAGES_COMMAND_LINE.trim_end_matches('\n'),
+            tairix_test_images::COMMAND
+        );
+        assert!(
+            IMAGES_COMMAND_LINE.ends_with('\n'),
+            "the shell needs the return"
+        );
+        assert!(tairix_test_images::pass_line().starts_with(IMAGES_PASS_PREFIX));
     }
 
     /// The audio verticals' serial-script marker is exactly the `audiotone`

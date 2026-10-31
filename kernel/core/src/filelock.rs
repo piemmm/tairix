@@ -409,6 +409,13 @@ impl Wakes {
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
+
+    /// Unpark the waiters, with the registry's lock already released.
+    pub fn wake(&self) {
+        if let Some(key) = self.key {
+            crate::waitq::file_lock_wake(crate::waitq::WakeKey::new(key), &self.tasks);
+        }
+    }
 }
 
 /// Registry state behind [`REGISTRY`].

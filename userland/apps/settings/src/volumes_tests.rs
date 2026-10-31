@@ -74,7 +74,7 @@ fn system() -> MountRecord {
 use crate::test_support::theme;
 
 fn readings(records: &[MountRecord]) -> Readings {
-    let volumes: Vec<VolumeReading> = records.iter().map(VolumeReading::of).collect();
+    let volumes: Vec<VolumeReading> = records.iter().filter_map(VolumeReading::of).collect();
     Readings::new(&volumes)
 }
 
@@ -320,4 +320,21 @@ fn a_machine_with_no_mounted_volume_draws_no_card() {
     assert!(readings
         .placed_for_test(Rect::new(0, 0, 600, 800), Scale::ONE, &theme())
         .is_empty());
+}
+
+#[test]
+fn another_users_private_volume_draws_no_card() {
+    let theirs = record(
+        b"Letters.adf",
+        b"/Storage/letters",
+        b"affs",
+        usage(440, 10, 10),
+        MountAvailability::Available,
+        None,
+    )
+    .withheld();
+    assert_eq!(VolumeReading::of(&theirs), None);
+    let readings = readings(&[system(), theirs]);
+    assert_eq!(readings.len(), 1, "its absences would not be the volume's");
+    assert_eq!(readings.caption(0), Some("arx0p2"));
 }

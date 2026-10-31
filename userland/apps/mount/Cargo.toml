@@ -1,6 +1,6 @@
 [package]
 name = "tairix-mount"
-description = "TAIRiX `mount` CLI: list mounted filesystems via the System Information API and attach new ones (`userland/apps/` — `PLAN.md` Stage 6)."
+description = "TAIRiX `mount` CLI: list the mounted filesystems, and mount a disk image for the user who runs it (`plans/DISK-IMAGES.md` DI6)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,15 +11,42 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, as for `tairix-df`; host tooling
+# builds only the pure library, so the host test build never pulls the
+# runtime's `_start`, allocator or panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+# The `tairix-mount` library (the pure parse + mount engine) and the `Run`
+# entry-point binary of the `mount` tool, an inert stub on the host.
+[[bin]]
+name = "tairix-mount-run"
+path = "src/run.rs"
+
 [dependencies]
-# The shared command-line option-value resolver: one definition of
-# "attached value or the following argument", so no two tools disagree.
-tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
-# The frozen `Errno`, the `MountFlags` mount-policy bitmap the tool parses
-# and presents, and the `sysinfo-v1` mount-list surface; `mount` invents no
-# parallel error or flag set and never links a kernel or driver crate.
+# The audited ABI vocabulary: `Errno`, the image attach and its reply, the
+# format names `-t` takes, and the mount and view records listed.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The shared System Information API client helpers: the `Transport`/`Output`
-# seams, request framing, and the mount-table paging + render shared with the
-# other `sysinfo` clients. `mount` consumes these rather than duplicating them.
+# The one help engine: the shared own-bundle short-help render the
+# `-h`/`-?`/`--help` switches use (plans/APPS.md).
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The shared System Information API client: the mount-table paging walk,
+# the namespace join and the one `source on target` rendering.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+# The shared `getopt` scanner, the output seam and the operand quoting.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime (`_start`,
+# canary, panic handler, allocator, standard streams, and the image attach
+# and `realpath` calls).
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The help engine's syscall-backed own-bundle `HelpSource` (`BundleHelp`)
+# and `lib/procinfo`'s production `IpcTransport`.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

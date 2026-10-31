@@ -632,7 +632,7 @@ pub const CONSOLE_INHERIT: u64 = u64::MAX;
 /// running process can never change its *own* identity; the credential is
 /// fixed at creation and only ever narrows or switches through a privileged
 /// spawn (there is no setuid-self).
-pub const SPAWN_UID_INHERIT: u32 = u32::MAX;
+pub const SPAWN_UID_INHERIT: u32 = crate::UNASSIGNABLE_ID;
 
 /// The `stack_len` argument to [`crate::SyscallNumber::THREAD_CREATE`] that
 /// asks for the kernel's default per-thread stack size instead of naming one.

@@ -36,8 +36,8 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `HARDWARE_TREE`         | `CAP_SYSINFO_HW`       | yes     |
 | `SYSTEM_IDENTITY`       | none                   | no      |
 | `UPTIME`                | none                   | no      |
-| `MOUNT_LIST`            | none                   | no      |
-| `VIEW_LIST`             | none                   | no      |
+| `MOUNT_LIST`            | none (scoped)          | no      |
+| `VIEW_LIST`             | none (scoped)          | no      |
 | `PLATFORM_COMPATIBLE`   | none                   | no      |
 | `RESOURCE_LIMITS`       | none (self-scoped)     | no      |
 | `PROCESS_IDENTITY`      | none (self-scoped)     | no      |
@@ -92,10 +92,21 @@ own processes") require no capability; the global view does
 names its owner; every other bit is reserved, and a record carrying one is
 refused. The hardware-tree query gates the read-only view of
 the detected hardware tree (`AGENTS.md` §18.4). `MOUNT_LIST` and
-`VIEW_LIST` are ungated: the mount table is system-wide and secret-free, so
-— like `UPTIME` and `SYSTEM_IDENTITY` — any task may read it; the
-privileged *act* of mounting is gated separately by `CAP_FS_MOUNT`
-(`AGENTS.md` §5.2) and is not part of this read-only API. `MOUNT_LIST`
+`VIEW_LIST` are ungated: every volume is listed to every task, as the
+`/Storage` catalog shows its name to any. What a principal attached presented
+to itself alone — a private disk image or network share, which
+`MountRecord::private` marks — is listed to another principal without the
+source it was attached from or the usage of what it holds
+(`MountRecord::withheld`, which `MountRecord::is_withheld` marks, so the
+empty source and zero usage read as unknown rather than absent); one
+presented to others too is listed whole. A binding is listed as the volume it
+shows is: one of a volume kept from the caller is left out, unless it is that
+volume's catalog entry, listed without the subtree it shows
+(`ViewBindingRecord::withheld`). No capability widens either list — what an
+ungated query discloses is fixed by the query, not its caller. `sysinfod`
+applies this scope, as it scopes every per-principal answer. The privileged *act* of mounting is gated
+separately by `CAP_FS_MOUNT` (`AGENTS.md` §5.2) and is not part of this
+read-only API. `MOUNT_LIST`
 reports each attached volume once — its source, type, attach flags,
 capacity, availability, medium and identity, and the view path showing its
 root — and `VIEW_LIST` each view binding: its path, the subtree of the
@@ -757,7 +768,9 @@ the request/render libraries stay testable against in-memory fixtures.
   ([`MACHINE_ID_LEN`] bytes), the OS version triple, and an inline
   hostname bounded by [`HOSTNAME_MAX`].
 - [`MountRecord`] — one mount-table entry: the backing `source` (bounded
-  by [`MOUNT_SOURCE_MAX`]), the `target` mount point ([`MOUNT_TARGET_MAX`]),
+  by [`MOUNT_SOURCE_MAX`]; a longer name is cut between characters and the
+  record marked `source_cut`, so a cut never passes for the whole), the
+  `target` mount point ([`MOUNT_TARGET_MAX`]),
   the `fstype` naming its on-disk format (`ext2` for an ext2 volume the ext4
   driver serves; [`MOUNT_FSTYPE_MAX`]), the [`MountFlags`] mount-policy
   bitmap (`ro`/`noexec`), the volume's live [`MountAvailability`] (so
@@ -766,10 +779,10 @@ the request/render libraries stay testable against in-memory fixtures.
   array's completions carry that state across the block-service seam,
   [block drivers](../drivers/block.md)), its stable 16-byte volume identity ([`VOLUME_ID_LEN`],
   all-zero when the mount publishes none — the identity a `volume_detach`
-  request names), the principal that attached it when a network volume's
-  principal did (`owner`, which may detach it without `CAP_FS_MOUNT`), its
-  [`VolumeClass`] (local or network), the storage `medium` of the block
-  device backing it, and
+  request names), the principal that attached a network or disk-image
+  volume (`owner`, which may detach it without `CAP_FS_MOUNT`), its
+  [`VolumeClass`] (`0` local, `1` network, `2` one a disk-image file holds),
+  the storage `medium` of the block device backing it, and
   the volume's space accounting as a `VolumeStats` usage block (block size,
   whether the volume is down to its reserve, and 64-bit
   total/free/available block and inode counts) — the figures `df` renders.
@@ -791,9 +804,13 @@ the request/render libraries stay testable against in-memory fixtures.
   backing (a synthetic or view mount), for a device whose medium word this
   ABI does not define, and for a wire byte a decoder does not recognise:
   the record never fabricates a medium nobody reported. On the wire the
-  medium is one byte after `availability`, `0` meaning unknown and a known
-  medium its discriminant plus one; the seven bytes that follow it are
-  reserved-must-be-zero and a decode refuses a record that sets them.
+  medium is the block ABI's eight-byte record after `availability`: the
+  transport (`0xFF` for a device that declared none), the rotation and its
+  evidence, the removability and its evidence, the form (`Unspecified`,
+  `OpticalDisc`, `FloppyDisk`), and the nominal rate. An image's transport
+  is `Virtual`, so an `OpticalDisc` or `FloppyDisk` form there names the
+  layout of the volume its file holds, not a drive. A record this ABI does
+  not define decodes as *unknown*; it is never refused.
 
   **The record's block counts are turned into facts in exactly one place.**
   Every surface that reports a volume — `df`, `mount`, `sysmon`, the

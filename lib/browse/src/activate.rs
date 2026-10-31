@@ -77,4 +77,11 @@ pub enum Activation {
     /// it as it was displayed (`plans/ZEROCONF.md` §6.3). The engine names the
     /// endpoint and mounts nothing itself.
     MountEndpoint(Box<NetworkEndpoint>),
+    /// The entry is a disk image at `path`: the caller mounts the volume it
+    /// holds for the user ([`crate::mount`]) and shows it. The engine names
+    /// the file and mounts nothing itself.
+    MountImage {
+        /// The image's validated absolute path.
+        path: String,
+    },
 }

@@ -236,7 +236,10 @@ or the `fsserve-v1` framing on the endpoint (`docs/src/abi/fsserve.md`). A
 filesystem driver written in C needs all of them, so they land together, one
 header per module (`tairix_volume.h`, `tairix_fsserve.h`); the `VolumeInfo`
 flag bits, private to `lib/abi` today, become public so the generator reads
-them rather than re-typing them.
+them rather than re-typing them. `TAIRIX_FSSERVE_VERSION`, `TAIRIX_VOLUME_FS_*`
+and `TAIRIX_VOLUME_NAME_MAX`, which `tairix_syscall.h` publishes for the attach
+frame, move into those headers and `tairix_syscall.h` includes them, so each
+is still defined once.
 
 **Deliverables**
 - Grow the `tools/xtask` generator (`commands/c_header.rs`) from the current

@@ -61,7 +61,9 @@ use crate::driver::audio::{
     SampleFormat, SampleFormats, StreamDirection, AUDIO_NAME_MAX, CHANNEL_MAP_WIRE_LEN,
     GAIN_RANGE_WIRE_LEN, MAX_DEVICE_ENDPOINTS, RATE_SUPPORT_WIRE_LEN,
 };
-use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
+use crate::le::{
+    decode_bool, put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64,
+};
 use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::time::{Duration64, Time64};
 use crate::Errno;
@@ -1061,11 +1063,7 @@ fn decode_control(op: u8, body: &[u8]) -> Result<AudioRequest, Errno> {
             if value[1..].iter().any(|b| *b != 0) {
                 return Err(Errno::BadMagic);
             }
-            let muted = match value[0] {
-                0 => false,
-                1 => true,
-                _ => return Err(Errno::OutOfRange),
-            };
+            let muted = decode_bool(value[0])?;
             Ok(AudioRequest::SetMute { device_id, muted })
         }
     }
@@ -1164,11 +1162,7 @@ fn decode_mute(body: &[u8]) -> Result<AudioRequest, Errno> {
     if body[level::MUTED + 1..].iter().any(|b| *b != 0) {
         return Err(Errno::BadMagic);
     }
-    let muted = match body[level::MUTED] {
-        0 => false,
-        1 => true,
-        _ => return Err(Errno::OutOfRange),
-    };
+    let muted = decode_bool(body[level::MUTED])?;
     Ok(AudioRequest::Mute {
         stream_id: checked_stream(read_u64(body, level::STREAM))?,
         muted,

@@ -381,6 +381,24 @@ fn the_filesystem_vocabulary_reports_the_volume() {
     assert_eq!(id, device);
 }
 
+#[test]
+fn another_principals_private_volume_reports_no_figures() {
+    let fs = tree();
+    let (volume, view) = mount("/vol", "affs", 512);
+    let mounts = MockMounts(vec![(volume.withheld(), view)]);
+    let names = MockNames(None);
+    let (out, _, clean) = go(
+        &["-f", "-c", "%a %b %c %d %f %s %S %T %n", "/vol/file"],
+        &fs,
+        &mounts,
+        &names,
+    );
+    assert_eq!(out, "? ? ? ? ? ? ? affs /vol/file\n");
+    assert!(clean);
+    let (blksize, _, _) = go(&["-c", "%o", "/vol/file"], &fs, &mounts, &names);
+    assert_eq!(blksize, "?\n");
+}
+
 /// GNU 9.4's default report keeps its indentation and column widths: the
 /// mode zero-padded to four digits, the ids right-aligned.
 #[test]

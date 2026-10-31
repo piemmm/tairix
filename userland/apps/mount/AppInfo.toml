@@ -1,0 +1,16 @@
+# Signed-AppInfo manifest source for the `mount` command app
+# (plans/DISK-IMAGES.md DI6). Discovered by the build's app-bundle composer;
+# the capability list is the bundle's request, intersected with the launching
+# user's grants. CAP_CONSOLE_WRITE covers the inherited standard streams;
+# CAP_FS_ACCESS opens the disk image the user names, and the tool's own
+# Help/ documents, through the secured VFS — the image attach itself asks
+# the caller for exactly that. A private image mount needs nothing more,
+# and the mount table comes from the ungated sysinfo-v1 queries.
+id = "os.tairix.mount"
+name = "mount"
+title = "Mount"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "mount.png"

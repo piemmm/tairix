@@ -20,7 +20,10 @@ monté rapporte sa propre comptabilité. Par défaut, le rapport masque
 les montages sans capacité propre (les liaisons de vue synthétiques du
 système) et les montages supplémentaires d'un volume déjà listé ; `-a`
 montre tout, et le nombre d'entrées masquées est noté sur le flux
-d'information standard (fd 3), jamais dans la table.
+d'information standard (fd 3), jamais dans la table. Un volume qu'un
+autre utilisateur garde privé est lui aussi omis, et noté à part ;
+`-a` le liste avec `-` pour chaque chiffre que seul cet utilisateur
+peut voir.
 
 Les tailles sont affichées en blocs de 1024 octets sauf si une option
 d'unité en décide autrement ; une option d'unité ultérieure remplace
@@ -37,8 +40,9 @@ continue avec le reste. Les options GNU `--output`, `--sync` et
 
 ## OPTIONS
 
-- `-a, --all` — inclure les montages sans capacité et en double que
-  le comportement par défaut masque.
+- `-a, --all` — inclure les montages sans capacité et en double,
+  ainsi que les volumes privés des autres utilisateurs, que le
+  comportement par défaut masque.
 - `-T, --print-type` — ajouter la colonne du type de système de
   fichiers.
 - `-t, --type <type>` — ne rapporter que les systèmes de fichiers du
@@ -50,7 +54,7 @@ continue avec le reste. Les options GNU `--output`, `--sync` et
 - `-P, --portability` — le format portable POSIX (en-têtes
   `1024-blocks` et `Capacity`).
 - `-l, --local` — restreindre le rapport aux systèmes de fichiers
-  locaux (tous les montages TAIRiX aujourd'hui : rien n'est filtré).
+  locaux, en omettant les partages réseau.
 - `--total` — ajouter une ligne étiquetée `total` sommant les
   chiffres affichés.
 - `-k` — blocs de 1024 octets (la valeur par défaut).

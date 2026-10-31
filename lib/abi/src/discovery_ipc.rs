@@ -53,7 +53,7 @@
 
 use core::net::IpAddr;
 
-use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::le::{decode_bool, put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::net_ipc::{address_parts, ip_from_parts, validate_if_name, NetAddrFamily, IF_NAME_LEN};
 use crate::origin::{Origin, TrustDomain};
 use crate::reply::{decode_status_reply, encode_status_reply, STATUS_REPLY_LEN};
@@ -1316,11 +1316,7 @@ impl<'a> CollectReply<'a> {
             .get(..COLLECT_HEADER_LEN)
             .ok_or(Errno::BufferTooSmall)?;
         let count = read_u16(header, STATUS_REPLY_LEN);
-        let more = match header[STATUS_REPLY_LEN + 2] {
-            0 => false,
-            1 => true,
-            _ => return Err(Errno::BadMagic),
-        };
+        let more = decode_bool(header[STATUS_REPLY_LEN + 2]).map_err(|_| Errno::BadMagic)?;
         if header[STATUS_REPLY_LEN + 3] != 0 {
             return Err(Errno::BadMagic);
         }

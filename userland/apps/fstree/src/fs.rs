@@ -13,6 +13,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::sysinfo::MountRecord;
 use tairix_abi::time::Time64;
 use tairix_abi::{Errno, FileId, FileKind};
 use tairix_fscopy::op::{OpError, Verb};
@@ -55,6 +56,24 @@ pub struct VolumeInfo {
     /// What the volume holds, or `None` when it tracks no capacity
     /// (shown as absent, never fabricated).
     pub space: Option<VolumeBytes>,
+}
+
+impl VolumeInfo {
+    /// The root `record` names, or `None` for one the session cannot open:
+    /// another principal's private volume, withheld from it, or a target
+    /// that is not text.
+    #[must_use]
+    pub fn of(record: &MountRecord) -> Option<Self> {
+        if record.is_withheld() {
+            return None;
+        }
+        let target = core::str::from_utf8(record.target_bytes()).ok()?;
+        Some(Self {
+            target: String::from(target),
+            fstype: String::from(core::str::from_utf8(record.fstype_bytes()).unwrap_or("?")),
+            space: VolumeBytes::of(&record.usage()),
+        })
+    }
 }
 
 /// The filesystem operations the landed stages perform: listings, the

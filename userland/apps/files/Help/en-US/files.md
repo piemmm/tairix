@@ -92,12 +92,20 @@ as a RISC OS filetype; any attribute the destination cannot keep is named
 in a warning once the operation ends.
 
 The right-click menu opens with *Display*. Beneath it a submenu names what
-the menu acts on — *File ‘notes.txt’*, a long name shortened in the middle so
-its extension still shows, or *Selection* when several items are selected —
-and holds *Open*, *Open With…*, *Get Info…*, *Rename*, *Cut*, *Copy* and
-*Delete*; a row that cannot act there is greyed and says why. *New* follows
-it, then *Select All* and *Clear Selection*, and *Paste* last. A right-click
-on empty space clears the selection, so the item's submenu is greyed.
+the menu acts on — *File ‘notes.txt’*, a long name shortened in the middle
+so its extension still shows, or *Selection* when several items are selected
+— and holds *Open*, *Open With…*, *Mount Read-Only*, *Eject*, *Get Info…*,
+*Rename*, *Cut*, *Copy* and *Delete*; a row that cannot act there is greyed
+and says why. *New* follows it, then *Select All* and *Clear Selection*, and
+*Paste* last. A right-click on empty space clears the selection, so the
+item's submenu is greyed.
+
+Opening a disk image — an `.iso`, `.adf`, `.hdf` and the like — mounts it
+for you in `/Storage`, writable where the file is, and opens its window;
+*Mount Read-Only* mounts it read-only instead. It stays mounted until you
+eject it or your login session ends. *Eject* takes off a volume you mounted,
+from its icon or from its row in the places rail, whose own right-click menu
+holds *Open* and *Eject*; your windows on it move to `/Storage` first.
 
 The right-click menu's *New* submenu makes a folder, or an empty document of
 each kind an installed editor writes, and opens its name for editing.

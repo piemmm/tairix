@@ -110,6 +110,12 @@ pub enum DesktopActivation {
         /// The document to open, if this launch came from a plain file.
         document: Option<LaunchDocument>,
     },
+    /// Mount the disk image at this absolute path for the user, and show the
+    /// volume it holds.
+    MountImage {
+        /// The absolute path of the image, or of the shortcut naming it.
+        path: String,
+    },
 }
 
 /// A document the desktop opens for the application it launches.
@@ -1254,10 +1260,10 @@ impl<S: DirectorySource> Desktop<S> {
     /// Resolve what activating the icon at `index` means.
     ///
     /// A directory opens the file manager at it; an application bundle
-    /// launches; a plain file launches the application the shared association
-    /// model picks for it, opening the file. A file nothing is
-    /// associated with is refused with a stated reason and nothing else
-    /// happens.
+    /// launches; a disk image is mounted, as the file manager mounts one; any
+    /// other file launches the application the shared association model picks
+    /// for it, opening the file. A file nothing is associated with is refused
+    /// with a stated reason and nothing else happens.
     ///
     /// A **shortcut** — a symbolic link on the desktop — acts on what it
     /// names: a folder or a file is opened through the link (the kernel
@@ -1298,6 +1304,13 @@ impl<S: DirectorySource> Desktop<S> {
                     bundle_label(leaf_of(&bundle_path)),
                     None,
                 )))
+            }
+            EntryKind::File | EntryKind::Link(LinkTarget::File)
+                if tairix_browse::media_for_entry(entry, &self.folder).holds_a_volume() =>
+            {
+                DesktopOutcome::acting(DesktopAction::Activate(DesktopActivation::MountImage {
+                    path,
+                }))
             }
             EntryKind::File | EntryKind::Link(LinkTarget::File) => {
                 match applications_for(entry.name(), apps).first() {

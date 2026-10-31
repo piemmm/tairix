@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscLayout};
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
-use tairix_fsprobe::{adfs, ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC, FAT_DIR_ENTRY_LEN};
+use tairix_fsprobe::{adfs, affs, ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC, FAT_DIR_ENTRY_LEN};
 
 /// An in-memory device over a byte image.
 pub struct Image {
@@ -182,6 +182,46 @@ pub fn adfs_old_map(name: &[u8; 10]) -> Vec<u8> {
     image[511] = adfs::old_map_checksum(&image[256..512]);
     image[512 + 1..512 + 5].copy_from_slice(b"Hugo");
     image
+}
+
+/// An AmigaDOS volume of `blocks` blocks of `block_size` bytes: a `DOS`
+/// boot block of type `flags` and a root block named `name` at the volume's
+/// middle.
+pub fn affs_volume(flags: u8, block_size: usize, blocks: u64, name: &[u8]) -> Vec<u8> {
+    let mut image = vec![0u8; blocks as usize * block_size];
+    image[..3].copy_from_slice(b"DOS");
+    image[3] = flags;
+    let root = affs::root_block(blocks);
+    image[8..12].copy_from_slice(&(root as u32).to_be_bytes());
+    let at = root as usize * block_size;
+    write_affs_root(&mut image[at..at + block_size], name);
+    image
+}
+
+/// Lay a root block named `name` out in `block`, its checksum sealed.
+pub fn write_affs_root(block: &mut [u8], name: &[u8]) {
+    let offsets = affs::Offsets::new(block.len());
+    block.fill(0);
+    affs::put_be32(block, 0, affs::T_HEADER);
+    affs::put_be32(block, 12, offsets.table_len() as u32);
+    affs::put_be32(block, offsets.bm_flag(), affs::BITMAP_VALID);
+    block[offsets.name()] = name.len() as u8;
+    block[offsets.name() + 1..offsets.name() + 1 + name.len()].copy_from_slice(name);
+    affs::DateStamp {
+        days: 9000,
+        mins: 600,
+        ticks: 25,
+    }
+    .write(block, offsets.created());
+    affs::put_be32(block, offsets.sec_type(), affs::ST_ROOT);
+    seal_affs(block);
+}
+
+/// Recompute `block`'s checksum at byte 20, where every header keeps it.
+pub fn seal_affs(block: &mut [u8]) {
+    affs::put_be32(block, 20, 0);
+    let sum = affs::checksum(block, 20);
+    affs::put_be32(block, 20, sum);
 }
 
 pub mod iso {

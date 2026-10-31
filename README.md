@@ -118,7 +118,8 @@ for filesystems, the feature section below.
 | Receive pre-filter (foreign traffic shed before the stack wakes) | ✓ | ✓ | ✓ | — |
 | USB host controller (xHCI: enumeration, hubs, hotplug, isochronous streams) | ✓ qemu-xhci | ✓ qemu-xhci + ◐ VL805 | ✓ qemu-xhci | — |
 | USB optical drives (multimedia units, sessions, removal) | ▢ | ✓ qemu-xhci | ▢ | — |
-| Removable-media filesystems served from user space (`fsserve-v1`: ARXFS, ext2/3/4, FAT32, ADFS, ISO 9660, UDF) | ▢ | ✓ | ▢ | — |
+| Removable-media filesystems served from user space (`fsserve-v1`: ARXFS, ext2/3/4, FAT32, ADFS, AmigaDOS, ISO 9660, UDF) | ▢ | ✓ | ▢ | — |
+| Disk images mounted for their owner (ISO 9660, UDF, FAT32, ADFS, AmigaDOS; double-click or `mount`; private; ejected, or gone with the session) | ▢ | ✓ | ▢ | — |
 | Input devices | ✓ virtio + ◐ ps2 | ✓ virtio + ◐ USB HID | ✓ virtio | ✓ host |
 | Touch input (multitouch frames; tap, scroll and pinch gestures) | ◐ virtio | ◐ virtio + ◐ USB HID | ◐ virtio | ▢ |
 | Audio playback and capture (`audiod` mixer, one path, no bypass) | ◐ virtio + USB + HD Audio | ◐ virtio + USB + HD Audio + Pi jack, I²S, HDMI | ◐ virtio + USB + HD Audio | ▢ |
@@ -172,9 +173,10 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 | Device-health monitoring → triggered scrub | ✓ | — | — | — | — |
 
 TAIRiX ships drivers for ARXFS (native) and for ext2/ext3/ext4, FAT32,
-ADFS, ISO 9660 (read-only: Joliet, Rock Ridge, High Sierra) and UDF 1.02–2.60
-as interoperability drivers for foreign volumes; on removable media each runs
-in user space, reaching only its own volume's blocks. A copy onto ARXFS keeps a
+ADFS, AmigaDOS (OFS and FFS), ISO 9660 (read-only: Joliet, Rock Ridge, High
+Sierra) and UDF 1.02–2.60 as interoperability drivers for foreign volumes; on
+removable media and in disk images each runs in user space, reaching only its
+own volume's blocks. A copy onto ARXFS keeps a
 file's RISC OS filetype, Mac type and creator, Amiga comment and holes.
 
 ## Security & attack-vector prevention

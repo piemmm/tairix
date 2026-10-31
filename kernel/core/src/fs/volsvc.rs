@@ -12,18 +12,22 @@
 //!
 //! The same service answers the filesystem driver serving an attached volume
 //! from user space (`plans/FSSERVE.md` §4–§5): its block transfers, and its
-//! offer to serve the volume or its refusal; and a network filesystem server's
+//! offer to serve the volume or its refusal; a network filesystem server's
 //! offer of a volume to one principal, that principal's attach of it, and the
-//! server's word on it (`plans/FSSERVE.md` §6).
+//! server's word on it (`plans/FSSERVE.md` §6); and the volume a disk-image
+//! file holds, attached for the principal that handed over the file
+//! (`plans/DISK-IMAGES.md`).
 
 use alloc::sync::Arc;
 
 use tairix_abi::fsserve::ServeOffer;
+use tairix_abi::imageattach::{ImageAttach, ImageAttachReply};
 use tairix_abi::netattach::{AttachReply, FsserveCtl, NetworkAttach, NetworkOffer, OfferId};
 use tairix_abi::volume::{VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeInfo};
-use tairix_abi::{AppIdentity, CapabilityId, CapabilityQuery, DriverError, Errno};
+use tairix_abi::{AppIdentity, CapabilityId, CapabilityQuery, DriverError, Errno, ProcId};
 use tairix_kernel_ipc::CallEndpoint;
 
+use super::NodeHandle;
 use crate::sharedreg::KernelHold;
 
 /// What a served-volume read hands each chunk to, with the chunk's offset into
@@ -72,6 +76,18 @@ pub struct OfferingServer<'a> {
     pub app: &'a AppIdentity,
 }
 
+/// The disk-image file an `image_attach` caller handed over.
+pub struct ImageSource {
+    /// The file, acting as the caller's identity frozen at the attach.
+    pub file: NodeHandle,
+    /// Whether the caller's descriptor may write it.
+    pub writable: bool,
+    /// The caller's login session, whose end detaches the volume.
+    pub session: ProcId,
+    /// The calling task, which waits for the volume's driver.
+    pub task: u64,
+}
+
 /// The runtime volume attach/detach operations the syscall handlers
 /// delegate to.
 ///
@@ -102,8 +118,8 @@ pub trait VolumeService: Sync {
     ) -> Result<(), Errno>;
 
     /// Flush, unmount, and unpublish the runtime-attached volume
-    /// `request` names, for `caller`: a network volume's owner, or any
-    /// caller holding the mount authority.
+    /// `request` names, for `caller`: the principal a network or disk-image
+    /// volume was attached for, or any caller holding the mount authority.
     ///
     /// # Errors
     ///
@@ -222,7 +238,38 @@ pub trait VolumeService: Sync {
     ///
     /// [`Errno::NotFound`] for no such offer made by `server`.
     fn offer_ctl(&self, server: u64, offer: OfferId, op: FsserveCtl) -> Result<(), Errno>;
+
+    /// Attach the volume the image file `source` holds for `caller`, as
+    /// `attach` asks, waiting until its driver serves or refuses it, and hand
+    /// the answer to `answer`. What an answer `answer` refuses would have
+    /// left is undone, so a caller never told of a volume is not given one. A
+    /// file the kernel will not attach, and a refused target or asked name,
+    /// are answers, not errors.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for a presentation `caller` may not ask
+    /// for; [`Errno::AlreadyExists`] when no name it could take is free;
+    /// [`Errno::ReadOnly`] for an attach asking `Writable` of a descriptor or
+    /// format that will not write; [`Errno::Busy`] for a file locked against
+    /// it — any lock refuses a writable attach, a writer's any attach — or a
+    /// volume of it being attached or detached; [`Errno::LimitExceeded`] past the
+    /// principal's image bound or the nesting bound; [`Errno::TimedOut`] for a
+    /// driver that never answered; [`Errno::Interrupted`] for a caller killed
+    /// while it waited; [`Errno::NotAttached`] for a volume detached before it
+    /// could be answered; the refusals of mounting it and of `answer`; or
+    /// [`Errno::NotImplemented`] before a service is installed.
+    fn attach_image(
+        &self,
+        caller: &Principal<'_>,
+        source: ImageSource,
+        attach: &ImageAttach<'_>,
+        answer: AnswerSink<'_>,
+    ) -> Result<(), Errno>;
 }
+
+/// Where an image attach's answer is delivered to its caller.
+pub type AnswerSink<'a> = &'a mut dyn FnMut(&ImageAttachReply) -> Result<(), Errno>;
 
 /// The fail-closed default: every operation reports
 /// [`Errno::NotImplemented`] until a boot path installs a real service.
@@ -304,6 +351,16 @@ impl VolumeService for NullVolumeService {
     fn offer_ctl(&self, _server: u64, _offer: OfferId, _op: FsserveCtl) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
+
+    fn attach_image(
+        &self,
+        _caller: &Principal<'_>,
+        _source: ImageSource,
+        _attach: &ImageAttach<'_>,
+        _answer: AnswerSink<'_>,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// The shared [`NullVolumeService`] the syscall handlers default to.
@@ -366,5 +423,35 @@ mod tests {
             NULL_VOLUME_SERVICE.attach_offered(&caller, offer, &attach),
             Err(Errno::NotImplemented)
         );
+        let volume = Arc::new(super::super::VolumeNodes::new(1));
+        let file = crate::test_bundle::node_handle(crate::test_bundle::opened_node(
+            &volume,
+            9,
+            tairix_abi::driver::filesystem::NodeKind::RegularFile,
+            "/Users/a/disk.adf",
+        ));
+        let source = ImageSource {
+            file,
+            writable: true,
+            session: tairix_kernel_sec::session::ROOT_SESSION,
+            task: 1,
+        };
+        let image = ImageAttach {
+            name: None,
+            presentation: tairix_abi::netattach::Presentation::Private,
+            access: tairix_abi::imageattach::ImageAccess::WritableWherePossible,
+            target: None,
+            expects: None,
+            adopt: false,
+        };
+        let mut answered = false;
+        assert_eq!(
+            NULL_VOLUME_SERVICE.attach_image(&caller, source, &image, &mut |_| {
+                answered = true;
+                Ok(())
+            }),
+            Err(Errno::NotImplemented)
+        );
+        assert!(!answered, "nothing is answered");
     }
 }

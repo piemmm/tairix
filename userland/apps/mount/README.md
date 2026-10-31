@@ -1,84 +1,58 @@
-# `tairix-mount` — list and attach filesystems
+# `tairix-mount` — list filesystems, and mount disk images
 
-Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `mount` both reports
-and changes the mount table, and the two halves take different paths.
-**Listing** the mounted filesystems is a read of live system state, so —
-like `ps` — it goes through the typed, versioned, capability-checked System
-Information API (`sysinfo-v1`) served by `/System/Services/sysinfod.app/Run`
-(`AGENTS.md` §16.6): TAIRiX has no `/proc` and no mount-table file, so
-`mount` issues the ungated `MOUNT_LIST` and `VIEW_LIST` queries and has no
-privileged path that bypasses the capability check. **Attaching** a filesystem is
-privileged — it needs `CAP_FS_MOUNT` (`AGENTS.md` §5.2) — and the kernel,
-not this tool, makes that decision (`AGENTS.md` §5.4).
+Stability tier: **experimental**.
 
-The crate is `no_std` (with `alloc`, used only by the test fixtures), has no
-`unsafe`, and no `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md`
-§2.9). Its only dependencies are the audited `tairix-abi` crate, the
-shared `tairix-procinfo` client helpers, and the shared `tairix-util`
-command-line scanner, so it never links a kernel or driver crate
-(`AGENTS.md` §17.4).
+The `mount` command app. With no operands it lists the mount table through
+the System Information API's ungated `MOUNT_LIST` and `VIEW_LIST` queries,
+one `source on target type fstype (options)` line per view binding. With an
+`IMAGE` operand it mounts the volume that disk-image file holds, privately,
+for the user who runs it (`plans/DISK-IMAGES.md` DI6). The kernel recognises
+the image, decides whether it may be mounted, and audits the decision; the
+tool holds no authority of its own. A device or volume source is not mounted
+(`plans/OPEN-DEFECTS.md` D1014).
 
 ## Usage
 
 ```
-mount [-r] [-t TYPE] [-o OPTIONS] [--] [SOURCE TARGET]
+mount [-lrvw] [-t TYPE] [-o OPTIONS] [--] [IMAGE [TARGET]]
 
-  (no operands)        list the mounted filesystems
-  SOURCE TARGET        mount SOURCE at TARGET (needs CAP_FS_MOUNT)
-  -r, --read-only      mount read-only (same as -o ro)
-  -t, --types TYPE     filesystem type (probed when omitted)
-  -o, --options LIST   comma-separated: ro,rw,noexec
-  -h, --help           show the usage banner
+  (no operands)            list the mounted filesystems, of the types -t names
+  IMAGE                    mount the disk image IMAGE, at /Storage/NAME
+  IMAGE /Storage/NAME      mount it as NAME
+  IMAGE DIRECTORY          mount it, and show it at DIRECTORY too
+  -r, --read-only          mount read-only (as -o ro)
+  -w, --rw, --read-write   mount read-write, or not at all
+  -t, --types TYPE         the filesystem IMAGE must hold, or auto
+  -o, --options LIST       comma-separated: ro,rw,noexec,loop,name=NAME
+  -v, --verbose            say where it was mounted
+  -l, --show-labels        accepted for the listing, which carries no labels
+  -h, -?, --help           show the short help
 ```
 
-With no operands `mount` lists the table; with exactly `SOURCE TARGET` it
-attaches. Value options accept their value attached (`-text4`,
-`--types=ext4`) or as the following argument; `-r` may cluster with other
-toggles. `--` ends option parsing. The `-o` names map onto the
-`MountFlags` bitmap; GNU `mount`'s `nosuid` and `nodev` are refused, since
-TAIRiX has no setuid programs or device files for them to restrict.
+The options follow util-linux: the last of `-r`, `-w`, `-o ro` and `-o rw`
+wins, `-w` never falls back to read-only, and `-t` names a filesystem as the
+mount table does, or `auto` — with no operands, a util-linux type list the
+listing is filtered by. Every target is resolved and refused as itself, never
+as the image. An empty or unknown `-o` element is refused, as
+are `nosuid`, `nodev` and `exec`, which have nothing to restrict or are never
+granted. The exit status is util-linux's: `1` for a command line not
+understood, `2` for a listing or terminal that failed, `32` for a mount that
+failed — an unknown filesystem type among them — each failure a sentence
+ending in a full stop.
 
-## Shared with the other `sysinfo` clients
+## Structure
 
-Listing reads the attached volumes and the view bindings onto them through
-the same `lib/procinfo` machinery `ps` and `sysinfo` use — the
-`Transport`/`Output` seams, the request framing, the generic
-`offset`/`limit` page walk, and the `Namespace` join of each binding to its
-volume — so none of it is copied (`AGENTS.md` §2.2). The shared renderer
-prints one familiar `source on target type fstype (options)` line per
-binding: a carved-out subtree reads `source[/subtree]`, and the `/Storage`
-catalog, which shows no volume, reads `none on /Storage type none`. Because sibling
-userland crates may not depend on one another (`AGENTS.md` §17.4), that
-shared piece is the `lib/procinfo` crate; `mount` owns only its own argument
-grammar, the `Mounter` attach seam, the usage banner, and `MountError`.
+The crate is the pure `no_std` engine library — parser, listing, mount,
+errors — over injected seams (`lib/procinfo`'s `Transport`, the `Mounter`,
+`lib/help`'s `HelpSource`), host-tested against in-memory fixtures, and the
+freestanding `Run` program, which wires `tairix_procinfo::IpcTransport`,
+`tairix_rt::image_attach_path` and `tairix_rt::realpath`, and
+`tairix_help::BundleHelp` over the inherited standard streams. No `unsafe`,
+and no `unwrap`/`expect`/`panic!` in production paths.
 
-## A presenter, not a policy point
+`cargo test -p tairix-mount` drives the grammar, the listing, the attach and
+every field it carries, targets, the verbose line and the read-only warning,
+every refusal and its exit status, and the thirteen-locale `OPTIONS` pinning
+of the bundled `Help/` documents.
 
-For a `SOURCE TARGET` request `run` builds a `MountSpec` and hands it to the
-injected `Mounter` seam; it makes no permission decision of its own. The
-kernel is the policy point (`AGENTS.md` §5.4): a missing `CAP_FS_MOUNT`, an
-unknown source, a bad superblock, or an already-mounted target is refused
-there and surfaced as `MountError::Mount(errno)`. On a running system the
-`Transport`, `Output`, and `Mounter` seams are IPC-, console-, and
-syscall-backed; in tests they are in-memory fixtures, so every parsing,
-rendering, and routing decision is testable without a kernel.
-
-## Fail closed
-
-An option `getopt` refuses is a `MountError::Option`, worded as it words
-it; a number of operands other than zero or two is a `MountError::Usage`;
-an unknown or empty `-o`/`-t` value is a `MountError::BadOption`. A listing
-transport failure or an undecodable reply is `MountError::Service`; a
-refused or failed attach is `MountError::Mount`; a failed terminal write is
-`MountError::Output`. There is no panic (`AGENTS.md` §2.9).
-
-## Tests
-
-`cargo test -p tairix-mount` drives the parser and the engine against an
-in-memory `sysinfod` fixture, a recording output, and an in-memory mounter:
-the command grammar, the binding listing and its query routing, the
-empty table, the service/output-failure paths, the attach request reaching
-the mounter with the right fields, and the denied-attach mapping.
-
-See [`docs/src/userland/utilities.md`](../../../docs/src/userland/utilities.md)
-for the full subsystem documentation.
+See [`docs/src/userland/utilities.md`](../../../docs/src/userland/utilities.md).

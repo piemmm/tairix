@@ -9,7 +9,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::driver::filesystem::{DirVisit, MountFlags, NodeId, NodeKind};
 use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
@@ -157,7 +157,10 @@ pub(crate) struct MemFs {
     volume: Arc<VolumeNodes>,
     /// What every node is reached through.
     projection: Arc<Projection>,
-    read_calls: std::sync::Mutex<BTreeMap<String, usize>>,
+    /// Per file, made with the fixture, so counting a read takes no lock
+    /// and nothing from the heap: a lazily allocated lock would be the one
+    /// allocation an exhausted heap refuses.
+    read_calls: BTreeMap<String, AtomicUsize>,
     stat_error: Option<Errno>,
     /// Paths the fixture reports as symbolic links rather than regular
     /// files, so the bundle store's refusal of a link can be exercised.
@@ -201,14 +204,10 @@ impl MemFs {
                 .collect(),
             volume: test_volume(),
             projection: test_projection(),
-            // Every file tallied from the start, so a read takes nothing from
-            // the heap.
-            read_calls: std::sync::Mutex::new(
-                files
-                    .iter()
-                    .map(|(path, _)| ((*path).to_string(), 0))
-                    .collect(),
-            ),
+            read_calls: files
+                .iter()
+                .map(|(path, _)| ((*path).to_string(), AtomicUsize::new(0)))
+                .collect(),
             stat_error: None,
             links: BTreeSet::new(),
             noexec: false,
@@ -291,26 +290,15 @@ impl MemFs {
     /// How many times the bytes of `path` were read.
     pub(crate) fn read_calls(&self, path: &str) -> usize {
         self.read_calls
-            .lock()
-            .expect("read-call counter not poisoned")
             .get(path)
-            .copied()
-            .unwrap_or(0)
+            .map_or(0, |reads| reads.load(Ordering::Relaxed))
     }
 
     /// Read `path`'s bytes from `offset`, counting the read.
     fn serve(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
-        let mut tally = self
-            .read_calls
-            .lock()
-            .expect("read-call counter not poisoned");
-        match tally.get_mut(path) {
-            Some(reads) => *reads += 1,
-            None => {
-                tally.insert(path.to_string(), 1);
-            }
+        if let Some(reads) = self.read_calls.get(path) {
+            reads.fetch_add(1, Ordering::Relaxed);
         }
-        drop(tally);
         let bytes = self.files.get(path).ok_or(Errno::NotFound)?;
         let start = usize::try_from(offset).map_err(|_| Errno::OutOfRange)?;
         if start >= bytes.len() {
@@ -897,4 +885,44 @@ pub(crate) fn verified_app() -> Arc<LoadedApp> {
     })
     .expect("a fresh cell")
     .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoCaps;
+    impl CapabilityQuery for NoCaps {
+        fn holds(&self, _cap: CapabilityId) -> bool {
+            false
+        }
+    }
+
+    /// Regression: the fixture counted reads under a lock std allocates on
+    /// its first use on some hosts, so a test refusing every allocation
+    /// aborted inside the fixture rather than exercising the code under test.
+    #[test]
+    fn a_fixture_read_takes_nothing_from_the_heap() {
+        let fs = MemFs::new(&[("/f", b"bytes")]);
+        let at = At {
+            start: Start::Root,
+            path: "/f",
+        };
+        let file = node_handle(
+            fs.open(0, &NoCaps, at, OpenFlags::READ, CreateMode::NONE)
+                .expect("opens"),
+        );
+        let who = Acting {
+            uid: 0,
+            caps: &NoCaps,
+            granted: false,
+        };
+        let mut buf = [0u8; 5];
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let read = fs.read_node(&file, &who, 0, &mut buf);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(read, Ok(5));
+        assert_eq!(&buf, b"bytes");
+        assert_eq!(fs.read_calls("/f"), 1);
+    }
 }

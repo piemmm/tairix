@@ -230,6 +230,20 @@ pub const ISO9660_DRIVER: ServedFsDriver = ServedFsDriver {
     store_path: &[b"Drivers", b"filesystem", b"iso9660", b"Run"],
 };
 
+/// The ADFS driver: the disk-image vertical's Acorn floppy is one.
+pub const ADFS_DRIVER: ServedFsDriver = ServedFsDriver {
+    package: "tairix-drv-fs-adfs",
+    bind_keys: tairix_drv_fs_adfs::BIND_KEYS,
+    store_path: &[b"Drivers", b"filesystem", b"adfs", b"Run"],
+};
+
+/// The AmigaDOS driver: the disk-image vertical's Amiga floppy is one.
+pub const AFFS_DRIVER: ServedFsDriver = ServedFsDriver {
+    package: "tairix-drv-fs-affs",
+    bind_keys: tairix_drv_fs_affs::BIND_KEYS,
+    store_path: &[b"Drivers", b"filesystem", b"affs", b"Run"],
+};
+
 /// Every format a removable volume is served as.
 pub const SERVED_FS_DRIVERS: &[ServedFsDriver] = &[
     ServedFsDriver {
@@ -253,11 +267,8 @@ pub const SERVED_FS_DRIVERS: &[ServedFsDriver] = &[
         bind_keys: tairix_drv_fs_udf::BIND_KEYS,
         store_path: &[b"Drivers", b"filesystem", b"udf", b"Run"],
     },
-    ServedFsDriver {
-        package: "tairix-drv-fs-adfs",
-        bind_keys: tairix_drv_fs_adfs::BIND_KEYS,
-        store_path: &[b"Drivers", b"filesystem", b"adfs", b"Run"],
-    },
+    ADFS_DRIVER,
+    AFFS_DRIVER,
 ];
 
 /// Cross-compile `package` for the freestanding aarch64 target, convert the
@@ -1679,6 +1690,35 @@ pub fn optical_driver_store_files(
                 store_file(VOLMGR_STORE_PATH, build_volmgr_bundle(ctx, arch, profile)?),
                 served_fs_store_file(ctx, arch, &ISO9660_DRIVER, profile)?,
             ])
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
+/// The signed **disk-image set** — the ADFS, AmigaDOS and ISO 9660 drivers
+/// the disk-image vertical's three images are served by — each paired with
+/// its store path. An image volume's node hangs off the virtual bus, so no
+/// bus or device driver rides with them, and the console stays the text
+/// console the serial script drives. Built once per xtask process and
+/// memoised.
+///
+/// # Errors
+///
+/// As [`build_served_fs_bundle`].
+pub fn images_driver_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
+        .get_or_init(|| {
+            [ADFS_DRIVER, AFFS_DRIVER, ISO9660_DRIVER]
+                .iter()
+                .map(|driver| served_fs_store_file(ctx, arch, driver, profile))
+                .collect()
         })
         .as_ref()
         .map(Vec::as_slice)

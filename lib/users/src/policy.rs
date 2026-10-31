@@ -18,7 +18,9 @@ use tairix_abi::driver::DriverError;
 use tairix_abi::home::{
     HOME_DESKTOP_DIR, HOME_FILES_DIR, HOME_LIBRARY_DIR, HOME_SETTINGS_DIR, USERS_DIR,
 };
-use tairix_abi::{CapabilityId, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR};
+use tairix_abi::{
+    CapabilityId, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, UNASSIGNABLE_ID,
+};
 
 use tairix_util::fallible::concatenated;
 
@@ -196,7 +198,8 @@ pub const FIRST_USER_GID: u32 = 1000;
 pub enum IdRange {
     /// The reserved system/service band, `0..=999`.
     System,
-    /// The interactive-user band, `1000..=u32::MAX`.
+    /// The interactive-user band, `1000..`[`UNASSIGNABLE_ID`]: that one id
+    /// names no principal.
     User,
 }
 
@@ -205,7 +208,7 @@ impl IdRange {
     const fn bounds(self) -> (u32, u32) {
         match self {
             Self::System => (0, FIRST_USER_UID - 1),
-            Self::User => (FIRST_USER_UID, u32::MAX),
+            Self::User => (FIRST_USER_UID, UNASSIGNABLE_ID - 1),
         }
     }
 
@@ -254,7 +257,7 @@ mod tests {
     use tairix_abi::driver::filesystem::{SecurityAcl, SecuritySubject};
     use tairix_abi::{
         CapabilityId, BUNDLE_SUFFIX, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR,
-        SYSTEM_COMMAND_STORE,
+        SYSTEM_COMMAND_STORE, UNASSIGNABLE_ID,
     };
 
     #[test]
@@ -340,7 +343,7 @@ mod tests {
     #[test]
     fn an_exhausted_band_fails_closed_without_spilling() {
         assert_eq!(next_id(IdRange::System, [FIRST_USER_UID - 1]), None);
-        assert_eq!(next_id(IdRange::User, [u32::MAX]), None);
+        assert_eq!(next_id(IdRange::User, [UNASSIGNABLE_ID - 1]), None);
     }
 
     #[test]
@@ -349,7 +352,11 @@ mod tests {
         assert!(IdRange::System.contains(999));
         assert!(!IdRange::System.contains(FIRST_USER_UID));
         assert!(IdRange::User.contains(FIRST_USER_UID));
-        assert!(IdRange::User.contains(u32::MAX));
+        assert!(IdRange::User.contains(UNASSIGNABLE_ID - 1));
+        assert!(
+            !IdRange::User.contains(UNASSIGNABLE_ID),
+            "every ABI sentinel for no principal is spelled with it"
+        );
         assert!(!IdRange::User.contains(999));
     }
     /// The gated roots hang off directories the home shape already

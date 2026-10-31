@@ -434,7 +434,7 @@ occupies, from the format's own allocation tracking (ext4 `i_blocks`, the
 clusters a FAT file's size needs or a FAT directory's chain, ARXFS mapped
 extents); and `content_gen` the version of the node's data, which the volume
 never hands out twice (`NodeInfo::NO_CONTENT_GEN`, `0`, where the format keeps
-none: ext4, FAT32 and ADFS).
+none: ext4, FAT32, ADFS, AmigaDOS, ISO 9660 and UDF).
 
 `parent(dir)` answers the directory holding `dir`'s name, its `..` as the
 format records it; the root answers itself, a removed directory is
@@ -443,7 +443,7 @@ format records it; the root answers itself, a removed directory is
 `name_matching` and `node_identity` are declarations only the format can
 make, so neither has a default. `node_identity` says how long a node keeps
 its id: `Stable` for as long as the node keeps its name, a pin changing
-nothing (ARXFS, ext4, UDF, ISO 9660), and `ContentDerived` where a write, a
+nothing (ARXFS, ext4, UDF, ISO 9660, AmigaDOS), and `ContentDerived` where a write, a
 truncate, a rename, a pin or the last unpin may change it: FAT32 and ADFS
 report a pinned node under a token, and ADFS names any other object by where
 its data lies. The cache in front of every mounted volume keeps no lookup or

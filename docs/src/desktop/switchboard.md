@@ -403,7 +403,8 @@ earlier end, derives nought, and plots a flat trace for the disk the machine
 is running from. Where the kernel publishes no serving device for a volume
 there are no shared counters to collapse, so that volume stands as its own
 entry with its capacity alone; a mount with no backing volume at all (the
-in-RAM layout directories) is view plumbing and no storage device.
+in-RAM layout directories) is view plumbing and no storage device, and
+another user's private volume, withheld from this one, is none either.
 
 **A `Storage` entry is named by its device, then by what is on it.** The
 entry reads `<device> · <volumes>` — `virtio-blk · ARXFSSystem · ARXFSRoot`

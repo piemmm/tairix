@@ -127,6 +127,12 @@
 #define TAIRIX_MOUNT_RECOVERY_CONFLICT ((uint8_t)3u)
 #define TAIRIX_MOUNT_DEGRADED ((uint8_t)4u)
 #define TAIRIX_MOUNT_RECOVERING ((uint8_t)5u)
+/* A mount record's owner, or a view binding's binder, when there is none. */
+#define TAIRIX_MOUNT_NO_OWNER 0xffffffffu
+/* The kind of volume a mount record describes (uint8_t). */
+#define TAIRIX_VOLUME_CLASS_LOCAL ((uint8_t)0u)
+#define TAIRIX_VOLUME_CLASS_NETWORK ((uint8_t)1u)
+#define TAIRIX_VOLUME_CLASS_IMAGE ((uint8_t)2u)
 /* The bytes of a tairix_blk_medium_t. A fact nothing established is
    TAIRIX_BLK_FACT_UNKNOWN with TAIRIX_BLK_EVIDENCE_NONE; a device that
    declared nothing has TAIRIX_BLK_TRANSPORT_UNDECLARED. */
@@ -148,6 +154,9 @@
 #define TAIRIX_BLK_REMOVABILITY_EVIDENCE_TRANSPORT ((uint8_t)1u)
 #define TAIRIX_BLK_REMOVABILITY_EVIDENCE_INQUIRY ((uint8_t)2u)
 #define TAIRIX_BLK_REMOVABILITY_EVIDENCE_MEDIUM_ABSENT ((uint8_t)3u)
+#define TAIRIX_BLK_FORM_UNSPECIFIED ((uint8_t)0u)
+#define TAIRIX_BLK_FORM_OPTICAL_DISC ((uint8_t)1u)
+#define TAIRIX_BLK_FORM_FLOPPY_DISK ((uint8_t)2u)
 #define TAIRIX_MAX_USERNAME_LEN 32u
 #define TAIRIX_MAX_GROUPNAME_LEN 32u
 #define TAIRIX_MAX_DISPLAY_NAME_LEN 64u
@@ -192,7 +201,7 @@
 #define TAIRIX_LOAD_AVERAGE_WIRE_LEN 24u
 #define TAIRIX_SYSTEM_IDENTITY_WIRE_LEN 88u
 #define TAIRIX_MOUNT_RECORD_WIRE_LEN 232u
-#define TAIRIX_VIEW_BINDING_RECORD_WIRE_LEN 156u
+#define TAIRIX_VIEW_BINDING_RECORD_WIRE_LEN 160u
 #define TAIRIX_RESOURCE_LIMIT_RECORD_WIRE_LEN 32u
 #define TAIRIX_USER_DIRECTORY_RECORD_WIRE_LEN 44u
 #define TAIRIX_GROUP_DIRECTORY_RECORD_WIRE_LEN 40u
@@ -303,15 +312,16 @@ typedef struct tairix_system_identity {
 /* What a block device is: its transport (TAIRIX_BLK_TRANSPORT_*), then
 * whether its medium rotates and whether it can leave the unit
 * (TAIRIX_BLK_ROTATION_*, TAIRIX_BLK_REMOVABILITY_*), each with the
-* evidence that established it. `rpm` is the nominal rotation rate of a
-* rotating medium and zero otherwise. */
+* evidence that established it, then the form its medium takes
+* (TAIRIX_BLK_FORM_*). `rpm` is the nominal rotation rate of a rotating
+* medium and zero otherwise. */
 typedef struct tairix_blk_medium {
     uint8_t transport;
     uint8_t rotation;
     uint8_t rotation_evidence;
     uint8_t removability;
     uint8_t removability_evidence;
-    uint8_t reserved;
+    uint8_t form;
     uint16_t rpm;
 } tairix_blk_medium_t;
 
@@ -324,8 +334,14 @@ typedef struct tairix_blk_medium {
 * `usage` is the backing volume's space accounting (all-zero when none is
 * known). `volume_id` is the volume's stable published identity (all-zero
 * when the mount has none), the identity a volume_detach request names.
-* `owner` is the uid that attached a network volume, 0xFFFFFFFF for one
-* no one owns; `volume_class` is 0 for a local volume, 1 for a network one.
+* `owner` is the uid that attached a network or disk-image volume,
+* TAIRIX_MOUNT_NO_OWNER for one no one owns; `volume_class` is a
+* TAIRIX_VOLUME_CLASS_*; `private_to_owner` is 1 for a volume presented
+* to its owner alone, which another principal is listed without its
+* source or usage, else 0; `withheld` is 1 on the record so listed, whose
+* empty source and all-zero usage are then unknown rather than absent;
+* `source_cut` is 1 when the source is only the first bytes of a longer
+* name, cut between characters to fit.
 * The inline source/target/fstype buffers are valid for their respective
 * *_len byte counts. */
 typedef struct tairix_mount_record {
@@ -339,7 +355,9 @@ typedef struct tairix_mount_record {
     uint8_t volume_id[TAIRIX_VOLUME_ID_LEN];
     uint32_t owner;
     uint8_t volume_class;
-    uint8_t reserved0[3];
+    uint8_t private_to_owner;
+    uint8_t withheld;
+    uint8_t source_cut;
     uint8_t source[TAIRIX_MOUNT_SOURCE_MAX];
     uint8_t target[TAIRIX_MOUNT_TARGET_MAX];
     uint8_t fstype[TAIRIX_MOUNT_FSTYPE_MAX];
@@ -350,16 +368,22 @@ typedef struct tairix_mount_record {
 * MountFlags it narrows that volume to. `volume_id` is the attached
 * volume's, the key of its tairix_mount_record_t; a binding showing no
 * volume (the /Storage catalog) has an empty subtree and an all-zero
-* volume_id. `binder` is the uid that made a view_bind binding,
-* 0xFFFFFFFF for one the system made. The inline target/subtree buffers
-* are valid for their *_len byte counts. */
+* volume_id, and one withheld from its reader an empty subtree.
+* `binder` is the uid that made a view_bind binding,
+* TAIRIX_MOUNT_NO_OWNER for one the system made; `owner` is the uid that
+* attached the volume it shows, TAIRIX_MOUNT_NO_OWNER for one no one owns,
+* and `private_to_owner` 1 when that volume is presented to its owner
+* alone. The inline target/subtree buffers are valid for their *_len byte
+* counts. */
 typedef struct tairix_view_binding_record {
     uint32_t flags;
     uint8_t target_len;
     uint8_t subtree_len;
-    uint8_t reserved0[2];
+    uint8_t private_to_owner;
+    uint8_t reserved0;
     uint8_t volume_id[TAIRIX_VOLUME_ID_LEN];
     uint32_t binder;
+    uint32_t owner;
     uint8_t target[TAIRIX_MOUNT_TARGET_MAX];
     uint8_t subtree[TAIRIX_MOUNT_TARGET_MAX];
 } tairix_view_binding_record_t;

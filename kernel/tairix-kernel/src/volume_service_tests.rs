@@ -47,7 +47,7 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::NameMatching;
 use tairix_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeKind, NodeSecurity,
-    Unpinned, VolumeStats,
+    Unpinned, VolumeHost as _, VolumeStats,
 };
 use tairix_abi::fs::{
     OpenFlags, FS_INITIAL_UMASK, FS_NEW_DIR_MODE, FS_NEW_FILE_MODE, FS_OWNER_UNCHANGED,
@@ -92,6 +92,7 @@ use tairix_reclaim::{FreeMemorySource, MemoryPressure, Unpressured};
 
 use crate::hwtree_store::HwTreeStore;
 use crate::root_mount::LATE_IDENTITY;
+use crate::served_volume::Granted as _;
 use crate::system_mount::{FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST};
 use crate::test_support::{RamBlock, BLOCK_SIZE};
 use crate::volume_policy::LATE_STORAGE_GID;
@@ -700,6 +701,25 @@ static DRIVEN: Mutex<Vec<(u32, u64)>> = Mutex::new(Vec::new());
 /// The process numbers test drivers run as.
 static NEXT_DRIVER: AtomicU64 = AtomicU64::new(0x7D_0000);
 
+/// The host each test driver reports its held writes through, by the node it
+/// serves.
+static HOSTS: Mutex<Vec<(u32, &'static ServedHost<DriverClock>)>> = Mutex::new(Vec::new());
+
+/// Have the driver serving `node` tell the kernel, from its next reply on,
+/// that it holds writes it has not published, as one deferring its commits
+/// does.
+fn hold_unpublished(node: u32) {
+    let host = HOSTS
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(served, _)| *served == node)
+        .map(|&(_, host)| host)
+        .expect("a driver serves the node");
+    host.writeback_due(DriverHandle::from_raw(1).expect("a handle"), Some(u64::MAX));
+}
+
 /// A test driver's clock: frozen when it defers, so a commit it holds falls
 /// due only when a scenario says, and absent otherwise.
 struct DriverClock {
@@ -756,32 +776,25 @@ fn attach_served(
     attached
 }
 
-/// Each volume node under the publisher no driver serves yet: its id, the
-/// served volume its grant names, and the format its key binds.
-fn undriven_volume_nodes() -> Vec<(u32, u64, VolumeFsType)> {
+/// Each volume node under `parent` no driver serves yet: its id, the served
+/// volume its grant names, and the format its key binds.
+fn undriven_volume_nodes(parent: u32) -> Vec<(u32, u64, VolumeFsType)> {
     let mut found = Vec::new();
     TREE.for_each_node(&mut |node| {
-        if node.parent() != PUBLISHER {
+        if node.parent() != parent {
             return;
         }
         let Some(volume) = node.resources().iter().find_map(HwResource::volume_id) else {
             return;
         };
-        let fstype = [
-            VolumeFsType::ARXFS,
-            VolumeFsType::Ext4,
-            VolumeFsType::Fat32,
-            VolumeFsType::Iso9660,
-            VolumeFsType::Udf,
-            VolumeFsType::Adfs,
-        ]
-        .into_iter()
-        .find(|fstype| {
-            node.match_keys()
-                .iter()
-                .any(|key| key.compatible_bytes() == fstype.served_compatible())
-        })
-        .expect("a volume node names its format");
+        let fstype = VolumeFsType::ALL
+            .into_iter()
+            .find(|fstype| {
+                node.match_keys()
+                    .iter()
+                    .any(|key| key.compatible_bytes() == fstype.served_compatible())
+            })
+            .expect("a volume node names its format");
         found.push((node.id(), volume, fstype));
     });
     let driven = DRIVEN.lock().unwrap();
@@ -792,7 +805,7 @@ fn undriven_volume_nodes() -> Vec<(u32, u64, VolumeFsType)> {
 /// Start a driver for every volume node none serves, each having served or
 /// refused its volume before this returns.
 fn serve_published(facility: &'static TestFacility) {
-    for (node, volume, fstype) in undriven_volume_nodes() {
+    for (node, volume, fstype) in undriven_volume_nodes(PUBLISHER) {
         start_driver(facility, node, volume, fstype);
     }
 }
@@ -818,6 +831,7 @@ fn start_driver(facility: &'static TestFacility, node: u32, volume: u64, fstype:
         VolumeFsType::Iso9660 => driver.start::<tairix_drv_fs_iso9660::Served>(offered),
         VolumeFsType::Udf => driver.start::<tairix_drv_fs_udf::Served>(offered),
         VolumeFsType::Adfs => driver.start::<tairix_drv_fs_adfs::Served>(offered),
+        VolumeFsType::Affs => driver.start::<tairix_drv_fs_affs::Served>(offered),
     }
     // Every path of the driver's start sends, and a driver that dies first
     // drops the sender, so this waits on completion rather than the clock.
@@ -859,6 +873,7 @@ impl Driver {
     fn run<F: ServedFormat>(self, offered: &mpsc::Sender<()>) {
         let host: &'static ServedHost<DriverClock> =
             Box::leak(Box::new(ServedHost::new(DriverClock { defer: self.defer })));
+        HOSTS.lock().unwrap().push((self.node, host));
         let budget = WritebackBudget {
             backing: 1 << 30,
             gauge: &Unpressured,
@@ -1203,6 +1218,8 @@ fn boot() -> Booted {
     TREE.seed(vec![
         HwNode::new(HW_NODE_ROOT_ID, HW_NODE_ROOT, HwDeviceClass::Root),
         HwNode::new(PUBLISHER, HW_NODE_ROOT_ID, HwDeviceClass::Storage),
+        crate::virtual_bus::node(),
+        crate::volume_service::image_volumes_node(),
     ])
     .expect("seed the scenarios' tree once");
     VOLUME_SERVICE.install(&SINK, pressure, Some(watches), &TREE);
@@ -1427,7 +1444,11 @@ fn run_scenarios(window_ptr: *mut u8, facility: &'static TestFacility) {
     a_network_volume_leaves_with_its_server_scenario(facility);
     a_lost_network_volume_waits_for_its_owner_scenario(facility);
     a_bind_within_a_network_volume_leaves_with_it_scenario(facility);
+    image_scenarios::run(window_ptr, facility);
 }
+
+#[path = "image_volume_scenarios.rs"]
+mod image_scenarios;
 
 /// The served volume, and the node it is published as, of the attached
 /// volume named `name`.
@@ -4681,7 +4702,6 @@ fn a_network_volume_leaves_with_its_server_scenario(facility: &'static TestFacil
 }
 
 fn a_lost_network_volume_waits_for_its_owner_scenario(facility: &'static TestFacility) {
-    use tairix_abi::driver::filesystem::VolumeHost as _;
     let key = *b"scenario-key-lst";
     let server = NetServer::offer(facility, key, MEMBER_UID, "//nas/lost", share_fs());
     let reply = VOLUME_SERVICE

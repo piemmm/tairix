@@ -6,8 +6,10 @@
 //! path and the RAID administrator share. The filesystem drivers import the
 //! constants and recognisers it reads by — the `ARXFS` header magic, the ext
 //! superblock magic, the FAT32 parameter block and identity, and the
-//! [`adfs`], [`iso9660`] and [`udf`] recognisers — so a probe and a mounted
-//! driver never disagree about what a volume is or which identity it carries.
+//! [`adfs`], [`affs`], [`iso9660`] and [`udf`] recognisers — so a probe and a
+//! mounted driver never disagree about what a volume is or which identity it
+//! carries. A disk an Amiga Rigid Disk Block partitions is told apart as a
+//! partition table, not a volume.
 //!
 //! Everything read is untrusted removable-media content: every access is
 //! bounds-checked, every field validated before use, and anything that does
@@ -23,12 +25,14 @@
 extern crate alloc;
 
 pub mod adfs;
+pub mod affs;
 pub mod iso9660;
 pub mod name;
 pub mod udf;
 
 use alloc::boxed::Box;
 
+use tairix_abi::blkio::BlkForm;
 use tairix_abi::driver::block::{Block, DiscLayout};
 use tairix_abi::volume::VolumeFsType;
 use tairix_abi::DriverError;
@@ -104,6 +108,9 @@ pub enum Recognised {
     RaidMember([u8; 16]),
     /// A volume of a supported filesystem.
     Volume(ProbedVolume),
+    /// A disk an Amiga Rigid Disk Block partitions: it holds volumes this
+    /// build does not attach, so it is neither attached nor blank.
+    RigidDiskBlock,
 }
 
 /// A region of an extent, in bytes from its start, whose content any
@@ -127,14 +134,19 @@ pub struct ProbedVolume {
     pub identity: [u8; 16],
     /// The volume's mutation evidence: the `ARXFS` superblock ring, the ext4
     /// primary superblock, FAT32's reserved sectors through `FSInfo`, UDF's
-    /// integrity sequence. `None` where the format has no region every writer
-    /// rewrites (ISO 9660 is never written; ADFS keeps none) or declares an
-    /// implausible one — no evidence means no replay.
+    /// integrity sequence, the AmigaDOS root block. `None` where the format
+    /// has no region every writer rewrites (ISO 9660 is never written; ADFS
+    /// keeps none) or declares an implausible one — no evidence means no
+    /// replay.
     pub evidence: Option<Evidence>,
     /// How far into the extent the volume's structures reach, for the
     /// formats whose structures do not open the extent (ISO 9660 and UDF), so
     /// a partition table found beside them can be weighed against them.
     pub span: Option<u64>,
+    /// The medium the volume was laid out for, where its format says: a disc
+    /// for ISO 9660 and for UDF's 2048-byte sectors, a floppy for an ADFS or
+    /// AmigaDOS floppy format.
+    pub form: BlkForm,
     label: [u8; LABEL_MAX],
     label_len: u8,
 }
@@ -153,9 +165,14 @@ impl ProbedVolume {
             identity,
             evidence,
             span,
+            form: BlkForm::Unspecified,
             label,
             label_len,
         }
+    }
+
+    const fn laid_out_for(self, form: BlkForm) -> Self {
+        Self { form, ..self }
     }
 
     /// The volume's human-facing label, trimmed of the format's padding;
@@ -170,8 +187,11 @@ impl ProbedVolume {
 /// Recognise what the extent `dev` holds, in a fixed order: a RAID array
 /// member first, then the formats whose signature opens the extent
 /// (`ARXFS`, ext4, FAT32 — most specific first), then the disc formats whose
-/// structures lie 32 KiB in (ISO 9660 and UDF), then ADFS, whose oldest
-/// layout carries the weakest signature. `None` when nothing matches.
+/// structures lie 32 KiB in (ISO 9660 and UDF), then AmigaDOS, whose `DOS`
+/// boot block names a checksummed root at the volume's middle, then ADFS,
+/// whose oldest layout carries the weakest signature, and last an Amiga Rigid
+/// Disk Block, which partitions the extent rather than holding one volume.
+/// `None` when nothing matches.
 ///
 /// A FAT32 volume is labelled from its root directory's label entry, which a
 /// relabel rewrites, over the boot sector's copy. A disc carrying both ISO
@@ -203,19 +223,74 @@ pub fn recognise<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<Recognised>
         }
         None => match disc_volume(dev)? {
             Some(volume) => Some(volume),
-            None => adfs::identify(dev)?.map(|layout| {
-                let (name, len) = layout.name();
-                ProbedVolume::new(
-                    VolumeFsType::Adfs,
-                    layout.identity(),
-                    &name[..len],
-                    None,
-                    None,
-                )
-            }),
+            None => match affs_volume(dev)? {
+                Some(volume) => Some(volume),
+                None => adfs::identify(dev)?.map(|layout| {
+                    let (name, len) = layout.name();
+                    ProbedVolume::new(
+                        VolumeFsType::Adfs,
+                        layout.identity(),
+                        &name[..len],
+                        None,
+                        None,
+                    )
+                    .laid_out_for(adfs_form(&layout))
+                }),
+            },
         },
     };
-    Ok(found.map(Recognised::Volume))
+    if let Some(volume) = found {
+        return Ok(Some(Recognised::Volume(volume)));
+    }
+    Ok(affs::rigid_disk_block(dev)?.then_some(Recognised::RigidDiskBlock))
+}
+
+/// An AmigaDOS volume, labelled with its name in UTF-8 and evidenced by its
+/// root block, which every writer restamps with the volume's alteration date.
+fn affs_volume<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<ProbedVolume>, DriverError> {
+    let Some(layout) = affs::identify(dev)? else {
+        return Ok(None);
+    };
+    let mut label = [0u8; 2 * affs::NAME_MAX];
+    let mut len = 0;
+    for &byte in layout.name() {
+        len += char::from(byte).encode_utf8(&mut label[len..]).len();
+    }
+    let evidence = layout
+        .root
+        .checked_mul(u64::from(layout.block_size))
+        .map(|offset| Evidence {
+            offset,
+            len: u64::from(layout.block_size),
+        })
+        .filter(|evidence| evidence.len <= EVIDENCE_MAX);
+    Ok(Some(
+        ProbedVolume::new(
+            VolumeFsType::Affs,
+            layout.identity(),
+            &label[..len],
+            evidence,
+            None,
+        )
+        .laid_out_for(layout.form()),
+    ))
+}
+
+/// The medium an ADFS volume was laid out for: a new-map disc record names a
+/// density for a floppy and none for a hard disc; the old map's formats are
+/// the floppies up to the D format's 800 KiB.
+fn adfs_form(layout: &adfs::Layout) -> BlkForm {
+    let floppy = match layout {
+        adfs::Layout::NewMap { record, .. } => record.density != 0,
+        adfs::Layout::OldMap { disc_sectors, .. } => {
+            u64::from(*disc_sectors) * adfs::OLD_SECTOR_SIZE <= adfs::OLD_MAP_FLOPPY_MAX
+        }
+    };
+    if floppy {
+        BlkForm::FloppyDisk
+    } else {
+        BlkForm::Unspecified
+    }
 }
 
 /// A RAID array member's array UUID, through the one superblock decode the
@@ -244,13 +319,16 @@ fn disc_volume<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<ProbedVolume>
         if let Some(udf) = udf::identify(dev, layout)? {
             let (label, len) = udf.label();
             let evidence = udf_evidence(&udf, dev.capacity());
-            return Ok(Some(ProbedVolume::new(
-                VolumeFsType::Udf,
-                udf.identity(),
-                &label[..len],
-                evidence,
-                Some(udf.span_bytes()),
-            )));
+            return Ok(Some(
+                ProbedVolume::new(
+                    VolumeFsType::Udf,
+                    udf.identity(),
+                    &label[..len],
+                    evidence,
+                    Some(udf.span_bytes()),
+                )
+                .laid_out_for(udf_form(&udf)),
+            ));
         }
     }
     Ok(iso.map(|iso| {
@@ -262,7 +340,18 @@ fn disc_volume<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<ProbedVolume>
             None,
             Some(iso.span_bytes()),
         )
+        .laid_out_for(BlkForm::OpticalDisc)
     }))
+}
+
+/// The medium a UDF volume was laid out for: a disc's 2048-byte sectors, or
+/// unstated for the 512-byte blocks of a disk.
+fn udf_form(volume: &udf::Volume) -> BlkForm {
+    if volume.block_size() == 2048 {
+        BlkForm::OpticalDisc
+    } else {
+        BlkForm::Unspecified
+    }
 }
 
 /// UDF's mutation evidence: the logical volume integrity sequence, which a

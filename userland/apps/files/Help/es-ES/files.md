@@ -102,12 +102,21 @@ destino no pueda conservar se indica en un aviso al terminar la operación.
 El menú contextual empieza por *Mostrar*. Debajo, un submenú nombra aquello
 sobre lo que actúa el menú — *Archivo «notes.txt»*, con un nombre largo
 acortado por el medio para que su extensión siga viéndose, o *Selección*
-cuando hay varios elementos seleccionados — y contiene *Abrir*, *Abrir con…*,
-*Obtener información…*, *Renombrar*, *Cortar*, *Copiar* y *Eliminar*; una
-fila que no puede actuar ahí aparece atenuada y dice por qué. Le siguen
-*Nuevo*, luego *Seleccionar todo* y *Borrar selección*, y por último *Pegar*.
-Un clic derecho en un espacio vacío borra la selección, así que el submenú
-del elemento aparece atenuado.
+cuando hay varios elementos seleccionados — y contiene *Abrir*, *Abrir
+con…*, *Montar solo lectura*, *Expulsar*, *Obtener información…*,
+*Renombrar*, *Cortar*, *Copiar* y *Eliminar*; una fila que no puede actuar
+ahí aparece atenuada y dice por qué. Le siguen *Nuevo*, luego *Seleccionar
+todo* y *Borrar selección*, y por último *Pegar*. Un clic derecho en un
+espacio vacío borra la selección, así que el submenú del elemento aparece
+atenuado.
+
+Abrir una imagen de disco — un archivo `.iso`, `.adf`, `.hdf` y similares —
+la monta para usted en `/Storage`, con escritura donde el archivo la
+permite, y abre su ventana; *Montar solo lectura* la monta en solo lectura.
+Sigue montada hasta que la expulse o termine su sesión. *Expulsar* retira un
+volumen que usted montó, desde su icono o desde su fila en la barra de
+lugares, cuyo propio menú contextual contiene *Abrir* y *Expulsar*; sus
+ventanas en él pasan antes a `/Storage`.
 
 El submenú *Nuevo* del menú contextual crea una carpeta, o un documento
 vacío de cada tipo que escribe un editor instalado, y abre su nombre para

@@ -20,7 +20,7 @@ mod images;
 
 use images::{device, iso, udf_image};
 use tairix_abi::driver::block::DiscLayout;
-use tairix_fsprobe::{adfs, fingerprint, iso9660, recognise, udf, Recognised};
+use tairix_fsprobe::{adfs, affs, fingerprint, iso9660, recognise, udf, Recognised};
 use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -95,6 +95,11 @@ fn corpus() -> Vec<Seed> {
         Seed::new(hsf, 2048),
         Seed::new(udf, 512),
         Seed::new(images::adfs_old_map(b"Acorn     "), 512),
+        // Small enough that the root at the volume's middle lies within the
+        // reach of the noise phase too.
+        Seed::new(images::affs_volume(3, 512, 40, b"Workbench"), 512),
+        Seed::new(images::affs_volume(1, 1024, 24, b"HardFile"), 512),
+        Seed::new(tairix_test_amiga_image::rdb_disk(32, 1), 512),
     ]
 }
 
@@ -131,6 +136,10 @@ fn exercise(bytes: Vec<u8>, block_size: u32, layout: Option<DiscLayout>) {
     if let Ok(Some(layout)) = adfs::identify(&mut dev) {
         let _ = (layout.name(), layout.identity());
     }
+    if let Ok(Some(layout)) = affs::identify(&mut dev) {
+        let _ = (layout.name(), layout.identity(), layout.form());
+    }
+    let _ = affs::rigid_disk_block(&mut dev);
 }
 
 #[test]

@@ -78,11 +78,14 @@ The disk family is one kind per medium a volume can report
 rotating, on an ATA bus or behind a USB bridge), `DiskSolidState`,
 `DiskNvme`, `DiskUsb` (a flash drive), `DiskExternal` (a USB unit that reported
 no rotation), `DiskSdCard`, `DiskOptical` (a disc, whatever drive holds it),
-and `Disk` for a virtual or unreported medium.
+`DiskFloppy` (a floppy, or a disk image laid out as one), and `Disk` for a
+virtual or unreported medium.
 Each ships a raster master in
 `assets/` (`disk-hard`, `disk-solid-state`, `disk-nvme`, `disk-usb`,
-`disk-external`, `disk-sd`, `disk-optical`, `disk`), held to the same square,
-trimmed and bounded contract as every master.
+`disk-external`, `disk-sd`, `disk-optical`, `disk-floppy`, `disk`), held to
+the same square, trimmed and bounded contract as every master. A disk-image
+file takes its medium's picture too: a disc image the disc, a floppy image the
+floppy, a hard-disk image the hard disk.
 
 ## The `artwork` layer
 

@@ -106,11 +106,21 @@ Le menu contextuel commence par *Affichage*. En dessous, un sous-menu nomme
 ce sur quoi le menu agit — *Fichier « notes.txt »*, un nom long raccourci en
 son milieu pour que son extension reste visible, ou *Sélection* quand
 plusieurs entrées sont sélectionnées — et contient *Ouvrir*, *Ouvrir avec…*,
-*Lire les informations…*, *Renommer*, *Couper*, *Copier* et *Supprimer* ;
-une ligne qui ne peut pas agir là est grisée et en donne la raison. Viennent
-ensuite *Nouveau*, puis *Tout sélectionner* et *Effacer la sélection*, et
-enfin *Coller*. Un clic droit sur un espace vide efface la sélection, si bien
-que le sous-menu de l'entrée est grisé.
+*Monter en lecture seule*, *Éjecter*, *Lire les informations…*, *Renommer*,
+*Couper*, *Copier* et *Supprimer* ; une ligne qui ne peut pas agir là est
+grisée et en donne la raison. Viennent ensuite *Nouveau*, puis *Tout
+sélectionner* et *Effacer la sélection*, et enfin *Coller*. Un clic droit
+sur un espace vide efface la sélection, si bien que le sous-menu de l'entrée
+est grisé.
+
+Ouvrir une image disque — un fichier `.iso`, `.adf`, `.hdf` et autres — la
+monte pour vous sous `/Storage`, en écriture là où le fichier l'est, et
+ouvre sa fenêtre ; *Monter en lecture seule* la monte en lecture seule. Elle
+reste montée jusqu'à ce que vous l'éjectiez ou que votre session se termine.
+*Éjecter* retire un volume que vous avez monté, depuis son icône ou depuis
+sa ligne dans la barre des emplacements, dont le menu contextuel propre
+contient *Ouvrir* et *Éjecter* ; vos fenêtres qui s'y trouvent passent
+d'abord à `/Storage`.
 
 Le sous-menu *Nouveau* du menu contextuel crée un dossier, ou un document
 vide de chaque sorte qu'un éditeur installé sait écrire, et ouvre son nom

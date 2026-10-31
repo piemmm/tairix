@@ -7,9 +7,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::VolumeStats;
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
-use tairix_abi::sysinfo::{MountRecord, ViewBindingRecord};
+use tairix_abi::sysinfo::{MountRecord, ViewBindingRecord, VolumeClass};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{field_lossy, Namespace, Transport, VolumeBytes};
+use tairix_procinfo::{field_lossy, source_text, Namespace, Transport, VolumeBytes};
 use tairix_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_TEXT_MAX};
 
 use crate::command::{Command, Options};
@@ -37,6 +37,9 @@ struct Fs {
     target: String,
     fstype: String,
     usage: VolumeStats,
+    class: VolumeClass,
+    /// Another principal's volume, whose figures this caller is not shown.
+    withheld: bool,
 }
 
 impl Fs {
@@ -44,7 +47,7 @@ impl Fs {
     /// shows it.
     fn of(volume: &MountRecord, target: &[u8]) -> Self {
         Self {
-            source: field_lossy(volume.source_bytes()),
+            source: source_text(volume),
             target: if target.is_empty() {
                 String::from("-")
             } else {
@@ -52,6 +55,8 @@ impl Fs {
             },
             fstype: field_lossy(volume.fstype_bytes()),
             usage: volume.usage(),
+            class: volume.class(),
+            withheld: volume.is_withheld(),
         }
     }
 
@@ -65,10 +70,21 @@ impl Fs {
                 target: field_lossy(view.target_bytes()),
                 fstype: String::from(NO_VOLUME),
                 usage: VolumeStats::default(),
+                class: VolumeClass::Local,
+                withheld: false,
             });
         }
         Some(Self::of(namespace.volume_of(view)?, view.target_bytes()))
     }
+}
+
+/// What the default report left out, by why.
+#[derive(Clone, Copy, Debug, Default)]
+struct Omitted {
+    /// Capacity-less volumes, further bindings, and the catalog.
+    pseudo_or_bind: u64,
+    /// Volumes other principals keep to themselves.
+    withheld: u64,
 }
 
 /// Run a parsed `df` command against the injected seams.
@@ -105,18 +121,18 @@ pub fn run(
 
     let namespace = Namespace::read(transport).map_err(DfError::from)?;
     let mut clean = true;
-    let (selected, hidden) = if options.paths.is_empty() {
+    let (selected, omitted) = if options.paths.is_empty() {
         select_all(&options, &namespace)
     } else {
         let selected = select_operands(&options, &namespace, probe, err, &mut clean)?;
-        (selected, 0)
+        (selected, Omitted::default())
     };
 
-    // The type filters apply to whatever was selected; leaving nothing is
-    // the GNU `no file systems processed` outcome.
+    // The filters apply to whatever was selected; leaving nothing is the GNU
+    // `no file systems processed` outcome.
     let rows: Vec<&Fs> = selected
         .iter()
-        .filter(|fs| type_selected(&options, fs))
+        .filter(|fs| filtered_in(&options, fs))
         .collect();
     if rows.is_empty() {
         if clean {
@@ -127,23 +143,21 @@ pub fn run(
     }
 
     render(&options, &rows, out)?;
-    if hidden > 0 {
-        emit_omission_record(out, hidden);
-    }
+    emit_omissions(out, &omitted);
     Ok(clean)
 }
 
-/// The whole-namespace selection and how many rows `-a` would add to it.
+/// The whole-namespace selection and the rows `-a` would add to it.
 ///
 /// By default, one row per attached volume that reports a capacity, at the
 /// view path showing its root. `-a` lists every binding instead — a volume's
 /// further bindings as rows of their own, as GNU `df -a` lists bind mounts,
-/// and the `/Storage` catalog as a pseudo filesystem — then any volume no
-/// binding shows.
-fn select_all(options: &Options, namespace: &Namespace) -> (Vec<Fs>, u64) {
+/// the `/Storage` catalog as a pseudo filesystem, and another principal's
+/// private volume with no figures — then any volume no binding shows.
+fn select_all(options: &Options, namespace: &Namespace) -> (Vec<Fs>, Omitted) {
     let every = every_row(namespace);
     if options.all {
-        return (every, 0);
+        return (every, Omitted::default());
     }
     let reported: Vec<Fs> = namespace
         .volumes()
@@ -151,8 +165,19 @@ fn select_all(options: &Options, namespace: &Namespace) -> (Vec<Fs>, u64) {
         .filter(|volume| VolumeBytes::of(&volume.usage()).is_some())
         .map(|volume| Fs::of(volume, volume.target_bytes()))
         .collect();
-    let hidden = every.len().saturating_sub(reported.len());
-    (reported, u64::try_from(hidden).unwrap_or(u64::MAX))
+    let withheld = every.iter().filter(|fs| fs.withheld).count();
+    let pseudo_or_bind = every
+        .len()
+        .saturating_sub(reported.len())
+        .saturating_sub(withheld);
+    let count = |rows: usize| u64::try_from(rows).unwrap_or(u64::MAX);
+    (
+        reported,
+        Omitted {
+            pseudo_or_bind: count(pseudo_or_bind),
+            withheld: count(withheld),
+        },
+    )
 }
 
 /// Every binding's row, then every volume no binding shows.
@@ -235,8 +260,11 @@ fn select_operands(
     Ok(rows)
 }
 
-/// Whether the `-t`/`-x` filters keep `fs` in the report.
-fn type_selected(options: &Options, fs: &Fs) -> bool {
+/// Whether the `-l`, `-t` and `-x` filters keep `fs` in the report.
+fn filtered_in(options: &Options, fs: &Fs) -> bool {
+    if options.local && fs.class == VolumeClass::Network {
+        return false;
+    }
     if options.exclude_types.contains(&fs.fstype) {
         return false;
     }
@@ -427,7 +455,10 @@ fn row(options: &Options, fs: &Fs) -> Vec<Cell> {
             fs.fstype.as_str()
         }));
     }
-    if options.inodes {
+    if fs.withheld {
+        // GNU writes a figure it does not know as `-`.
+        cells.extend((0..4).map(|_| Cell::number("-")));
+    } else if options.inodes {
         push_inode_cells(&mut cells, fs.usage.files, fs.usage.files_free);
     } else {
         let (total, used, avail) = byte_figures(&fs.usage);
@@ -514,21 +545,62 @@ fn diagnose(err: &dyn Output, message: &str) -> Result<(), DfError> {
     err.write_all(line.as_bytes()).map_err(DfError::Output)
 }
 
-/// Emit the `fs.mounts_omitted` advisory (fd 3) when the default view
-/// left out rows `-a` shows — a volume reporting no capacity, a further
-/// binding of a volume, the catalog — so a tool or user knows the table is
-/// not exhaustive and how to see the rest. Advisory only — never affects
-/// the table, the exit status, or ordering.
-fn emit_omission_record(out: &dyn Output, omitted: u64) {
-    let message = if omitted == 1 {
-        String::from("1 pseudo or bind mount not shown.")
-    } else {
-        format!("{omitted} pseudo or bind mounts not shown.")
-    };
+/// Emit an omission advisory (fd 3) for each kind of row the default view
+/// left out that `-a` shows, so a tool or user knows the table is not
+/// exhaustive and how to see the rest. Advisory only — never affects the
+/// table, the exit status, or ordering.
+fn emit_omissions(out: &dyn Output, omitted: &Omitted) {
+    let Omitted {
+        pseudo_or_bind,
+        withheld,
+    } = *omitted;
+    if pseudo_or_bind > 0 {
+        let message = if pseudo_or_bind == 1 {
+            String::from("1 pseudo or bind mount not shown.")
+        } else {
+            format!("{pseudo_or_bind} pseudo or bind mounts not shown.")
+        };
+        let omission = Omission {
+            code: "fs.mounts_omitted",
+            reason: "hidden_by_default",
+            entry_class: "pseudo_or_bind_mount",
+        };
+        emit_omission(out, &omission, pseudo_or_bind, &message);
+    }
+    if withheld > 0 {
+        let message = if withheld == 1 {
+            String::from("1 other user's private volume not shown.")
+        } else {
+            format!("{withheld} other users' private volumes not shown.")
+        };
+        let omission = Omission {
+            code: "fs.private_mounts_omitted",
+            reason: "private_to_another_principal",
+            entry_class: "private_mount",
+        };
+        emit_omission(out, &omission, withheld, &message);
+    }
+}
+
+/// What one omission advisory says was left out.
+struct Omission {
+    code: &'static str,
+    reason: &'static str,
+    entry_class: &'static str,
+}
+
+/// Emit one omission advisory: `count` rows of `omission`'s kind, `message`
+/// saying so.
+fn emit_omission(out: &dyn Output, omission: &Omission, count: u64, message: &str) {
+    let Omission {
+        code,
+        reason,
+        entry_class,
+    } = omission;
     let ai = format!(
         "{{\"subject\":\"filesystem_report\",\
-         \"omission\":{{\"reason\":\"hidden_by_default\",\
-         \"entry_class\":\"pseudo_or_bind_mount\",\"omitted_count\":{omitted},\
+         \"omission\":{{\"reason\":\"{reason}\",\
+         \"entry_class\":\"{entry_class}\",\"omitted_count\":{count},\
          \"stdout_is_exhaustive\":false}},\
          \"suggestion\":{}}}",
         Suggestion::new(&["df", "-a"])
@@ -536,9 +608,9 @@ fn emit_omission_record(out: &dyn Output, omitted: u64) {
     let record = StdInfoRecord::new(
         OWN_WORD,
         StdInfoKind::Omission,
-        "fs.mounts_omitted",
+        code,
         Severity::Info,
-        Human::with_suggestion(&message, "Use `df -a` to show them."),
+        Human::with_suggestion(message, "Use `df -a` to show them."),
     )
     .with_ai(&ai);
     let mut buf = [0u8; 512];
@@ -558,8 +630,8 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{
-        MountAvailability, MountRecord, MountVolumeState, PageRequest, SysinfoQueryId,
-        SysinfoRequestHeader, ViewBindingRecord,
+        MountAvailability, MountOwner, MountRecord, MountVolumeState, PageRequest, SysinfoQueryId,
+        SysinfoRequestHeader, ViewBindingRecord, VolumeClass,
     };
     use tairix_abi::Errno;
     use tairix_help::{HelpSource, SourceError};
@@ -809,6 +881,81 @@ mod tests {
         assert!(rows[3].starts_with("none") && rows[3].ends_with(" /Storage"));
         assert!(rows[4].ends_with(" /Storage/odd"));
         assert!(records.is_empty());
+    }
+
+    /// The production table, plus another user's private floppy at
+    /// `/Storage/letters` as `sysinfod` lists it to this caller, and a network
+    /// share at `/Storage/nas`.
+    fn shared_table() -> Fixture {
+        let mut fixture = table();
+        let floppy = record(
+            "Letters.adf",
+            "/Storage/letters",
+            "affs",
+            usage(512, 1760, 40, 40),
+            4,
+        )
+        .with_owner(MountOwner {
+            uid: 1001,
+            private: true,
+        })
+        .with_class(VolumeClass::Image);
+        let share = record(
+            "//nas/team",
+            "/Storage/nas",
+            "smb3",
+            usage(512, 4096, 1024, 1024),
+            5,
+        )
+        .with_class(VolumeClass::Network);
+        fixture.records.extend([floppy.withheld(), share]);
+        fixture.views.extend([
+            view("/Storage/letters", "", 4),
+            view("/Storage/nas", "/", 5),
+        ]);
+        fixture
+    }
+
+    #[test]
+    fn another_users_private_volume_is_noted_apart_and_listed_without_figures() {
+        let (clean, out, _, records) = run_case(&[], &shared_table(), &MemProbe::new(&[]));
+        assert!(clean);
+        assert!(!out.contains("/Storage/letters"), "{out}");
+        assert_eq!(records.len(), 2, "{records:?}");
+        assert!(records[0].contains("3 pseudo or bind mounts not shown."));
+        assert!(records[1].contains("\"code\":\"fs.private_mounts_omitted\""));
+        assert!(records[1].contains("1 other user's private volume not shown."));
+        for args in [&["-a"][..], &["-a", "-i"][..]] {
+            let (_, all, _, _) = run_case(args, &shared_table(), &MemProbe::new(&[]));
+            let row = all
+                .lines()
+                .find(|line| line.ends_with(" /Storage/letters"))
+                .expect("listed");
+            assert_eq!(
+                row.split_whitespace().collect::<Vec<_>>(),
+                ["-", "-", "-", "-", "-", "/Storage/letters"],
+                "{args:?}: its figures are unknown, not zero"
+            );
+        }
+        let (_, operand, _, _) = run_case(
+            &["/Storage/letters"],
+            &shared_table(),
+            &MemProbe::new(&["/Storage/letters"]),
+        );
+        assert!(operand
+            .lines()
+            .nth(1)
+            .is_some_and(|row| row.starts_with("- ")));
+    }
+
+    #[test]
+    fn local_leaves_out_the_network_shares() {
+        let (_, every, _, _) = run_case(&[], &shared_table(), &MemProbe::new(&[]));
+        assert!(every.contains("/Storage/nas"));
+        let (clean, local, _, _) = run_case(&["-l"], &shared_table(), &MemProbe::new(&[]));
+        assert!(clean);
+        assert!(!local.contains("/Storage/nas"), "{local}");
+        assert!(local.contains(" /System\n"));
     }
 
     #[test]

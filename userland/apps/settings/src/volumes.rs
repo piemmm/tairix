@@ -1,4 +1,5 @@
-//! The Storage pane: one card per mounted volume, read-only.
+//! The Storage pane: one card per mounted volume not withheld from the
+//! reader, read-only.
 //!
 //! Unlike every other composed pane, this one has no fixed table of
 //! settables behind it — its cards are the volumes the machine turns out to
@@ -94,10 +95,15 @@ pub struct VolumeReading {
 }
 
 impl VolumeReading {
-    /// What `record` says about its volume.
+    /// What `record` says about its volume; `None` for one
+    /// [withheld](MountRecord::is_withheld) from this user, whose details are
+    /// another user's and whose card would state absences that are not.
     #[must_use]
-    pub fn of(record: &MountRecord) -> Self {
-        Self {
+    pub fn of(record: &MountRecord) -> Option<Self> {
+        if record.is_withheld() {
+            return None;
+        }
+        Some(Self {
             name: text(mount_name_bytes(record)),
             target: text(record.target_bytes()),
             fstype: text(record.fstype_bytes()),
@@ -105,7 +111,7 @@ impl VolumeReading {
             medium: record.medium(),
             availability: record.availability(),
             bytes: VolumeBytes::of(&record.usage()),
-        }
+        })
     }
 
     /// What the volume is called.
@@ -253,7 +259,8 @@ fn capacity_tile(bytes: VolumeBytes, medium: Option<BlkMedium>) -> MetricTile {
         .with_instrument(MetricInstrument::Track(track))
 }
 
-/// The Storage pane's body: one card per mounted volume.
+/// The Storage pane's body: one card per mounted volume not withheld from the
+/// reader.
 ///
 /// Read-only throughout, so it routes no input: the pane's keyboard is its
 /// scrollbar's, exactly as a pane that states an absence.

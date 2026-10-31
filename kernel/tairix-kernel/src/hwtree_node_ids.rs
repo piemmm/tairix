@@ -85,12 +85,16 @@ pub const IOMMU_UNIT_NODE_BASE_ID: u32 = region(6);
 /// enumerated GPU slot, so distinct adapters stay distinct.
 pub const VIRTIO_DISPLAY_PROBE_NODE_BASE_ID: u32 = region(7);
 
+/// The id of the kernel's own parent of image volumes' nodes, which no driver
+/// binds. A single node, so it needs only the one id at its region base.
+pub const IMAGE_VOLUMES_NODE_ID: u32 = region(8);
+
 /// The first region of the PCI function nodes: every segment the kernel owns
 /// takes the region at its position among them, and each function's node
 /// sits at its requester id within it, so a function has one id whatever its
 /// class and however many segments there are. It is the last region, since
 /// every segment past the first claims the one after it.
-pub const PCI_FUNCTION_NODE_BASE_ID: u32 = region(8);
+pub const PCI_FUNCTION_NODE_BASE_ID: u32 = region(9);
 
 /// The node id of the function with requester id `requester` on the
 /// `ordinal`-th segment the kernel owns, or [`None`] past the id space.
@@ -129,7 +133,7 @@ mod tests {
     use super::*;
 
     /// Every reserved base, in region order, for the disjointness sweep.
-    const BASES: [u32; 9] = [
+    const BASES: [u32; 10] = [
         VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
         VIRTIO_INPUT_PROBE_NODE_BASE_ID,
         BOOT_DISPLAY_NODE_ID,
@@ -138,6 +142,7 @@ mod tests {
         VIRTIO_AUDIO_PROBE_NODE_BASE_ID,
         IOMMU_UNIT_NODE_BASE_ID,
         VIRTIO_DISPLAY_PROBE_NODE_BASE_ID,
+        IMAGE_VOLUMES_NODE_ID,
         PCI_FUNCTION_NODE_BASE_ID,
     ];
 

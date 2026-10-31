@@ -175,10 +175,6 @@ impl MemBlock {
         self
     }
 
-    /// Model the backing device being enlarged underneath a live mount (an
-    /// admin growing the partition / logical volume / virtual disk): extend
-    /// the store with fresh zeroed blocks and report the larger count. Used to
-    /// exercise online [`ARXFS::grow`].
     /// Note how deep the stack is at this device call. `#[inline(never)]`
     /// keeps this frame's own size out of the comparison between calls.
     #[inline(never)]
@@ -204,6 +200,10 @@ impl MemBlock {
         base.abs_diff(self.stack_floor)
     }
 
+    /// Model the backing device being enlarged underneath a live mount (an
+    /// admin growing the partition / logical volume / virtual disk): extend
+    /// the store with fresh zeroed blocks and report the larger count. Used to
+    /// exercise online [`ARXFS::grow`].
     fn enlarge_to(&mut self, new_block_count: u64) {
         assert!(new_block_count >= self.block_count, "enlarge cannot shrink");
         self.store
@@ -10143,8 +10143,11 @@ fn a_merge_of_two_empty_siblings_is_refused_rather_than_indexed_into() {
     fs.rollback();
 }
 
-/// Stack bytes one call of `op` used, measured from the caller's own frame down
-/// to the deepest device call it reached.
+/// Stack bytes one call of `op` used, measured from this frame down to the
+/// deepest device call it reached. `#[inline(never)]` keeps the anchor in a
+/// frame of its own: inlined, it would sit in the caller's, and every local the
+/// caller holds below it would be billed to `op`.
+#[inline(never)]
 fn stack_cost<T>(
     fs: &mut ARXFS<MemBlock>,
     op: impl FnOnce(&mut ARXFS<MemBlock>) -> T,
@@ -10155,6 +10158,32 @@ fn stack_cost<T>(
     let out = op(fs);
     let used = fs.block_mut().stack_used(base);
     (out, used)
+}
+
+/// The cost of one device read measured beneath a frame holding `PAD` bytes
+/// of its own.
+#[inline(never)]
+fn read_cost_beneath<const PAD: usize>(fs: &mut ARXFS<MemBlock>) -> usize {
+    let mut pad = [0u8; PAD];
+    core::hint::black_box(&mut pad);
+    let (read, used) = stack_cost(fs, |fs| {
+        let mut block = [0u8; 512];
+        fs.block_mut().read_blocks(0, &mut block)
+    });
+    assert_eq!(read, Ok(()));
+    core::hint::black_box(&pad);
+    used
+}
+
+#[test]
+fn a_stack_cost_leaves_the_measuring_callers_own_frame_out() {
+    let mut fs = fmt(512, 1 << 16, 64);
+    let shallow = read_cost_beneath::<16>(&mut fs);
+    let deep = read_cost_beneath::<{ 8 * 1024 }>(&mut fs);
+    assert!(
+        deep.abs_diff(shallow) < 256,
+        "the same read cost {shallow} bytes beneath a small frame and {deep} beneath an 8 KiB one"
+    );
 }
 
 #[test]

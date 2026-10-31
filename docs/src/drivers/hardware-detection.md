@@ -175,11 +175,17 @@ address *inside* that outbound window. The bootstrap floor (§18.6) seeds
 only the first nodes needed to reach the driver store; everything below a
 discovered bus is published by that bus's user-space driver.
 
-The kernel publishes one kind of node itself: for each removable volume it
-attaches, a `tairix,volume-<format>` node under the storage node the volume
-manager was loaded for, carrying the one `Volume` resource the format's driver
-is granted ([Volumes served from user space](../filesystem/served.md)). It
-withdraws the node when the volume leaves, which is what unloads the driver.
+The kernel publishes one kind of node itself: for each volume it serves, a
+`tairix,volume-<format>` node carrying the one `Volume` resource the format's
+driver is granted ([Volumes served from user space](../filesystem/served.md))
+— a removable volume's under the storage node the volume manager was loaded
+for, a disk image's under the kernel's own image-volumes node, which no
+driver binds ([Disk images](../filesystem/images.md)). It withdraws the node
+when the volume leaves, which is what unloads the driver. A disk image's node
+is a principal's request rather than a device's discovery, so it is issued
+its id from the lower half of the ids left once the store was seeded
+(`HwTreeStore::publish_requested_child`): no id is reissued, and however fast
+a principal cycles attaches, the devices and drivers keep the other half.
 
 The kernel **owns the published node's identity** — the emitter never names
 it (`AGENTS.md` §4 / §5.4 — identity is kernel-provided, never
@@ -199,7 +205,8 @@ publish nothing — `hw_emit_node` fails closed with `PermissionDenied`.
 
 The boot record (`tairix_kernel::unlock_service::record_boot`) resolves the
 bootstrap root block binding from the collected boot tree and then moves the
-tree, plus the virtual bus, into the store, which keeps the kernel's only copy.
+tree, plus the virtual bus and the image volumes' parent node, into the
+store, which keeps the kernel's only copy.
 The store takes one seed per boot and refuses a tree that names an id twice or
 holds a node whose id is not above its parent's — the order that lets a
 removal find a whole subtree in one ascending pass. A refused seed, or no

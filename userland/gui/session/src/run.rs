@@ -117,6 +117,7 @@ mod program {
     use tairix_appdata::RtHost;
     use tairix_audio::live::{live_captures, RtAudio};
     use tairix_audio::stream::{devices, set_control, DeviceControl};
+    use tairix_browse::mount::{MountAct, MountDone, MountWorker};
     use tairix_browse::{
         AppAssociation, DirectorySource, Entry, GridView, Listing, ListingDesk, ListingJob, Probe,
         Probes, RtLinkReader, Took, WatchUpdate, WatchedDirectory, Watches, WATCH_BUFFER_LEN,
@@ -457,6 +458,10 @@ mod program {
     /// The wait-set token of every saver taken down while it still ran: ready
     /// once one has exited, to be reaped.
     const SAVER_EXIT_TOKEN: u64 = 31;
+
+    /// The wait-set token of the mount worker's wake: a disk image opened on
+    /// the desktop was mounted, or refused.
+    const MOUNT_TOKEN: u64 = 32;
 
     /// How often the user's screensaver store's watch may report: a bundle
     /// copied in costs one read of the stores, and is most often whole by
@@ -2948,6 +2953,30 @@ mod program {
             );
         }
         let _elevate_guard = tairix_rt::work::WorkerGuard::new(&elevate_worker);
+        // A disk image opened on the desktop is mounted on a thread of its
+        // own: the attach waits for the volume's driver, which behind the file
+        // worker would hold every picker up. With no memory for one, each
+        // image opened is refused, saying so.
+        let mounts = tairix_browse::mount::mount_worker()
+            .ok()
+            .map(alloc::sync::Arc::new);
+        match &mounts {
+            Some(worker) => {
+                if let Err(reason) = Worker::start(worker) {
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "no mount thread ({reason:?}); a disk image is mounted on the serve loop"
+                        ),
+                    );
+                }
+            }
+            None => app::report(
+                APP_NAME,
+                "no memory for the mount worker; disk images are not mounted",
+            ),
+        }
+        let _mount_guard = mounts.as_ref().map(tairix_rt::work::WorkerGuard::new);
         // The one thread that waits on the font service: the desktop draws
         // without waiting, and this fetches what it drew provisionally. With
         // no thread, text is fetched on the serve loop as it is drawn.
@@ -3496,6 +3525,18 @@ mod program {
             ) != 0
             {
                 return app::fail(APP_NAME, EXIT_WAIT_FAILED, "elevation wake wait refused");
+            }
+        }
+        if let Some(read) = mounts.as_ref().and_then(|worker| worker.wake().read_end()) {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                MOUNT_TOKEN,
+            ) != 0
+            {
+                return app::fail(APP_NAME, EXIT_WAIT_FAILED, "mount wake wait refused");
             }
         }
         if let Some(read) = zone_worker.wake().read_end() {
@@ -4411,6 +4452,7 @@ mod program {
                             publisher: &publisher,
                             catalogs: &catalogs,
                             files: &files,
+                            mounts: mounts.as_deref(),
                             desktop: &mut desktop,
                             launched: &mut launched,
                             programs: &mut programs,
@@ -5240,6 +5282,28 @@ mod program {
             } else if token == ELEVATE_TOKEN {
                 elevate_worker.wake().drain();
                 adopt_elevations(&mut elevator, &mut elevate, &shell, &mut compositor);
+            } else if token == MOUNT_TOKEN {
+                if let Some(mounts) = &mounts {
+                    mounts.wake().drain();
+                    mounts.collect_landed(|done| {
+                        let settled = settle_mount(
+                            done,
+                            &mut shell,
+                            &mut compositor,
+                            &mut LaunchCtx {
+                                launched: &mut launched,
+                                apps: &apps.service,
+                                server: &mut server,
+                                sink: &mut sink,
+                                windows: &windows,
+                                identity: &identity,
+                            },
+                        );
+                        if let Err(refusal) = settled {
+                            state_refusal(&refusal, &mut windows, &mut shell, &mut compositor);
+                        }
+                    });
+                }
             } else if token == FONT_TOKEN {
                 // What landed is laid out again at the end of this turn, where
                 // every surface is brought up to date before the frame.
@@ -5384,6 +5448,7 @@ mod program {
                         publisher: &publisher,
                         catalogs: &catalogs,
                         files: &files,
+                        mounts: mounts.as_deref(),
                         pinboard: &mut pinboard,
                         wallpapers: &wallpapers,
                         desktop: &mut desktop,
@@ -8110,6 +8175,7 @@ mod program {
         publisher: &'a Publisher,
         catalogs: &'a Catalogs,
         files: &'a Files,
+        mounts: Option<&'a MountWorker>,
         desktop: &'a mut Desktop<S>,
         launched: &'a mut LaunchTable,
         programs: &'a mut Programs,
@@ -8125,6 +8191,7 @@ mod program {
         publisher: &'a Publisher,
         catalogs: &'a Catalogs,
         files: &'a Files,
+        mounts: Option<&'a MountWorker>,
         pinboard: &'a mut PinboardPanel,
         wallpapers: &'a Wallpapers,
         desktop: &'a mut Desktop<S>,
@@ -8213,7 +8280,7 @@ mod program {
             let refused = route_desktop(
                 &outcome,
                 self.publisher,
-                self.files,
+                (self.files, self.mounts),
                 self.pinboard,
                 self.wallpapers,
                 self.desktop,
@@ -8304,6 +8371,7 @@ mod program {
                     publisher: self.publisher,
                     catalogs: self.catalogs,
                     files: self.files,
+                    mounts: self.mounts,
                     desktop: self.desktop,
                     launched: self.launched,
                     programs: self.programs,
@@ -8806,7 +8874,7 @@ mod program {
         let applied = apply_desktop_action(
             acted.action,
             desk.publisher,
-            desk.files,
+            (desk.files, desk.mounts),
             desk.pinboard,
             desk.wallpapers,
             desk.desktop,
@@ -11142,7 +11210,7 @@ mod program {
     fn route_desktop<S: DirectorySource>(
         outcome: &Timed<tairix_desktop_session::ShellOutcome>,
         publisher: &Publisher,
-        files: &Files,
+        file_work: (&Files, Option<&MountWorker>),
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
@@ -11219,7 +11287,7 @@ mod program {
         // The settings and folder edits `apply_desktop_action` performs are
         // the changes that genuinely repaint the whole layer.
         let applied = apply_desktop_action(
-            action, publisher, files, pinboard, wallpapers, desktop, shell, compositor, launch,
+            action, publisher, file_work, pinboard, wallpapers, desktop, shell, compositor, launch,
             now_ns,
         );
         if applied == Ok(true) {
@@ -11394,7 +11462,7 @@ mod program {
     fn apply_desktop_action<S: DirectorySource>(
         action: Option<DesktopAction>,
         publisher: &Publisher,
-        files: &Files,
+        (files, mounts): (&Files, Option<&MountWorker>),
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
@@ -11421,6 +11489,10 @@ mod program {
                 document: None,
             })) => {
                 let _ = launch.launch(shell, compositor, &run_path, &label, &[], None);
+                false
+            }
+            Some(DesktopAction::Activate(DesktopActivation::MountImage { path })) => {
+                mount_image(path, mounts, shell, compositor, launch)?;
                 false
             }
             // The document is opened on the file worker, and the launch
@@ -11575,6 +11647,66 @@ mod program {
         if let Some(FileAnswer::Desktop(done)) = files.submit(FileJob::Desktop(call)) {
             settle_desktop_call(done, desktop, shell, compositor, launch);
         }
+    }
+
+    /// Mount the disk image at `path` the user opened on the desktop, off the
+    /// loop. With no thread it is mounted here, and settled at once.
+    fn mount_image(
+        path: alloc::string::String,
+        mounts: Option<&MountWorker>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        launch: &mut LaunchCtx<'_>,
+    ) -> Result<(), GestureRefusal> {
+        let act = MountAct::Attach {
+            path,
+            read_only: false,
+        };
+        let Some(mounts) = mounts else {
+            return Err(gesture_refusal(act.refused(tairix_browse::mount::UNSERVED)));
+        };
+        match mounts.submit(act) {
+            Ok(false) => Ok(()),
+            Ok(true) => mounts
+                .collect()
+                .map_or(Ok(()), |done| settle_mount(done, shell, compositor, launch)),
+            Err(act) => Err(gesture_refusal(act.refused(tairix_browse::mount::CROWDED))),
+        }
+    }
+
+    /// Show the volume a disk image opened on the desktop holds, as a folder
+    /// opened there is shown.
+    ///
+    /// # Errors
+    ///
+    /// Why the image was not mounted.
+    fn settle_mount(
+        done: MountDone,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        launch: &mut LaunchCtx<'_>,
+    ) -> Result<(), GestureRefusal> {
+        let Some(location) = done.shown().map_err(gesture_refusal)? else {
+            return Ok(());
+        };
+        let path = tairix_browse::vfs::spell_absolute_path(&location);
+        let _ = launch.launch(
+            shell,
+            compositor,
+            FILES_RUN_PATH,
+            FILES_LABEL,
+            &[path.as_bytes()],
+            Some(LaunchTarget::Path(&path)),
+        );
+        Ok(())
+    }
+
+    /// A refused mount, as the desktop states a refused gesture.
+    fn gesture_refusal(refusal: tairix_browse::mount::MountRefusal) -> GestureRefusal {
+        GestureRefusal::new(
+            refusal.headline,
+            tairix_window::client::alert_sentence(refusal.reason),
+        )
     }
 
     /// Settle a desktop call the file worker carried out.

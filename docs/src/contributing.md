@@ -104,6 +104,14 @@ single-byte sweep of the 2.8 KiB machine report and the aarch64 port's
 redistributor that never wakes, half an hour each through safe code. The
 registry names every exclusion and carries its reason.
 
+A host's own architecture decides one more thing: what the interpreter refuses
+there is skipped there alone (`HOST_REFUSALS`, with its reason) — on an AArch64
+host the NEON blur, whose per-lane shift count the interpreter cannot execute
+— and every interpreted build takes `sha2`'s portable backend
+(`SHA2_PORTABLE`), since an AArch64 host's interpreter executes no SHA-2
+instruction and that backend's constant loads break Stacked Borrows
+(`plans/OPEN-DEFECTS.md` D1588). Every host then interprets the same code.
+
 Figures in this table are wall clock, taken from outside. Miri's own clock is
 virtual: the `finished in …` line a test binary prints under the interpreter is
 **not** wall time and can exceed it severalfold, so the runner's own per-job

@@ -7,14 +7,7 @@ use crate::testfs::TestFs;
 
 #[test]
 fn every_format_binds_the_nodes_published_for_it_alone() {
-    let formats = [
-        VolumeFsType::ARXFS,
-        VolumeFsType::Ext4,
-        VolumeFsType::Fat32,
-        VolumeFsType::Iso9660,
-        VolumeFsType::Udf,
-        VolumeFsType::Adfs,
-    ];
+    let formats = VolumeFsType::ALL;
     for fstype in formats {
         let key = bind_key(fstype);
         for other in formats {

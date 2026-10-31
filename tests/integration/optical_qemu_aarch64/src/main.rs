@@ -37,10 +37,9 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
@@ -65,13 +64,9 @@ mod kernel {
     /// `SyscallInvoked`, the audited record the sink watches for exits.
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
-    /// The login shell, whose `exit` the script types only once the fixture
-    /// has reported its pass: no other process's exit, however it lands, can
-    /// end the run.
-    const SHELL: &str = "elsh";
-
-    /// Whether the fixture has exited, which only a pass lets it do.
-    static FIXTURE_EXITED: AtomicBool = AtomicBool::new(false);
+    /// The run's end: the fixture's exit, which only a pass lets it make,
+    /// then the shell's.
+    static END: FixtureExit = FixtureExit::new(&[COMMAND], SYSCALL_INVOKED_EVENT_ID);
 
     /// Replays every event to the serial console and ends the run on the
     /// shell's exit after the fixture's.
@@ -80,13 +75,8 @@ mod kernel {
     impl Sink for OpticalSink {
         fn write_event(&self, event: &Event<'_>) {
             SerialSink::new().write_event(event);
-            if event.id != SYSCALL_INVOKED_EVENT_ID || field_str(event, "sc") != Some("exit") {
-                return;
-            }
-            match field_str(event, "comm") {
-                Some(COMMAND) => FIXTURE_EXITED.store(true, Ordering::Release),
-                Some(SHELL) if FIXTURE_EXITED.load(Ordering::Acquire) => qemu_exit::exit_success(),
-                _ => {}
+            if END.passed(event) {
+                qemu_exit::exit_success();
             }
         }
     }

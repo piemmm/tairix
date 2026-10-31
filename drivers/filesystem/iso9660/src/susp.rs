@@ -161,6 +161,16 @@ pub(crate) struct Amiga {
     comment_complete: bool,
 }
 
+impl Amiga {
+    /// What the record surfaces as `amiga` attributes.
+    pub(crate) fn object(&self) -> tairix_fsmeta::preset::amiga::Object<'_> {
+        tairix_fsmeta::preset::amiga::Object {
+            protection: self.protection,
+            comment: &self.comment,
+        }
+    }
+}
+
 /// What a record's system use declares.
 pub(crate) struct SystemUse {
     pub posix: Option<Posix>,

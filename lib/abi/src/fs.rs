@@ -158,7 +158,7 @@ pub const FS_UMASK_QUERY: u32 = u32::MAX;
 /// A call may pass this for either field to change only the other; passing it
 /// for both is a well-formed no-op. `0xFFFF_FFFF` is not an assignable id, so
 /// the sentinel can never collide with a real owner id.
-pub const FS_OWNER_UNCHANGED: u32 = u32::MAX;
+pub const FS_OWNER_UNCHANGED: u32 = crate::UNASSIGNABLE_ID;
 
 /// Longest extended-attribute key, in bytes, a `fs_attr_*` syscall accepts.
 ///

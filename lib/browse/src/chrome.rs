@@ -49,6 +49,7 @@ use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::media::BlankDocument;
 use crate::open_with::{AppAssociation, OPEN_WITH_QUICK_MAX};
+use crate::places::Place;
 use crate::presentation::HiddenEndings;
 use crate::render::ListColumns;
 use crate::sort::{SortDirection, SortKey, SortMode};
@@ -411,6 +412,12 @@ pub enum ContextCommand {
     /// for a regular file — a directory descends and a bundle launches itself,
     /// so neither has an application to choose.
     OpenWith,
+    /// Mount the selected disk image read-only, however its file may be
+    /// written ([`crate::mount`]).
+    MountReadOnly,
+    /// Eject the selected volume, which the user attached: flushed and taken
+    /// out of the catalog ([`crate::mount::MountAct::Eject`]).
+    Eject,
     /// Rename the selected entry in place
     /// ([`prepare_rename`](Browser::prepare_rename)).
     Rename,
@@ -446,6 +453,8 @@ pub enum ContextCommand {
 pub const CONTEXT_COMMANDS: &[ContextCommand] = &[
     ContextCommand::Open,
     ContextCommand::OpenWith,
+    ContextCommand::MountReadOnly,
+    ContextCommand::Eject,
     ContextCommand::GetInfo,
     ContextCommand::Rename,
     ContextCommand::Cut,
@@ -465,6 +474,8 @@ impl ContextCommand {
         match self {
             Self::Open => "Open",
             Self::OpenWith => "Open With\u{2026}",
+            Self::MountReadOnly => "Mount Read-Only",
+            Self::Eject => "Eject",
             Self::GetInfo => "Get Info\u{2026}",
             Self::Rename => "Rename",
             Self::Cut => "Cut",
@@ -485,7 +496,7 @@ impl ContextCommand {
             Self::Open => "Enter",
             // Open With… binds no keyboard accelerator, so it advertises none;
             // the menu's own traversal is how a keyboard reaches it.
-            Self::OpenWith => "",
+            Self::OpenWith | Self::MountReadOnly | Self::Eject => "",
             Self::GetInfo => "Alt+Enter",
             Self::Rename => "F2",
             Self::Cut => "Ctrl+X",
@@ -505,6 +516,8 @@ impl ContextCommand {
             self,
             Self::Open
                 | Self::OpenWith
+                | Self::MountReadOnly
+                | Self::Eject
                 | Self::GetInfo
                 | Self::Rename
                 | Self::Cut
@@ -538,6 +551,7 @@ impl ContextCommand {
         match self {
             Self::Open => AppMenuSymbol::Open,
             Self::OpenWith => AppMenuSymbol::OpenWith,
+            Self::MountReadOnly | Self::Eject => AppMenuSymbol::Drive,
             Self::GetInfo => AppMenuSymbol::Properties,
             Self::Rename => AppMenuSymbol::Rename,
             Self::Cut => AppMenuSymbol::Cut,
@@ -915,6 +929,47 @@ pub fn network_context_menu<S: DirectorySource>(
     Ok(menu)
 }
 
+/// Build the row model a secondary press on the rail's `place` asks the
+/// desktop to open, under the root `title`: Open, then Eject, each disabled
+/// with its reason when it cannot act — Eject unless the place shows a volume
+/// attached for `viewer`.
+///
+/// The ids are [`context_menu`]'s, so [`context_choice_from_item`] reads
+/// either.
+///
+/// # Errors
+///
+/// Any [`Errno`] the shared menu bounds refuse, as [`context_menu`]'s.
+pub fn place_menu(place: &Place, viewer: Option<u32>, title: &str) -> Result<AppMenu, Errno> {
+    let mut menu = AppMenu::titled(AppMenuLabel::new(title)?);
+    for command in [ContextCommand::Open, ContextCommand::Eject] {
+        let index = CONTEXT_COMMANDS
+            .iter()
+            .position(|&listed| listed == command)
+            .ok_or(Errno::OutOfRange)?;
+        let reason = place_reason(place, viewer, command);
+        let item = command_item(index, command, reason, (None, HiddenEndings::NONE))?;
+        menu.push(AppMenuRow::Item(item))?;
+    }
+    Ok(menu)
+}
+
+/// Why `command` cannot act on the rail's `place` for `viewer`, or `""` when
+/// it can.
+fn place_reason(place: &Place, viewer: Option<u32>, command: ContextCommand) -> &'static str {
+    match command {
+        ContextCommand::Open if place.is_available() => "",
+        ContextCommand::Open => "it cannot be reached now",
+        ContextCommand::Eject => place
+            .facts()
+            .map_or(Mountable::Neither, |facts| {
+                Mountable::Volume(facts.ejector())
+            })
+            .eject_refusal(viewer),
+        _ => "",
+    }
+}
+
 /// Why Open cannot act on what is chosen over the network, or `""` when it
 /// can.
 fn network_open_reason<S: DirectorySource>(browser: &Browser<S>) -> &'static str {
@@ -1229,6 +1284,46 @@ pub struct ContextMenuModel {
     /// The endings the window shows names without, which the selection's row
     /// and the Rename field show the chosen name without too.
     endings: HiddenEndings,
+    /// What the one entry chosen is to the mounting verbs.
+    mountable: Mountable,
+    /// The principal the menu is shown to, the one a volume must have been
+    /// attached for to eject.
+    viewer: Option<u32>,
+}
+
+/// What the one entry a context menu acts on is to its mounting verbs.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Mountable {
+    /// Neither a disk image nor a volume.
+    Neither,
+    /// A disk image: a file holding a volume.
+    Image,
+    /// A volume's root, ejectable by its
+    /// [`ejector`](crate::places::VolumeFacts::ejector).
+    Volume(Option<u32>),
+}
+
+impl Mountable {
+    /// What `entry`, listed in `parent`, is to the mounting verbs.
+    fn of(entry: &Entry, parent: &[String]) -> Self {
+        if let Some(facts) = entry.volume() {
+            return Self::Volume(facts.ejector());
+        }
+        if crate::media::media_for_entry(entry, parent).holds_a_volume() {
+            Self::Image
+        } else {
+            Self::Neither
+        }
+    }
+
+    /// Why Eject cannot act on this for `viewer`, or `""` when it can.
+    fn eject_refusal(self, viewer: Option<u32>) -> &'static str {
+        match self {
+            Self::Volume(Some(ejector)) if viewer == Some(ejector) => "",
+            Self::Volume(_) => "only a volume you attached ejects",
+            Self::Neither | Self::Image => "only a volume ejects",
+        }
+    }
 }
 
 impl ContextMenuModel {
@@ -1250,6 +1345,21 @@ impl ContextMenuModel {
             sort: browser.sort_mode(),
             sort_keys: ListColumns::of_browser(browser).keys(),
             endings: browser.presentation().endings,
+            mountable: match (browser.chosen_entry(), browser.folder()) {
+                (Some(entry), Some(parent)) => Mountable::of(entry, parent),
+                _ => Mountable::Neither,
+            },
+            viewer: None,
+        }
+    }
+
+    /// The model, shown to the principal `uid`: the one a volume ejects for
+    /// when it was attached for them.
+    #[must_use]
+    pub const fn viewed_by(self, uid: u32) -> Self {
+        Self {
+            viewer: Some(uid),
+            ..self
         }
     }
 
@@ -1312,6 +1422,15 @@ impl ContextMenuModel {
                     Some(_) => "only a file opens with an application",
                     None => DANGLING,
                 },
+            },
+            ContextCommand::MountReadOnly => match single() {
+                Err(reason) => reason,
+                Ok(_) if self.mountable == Mountable::Image => "",
+                Ok(_) => "only a disk image mounts",
+            },
+            ContextCommand::Eject => match single() {
+                Err(reason) => reason,
+                Ok(_) => self.mountable.eject_refusal(self.viewer),
             },
             ContextCommand::Paste => {
                 if self.has_clipboard {

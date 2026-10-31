@@ -741,7 +741,7 @@ fn netattach_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
         frames.push(out[..len].to_vec());
     }
     frames.push(
-        AttachReply::new([9; 16], "share-2")
+        AttachReply::new([9; 16], "share-2", true)
             .expect("a reply")
             .encode()
             .to_vec(),
@@ -765,6 +765,76 @@ fn netattach_frames_with_flipped_bits_round_trip_or_are_refused() {
     for mut frame in netattach_frames() {
         exercise_netattach(&frame);
         each_bit_flipped(&mut frame, exercise_netattach);
+    }
+}
+
+/// Drive the image-attachment decoders on `bytes` (one arm of [`exercise`]):
+/// the attach a principal asks of a disk-image file, and the kernel's reply.
+/// An accepted frame re-encodes to itself.
+fn exercise_imageattach(bytes: &[u8]) {
+    use tairix_abi::imageattach::{ImageAttach, ImageAttachReply, IMAGE_ATTACH_MAX};
+    if let Ok(attach) = ImageAttach::decode(bytes) {
+        let mut out = vec![0u8; IMAGE_ATTACH_MAX];
+        let len = attach
+            .encode(&mut out)
+            .expect("an accepted image attach must re-encode");
+        assert_eq!(&out[..len], bytes, "an accepted image attach is canonical");
+    }
+    if let Ok(reply) = ImageAttachReply::decode(bytes) {
+        assert_eq!(&reply.encode()[..], bytes, "an accepted reply is canonical");
+    }
+}
+
+/// Well-formed frames of every image-attachment decoder.
+fn imageattach_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
+    use tairix_abi::imageattach::{
+        ImageAccess, ImageAttach, ImageAttachReply, ImageRefusal, IMAGE_ATTACH_MAX,
+    };
+    use tairix_abi::netattach::{AttachReply, Presentation};
+    use tairix_abi::volume::VolumeFsType;
+    let mut frames = std::vec::Vec::new();
+    for (name, target, expects, access) in [
+        (None, None, None, ImageAccess::WritableWherePossible),
+        (
+            Some("floppy"),
+            Some("/Users/ann/Home/floppy"),
+            Some(VolumeFsType::Affs),
+            ImageAccess::ReadOnly,
+        ),
+        (Some("disk"), None, None, ImageAccess::Writable),
+    ] {
+        let attach = ImageAttach {
+            name,
+            presentation: Presentation::Private,
+            access,
+            target,
+            expects,
+            adopt: false,
+        };
+        let mut out = vec![0u8; IMAGE_ATTACH_MAX];
+        let len = attach.encode(&mut out).expect("encodes");
+        frames.push(out[..len].to_vec());
+    }
+    let volume = AttachReply::new([9; 16], "floppy", false).expect("a reply");
+    for reply in [
+        ImageAttachReply::Attached(volume),
+        ImageAttachReply::AlreadyAttached(volume),
+        ImageAttachReply::Refused(ImageRefusal::RecordsOwners),
+        ImageAttachReply::TargetRefused(tairix_abi::Errno::NotEmpty),
+        ImageAttachReply::NameRefused(tairix_abi::Errno::AlreadyExists),
+    ] {
+        frames.push(reply.encode().to_vec());
+    }
+    frames
+}
+
+/// Every image-attachment frame, each bit flipped in turn: it decodes to its
+/// own encoding or is refused, never panics.
+#[test]
+fn imageattach_frames_with_flipped_bits_round_trip_or_are_refused() {
+    for mut frame in imageattach_frames() {
+        exercise_imageattach(&frame);
+        each_bit_flipped(&mut frame, exercise_imageattach);
     }
 }
 
@@ -1452,6 +1522,7 @@ fn exercise(bytes: &[u8]) {
     exercise_discovery(bytes);
     exercise_netshare(bytes);
     exercise_netattach(bytes);
+    exercise_imageattach(bytes);
     exercise_elevate(bytes);
     exercise_session_ipc(bytes);
     exercise_saver_ipc(bytes);

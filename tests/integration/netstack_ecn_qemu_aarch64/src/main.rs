@@ -43,21 +43,14 @@
 //! ## Why the PASS keys on the client's exit *then* the shell's exit
 //!
 //! On a fully verified transfer the client prints its `TCPECHO PASS …` line
-//! and exits `0`; on **any** shortfall it prints the reason and parks forever
-//! — it never exits — so the client's audited `exit` (`SyscallInvoked`,
-//! `EventId(5000)`, `sc=exit`, `comm=tcpecho`) is itself the kernel-side
-//! witness of a verified transfer. Exiting QEMU on that record would tear the
-//! run down before the runner observed the marker and sent its final line, so
-//! the sink only *arms* there and reports PASS on the **next** audited `exit`
-//! — the shell's, which the runner types only after the `TCPECHO PASS` marker
-//! appeared past the client's own output. The runner additionally fails the
-//! run if the guest exits before every scripted marker appeared, and the
-//! harness requires the ECN echo peer to report its full verdict (transfer
-//! echoed **and** the three ECN observations witnessed), so neither side can
-//! pass alone. A refused connect, a mismatched echo, a client crash, or an
-//! ECN failure therefore never reaches a passing run: it times out with the
-//! diagnosis in the serial transcript / peer verdict — the documented
-//! fail-loud behaviour.
+//! and exits `0`; on any shortfall it prints the reason and parks. The run
+//! passes on the login shell's audited exit after the client's
+//! (`tairix_itest_witness::FixtureExit`), which the runner types only once the
+//! marker appeared, and the harness also requires the ECN echo peer's full
+//! verdict (the transfer echoed and the three ECN observations witnessed), so
+//! neither side can pass alone. A refused connect, a mismatched echo, a client
+//! crash or an ECN failure times out with its diagnosis on serial or in the
+//! peer's verdict.
 //!
 //! ## How it differs from a production kernel
 //!
@@ -76,10 +69,9 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
@@ -106,34 +98,17 @@ mod kernel {
     /// `kernel/syscall/src/audit.rs`.
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
-    /// Set once the `tcpecho` client's own audited `exit` has been observed —
-    /// the kernel-side witness that the client judged the transfer fully
-    /// verified (a failed transfer parks forever and never exits). The PASS
-    /// finisher fires on the next audited `exit`: the shell's, typed by the
-    /// runner only after the `TCPECHO PASS` marker appeared, so the report
-    /// provably reached the transcript before the run ended.
-    static CLIENT_EXITED: AtomicBool = AtomicBool::new(false);
+    /// The run's end: the shell's exit after the client's.
+    static END: FixtureExit = FixtureExit::new(&[COMMAND], SYSCALL_INVOKED_EVENT_ID);
 
-    /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// once the `tcpecho` client's audited `exit` has been observed and the
-    /// shell's subsequent scripted `exit` dispatches (see the module docs for
-    /// why the PASS is deferred to the second exit). The ECN-specific proof is
-    /// the host peer's on-wire verdict, not a kernel record, so this sink is
-    /// the stream vertical's exit-keyed observer unchanged.
+    /// Replays every event to the serial console and ends the run at [`END`].
+    /// The ECN proof is the host peer's on-wire verdict, not a kernel record.
     struct EcnSink;
 
     impl Sink for EcnSink {
         fn write_event(&self, event: &Event<'_>) {
-            // Replay through the serial sink so the QEMU transcript records the
-            // full boot + autoload + config-delivery + connect + transfer
-            // timeline.
             SerialSink::new().write_event(event);
-            if event.id != SYSCALL_INVOKED_EVENT_ID || field_str(event, "sc") != Some("exit") {
-                return;
-            }
-            if field_str(event, "comm") == Some(COMMAND) {
-                CLIENT_EXITED.store(true, Ordering::Release);
-            } else if CLIENT_EXITED.load(Ordering::Acquire) {
+            if END.passed(event) {
                 qemu_exit::exit_success();
             }
         }

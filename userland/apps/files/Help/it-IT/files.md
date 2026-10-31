@@ -101,12 +101,20 @@ non può conservare viene indicato in un avviso al termine dell'operazione.
 Il menu contestuale si apre con *Visualizza*. Sotto, un sottomenu nomina ciò
 su cui agisce il menu — *File «notes.txt»*, con un nome lungo accorciato nel
 mezzo perché l'estensione resti visibile, o *Selezione* quando sono
-selezionate più voci — e contiene *Apri*, *Apri con…*, *Ottieni
-informazioni…*, *Rinomina*, *Taglia*, *Copia* ed *Elimina*; una voce che lì
-non può agire è in grigio e ne dice il motivo. Seguono *Nuovo*, poi
-*Seleziona tutto* e *Annulla selezione*, e infine *Incolla*. Un clic destro
-su uno spazio vuoto annulla la selezione, quindi il sottomenu della voce è in
-grigio.
+selezionate più voci — e contiene *Apri*, *Apri con…*, *Monta in sola
+lettura*, *Espelli*, *Ottieni informazioni…*, *Rinomina*, *Taglia*, *Copia*
+ed *Elimina*; una voce che lì non può agire è in grigio e ne dice il motivo.
+Seguono *Nuovo*, poi *Seleziona tutto* e *Annulla selezione*, e infine
+*Incolla*. Un clic destro su uno spazio vuoto annulla la selezione, quindi
+il sottomenu della voce è in grigio.
+
+Aprire un'immagine disco — un file `.iso`, `.adf`, `.hdf` e simili — la
+monta per voi in `/Storage`, scrivibile dove lo è il file, e ne apre la
+finestra; *Monta in sola lettura* la monta invece in sola lettura. Resta
+montata finché non la espellete o non termina la vostra sessione. *Espelli*
+toglie un volume che avete montato, dalla sua icona o dalla sua riga nella
+barra dei luoghi, il cui menu contestuale contiene *Apri* ed *Espelli*; le
+vostre finestre su di esso passano prima a `/Storage`.
 
 Il sottomenu *Nuovo* del menu contestuale crea una cartella, o un documento
 vuoto di ogni tipo che un editor installato sa scrivere, e ne apre il nome

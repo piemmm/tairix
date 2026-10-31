@@ -10,7 +10,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use tairix_abi::CapabilityId;
+use tairix_abi::{CapabilityId, UNASSIGNABLE_ID};
 use tairix_caps::CapabilitySet;
 use tairix_util::fallible::{collected, concatenated, written};
 
@@ -134,6 +134,14 @@ pub struct Identity<'a> {
 /// all three; a [`AccountState::NoLogin`] account carries none of them.
 fn check(identity: &Identity<'_>, password: &StoredPassword) -> Result<(), ParseError> {
     check_username(identity.username)?;
+    if identity.uid.0 == UNASSIGNABLE_ID {
+        return Err(ParseError::UserId);
+    }
+    let mut gids =
+        core::iter::once(identity.primary_gid).chain(identity.supplementary_gids.iter().copied());
+    if gids.any(|gid| gid.0 == UNASSIGNABLE_ID) {
+        return Err(ParseError::GroupId);
+    }
     check_display_name(identity.display_name)?;
     if let Some(home) = identity.home {
         check_path(home)?;
@@ -675,6 +683,35 @@ mod tests {
         let mut bad = identity(&[]);
         bad.username = "Ada";
         assert!(UserRecord::new(bad, password()).is_err());
+    }
+
+    #[test]
+    fn no_account_is_given_the_id_every_sentinel_is_spelled_with() {
+        let mut uid = identity(&[]);
+        uid.uid = Uid(tairix_abi::UNASSIGNABLE_ID);
+        assert_eq!(
+            UserRecord::new(uid, password()).err(),
+            Some(ParseError::UserId)
+        );
+        let mut primary = identity(&[]);
+        primary.primary_gid = Gid(tairix_abi::UNASSIGNABLE_ID);
+        assert_eq!(
+            UserRecord::new(primary, password()).err(),
+            Some(ParseError::GroupId)
+        );
+        let supplementary = [Gid(1000), Gid(tairix_abi::UNASSIGNABLE_ID)];
+        assert_eq!(
+            UserRecord::new(identity(&supplementary), password()).err(),
+            Some(ParseError::GroupId)
+        );
+        assert_eq!(
+            crate::GroupRecord::new("nobody", Gid(tairix_abi::UNASSIGNABLE_ID)).err(),
+            Some(ParseError::GroupId)
+        );
+        assert_eq!(
+            crate::groups::GroupView::decode("nobody:4294967295").err(),
+            Some(ParseError::GroupId)
+        );
     }
 
     #[test]

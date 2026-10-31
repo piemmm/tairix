@@ -24,6 +24,7 @@
 //! since only the latest answer describes what it shows now.
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -239,6 +240,149 @@ impl<J, A> WindowReads<J, A> {
 impl<J, A> Default for WindowReads<J, A> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A unit of work the reader takes, each documented with why it goes where
+/// [`READ_ORDER`] puts it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ReadKind {
+    /// A write the user committed: it holds nothing once done, so it goes
+    /// before an eject that would otherwise undo it, and its window waits on
+    /// the answer.
+    Write,
+    /// Where an eject's volume is bound, so the loop takes its windows off it
+    /// first.
+    Locate,
+    /// An eject, waiting only for the read under way and those writes.
+    Settle,
+    /// A document the user opened: what they are waiting for.
+    Open,
+    /// A listing navigated to.
+    List,
+    /// The network catalogue a window shows, or is on its way to, waited on
+    /// as a folder's listing is.
+    Network,
+    /// A shown folder's changes: what the user sees is wrong until they land.
+    Drain,
+    /// A node to describe: a Properties window shows nothing until it lands.
+    Properties,
+    /// A drive window's reading, watched live.
+    Drive,
+    /// Icon artwork, decoration a frame already draws without.
+    Artwork,
+    /// Folder cues.
+    Probe,
+    /// A picture file's own content, last of the decoration: its class
+    /// picture already stands in, and it costs a whole file's read.
+    Thumbnail,
+    /// The program stores' file associations.
+    Bundles,
+    /// The home components and mounted volumes the rail is built from.
+    Places,
+}
+
+/// The order the reader takes its work in: the first kind with any waiting.
+/// Nothing starves, since each kind is finite and refilled only by the user
+/// asking again or, for a folder's changes, by a watch the kernel paces.
+pub const READ_ORDER: [ReadKind; 14] = [
+    ReadKind::Write,
+    ReadKind::Locate,
+    ReadKind::Settle,
+    ReadKind::Open,
+    ReadKind::List,
+    ReadKind::Network,
+    ReadKind::Drain,
+    ReadKind::Properties,
+    ReadKind::Drive,
+    ReadKind::Artwork,
+    ReadKind::Probe,
+    ReadKind::Thumbnail,
+    ReadKind::Bundles,
+    ReadKind::Places,
+];
+
+/// The ejects the reader carries out: `A`, each act, located to bindings `P`
+/// and carried out to `D`.
+///
+/// One count spans an eject's whole stay — located, its windows let go,
+/// carried out, landed — so its room is taken once, as it is admitted, and an
+/// eject that has already sent its windows away is never then refused.
+#[derive(Debug)]
+pub struct EjectDesk<A, P, D> {
+    /// Ejects admitted and not yet landed.
+    held: usize,
+    /// The most that may be held at once.
+    bound: usize,
+    locating: VecDeque<A>,
+    located: VecDeque<(A, P)>,
+    settling: VecDeque<A>,
+    landed: VecDeque<D>,
+}
+
+impl<A, P, D> EjectDesk<A, P, D> {
+    /// A desk holding at most `bound` ejects.
+    #[must_use]
+    pub const fn new(bound: usize) -> Self {
+        Self {
+            held: 0,
+            bound,
+            locating: VecDeque::new(),
+            located: VecDeque::new(),
+            settling: VecDeque::new(),
+            landed: VecDeque::new(),
+        }
+    }
+
+    /// Admit `act` to be located.
+    ///
+    /// # Errors
+    ///
+    /// `act`, when as many ejects are held as may be.
+    pub fn admit(&mut self, act: A) -> Result<(), A> {
+        if self.held >= self.bound {
+            return Err(act);
+        }
+        self.held += 1;
+        self.locating.push_back(act);
+        Ok(())
+    }
+
+    /// The next eject to locate.
+    pub fn next_locate(&mut self) -> Option<A> {
+        self.locating.pop_front()
+    }
+
+    /// `act` is located, its volume bound at `bound`.
+    pub fn located(&mut self, act: A, bound: P) {
+        self.located.push_back((act, bound));
+    }
+
+    /// The next eject located, for its windows to be taken off its volume.
+    pub fn take_located(&mut self) -> Option<(A, P)> {
+        self.located.pop_front()
+    }
+
+    /// Queue `act` to be carried out, in the room it took as it was admitted.
+    pub fn settle(&mut self, act: A) {
+        self.settling.push_back(act);
+    }
+
+    /// The next eject to carry out.
+    pub fn next_settle(&mut self) -> Option<A> {
+        self.settling.pop_front()
+    }
+
+    /// What an eject came to.
+    pub fn landed(&mut self, done: D) {
+        self.landed.push_back(done);
+    }
+
+    /// The next outcome, whose eject's room is free again.
+    pub fn take_landed(&mut self) -> Option<D> {
+        let done = self.landed.pop_front()?;
+        self.held = self.held.saturating_sub(1);
+        Some(done)
     }
 }
 

@@ -3,6 +3,7 @@
 //! Kept beside the module in its own file because `desktop.rs` is already
 //! past the length at which a `#[cfg(test)]` block belongs in a sibling.
 
+use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -1116,6 +1117,51 @@ fn double_clicking_a_file_launches_its_associated_application_with_the_file() {
             }),
         }))
     );
+}
+
+#[test]
+fn double_clicking_a_disk_image_mounts_it_even_where_an_application_claims_it() {
+    let mut desktop = desktop_of(vec![
+        file("Lemmings.adf"),
+        file("disc.iso"),
+        file("work.hdf"),
+        link("Elite.adl", LinkTarget::File, "/Users/ada/Home/Elite.adl"),
+    ]);
+    let layout = layout_of(&desktop);
+    let burner = vec![AppAssociation::new(
+        "Burn",
+        "/System/Applications/Burn.app",
+        vec!["application/x-cd-image".to_string()],
+    )];
+    let names: Vec<String> = desktop
+        .entries()
+        .iter()
+        .map(|entry| entry.name().to_string())
+        .collect();
+    for ((index, name), now_ns) in names.iter().enumerate().zip((0u64..).step_by(2)) {
+        let at = centre_of(&layout, index);
+        let mut press = |now_ns| {
+            desktop
+                .press(
+                    at,
+                    &layout,
+                    Scale::ONE,
+                    &theme(),
+                    now_ns,
+                    &burner,
+                    &mut Region::new(),
+                )
+                .action
+        };
+        let _ = press(now_ns);
+        assert_eq!(
+            press(now_ns + 1),
+            Some(DesktopAction::Activate(DesktopActivation::MountImage {
+                path: format!("/Users/ada/Desktop/{name}"),
+            })),
+            "{name} is mounted, a shortcut through the link"
+        );
+    }
 }
 
 #[test]

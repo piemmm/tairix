@@ -27,19 +27,12 @@
 //!
 //! ## Why the PASS keys on `sysmon`'s exit *then* the shell's exit
 //!
-//! The kernel-side witness is `sysmon`'s audited `exit` (`SyscallInvoked`,
-//! `EventId(5000)`, `sc=exit`, `comm=sysmon`) — which only lands after the
-//! whole interactive session ran. Exiting QEMU there would tear the run
-//! down before the runner observed the restored prompt and sent its final
-//! line, so the sink only *arms* on it and reports PASS on the **next**
-//! audited `exit` — the shell's, typed only after the prompt reappeared —
-//! so the verified frames provably reached the transcript before the run
-//! ended (the session-ceiling arm-then-exit discipline). The runner
-//! additionally fails the run if the guest exits before every scripted
-//! marker appeared and every line was sent. A refused spawn, a denied
-//! query rendered as a refusal the markers do not match, or a hung loop
-//! never reaches the armed exit: the run times out with the failing step
-//! in the serial transcript — the documented fail-loud behaviour.
+//! The kernel-side witness is `sysmon`'s audited `exit`, which only lands
+//! after the whole interactive session ran. The run passes on the login
+//! shell's audited exit after it (`tairix_itest_witness::FixtureExit`), which
+//! the runner types only once the prompt reappeared, so a refused spawn, a
+//! denied query rendered as a refusal the markers do not match, or a hung loop
+//! times out with the failing step on serial.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -66,10 +59,9 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
@@ -101,29 +93,16 @@ mod kernel {
     /// completion.
     const MONITOR_COMM: &str = "sysmon";
 
-    /// Set once `sysmon`'s audited `exit` has been observed. The PASS
-    /// finisher fires on the next audited `exit`: the shell's, typed by
-    /// the runner only after the restored prompt appeared, so the verified
-    /// frames provably reached the transcript before the run ended.
-    static MONITOR_DONE: AtomicBool = AtomicBool::new(false);
+    /// The run's end: the shell's exit after `sysmon`'s.
+    static END: FixtureExit = FixtureExit::new(&[MONITOR_COMM], SYSCALL_INVOKED_EVENT_ID);
 
-    /// Sink that replays every event through [`SERIAL_SINK`] and reports
-    /// PASS once `sysmon` has exited and the shell's subsequent scripted
-    /// `exit` dispatches (see the module docs for why the PASS is deferred
-    /// to the second exit).
+    /// Replays every event to the serial console and ends the run at [`END`].
     struct SysmonSink;
 
     impl Sink for SysmonSink {
         fn write_event(&self, event: &Event<'_>) {
-            // Replay through the serial sink so the QEMU transcript records
-            // the full boot + session timeline.
             SerialSink::new().write_event(event);
-            if event.id != SYSCALL_INVOKED_EVENT_ID || field_str(event, "sc") != Some("exit") {
-                return;
-            }
-            if field_str(event, "comm") == Some(MONITOR_COMM) {
-                MONITOR_DONE.store(true, Ordering::Release);
-            } else if MONITOR_DONE.load(Ordering::Acquire) {
+            if END.passed(event) {
                 qemu_exit::exit_success();
             }
         }

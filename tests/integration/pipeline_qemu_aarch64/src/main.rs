@@ -46,19 +46,12 @@
 //! ## Why the PASS keys on `cat`'s exit *then* the shell's exit
 //!
 //! `pipe_create` is deliberately unaudited, so the kernel-side witness is
-//! the round trip's `cat` exiting (`SyscallInvoked`, `EventId(5000)`,
-//! `sc=exit`, `comm=cat`) — the last scripted tool, which only runs after
-//! every pipeline step completed. Exiting QEMU there would tear the run
-//! down before the runner observed the content marker and sent its final
-//! line, so the sink only *arms* on it and reports PASS on the **next**
-//! audited `exit` — the shell's, typed only after `776005` appeared — so
-//! the verified bytes provably reached the transcript before the run
-//! ended (the session-ceiling arm-then-exit discipline). The runner
-//! additionally fails the run if the guest exits before every scripted
-//! marker appeared and every line was sent. A refused spawn wire, a hung
-//! pipe, an unreaped member, or a wrong byte count never reaches the
-//! armed exit: the run times out with the failing step in the serial
-//! transcript — the documented fail-loud behaviour.
+//! the round trip's `cat` exiting — the last scripted tool, which only runs
+//! after every pipeline step completed. The run passes on the login shell's
+//! audited exit after it (`tairix_itest_witness::FixtureExit`), which the
+//! runner types only once `776005` appeared, so a refused spawn wire, a hung
+//! pipe, an unreaped member or a wrong byte count times out with the failing
+//! step on serial.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -85,10 +78,9 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
@@ -119,30 +111,16 @@ mod kernel {
     /// pipeline and redirection step ran to completion.
     const FINAL_TOOL_COMM: &str = "cat";
 
-    /// Set once `cat`'s audited `exit` has been observed. The PASS
-    /// finisher fires on the next audited `exit`: the shell's, typed by
-    /// the runner only after the `776005` content marker appeared, so the
-    /// verified round-trip bytes provably reached the transcript before
-    /// the run ended.
-    static ROUND_TRIP_DONE: AtomicBool = AtomicBool::new(false);
+    /// The run's end: the shell's exit after the round trip's `cat`.
+    static END: FixtureExit = FixtureExit::new(&[FINAL_TOOL_COMM], SYSCALL_INVOKED_EVENT_ID);
 
-    /// Sink that replays every event through [`SERIAL_SINK`] and reports
-    /// PASS once the round trip's `cat` has exited and the shell's
-    /// subsequent scripted `exit` dispatches (see the module docs for why
-    /// the PASS is deferred to the second exit).
+    /// Replays every event to the serial console and ends the run at [`END`].
     struct PipelineSink;
 
     impl Sink for PipelineSink {
         fn write_event(&self, event: &Event<'_>) {
-            // Replay through the serial sink so the QEMU transcript records
-            // the full boot + session timeline.
             SerialSink::new().write_event(event);
-            if event.id != SYSCALL_INVOKED_EVENT_ID || field_str(event, "sc") != Some("exit") {
-                return;
-            }
-            if field_str(event, "comm") == Some(FINAL_TOOL_COMM) {
-                ROUND_TRIP_DONE.store(true, Ordering::Release);
-            } else if ROUND_TRIP_DONE.load(Ordering::Acquire) {
+            if END.passed(event) {
                 qemu_exit::exit_success();
             }
         }

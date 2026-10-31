@@ -160,7 +160,9 @@ impl StorageSubject<'_> {
 pub(crate) fn subjects(sample: &Sample) -> Vec<StorageSubject<'_>> {
     let mut subjects: Vec<StorageSubject<'_>> = Vec::new();
     for volume in sample.mounts.iter().flatten() {
-        if volume.volume_id() == VOLUME_ID_UNPUBLISHED {
+        // Another principal's private volume is withheld from this one: no
+        // device of its, and no figures to show.
+        if volume.volume_id() == VOLUME_ID_UNPUBLISHED || volume.is_withheld() {
             continue;
         }
         let id = subject_of(sample, &volume.volume_id());

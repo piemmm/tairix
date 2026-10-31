@@ -216,6 +216,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 161 | `fsserve_ctl`  | `u64 offer`, `u32 op`                   | `errno`       | `CAP_FS_SERVE`          | no      |
 | 162 | `view_bind`    | `user_ptr` (`ViewBindRequest`), `len`   | `errno`       | — (in-service)          | yes     |
 | 163 | `view_unbind`  | `user_ptr` (target), `len`              | `errno`       | — (in-service)          | yes     |
+| 164 | `image_attach` | `u32 fd`, `user_ptr` (`ImageAttach`), `len`, `user_ptr` (`ImageAttachReply` out), `len` | `u64` (bytes) | — (in-service: the descriptor's authority) | yes |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -253,6 +254,14 @@ authority — the presentation or target it may ask for, the volume it may bind 
 so no dispatch capability gates them. See
 [Network volumes](../abi/fsserve.md#network-volumes) and
 [Storage namespaces](../filesystem/drives.md) §9.
+
+`image_attach` (no. 164) attaches the volume a disk-image file holds, for the
+caller that opened it: the descriptor must be the caller's own and readable,
+under `CAP_FS_ACCESS`, and the volume is writable only when the descriptor
+writes in place. The kernel recognises the file itself and answers the volume
+it attached, the one the caller has from that file already, or the reason the
+file holds nothing it attaches; the call waits for the volume's driver. See
+[Disk images](../filesystem/images.md).
 
 **Every path-taking call resolves its path one way.** A relative path starts
 at the directory its `dirfd` holds: a descriptor the caller holds on a

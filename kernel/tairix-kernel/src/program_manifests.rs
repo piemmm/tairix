@@ -1719,6 +1719,7 @@ mod tests {
         ("man", ProgramKind::Command, MAN_MANIFEST),
         ("mdadm", ProgramKind::Command, RAID_ADMIN_TOOL_REQUEST),
         ("mkdir", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("mount", ProgramKind::Command, PURE_TOOL_REQUEST),
         (
             "music",
             ProgramKind::Application,

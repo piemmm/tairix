@@ -64,6 +64,7 @@ which the drift guard enforces.
 | FM22 | A drive's Properties: kind, filesystem, options, capacity as a ring, activity as a live trace, health, read off the loop | done |
 | FM20 | Nothing touches a disk on the window's loop: long operations on an operations worker, every one-shot write on the reader by ticket, the opening ladder and the mount list on the reader, and every refusal stated in the window | done |
 | FM23 | The file manager's own settings, kept in its app-data store and edited in a settings window of its own | done |
+| FM24 | Disk images: activating one mounts it and opens its volume, *Mount Read-Only* and *Eject* in the context menu, *Eject* on the rail's own menu (`plans/DISK-IMAGES.md` DI5) | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
@@ -547,7 +548,11 @@ Open/Rename/Cut/Copy/Paste/Properties verbs; `OpenWith` **now re-joins**
 `CONTEXT_COMMANDS` with FM6b's chooser verb (enabled only for a regular file),
 and **Delete** joined it with FM9-c's confirm-and-remove verb (enabled on any
 selection). New ▸ (Folder and the blank documents, `plans/FILES-INTERACTION.md`
-FI10) is a submenu of it; the read-only picker opens no write menu.
+FI10) is a submenu of it; the read-only picker opens no write menu. **Mount
+Read-Only** (a disk image) and **Eject** (a volume the user attached, a disk
+image's or a share's) join it, each disabled with its reason where it cannot
+act, and a rail row's own menu holds Open and Eject; a mount goes to the mount
+worker, an eject to the reader once the app has let go of the volume (FM24).
 
 FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
 decision — descend / launch a bundle / open a file, host-proven), and

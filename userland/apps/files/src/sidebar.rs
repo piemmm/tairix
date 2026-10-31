@@ -29,7 +29,7 @@ use tairix_browse::render::{
     sidebar_index_at, sidebar_reveal, sidebar_scroll_pointer, sidebar_scroll_wheel, sidebar_view,
     toolbar_command_at,
 };
-use tairix_browse::{Browser, DirectorySource, Places, ToolbarBand, ToolbarCommand, Volume};
+use tairix_browse::{Browser, DirectorySource, Places, ToolbarBand, ToolbarCommand};
 use tairix_controls::damage;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_theme::Theme;
@@ -50,6 +50,9 @@ pub struct SidebarOutcome {
     /// the single fail-loud reporting path it already uses for every other
     /// refusal, and so a test can read exactly what a user would be told.
     pub refused: Option<String>,
+    /// The row a secondary press asked the rail's menu for, and the
+    /// window-local point it was pressed at.
+    pub menu_on: Option<(usize, Point)>,
 }
 
 impl Default for SidebarOutcome {
@@ -63,6 +66,7 @@ impl SidebarOutcome {
     pub const QUIET: Self = Self {
         repaint: Repaint::Nothing,
         refused: None,
+        menu_on: None,
     };
 
     /// An outcome that repainted what it reported (or nothing at all) and
@@ -76,6 +80,7 @@ impl SidebarOutcome {
                 Repaint::Nothing
             },
             refused: None,
+            menu_on: None,
         }
     }
 }
@@ -165,6 +170,17 @@ pub fn press_point(action: PointerAction, x: u32, y: u32) -> Option<Point> {
     Some(pointer_point(x, y))
 }
 
+/// The window-local [`Point`] of a **secondary**-button (right-click) press,
+/// or `None` for any other pointer action — the mirror of [`press_point`] for
+/// the button that opens a context menu.
+#[must_use]
+pub fn secondary_press_point(action: PointerAction, x: u32, y: u32) -> Option<Point> {
+    if action != PointerAction::Pressed(PointerButtonCode::Secondary) {
+        return None;
+    }
+    Some(pointer_point(x, y))
+}
+
 /// Whether `event` is the user asking the window to re-read what is there:
 /// the refresh accelerator or a press on the toolbar's Refresh command.
 ///
@@ -193,8 +209,9 @@ pub fn is_refresh_request<S: DirectorySource>(
     }
 }
 
-/// Rebuild `places` from a freshly read `home` and `volumes`, keeping the
-/// keyboard focus, the cursor and the scroll where they were.
+/// Give a window's `places` the rows of the `fresh` rail, built once for
+/// every window, keeping the keyboard focus, the cursor and the scroll where
+/// they were.
 ///
 /// A refresh must never move the selection out from under the user, so the
 /// interaction state survives the rebuild; a cursor past the end of the new
@@ -202,11 +219,11 @@ pub fn is_refresh_request<S: DirectorySource>(
 /// past the end of a shorter rail is clamped wherever it is next read. The row
 /// lit under the pointer is found by the whole repaint that follows
 /// ([`follow_pointer`]).
-pub fn refresh_places(places: &mut Places, home: &[String], volumes: &[Volume]) {
+pub fn refresh_places(places: &mut Places, fresh: &Places) {
     let focused = places.is_focused();
     let cursor = places.cursor();
     let scroll = core::mem::take(places.scroll_mut());
-    *places = Places::new(home, volumes);
+    places.clone_from(fresh);
     places.set_focused(focused);
     places.set_cursor(cursor);
     *places.scroll_mut() = scroll;
@@ -424,6 +441,18 @@ pub fn apply_event<S: DirectorySource>(
             if taken {
                 return Some(SidebarOutcome::reported(!drew.is_empty()));
             }
+            if let Some(point) = secondary_press_point(*action, *x, *y) {
+                let rail = sidebar_view(window, scale, theme, Some(places), toolbar)?.rail_rect();
+                if !rail.contains(point) {
+                    return None;
+                }
+                // A press between rows is the rail's too, and opens nothing.
+                let row = sidebar_index_at(window, scale, theme, Some(places), toolbar, point);
+                return Some(SidebarOutcome {
+                    menu_on: row.map(|index| (index, point)),
+                    ..SidebarOutcome::QUIET
+                });
+            }
             let point = press_point(*action, *x, *y)?;
             let index = sidebar_index_at(window, scale, theme, Some(places), toolbar, point)?;
             places.set_focused(true);
@@ -467,6 +496,7 @@ pub fn navigate_to<S: DirectorySource>(
             // which rows that changes is not a report the rail can make.
             repaint: Repaint::Whole,
             refused: Some(alloc::format!("could not open {label}")),
+            menu_on: None,
         };
     };
     SidebarOutcome {
@@ -478,6 +508,7 @@ pub fn navigate_to<S: DirectorySource>(
             Repaint::Nothing
         },
         refused: None,
+        menu_on: None,
     }
 }
 

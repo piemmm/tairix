@@ -188,6 +188,7 @@ extern "C" {
 #define TAIRIX_SYS_FSSERVE_CTL 161u
 #define TAIRIX_SYS_VIEW_BIND 162u
 #define TAIRIX_SYS_VIEW_UNBIND 163u
+#define TAIRIX_SYS_IMAGE_ATTACH 164u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -450,6 +451,94 @@ typedef struct tairix_spawn_attach {
     uint64_t share;
     tairix_path_at_t working_directory;
 } tairix_spawn_attach_t;
+
+/* The frame image_attach() and fsserve_attach() take: a tairix_attach_head_t,
+* name_len bytes of the catalog name, then target_len bytes of the directory
+* the volume is also bound at, and nothing after. An image attach's version
+* is TAIRIX_IMAGE_ATTACH_VERSION and a network attach's TAIRIX_FSSERVE_VERSION;
+* an image attach with no name is named by the kernel. `presentation` is a
+* TAIRIX_PRESENTATION_*, and uid, gid, dir_mode and file_mode are zero but
+* for EXPLICIT. A network attach may set TAIRIX_ATTACH_FLAG_READ_ONLY and
+* has `own` zero. An image attach may set READ_ONLY or
+* TAIRIX_IMAGE_ATTACH_FLAG_WRITABLE, not both, and
+* TAIRIX_IMAGE_ATTACH_FLAG_EXPECTS, which makes `own` the TAIRIX_VOLUME_FS_*
+* the file must hold; without it `own` is zero. TAIRIX_IMAGE_ATTACH_FLAG_ADOPT
+* takes up a volume of the file attached already for the caller's login
+* session too. Anything else is refused. */
+#define TAIRIX_IMAGE_ATTACH_VERSION 1u
+#define TAIRIX_FSSERVE_VERSION 1u
+#define TAIRIX_ATTACH_HEAD_LEN 20u
+#define TAIRIX_IMAGE_ATTACH_MAX 116u
+#define TAIRIX_NETWORK_ATTACH_MAX 116u
+#define TAIRIX_VOLUME_NAME_MAX 32u
+#define TAIRIX_PRESENTATION_PRIVATE ((uint8_t)1u)
+#define TAIRIX_PRESENTATION_SHARED ((uint8_t)2u)
+#define TAIRIX_PRESENTATION_EXPLICIT ((uint8_t)3u)
+#define TAIRIX_ATTACH_FLAG_READ_ONLY ((uint8_t)0x1u)
+#define TAIRIX_IMAGE_ATTACH_FLAG_EXPECTS ((uint8_t)0x2u)
+#define TAIRIX_IMAGE_ATTACH_FLAG_WRITABLE ((uint8_t)0x4u)
+#define TAIRIX_IMAGE_ATTACH_FLAG_ADOPT ((uint8_t)0x8u)
+#define TAIRIX_VOLUME_FS_ARXFS ((uint8_t)0u)
+#define TAIRIX_VOLUME_FS_EXT4 ((uint8_t)1u)
+#define TAIRIX_VOLUME_FS_FAT32 ((uint8_t)2u)
+#define TAIRIX_VOLUME_FS_ISO9660 ((uint8_t)3u)
+#define TAIRIX_VOLUME_FS_UDF ((uint8_t)4u)
+#define TAIRIX_VOLUME_FS_ADFS ((uint8_t)5u)
+#define TAIRIX_VOLUME_FS_AFFS ((uint8_t)6u)
+typedef struct tairix_attach_head {
+    uint16_t version;
+    uint8_t presentation;
+    uint8_t flags;
+    uint32_t uid;
+    uint32_t gid;
+    uint16_t dir_mode;
+    uint16_t file_mode;
+    uint8_t name_len;
+    uint8_t own;
+    uint16_t target_len;
+} tairix_attach_head_t;
+
+/* What an attach answers: the volume's identity, which a detach names, and
+* the name it took in /Storage, valid for name_len bytes; `flags` holds
+* TAIRIX_ATTACH_REPLY_FLAG_READ_ONLY for a volume that takes no writes.
+* fsserve_attach() writes one alone, image_attach() one within a
+* tairix_image_attach_reply_t whose `outcome` is a
+* TAIRIX_IMAGE_ATTACH_OUTCOME_*: a REFUSED one names a TAIRIX_IMAGE_REFUSAL_*,
+* a TARGET_REFUSED one in `refused_errno` the TAIRIX_E_* the directory the
+* volume was also to be shown at refused it with, and a NAME_REFUSED one
+* there the TAIRIX_E_* the name asked for it was refused with, each
+* leaving `volume` zero and nothing attached; every field an outcome does
+* not name is zero. */
+#define TAIRIX_ATTACH_REPLY_LEN 56u
+#define TAIRIX_ATTACH_REPLY_FLAG_READ_ONLY ((uint8_t)0x1u)
+#define TAIRIX_IMAGE_ATTACH_REPLY_LEN 64u
+#define TAIRIX_IMAGE_ATTACH_OUTCOME_ATTACHED ((uint8_t)1u)
+#define TAIRIX_IMAGE_ATTACH_OUTCOME_ALREADY_ATTACHED ((uint8_t)2u)
+#define TAIRIX_IMAGE_ATTACH_OUTCOME_REFUSED ((uint8_t)3u)
+#define TAIRIX_IMAGE_ATTACH_OUTCOME_TARGET_REFUSED ((uint8_t)4u)
+#define TAIRIX_IMAGE_ATTACH_OUTCOME_NAME_REFUSED ((uint8_t)5u)
+#define TAIRIX_IMAGE_REFUSAL_UNRECOGNISED ((uint8_t)1u)
+#define TAIRIX_IMAGE_REFUSAL_NOT_EXPECTED ((uint8_t)2u)
+#define TAIRIX_IMAGE_REFUSAL_RAID_MEMBER ((uint8_t)3u)
+#define TAIRIX_IMAGE_REFUSAL_PARTITIONED ((uint8_t)4u)
+#define TAIRIX_IMAGE_REFUSAL_RECORDS_OWNERS ((uint8_t)5u)
+#define TAIRIX_IMAGE_REFUSAL_DAMAGED ((uint8_t)6u)
+#define TAIRIX_IMAGE_REFUSAL_UNSUPPORTED_VARIANT ((uint8_t)7u)
+#define TAIRIX_IMAGE_REFUSAL_UNREADABLE ((uint8_t)8u)
+typedef struct tairix_attach_reply {
+    uint8_t volume_id[16];
+    uint8_t name_len;
+    uint8_t flags;
+    uint8_t reserved0[6];
+    uint8_t name[32];
+} tairix_attach_reply_t;
+typedef struct tairix_image_attach_reply {
+    uint8_t outcome;
+    uint8_t refusal;
+    uint8_t reserved0[2];
+    int32_t refused_errno;
+    tairix_attach_reply_t volume;
+} tairix_image_attach_reply_t;
 
 /* fs_readdir() reads a directory a batch at a time from the open description's
 * position: whole records of at most TAIRIX_READDIR_BATCH_MAX bytes per call,
@@ -824,6 +913,7 @@ uint64_t tairix_sys_fsserve_attach(uint64_t a0, void * a1, uintptr_t a2, void * 
 int32_t tairix_sys_fsserve_ctl(uint64_t a0, uint32_t a1);
 int32_t tairix_sys_view_bind(void * a0, uintptr_t a1);
 int32_t tairix_sys_view_unbind(void * a0, uintptr_t a1);
+uint64_t tairix_sys_image_attach(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -161,7 +161,7 @@ use crate::devres::{
     NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction, UserFaultOutcome};
-use crate::filelock::{Held, LockedNode, OwnerId, Refusal, Request as LockRequest, Wakes};
+use crate::filelock::{Held, LockedNode, OwnerId, Refusal, Request as LockRequest};
 use crate::filemap::{FileMap, NULL_FILE_MAP};
 use crate::fs::{
     Acting, At, Authority, Cwd, FilesystemService, LateIdentity, NodeHandle, Start, VolumeForest,
@@ -2818,16 +2818,8 @@ where
         let limit = self.soft_limit(caller, LimitKind::FileLocks);
         let wakes = crate::filelock::release(file, owner, range, limit)
             .map_err(crate::filelock::Refusal::to_errno)?;
-        Self::wake_lock_waiters(&wakes);
+        wakes.wake();
         Ok(0)
-    }
-
-    /// Unpark the waiters a lock change freed, after the registry's lock has
-    /// been released.
-    fn wake_lock_waiters(wakes: &Wakes) {
-        if let Some(key) = wakes.key {
-            crate::waitq::file_lock_wake(WakeKey::new(key), &wakes.tasks);
-        }
     }
 
     /// The blocking half of `futex_wait`: re-test the word the caller named and,
@@ -9247,6 +9239,73 @@ where
             .map(|()| 0)
     }
 
+    fn image_attach(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        frame: u64,
+        frame_len: usize,
+        reply: u64,
+        reply_cap: usize,
+    ) -> SyscallResult {
+        use tairix_abi::imageattach::{ImageAttach, IMAGE_ATTACH_MAX, IMAGE_ATTACH_REPLY_LEN};
+        if frame_len > IMAGE_ATTACH_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut bytes = [0u8; IMAGE_ATTACH_MAX];
+        let bytes = &mut bytes[..frame_len];
+        self.copy_in_user(caller, frame, bytes)?;
+        let attach = ImageAttach::decode(bytes)?;
+        if reply_cap < IMAGE_ATTACH_REPLY_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // Proven writable first, so a reply that cannot land attaches nothing.
+        self.copy_out_user(caller, reply, &[0u8; IMAGE_ATTACH_REPLY_LEN])?;
+        let entry = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.process(), fd)
+            .ok_or(Errno::NotFound)?;
+        if !entry.flags.is_read() {
+            return Err(Errno::PermissionDenied);
+        }
+        // Only the caller's own open names the file as the caller: one it was
+        // conferred or granted acts as another identity, which would then
+        // outlive the hand-off as an attachment.
+        let handle = entry.own_node().ok_or(Errno::PermissionDenied)?;
+        match handle.node.kind() {
+            NodeKind::RegularFile => {}
+            NodeKind::Directory => return Err(Errno::IsADirectory),
+            NodeKind::Symlink => return Err(Errno::LinkLoop),
+        }
+        let authority = NodeAuthority::of(&entry, caller).ok_or(Errno::PermissionDenied)?;
+        authority.admit()?;
+        // The volume reads and writes the file long after this call, from its
+        // driver's syscalls, so the caller's identity is frozen into the hold.
+        let file = NodeHandle {
+            authority: Authority::Frozen(crate::fs::FrozenAuthority {
+                uid: caller.caps.owner().0,
+                caps: *caller.caps.effective(),
+                grant: None,
+            }),
+            ..handle.clone()
+        };
+        let source = crate::fs::ImageSource {
+            file,
+            // An append descriptor writes only at the end, never in place.
+            writable: entry.flags.is_write() && !entry.flags.contains(OpenFlags::APPEND),
+            session: caller.caps.login_session(),
+            task: caller.task_id.0,
+        };
+        drop(entry);
+        let who = principal(caller);
+        self.volume_service
+            .attach_image(&who, source, &attach, &mut |answer| {
+                self.copy_out_user(caller, reply, &answer.encode())
+            })?;
+        Ok(IMAGE_ATTACH_REPLY_LEN as u64)
+    }
+
     fn file_unmap(&self, caller: &CallerContext<'_>, base: u64, len: u64) -> SyscallResult {
         // A zero-length range names nothing; reject before touching state.
         if len == 0 {
@@ -12841,7 +12900,7 @@ where
                 waiting: !nonblock,
             }) {
                 Ok(wakes) => {
-                    Self::wake_lock_waiters(&wakes);
+                    wakes.wake();
                     break Ok(0);
                 }
                 Err(Refusal::Deadlock) => break Err(Errno::Deadlock),
@@ -14426,8 +14485,11 @@ fn finish_death(
     for exit in own.into_iter().chain(departed.released.iter()) {
         retire_number(process_wait, exit.process, exit.status);
     }
-    if let Some(anchor) = departed.instance {
-        crate::procsignal::end_session(caps, audit, anchor);
+    match departed.instance {
+        Some(anchor) if departed.released.ended_a_session() => {
+            crate::procsignal::end_session(caps, audit, anchor);
+        }
+        _ => {}
     }
 }
 
@@ -58089,6 +58151,10 @@ mod tests {
         ctl: Option<(u64, u64, tairix_abi::netattach::FsserveCtl)>,
         /// An offer's server process and application.
         offer: Option<u64>,
+        /// An image attach's caller and source.
+        image: Option<Image>,
+        /// What delivering an image attach's answer came to.
+        image_delivered: Option<Result<(), Errno>>,
     }
 
     /// A volume service that records what a handler hands it.
@@ -58176,7 +58242,7 @@ mod tests {
             _attach: &tairix_abi::netattach::NetworkAttach<'_>,
         ) -> Result<tairix_abi::netattach::AttachReply, Errno> {
             self.0.lock().attach = Some((caller.uid, caller.gid, caller.may_mount(), offer.get()));
-            tairix_abi::netattach::AttachReply::new([0x42; 16], "share")
+            tairix_abi::netattach::AttachReply::new([0x42; 16], "share", false)
         }
 
         fn offer_ctl(
@@ -58188,6 +58254,43 @@ mod tests {
             self.0.lock().ctl = Some((server, offer.get(), op));
             Ok(())
         }
+
+        fn attach_image(
+            &self,
+            caller: &crate::fs::Principal<'_>,
+            source: crate::fs::ImageSource,
+            _attach: &tairix_abi::imageattach::ImageAttach<'_>,
+            answer: crate::fs::AnswerSink<'_>,
+        ) -> Result<(), Errno> {
+            let frozen = match &source.file.authority {
+                Authority::Frozen(frozen) => Some(frozen.uid),
+                Authority::Holder => None,
+            };
+            self.0.lock().image = Some(Image {
+                caller: caller.uid,
+                frozen,
+                writable: source.writable,
+                session: source.session,
+                task: source.task,
+            });
+            let attached = tairix_abi::netattach::AttachReply::new([0x1A; 16], "floppy", false)?;
+            let delivered = answer(&tairix_abi::imageattach::ImageAttachReply::Attached(
+                attached,
+            ));
+            self.0.lock().image_delivered = Some(delivered);
+            delivered
+        }
+    }
+
+    /// What a [`Recording`] volume service was handed for an image attach.
+    #[derive(Debug, Eq, PartialEq)]
+    struct Image {
+        caller: u32,
+        /// The uid frozen into the file's hold, or `None` for a holder's own.
+        frozen: Option<u32>,
+        writable: bool,
+        session: ProcId,
+        task: u64,
     }
 
     /// A caller of the volume syscalls with one page of its own at `0x1000`.
@@ -58408,6 +58511,156 @@ mod tests {
             h.fsserve_ctl(&ctx, 0, FsserveCtl::Withdraw),
             Err(Errno::NotFound)
         );
+    }
+
+    /// The image attach tests' caller: uid 1000 holding `CAP_FS_ACCESS`, its
+    /// handlers recording what the volume service is handed, and a private
+    /// attach frame staged at `0x1100`, of the length answered.
+    fn image_attach_fixture() -> (
+        &'static RwLock<AddressSpaceRegistry>,
+        KernelSyscallHandlers<'static, TestArch>,
+        CallerContext<'static>,
+        &'static Recording,
+        usize,
+    ) {
+        use tairix_abi::imageattach::{ImageAttach, IMAGE_ATTACH_MAX};
+        let (_fs, _fm, aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
+        let recorder: &'static Recording = crate::forever(Box::new(Recording::default()));
+        let h = h.with_volume_service(recorder);
+        let attach = ImageAttach {
+            name: None,
+            presentation: tairix_abi::netattach::Presentation::Private,
+            access: tairix_abi::imageattach::ImageAccess::WritableWherePossible,
+            target: None,
+            expects: None,
+            adopt: false,
+        };
+        let mut frame = [0u8; IMAGE_ATTACH_MAX];
+        let len = attach.encode(&mut frame).expect("encodes");
+        h.copy_out_user(&ctx, 0x1100, &frame[..len])
+            .expect("staged");
+        (aspaces, h, ctx, recorder, len)
+    }
+
+    /// The caller's own descriptor of the fixture's file, opened as `flags`.
+    fn image_fd(
+        h: &KernelSyscallHandlers<'static, TestArch>,
+        ctx: &CallerContext<'_>,
+        flags: OpenFlags,
+    ) -> u32 {
+        let fd = h
+            .fs_open(ctx, FD_CWD, 0x1000, "/big".len(), flags, 0)
+            .expect("open");
+        u32::try_from(fd).expect("a descriptor")
+    }
+
+    #[test]
+    fn an_image_attach_is_refused_a_descriptor_it_may_not_hold() {
+        use tairix_abi::imageattach::{IMAGE_ATTACH_MAX, IMAGE_ATTACH_REPLY_LEN};
+        let (aspaces, h, ctx, recorder, len) = image_attach_fixture();
+        let rw = image_fd(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
+        let wo = image_fd(&h, &ctx, OpenFlags::WRITE);
+        let dir = image_fd(&h, &ctx, OpenFlags::READ.union(OpenFlags::DIRECTORY));
+        let conferred = 0;
+        aspaces
+            .write()
+            .install_std_entry(
+                ProcessId(2),
+                conferred,
+                node_entry(
+                    "/big",
+                    crate::fs::Authority::Frozen(crate::fs::FrozenAuthority {
+                        uid: 1000,
+                        caps: caps_with(&[CapabilityId::FS_ACCESS]),
+                        grant: None,
+                    }),
+                    OpenFlags::READ.union(OpenFlags::WRITE),
+                ),
+            )
+            .expect("installed");
+        let call = |fd, frame_len, reply, reply_cap| {
+            h.image_attach(&ctx, fd, 0x1100, frame_len, reply, reply_cap)
+        };
+        assert_eq!(
+            call(rw, IMAGE_ATTACH_MAX + 1, 0x1800, IMAGE_ATTACH_REPLY_LEN),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            call(rw, len, 0x1800, IMAGE_ATTACH_REPLY_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            call(rw, len, 0x9000, IMAGE_ATTACH_REPLY_LEN),
+            Err(Errno::BadAddress)
+        );
+        assert_eq!(
+            call(99, len, 0x1800, IMAGE_ATTACH_REPLY_LEN),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            call(wo, len, 0x1800, IMAGE_ATTACH_REPLY_LEN),
+            Err(Errno::PermissionDenied),
+            "an image is read through its descriptor"
+        );
+        assert_eq!(
+            call(dir, len, 0x1800, IMAGE_ATTACH_REPLY_LEN),
+            Err(Errno::IsADirectory)
+        );
+        assert_eq!(
+            call(conferred, len, 0x1800, IMAGE_ATTACH_REPLY_LEN),
+            Err(Errno::PermissionDenied),
+            "a descriptor another identity handed on never becomes an attachment"
+        );
+        assert_eq!(
+            recorder.0.lock().image,
+            None,
+            "every refusal attaches nothing"
+        );
+    }
+
+    #[test]
+    fn an_image_attach_hands_the_service_the_callers_own_file_frozen() {
+        use tairix_abi::imageattach::{ImageAttachReply, IMAGE_ATTACH_REPLY_LEN};
+        let (_aspaces, h, ctx, recorder, len) = image_attach_fixture();
+        let rw = image_fd(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
+        let call = |fd| h.image_attach(&ctx, fd, 0x1100, len, 0x1800, IMAGE_ATTACH_REPLY_LEN);
+        assert_eq!(call(rw), Ok(IMAGE_ATTACH_REPLY_LEN as u64));
+        assert_eq!(
+            recorder.0.lock().image.take(),
+            Some(Image {
+                caller: 1000,
+                frozen: Some(1000),
+                writable: true,
+                session: ctx.caps.login_session(),
+                task: 2,
+            })
+        );
+        let mut reply = [0u8; IMAGE_ATTACH_REPLY_LEN];
+        h.copy_in_user(&ctx, 0x1800, &mut reply)
+            .expect("reads back");
+        assert!(matches!(
+            ImageAttachReply::decode(&reply),
+            Ok(ImageAttachReply::Attached(attached)) if attached.volume_id == [0x1A; 16]
+        ));
+        assert_eq!(
+            recorder.0.lock().image_delivered.take(),
+            Some(Ok(())),
+            "the answer is delivered through the service, which can undo it"
+        );
+        let appending = OpenFlags::READ
+            .union(OpenFlags::WRITE)
+            .union(OpenFlags::APPEND);
+        for flags in [OpenFlags::READ, appending] {
+            assert_eq!(
+                call(image_fd(&h, &ctx, flags)),
+                Ok(IMAGE_ATTACH_REPLY_LEN as u64)
+            );
+            assert_eq!(
+                recorder.0.lock().image.take().map(|image| image.writable),
+                Some(false),
+                "only a descriptor that writes in place makes a writable volume"
+            );
+        }
     }
 
     #[test]

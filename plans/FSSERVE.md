@@ -21,6 +21,7 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
 | FSS4 | The volume block grant: `HwResourceKind::Volume` under `CAP_FS_SERVE`, the kernel's served-volume registry, and `volume_read` / `volume_write` / `volume_ctl` / `volume_serve` | done |
 | FSS5 | Removable volumes served from user space: the kernel-published volume node, the attach, serve, refusal, detach, unplug, server-loss and re-insert flows, the six driver bundles (ext4, FAT32, ADFS, ISO 9660, UDF, ARXFS), and the in-kernel removable path removed | done |
 | FSS6 | Network-served attachments, landing as `plans/SMB.md` SMB9a: the kernel-minted offer and its attach by the one principal it names, the presentations, owner and server detach, server-reported liveness, `MOUNT_LIST`'s owner and class, and the lanes that serve a multi-writer share concurrently and uncached | done |
+| FSS7 | Image-file attachments (`plans/DISK-IMAGES.md` DI3): a disk-image file's volume, its node under the kernel's image-volumes node, served by its format's bundle — the AmigaDOS driver (`affs`) among them — for its attacher, through the same served-volume registry | done |
 
 ## 0. Decisions (binding)
 
@@ -129,7 +130,7 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
   gave — then serve from one wait set: the endpoint, the memory-pressure
   notice, and the commit deadline the driver's `VolumeHost` reports as the
   wait's timeout, taken once when it fires so a failed publish cannot spin.
-- A driver crate supplies only how its format opens (`ServedFormat`), so six
+- A driver crate supplies only how its format opens (`ServedFormat`), so seven
   drivers share one program; its `Run` binary is behind a `program` feature,
   because the kernel links two of the libraries for its boot volumes.
 - The conformance suite runs the driver-trait contract over the real codec on

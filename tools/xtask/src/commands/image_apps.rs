@@ -467,6 +467,31 @@ pub fn optical_store_files(
     )
 }
 
+/// The composed store files the disk-image vertical's disk plants: the
+/// shared [`app_store_files`] set, which carries `mount` and `unmount`, plus
+/// the test-only `images` fixture bundle (`plans/DISK-IMAGES.md` DI7),
+/// memoised per arch.
+///
+/// # Errors
+///
+/// As [`fixture_store_files`].
+pub fn images_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    fixture_store_files(
+        ctx,
+        arch,
+        profile,
+        "tests/integration/images_program",
+        tairix_test_images::COMMAND,
+        &FILES,
+    )
+}
+
 /// The composed store files the liveness-watchdog vertical's disk plants:
 /// the shared [`app_store_files`] set with the **`netstack` service bundle
 /// replaced** by the watchdog fixture (`plans/NEW-SERVICEMANAGER.md`

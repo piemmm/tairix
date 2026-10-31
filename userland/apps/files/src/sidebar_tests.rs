@@ -231,6 +231,39 @@ fn a_press_on_a_row_focuses_the_rail_and_navigates_to_that_place() {
     );
 }
 
+/// A secondary press at `point`.
+fn secondary_press(point: Point) -> WindowEvent {
+    WindowEvent::Pointer {
+        window_id: WINDOW_ID,
+        x: u32::try_from(point.x).unwrap_or(0),
+        y: u32::try_from(point.y).unwrap_or(0),
+        action: PointerAction::Pressed(PointerButtonCode::Secondary),
+        modifiers: Modifiers::default(),
+        at_ns: 0,
+    }
+}
+
+#[test]
+fn a_secondary_press_on_a_row_asks_for_its_menu_and_goes_nowhere() {
+    let mut browser = browser();
+    let mut places = places();
+    let volume = places.index_of(&backup()).expect("the volume is a row");
+    let at = row_centre(&places, volume);
+    let outcome = route(&mut browser, &mut places, &secondary_press(at))
+        .expect("the rail owns its own press");
+    assert_eq!(outcome.menu_on, Some((volume, at)));
+    assert_eq!(outcome.repaint, Repaint::Nothing);
+    assert!(
+        browser.folder().expect("a folder").is_empty(),
+        "a menu is asked for, not a place gone to"
+    );
+    let beyond = Point::new(i32::try_from(rail(&places).width()).unwrap_or(0), at.y);
+    assert!(
+        route(&mut browser, &mut places, &secondary_press(beyond)).is_none(),
+        "the view's own menu is the view's"
+    );
+}
+
 #[test]
 fn a_press_beyond_the_rail_is_left_to_the_view_below() {
     let mut browser = browser();
@@ -632,12 +665,14 @@ fn a_refresh_re_reads_the_volumes_and_keeps_the_users_place_in_the_rail() {
 
     refresh_places(
         &mut places,
-        &home(),
-        &[
-            mounted("Backup", "/Storage/Backup", Some(HARD_DISK)),
-            // A stick the user just plugged in: it appears without a poll.
-            mounted("Stick", "/Storage/Stick", Some(STICK)),
-        ],
+        &Places::new(
+            &home(),
+            &[
+                mounted("Backup", "/Storage/Backup", Some(HARD_DISK)),
+                // A stick the user just plugged in: it appears without a poll.
+                mounted("Stick", "/Storage/Stick", Some(STICK)),
+            ],
+        ),
     );
 
     assert!(places.is_focused());
@@ -648,7 +683,7 @@ fn a_refresh_re_reads_the_volumes_and_keeps_the_users_place_in_the_rail() {
     // A cursor the shorter rail no longer has is left at the first row rather
     // than pointing past the end.
     places.set_cursor(3);
-    refresh_places(&mut places, &home(), &[]);
+    refresh_places(&mut places, &Places::new(&home(), &[]));
     assert_eq!(places.len(), 2);
     assert_eq!(places.cursor(), 0);
 }
@@ -879,7 +914,7 @@ fn walking_the_rail_cursor_past_the_fold_scrolls_the_rail_to_it() {
 fn a_refresh_keeps_where_the_rail_was_scrolled() {
     let mut places = crowded();
     places.scroll_mut().set_offset(40);
-    refresh_places(&mut places, &home(), &crowded_volumes());
+    refresh_places(&mut places, &Places::new(&home(), &crowded_volumes()));
     assert_eq!(places.scroll().offset(), 40);
 }
 
@@ -952,11 +987,13 @@ fn a_rebuilt_rail_lights_the_row_now_under_a_still_pointer() {
     // A volume sorting ahead of Backup takes the row the pointer rests on.
     refresh_places(
         &mut places,
-        &home(),
-        &[
-            mounted("Archive", "/Storage/Archive", None),
-            mounted("Backup", "/Storage/Backup", Some(HARD_DISK)),
-        ],
+        &Places::new(
+            &home(),
+            &[
+                mounted("Archive", "/Storage/Archive", None),
+                mounted("Backup", "/Storage/Backup", Some(HARD_DISK)),
+            ],
+        ),
     );
     follow_pointer(
         &mut places,

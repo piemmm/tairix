@@ -51,12 +51,11 @@
 //! ## Why the PASS keys on the tool's exit *then* the shell's exit
 //!
 //! `telnet` exits when the operator quits, which the script does only after
-//! the echoed answer appeared — but its exit alone still does not prove the
-//! transcript carried that answer before the run ended. So the guest audit
-//! sink arms on the tool's own audited `exit` (`SyscallInvoked`,
-//! `EventId(5000)`, `sc=exit`, `comm=telnet`) and reports PASS on the **next**
-//! audited `exit` — the shell's. The harness additionally requires the host
-//! peer's own verdict, which names the first negotiation step the client
+//! the echoed answer appeared, but its exit alone does not prove the
+//! transcript carried that answer before the run ended. The run passes on the
+//! login shell's audited exit after the tool's
+//! (`tairix_itest_witness::FixtureExit`), and the harness also requires the
+//! host peer's verdict, which names the first negotiation step the client
 //! failed to complete, so neither side can pass alone.
 //!
 //! ## How it differs from a production kernel
@@ -76,10 +75,9 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
@@ -113,29 +111,16 @@ mod kernel {
     /// `kernel/syscall/src/audit.rs`.
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
-    /// Set once the `telnet` tool's own audited `exit` has been observed. The
-    /// PASS finisher fires on the next audited `exit`: the shell's, typed by
-    /// the runner only after the peer's echoed answer appeared, so the round
-    /// trip provably reached the transcript before the run ended.
-    static TELNET_EXITED: AtomicBool = AtomicBool::new(false);
+    /// The run's end: the shell's exit after the tool's.
+    static END: FixtureExit = FixtureExit::new(&[TELNET_COMMAND], SYSCALL_INVOKED_EVENT_ID);
 
-    /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// once the `telnet` tool's audited `exit` has been observed and the
-    /// shell's subsequent scripted `exit` dispatches (see the module docs for
-    /// why the PASS is deferred to the second exit).
+    /// Replays every event to the serial console and ends the run at [`END`].
     struct TelnetSink;
 
     impl Sink for TelnetSink {
         fn write_event(&self, event: &Event<'_>) {
-            // Replay through the serial sink so the QEMU transcript records the
-            // full boot + autoload + connect + negotiate + relay timeline.
             SerialSink::new().write_event(event);
-            if event.id != SYSCALL_INVOKED_EVENT_ID || field_str(event, "sc") != Some("exit") {
-                return;
-            }
-            if field_str(event, "comm") == Some(TELNET_COMMAND) {
-                TELNET_EXITED.store(true, Ordering::Release);
-            } else if TELNET_EXITED.load(Ordering::Acquire) {
+            if END.passed(event) {
                 qemu_exit::exit_success();
             }
         }

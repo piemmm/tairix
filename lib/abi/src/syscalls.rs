@@ -2116,10 +2116,10 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        // The retraction half of `volume_attach`. Its owner may detach a
-        // network volume, so the mount authority is checked by the handler
-        // against the volume named; every decision is audited (the
-        // drives.md fs.hotplug.root_removed events).
+        // The retraction half of `volume_attach`, `fsserve_attach` and
+        // `image_attach`. The principal a network or disk-image volume was
+        // attached for may detach it, so the mount authority is checked by
+        // the handler against the volume named; every decision is audited.
         required_capability: None,
         audit: true,
     },
@@ -3929,6 +3929,28 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::IMAGE_ATTACH,
+        name: "image_attach",
+        arg_count: 5,
+        args: [
+            // The image's descriptor, non-null `UserPtr` to the
+            // `ImageAttach` and its length, non-null `UserPtr` for the
+            // `ImageAttachReply` and its capacity.
+            AbiType::U32,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // The descriptor is the authority over the file, and a wider
+        // presentation needs the mount authority, both judged by the handler
+        // against the caller; every attach is audited.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -4527,11 +4549,11 @@ mod tests {
     fn volume_capability_requirements_are_frozen() {
         // Attaching a runtime volume reshapes the storage namespace for
         // every principal: it carries the mount authority. Detaching, an
-        // attach of a network volume and a view binding are judged by their
-        // handlers against the volume and the caller, so they carry none at
-        // the dispatcher; serving carries the server's class capability.
-        // Every one is audited. Lock this down so a refactor cannot loosen a
-        // gate or drop an audit.
+        // attach of a network volume or a disk image and a view binding are
+        // judged by their handlers against the volume and the caller, so they
+        // carry none at the dispatcher; serving carries the server's class
+        // capability. Every one is audited. Lock this down so a refactor
+        // cannot loosen a gate or drop an audit.
         let gates = [
             (SyscallNumber::VOLUME_ATTACH, Some(CapabilityId::FS_MOUNT)),
             (SyscallNumber::VOLUME_DETACH, None),
@@ -4539,6 +4561,7 @@ mod tests {
             (SyscallNumber::FSSERVE_ATTACH, None),
             (SyscallNumber::VIEW_BIND, None),
             (SyscallNumber::VIEW_UNBIND, None),
+            (SyscallNumber::IMAGE_ATTACH, None),
         ];
         for (number, gate) in gates {
             let spec = spec_for(number).unwrap();

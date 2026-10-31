@@ -20,6 +20,9 @@ Yn ragosodedig mae'r adroddiad yn cuddio gosodiadau heb gapasiti eu
 hunain (rhwymiadau golwg synthetig y system) a gosodiadau pellach o
 gyfrol a restrwyd eisoes; mae `-a` yn dangos popeth, a nodir nifer y
 cofnodion cudd ar y ffrwd wybodaeth safonol (fd 3), byth yn y tabl.
+Gadewir allan hefyd gyfrol y mae defnyddiwr arall yn ei chadw'n
+breifat, a nodir hi ar wahân; mae `-a` yn ei rhestru gyda `-` ar gyfer
+pob ffigur nad oes ond y defnyddiwr hwnnw'n cael ei weld.
 
 Argreffir meintiau mewn blociau 1024-beit oni bai bod opsiwn uned yn
 dewis fel arall; mae opsiwn uned diweddarach yn disodli un cynharach,
@@ -35,8 +38,9 @@ gael eto.
 
 ## OPTIONS
 
-- `-a, --all` — cynnwys y gosodiadau di-gapasiti a dyblyg y mae'r
-  rhagosodiad yn eu cuddio.
+- `-a, --all` — cynnwys y gosodiadau di-gapasiti a dyblyg, a
+  chyfrolau preifat defnyddwyr eraill, y mae'r rhagosodiad yn eu
+  cuddio.
 - `-T, --print-type` — ychwanegu colofn math y system ffeiliau.
 - `-t, --type <type>` — adrodd am systemau ffeiliau o'r math `type`
   yn unig (ailadroddadwy).
@@ -45,8 +49,8 @@ gael eto.
 - `-i, --inodes` — adrodd ar gyfrifon inodau yn lle defnydd blociau.
 - `-P, --portability` — fformat cludadwy POSIX (penawdau
   `1024-blocks` a `Capacity`).
-- `-l, --local` — cyfyngu'r adroddiad i systemau ffeiliau lleol (pob
-  gosodiad TAIRiX heddiw: ni hidlir dim).
+- `-l, --local` — cyfyngu'r adroddiad i systemau ffeiliau lleol, gan
+  adael allan adnoddau rhwydwaith a rennir.
 - `--total` — atodi rhes wedi'i labelu `total` sy'n adio'r ffigurau a
   ddangosir.
 - `-k` — blociau 1024-beit (y rhagosodiad).

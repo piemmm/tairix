@@ -18,7 +18,7 @@
 //! probe whose hop limit runs out short of it as the router it reached, so the
 //! trace has three hops: the two routers, then the peer.
 //!
-//! ## Why the PASS keys on both tools' exits *then* the shell's exit
+//! ## Why the PASS keys on the tools' exits *then* the shell's exit
 //!
 //! A tool's exit alone proves nothing: `ping -c 3` exits whether or not a
 //! reply came, and `traceroute` ends at its hop bound however far it got. The
@@ -26,12 +26,12 @@
 //! hop, having first seen `ping`'s `icmp_seq=` and each router's hop, so an
 //! unanswered run never reaches it and times out fail-loud with the
 //! transcript; and the harness requires the peer's verdict that it served an
-//! echo and answered as both routers. This sink arms once both tools' audited
-//! exits (`SyscallInvoked`, `sc=exit`) are seen and reports PASS on the next —
-//! the shell's — so everything the runner waited for reached the transcript
-//! before the run ended. Only the audit sink differs from a production kernel,
-//! and it lives in a dedicated bin so feature unification can never leak the
-//! QEMU-exit shortcut into a production build.
+//! echo and answered as both routers. The run passes on the login shell's
+//! audited exit after a tool's (`tairix_itest_witness::FixtureExit`), so
+//! everything the runner waited for reached the transcript before the run
+//! ended, and no other process's exit ends it. Only the audit sink differs
+//! from a production kernel, and it lives in a dedicated bin so feature
+//! unification can never leak the QEMU-exit shortcut into a production build.
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -42,10 +42,9 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicU8, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
@@ -60,7 +59,7 @@ mod kernel {
     /// They are shipping command apps, not test fixtures, so there is no
     /// fixture crate to import them from; they are the command words the
     /// runner types.
-    const TOOLS: [&str; 2] = ["ping", "traceroute"];
+    const TOOLS: &[&str] = &["ping", "traceroute"];
 
     /// The global allocator's arena.
     static HEAP: Heap = Heap::ZERO;
@@ -78,30 +77,17 @@ mod kernel {
     /// `kernel/syscall/src/audit.rs`.
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
-    /// Which of [`TOOLS`] have exited, one bit each.
-    static EXITED: AtomicU8 = AtomicU8::new(0);
+    /// The run's end: the shell's exit after a tool's.
+    static END: FixtureExit = FixtureExit::new(TOOLS, SYSCALL_INVOKED_EVENT_ID);
 
-    /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// on the first audited `exit` after both tools' own.
+    /// Replays every event to the serial console and ends the run at [`END`].
     struct EchoToolsSink;
 
     impl Sink for EchoToolsSink {
         fn write_event(&self, event: &Event<'_>) {
-            // Replay through the serial sink so the QEMU transcript records the
-            // full boot + autoload + probe timeline.
             SerialSink::new().write_event(event);
-            if event.id != SYSCALL_INVOKED_EVENT_ID || field_str(event, "sc") != Some("exit") {
-                return;
-            }
-            let comm = field_str(event, "comm");
-            match TOOLS.iter().position(|tool| comm == Some(*tool)) {
-                Some(tool) => {
-                    EXITED.fetch_or(1 << tool, Ordering::AcqRel);
-                }
-                None if EXITED.load(Ordering::Acquire) == (1 << TOOLS.len()) - 1 => {
-                    qemu_exit::exit_success();
-                }
-                None => {}
+            if END.passed(event) {
+                qemu_exit::exit_success();
             }
         }
     }

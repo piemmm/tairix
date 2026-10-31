@@ -314,10 +314,26 @@ mod tests {
 
     #[test]
     fn an_exhausted_uid_space_fails_closed() {
-        let channel = MemChannel::new(&[("root", 0), ("max", u32::MAX)]);
+        let top = tairix_abi::UNASSIGNABLE_ID - 1;
+        assert!(
+            tairix_users::IdRange::User.contains(top)
+                && !tairix_users::IdRange::User.contains(top + 1),
+            "the band's last uid"
+        );
+        let channel = MemChannel::new(&[("root", 0), ("max", top)]);
         let db = UsersAdminDb::new(&channel, &ENTROPY);
         assert_eq!(db.create(&spec("bob", None)), Err(Errno::OutOfRange));
         assert!(channel.created().is_empty());
+    }
+
+    /// The id every sentinel is spelled with names no account, so one a
+    /// registry somehow holds never steers the allocation.
+    #[test]
+    fn the_unassignable_uid_steers_no_allocation() {
+        let channel = MemChannel::new(&[("root", 0), ("odd", tairix_abi::UNASSIGNABLE_ID)]);
+        let db = UsersAdminDb::new(&channel, &ENTROPY);
+        assert_eq!(db.create(&spec("bob", None)), Ok(()));
+        assert_eq!(channel.created()[0].uid, 1000);
     }
 
     #[test]

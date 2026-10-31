@@ -71,7 +71,7 @@ mod kernel {
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
     use tairix_itest_finisher::fail_point;
-    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
@@ -117,12 +117,8 @@ mod kernel {
     /// Set once an accepted measurement has been observed.
     static MEASURED: AtomicBool = AtomicBool::new(false);
 
-    /// Set once the fixture's own audited `exit` has been observed, so the
-    /// PASS fires on the *next* one — the shell's, typed by the runner only
-    /// after the measurement appeared. Exiting QEMU on the fixture's own
-    /// exit would tear the run down with the last scripted line still owed,
-    /// which the harness fails as an incomplete script.
-    static FIXTURE_EXITED: AtomicBool = AtomicBool::new(false);
+    /// The run's end: the fixture's exit, then the shell's.
+    static END: FixtureExit = FixtureExit::new(&[COMMAND], SYSCALL_INVOKED_EVENT_ID);
 
     /// The finisher a refused verdict exits with. Each expectation has its
     /// own code, so a failing run names which one it missed rather than
@@ -173,12 +169,7 @@ mod kernel {
     impl Sink for AuditObserver {
         fn write_event(&self, event: &Event<'_>) {
             SerialSink::new().write_event(event);
-            if event.id != SYSCALL_INVOKED_EVENT_ID || field_str(event, "sc") != Some("exit") {
-                return;
-            }
-            if field_str(event, "comm") == Some(COMMAND) {
-                FIXTURE_EXITED.store(true, Ordering::Release);
-            } else if MEASURED.load(Ordering::Acquire) && FIXTURE_EXITED.load(Ordering::Acquire) {
+            if END.passed(event) && MEASURED.load(Ordering::Acquire) {
                 qemu_exit::exit_success();
             }
         }

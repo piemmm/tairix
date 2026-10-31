@@ -29,6 +29,8 @@ own specifiers.
   figures are the volume that binding shows — so a link into another volume
   reports the volume it lands on, `/vol` never claims `/volume/x`, and
   `/System/Logs`, carved out of the root volume, reports the root volume.
+  Another user's private volume lists no binding but its catalog entry, so
+  a directory it is bound at elsewhere names the binding beneath it.
 * **Four specifiers are refused by name, not answered with a fabrication.**
   `%G` (the System Information API publishes a user directory and no group
   counterpart, so `%g` is the honest field), `%t`/`%T` of the file

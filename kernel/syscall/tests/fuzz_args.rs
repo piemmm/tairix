@@ -1214,6 +1214,18 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn image_attach(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _frame: u64,
+        _frame_len: usize,
+        _reply: u64,
+        _reply_cap: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn system_power(&self, _c: &CallerContext<'_>, _action: PowerAction) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

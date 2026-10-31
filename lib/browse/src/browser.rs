@@ -210,6 +210,8 @@ pub struct Browser<S: DirectorySource> {
     /// and only carrying one across a re-read copies it, so while this is
     /// clear a directory holding no volume root has nothing to unmark.
     drives_shown: bool,
+    /// How many navigations have begun ([`navigations`](Self::navigations)).
+    navigations: u64,
 }
 
 /// A navigation whose listing has not arrived yet: where it is going, and which
@@ -326,7 +328,17 @@ impl<S: DirectorySource> Browser<S> {
             focus_intent: None,
             climbing: None,
             drives_shown: false,
+            navigations: 0,
         }
+    }
+
+    /// How many navigations have begun: a move anywhere, and a navigation
+    /// given up to stay where the browser is, but no re-read of the location
+    /// shown. A caller that asked for something at one count knows from a
+    /// later one whether the user has gone somewhere since.
+    #[must_use]
+    pub const fn navigations(&self) -> u64 {
+        self.navigations
     }
 
     /// Which item view the browser is showing.
@@ -583,6 +595,7 @@ impl<S: DirectorySource> Browser<S> {
         let mut roots: Vec<(&str, DriveMark)> = places
             .rows()
             .iter()
+            .chain(places.unoffered())
             .filter(|place| place.kind() == PlaceKind::Volume)
             .filter_map(
                 |place| match (place.components().split_last(), place.facts()) {
@@ -1333,9 +1346,16 @@ impl<S: DirectorySource> Browser<S> {
             EntryKind::Link(LinkTarget::Bundle) => Ok(Activation::LaunchBundle {
                 path: launch.ok_or(BrowseError::Source(Errno::NotFound))?,
             }),
-            EntryKind::File | EntryKind::Link(LinkTarget::File) => Ok(Activation::OpenFile {
-                path: self.child_target_path(&name)?,
-            }),
+            EntryKind::File | EntryKind::Link(LinkTarget::File) => {
+                let path = self.child_target_path(&name)?;
+                let media =
+                    crate::media::media_for_named(&name, kind, crate::media::Site::of(components));
+                Ok(if media.holds_a_volume() {
+                    Activation::MountImage { path }
+                } else {
+                    Activation::OpenFile { path }
+                })
+            }
             // A link that resolves to nothing has nothing to activate; the
             // caller reports the refusal rather than opening the link's own
             // bytes, which are a path and not content.
@@ -1395,8 +1415,12 @@ impl<S: DirectorySource> Browser<S> {
     /// model. It records history and clears the forward stack exactly as a
     /// fresh navigation does.
     ///
-    /// Returns `Ok(true)` after moving and `Ok(false)` when `components`
-    /// already names the current directory — a no-op, not an error.
+    /// Returns `Ok(true)` when what the browser shows changed and `Ok(false)`
+    /// when `components` already names the current directory and nothing was
+    /// on its way elsewhere. Asking for the current directory while a
+    /// navigation is on its way somewhere else gives that navigation up — the
+    /// latest place asked for is where the browser stays — and reads the
+    /// directory afresh, so its source stops reading the place given up.
     ///
     /// Transactional and fail closed: the target is listed *before* any state
     /// or history changes, so an unlistable location (missing, unreadable, or
@@ -1408,10 +1432,34 @@ impl<S: DirectorySource> Browser<S> {
     /// Returns [`BrowseError::Source`] if `components` cannot be listed.
     pub fn navigate_to(&mut self, components: Vec<String>) -> Result<bool, BrowseError> {
         if self.folder() == Some(components.as_slice()) {
-            return Ok(false);
+            if !self.listing_elsewhere() {
+                return Ok(false);
+            }
+            self.begin(Location::Folder(components), Step::Reload)?;
+            self.navigations = self.navigations.wrapping_add(1);
+            return Ok(true);
         }
         self.navigate_recording(Location::Folder(components))?;
         Ok(true)
+    }
+
+    /// [`navigate_to`](Self::navigate_to), for a place asked for when the
+    /// browser had begun `asked_at` [navigations](Self::navigations): once the
+    /// user has gone anywhere since, where they went is where they stay, and
+    /// this changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`navigate_to`](Self::navigate_to).
+    pub fn navigate_as_asked(
+        &mut self,
+        components: Vec<String>,
+        asked_at: u64,
+    ) -> Result<bool, BrowseError> {
+        if self.navigations != asked_at {
+            return Ok(false);
+        }
+        self.navigate_to(components)
     }
 
     /// Navigate to the network, recording the move like any other: it lands
@@ -1427,6 +1475,7 @@ impl<S: DirectorySource> Browser<S> {
             step: Step::Fresh,
         });
         self.climbing = None;
+        self.navigations = self.navigations.wrapping_add(1);
         true
     }
 
@@ -1578,6 +1627,7 @@ impl<S: DirectorySource> Browser<S> {
                 target: Location::Network,
                 step,
             });
+            self.count(step);
             return Ok(());
         };
         // A reload is asked because the directory may have changed, so an
@@ -1587,7 +1637,9 @@ impl<S: DirectorySource> Browser<S> {
             Step::Reload => self.source.refresh(&components),
             Step::Fresh | Step::Back | Step::Forward => self.source.list(&components),
         };
-        match listed.map_err(BrowseError::Source)? {
+        let listed = listed.map_err(BrowseError::Source)?;
+        self.count(step);
+        match listed {
             Listing::Ready(entries) => {
                 self.pending = None;
                 self.commit(
@@ -1606,6 +1658,14 @@ impl<S: DirectorySource> Browser<S> {
                 });
                 Ok(())
             }
+        }
+    }
+
+    /// Count a navigation begun as `step`; a re-read of the location shown is
+    /// none.
+    fn count(&mut self, step: Step) {
+        if step != Step::Reload {
+            self.navigations = self.navigations.wrapping_add(1);
         }
     }
 

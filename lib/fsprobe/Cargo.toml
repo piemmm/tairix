@@ -1,6 +1,6 @@
 [package]
 name = "tairix-fsprobe"
-description = "TAIRiX filesystem recognition: the one no_std definition of which supported filesystem a block extent holds (a RAID member, ARXFS, ext4, FAT32, ISO 9660, UDF, ADFS), which stable identity, label and mutation evidence it carries, and how that identity renders as a short display fingerprint (plans/DEVICES.md D3c, plans/ALIAS.md §3.8)."
+description = "TAIRiX filesystem recognition: the one no_std definition of which supported filesystem a block extent holds (a RAID member, an Amiga Rigid Disk Block, ARXFS, ext4, FAT32, ISO 9660, UDF, AmigaDOS, ADFS), which stable identity, label and mutation evidence it carries, and how that identity renders as a short display fingerprint (plans/DEVICES.md D3c, plans/ALIAS.md §3.8)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -40,3 +40,5 @@ tairix-resref = { path = "../resref", version = "=0.0.0" }
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # The ISO 9660 records and descriptors the probe's test images are made of.
 tairix-test-iso9660-image = { path = "../../tests/integration/iso9660_image", version = "=0.0.0" }
+# The partitioned Amiga disk the probe refuses, laid out once for every test.
+tairix-test-amiga-image = { path = "../../tests/integration/amiga_image", version = "=0.0.0" }

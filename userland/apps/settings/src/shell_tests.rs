@@ -2858,7 +2858,7 @@ fn volume(source: &[u8], target: &[u8], blocks: u64, free: u64) -> VolumeReading
         [0; 16],
     )
     .expect("a well-formed record");
-    VolumeReading::of(&record)
+    VolumeReading::of(&record).expect("shown")
 }
 
 /// Where the storage pane lives.
@@ -3063,7 +3063,8 @@ fn the_storage_pane_draws_in_both_themes_and_at_both_densities() {
                         [0; 16],
                     )
                     .expect("a well-formed record"),
-                ),
+                )
+                .expect("shown"),
             ]);
             shell.lay_out(WIDE, scale, &theme);
             let mut surface = Surface::new(WIDE.width, WIDE.height).expect("a surface");

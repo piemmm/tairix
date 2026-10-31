@@ -20,7 +20,9 @@ reporta a sua própria contabilidade. Por predefinição, o relatório
 oculta as montagens sem capacidade própria (as ligações de vista
 sintéticas do sistema) e montagens adicionais de um volume já
 listado; `-a` mostra tudo, e o número de entradas ocultas é anotado no
-fluxo de informação padrão (fd 3), nunca na tabela.
+fluxo de informação padrão (fd 3), nunca na tabela. Um volume que
+outro utilizador mantém privado também é omitido, e anotado à parte;
+`-a` lista-o com `-` em cada número que só esse utilizador pode ver.
 
 Os tamanhos são impressos em blocos de 1024 bytes salvo se uma opção
 de unidade escolher outra coisa; uma opção de unidade posterior
@@ -37,8 +39,8 @@ estão disponíveis.
 
 ## OPTIONS
 
-- `-a, --all` — incluir as montagens sem capacidade e duplicadas que
-  a predefinição oculta.
+- `-a, --all` — incluir as montagens sem capacidade e duplicadas, e
+  os volumes privados de outros utilizadores, que a predefinição oculta.
 - `-T, --print-type` — acrescentar a coluna do tipo de sistema de
   ficheiros.
 - `-t, --type <type>` — reportar apenas sistemas de ficheiros do tipo
@@ -50,7 +52,7 @@ estão disponíveis.
 - `-P, --portability` — o formato portátil POSIX (cabeçalhos
   `1024-blocks` e `Capacity`).
 - `-l, --local` — restringir o relatório a sistemas de ficheiros
-  locais (hoje todas as montagens TAIRiX: nada é filtrado).
+  locais, omitindo as partilhas de rede.
 - `--total` — acrescentar uma linha etiquetada `total` que soma os
   valores mostrados.
 - `-k` — blocos de 1024 bytes (a predefinição).

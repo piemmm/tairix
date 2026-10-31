@@ -1535,6 +1535,7 @@ mod tests {
         "man",
         "mdadm",
         "mkdir",
+        "mount",
         "music",
         "mv",
         "netmap",

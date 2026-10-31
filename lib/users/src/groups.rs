@@ -33,6 +33,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_abi::UNASSIGNABLE_ID;
 use tairix_util::fallible::{concatenated, written};
 
 use crate::record::{name_charset_ok, parse_canonical_u32, Gid, FIELD_SEPARATOR};
@@ -110,7 +111,8 @@ impl<'t> GroupView<'t> {
     ///
     /// [`ParseError::FieldCount`] for the wrong number of `:`-separated
     /// fields, [`ParseError::GroupName`] for an invalid name, or
-    /// [`ParseError::GroupId`] for a non-canonically-spelled gid.
+    /// [`ParseError::GroupId`] for a non-canonically-spelled gid or the one
+    /// no group is given.
     pub fn decode(line: &'t str) -> Result<Self, ParseError> {
         let mut fields = line.split(FIELD_SEPARATOR);
         let name = fields.next().ok_or(ParseError::FieldCount)?;
@@ -118,7 +120,9 @@ impl<'t> GroupView<'t> {
         if fields.next().is_some() {
             return Err(ParseError::FieldCount);
         }
-        let gid = parse_canonical_u32(gid).ok_or(ParseError::GroupId)?;
+        let gid = parse_canonical_u32(gid)
+            .filter(|gid| *gid != UNASSIGNABLE_ID)
+            .ok_or(ParseError::GroupId)?;
         check_name(name)?;
         Ok(Self {
             name,
@@ -145,10 +149,14 @@ impl GroupRecord {
     /// # Errors
     ///
     /// [`ParseError::GroupName`] if `name` violates the identifier grammar
-    /// or the [`MAX_GROUPNAME_LEN`] bound, or [`ParseError::OutOfMemory`]
-    /// when the heap cannot hold it.
+    /// or the [`MAX_GROUPNAME_LEN`] bound, [`ParseError::GroupId`] for the
+    /// one gid no group is given, or [`ParseError::OutOfMemory`] when the
+    /// heap cannot hold it.
     pub fn new(name: &str, gid: Gid) -> Result<Self, ParseError> {
         check_name(name)?;
+        if gid.0 == UNASSIGNABLE_ID {
+            return Err(ParseError::GroupId);
+        }
         Self::held(name, gid)
     }
 

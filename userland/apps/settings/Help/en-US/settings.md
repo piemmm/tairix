@@ -74,8 +74,9 @@ also shows the processor's temperature and whether the fan is running. When
 machine's other settings, a change waits for *Apply*, which asks for an account
 that may change them.
 
-**Storage** lists every mounted volume: where it is mounted, its filesystem,
-its device and medium, how full it is, and whether it is healthy. It is a
+**Storage** lists every mounted volume but another user's private one: where
+it is mounted, its filesystem, its device and medium, how full it is, and
+whether it is healthy. It is a
 report, not a control — mounting and unmounting are the file manager's and
 the `mount` command's — and a volume whose format keeps no fixed capacity
 says so rather than showing a bar. `df` reports the same figures at a shell.

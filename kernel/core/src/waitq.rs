@@ -1384,6 +1384,19 @@ pub fn port_room_wake_task(task: TaskId) {
     }
 }
 
+/// The wait-queue an image attach parks on until its volume's filesystem
+/// driver serves or refuses it (`plans/DISK-IMAGES.md`). Timed: the attach
+/// judges its driver's liveness at each deadline it registers.
+pub static VOLUME_ATTACH_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake the attach `task` waits in: its volume was served, refused or
+/// retracted. A fail-safe no-op before the arch hook is installed.
+pub fn volume_attach_wake(task: TaskId) {
+    if let Some(arch) = wait_arch() {
+        let _ = VOLUME_ATTACH_WAITQ.wake_task(arch, task);
+    }
+}
+
 /// Drop every registration `task` holds — on every global queue, and on
 /// every futex key.
 ///
@@ -1542,6 +1555,11 @@ static ALL_QUEUES: &[GlobalQueue] = &[
     GlobalQueue {
         queue: &PORT_ROOM_WAITQ,
         timed: false,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &VOLUME_ATTACH_WAITQ,
+        timed: true,
         deferred: false,
     },
 ];

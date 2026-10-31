@@ -1,7 +1,8 @@
 # Volumes served from user space
 
-Every filesystem on removable media — ARXFS, ext2/3/4, FAT32, ADFS, ISO 9660
-and UDF — runs in a user-space driver process, not in the kernel
+Every filesystem on removable media or in a disk image — ARXFS, ext2/3/4,
+FAT32, ADFS, AmigaDOS, ISO 9660 and UDF — runs in a user-space driver
+process, not in the kernel
 (`plans/FSSERVE.md` FSS5). The kernel keeps only the drivers of the volumes it
 boots from: ARXFS for the root and `/System`, FAT32 for the boot partition. A
 format the kernel has never heard of is served by shipping its driver bundle.
@@ -51,7 +52,7 @@ The protocol is [`fsserve-v1`](../abi/fsserve.md).
 The proxy is one more filesystem driver in the mount registry, so a served
 volume keeps everything a removable volume had: the kernel's cache in front of
 it, the directory-watch feed, per-mount serialisation, and for FAT32, ADFS,
-ISO 9660 and UDF the storage-group identity map. Every call waits only while
+AmigaDOS, ISO 9660 and UDF the storage-group identity map. Every call waits only while
 the driver is answering or working on its volume; a driver that does neither
 for ten seconds has stopped, and the call is abandoned. A kill abandons a call
 too (`Errno::Interrupted`). An abandoned call leaves the window quarantined
@@ -141,6 +142,6 @@ What differs from a removable volume follows from other writers changing it:
 | 4300 | `fs.network.offered`       | a server offered a volume to a principal |
 | 4301 | `fs.network.attached`      | its principal attached it (`cause`: the presentation) |
 | 4302 | `fs.network.attach_refused` | an attach was refused (`cause`) |
-| 4303 | `fs.network.detached`      | detached (`cause`: `clean` or `forced`) |
+| 4303 | `fs.network.detached`      | detached (`cause`: `clean`, `forced`, or `forced_unflushed` when a flush was given up) |
 | 4304 | `fs.network.detach_refused` | a detach was refused (`cause`) |
 | 4305 | `fs.network.retired`       | its server withdrew it or was lost (`cause`, `outcome`) |

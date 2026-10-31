@@ -42,6 +42,7 @@ pub(crate) mod hex;
 pub mod home;
 pub mod hwlink;
 pub mod hwtree;
+pub mod imageattach;
 pub mod input;
 pub mod ipc;
 pub mod latency;
@@ -282,6 +283,11 @@ pub use waitset::{WaitSetOp, WaitSourceKind, WAITSET_CHILD_ANY, WAITSET_TIMEOUT_
 /// loading them can refuse a manifest produced for a future ABI revision
 /// without attempting to interpret its body.
 pub const ABI_VERSION_V1: u32 = 1;
+
+/// The one uid and gid no principal is ever given, so a sentinel spelled with
+/// it — an owner left unchanged, a uid inherited, a volume no one owns — is
+/// never taken for a real one.
+pub const UNASSIGNABLE_ID: u32 = u32::MAX;
 
 /// The current ABI version supported by this crate.
 ///

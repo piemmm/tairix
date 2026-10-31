@@ -1637,16 +1637,17 @@ impl SyscallNumber {
     /// Arguments: a non-null pointer to an encoded
     /// [`crate::volume::VolumeDetachRequest`] (the volume's stable
     /// 16-byte identity plus the force byte) and its length (exactly
-    /// [`crate::volume::VOLUME_DETACH_LEN`]). Only a volume attached
-    /// through [`SyscallNumber::VOLUME_ATTACH`] can be detached — the
-    /// boot volumes are permanent and refuse this path. The volume is
-    /// flushed first and a plain detach fails closed on a flush error (or
-    /// an unavailable, surprise-removed volume) rather than discarding
-    /// uncommitted data; a **force** detach (`plans/DEVICES.md` D4b)
-    /// retracts the volume anyway, deliberately discarding the retained
-    /// set with its own audit event. A network volume's owner may detach it;
-    /// any other volume needs `CAP_FS_MOUNT`, checked by the handler once it
-    /// knows the volume. Every detach decision is audited.
+    /// [`crate::volume::VOLUME_DETACH_LEN`]). Only a volume attached at
+    /// runtime — through [`SyscallNumber::VOLUME_ATTACH`],
+    /// [`SyscallNumber::FSSERVE_ATTACH`] or [`SyscallNumber::IMAGE_ATTACH`] —
+    /// can be detached; the boot volumes are permanent and refuse this path.
+    /// The volume is flushed first and a plain detach fails closed on a flush
+    /// error (or an unavailable, surprise-removed volume) rather than
+    /// discarding uncommitted data; a **force** detach (`plans/DEVICES.md`
+    /// D4b) retracts the volume anyway, deliberately discarding the retained
+    /// set with its own audit event. A network or disk-image volume's owner
+    /// may detach it; any other volume needs `CAP_FS_MOUNT`, checked by the
+    /// handler once it knows the volume. Every detach decision is audited.
     pub const VOLUME_DETACH: Self = Self(81);
 
     /// Grant the serving task of a call endpoint the right to map a shared
@@ -3168,6 +3169,20 @@ impl SyscallNumber {
     /// made. Ungated at the dispatcher; audited.
     pub const VIEW_UNBIND: Self = Self(163);
 
+    /// Attach the volume a disk-image file holds, for the caller
+    /// (`plans/DISK-IMAGES.md`).
+    ///
+    /// Arguments: `fd: u32`, a descriptor the caller opened on the image;
+    /// `frame: *const u8` and `frame_len: usize` (an
+    /// [`crate::imageattach::ImageAttach`]); `reply: *mut u8` and `reply_cap:
+    /// usize`. Parks until the volume's filesystem driver serves it or
+    /// refuses it, writes the [`crate::imageattach::ImageAttachReply`] and
+    /// returns its length. The descriptor is the authority: it must be
+    /// readable, and the volume is writable only when it is writable too. A
+    /// shared or explicit presentation needs
+    /// [`crate::CapabilityId::FS_MOUNT`]. Ungated at the dispatcher; audited.
+    pub const IMAGE_ATTACH: Self = Self(164);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3482,6 +3497,7 @@ mod tests {
         assert_eq!(SyscallNumber::FSSERVE_CTL.as_u16(), 161);
         assert_eq!(SyscallNumber::VIEW_BIND.as_u16(), 162);
         assert_eq!(SyscallNumber::VIEW_UNBIND.as_u16(), 163);
+        assert_eq!(SyscallNumber::IMAGE_ATTACH.as_u16(), 164);
     }
 
     #[test]

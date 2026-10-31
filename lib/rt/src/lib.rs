@@ -201,6 +201,8 @@ const NUM_FSSERVE_CTL: u64 = SyscallNumber::FSSERVE_CTL.as_u16() as u64;
 const NUM_VIEW_BIND: u64 = SyscallNumber::VIEW_BIND.as_u16() as u64;
 /// `view_unbind` syscall number (as above).
 const NUM_VIEW_UNBIND: u64 = SyscallNumber::VIEW_UNBIND.as_u16() as u64;
+/// `image_attach` syscall number (as above).
+const NUM_IMAGE_ATTACH: u64 = SyscallNumber::IMAGE_ATTACH.as_u16() as u64;
 
 /// `mmio_map` syscall number (as above).
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
@@ -2272,9 +2274,10 @@ pub fn volume_attach(request: &[u8]) -> i64 {
 /// D3b).
 ///
 /// `request` is an encoded [`tairix_abi::volume::VolumeDetachRequest`]
-/// (the volume's stable 16-byte identity plus the force byte). Requires
-/// `CAP_FS_MOUNT`; only a volume attached through [`volume_attach`] can be
-/// detached. A plain detach fails closed on a flush error (or an
+/// (the volume's stable 16-byte identity plus the force byte). The user who
+/// attached a disk image or a network share may detach it; any other volume
+/// needs `CAP_FS_MOUNT`, and only a runtime-attached volume can be detached.
+/// A plain detach fails closed on a flush error (or an
 /// unavailable, surprise-removed volume) rather than discarding
 /// uncommitted data; a force detach retracts the volume anyway,
 /// deliberately discarding the retained set with its own audit event.
@@ -2481,6 +2484,74 @@ pub fn fsserve_attach(
     };
     let answered = count_result(ret, reply.len()).map_err(Errno::from_syscall)?;
     AttachReply::decode(reply.get(..answered).ok_or(Errno::OutOfRange)?)
+}
+
+/// Attach the volume the disk-image file open as `fd` holds, as `attach`
+/// asks (`SyscallNumber::IMAGE_ATTACH`). Waits until the volume's driver
+/// serves or refuses it; a file holding nothing the kernel attaches, a target
+/// that will not take the volume and a name asked that it may not take are
+/// answered as such
+/// ([`ImageAttachReply`](tairix_abi::imageattach::ImageAttachReply)).
+///
+/// # Errors
+///
+/// `attach`'s refusal to encode, or the kernel's: [`Errno::PermissionDenied`]
+/// for a descriptor not the caller's own and readable, or a presentation it
+/// may not ask for; [`Errno::ReadOnly`] for an attach asking
+/// `Writable` of a descriptor or format that will not write; [`Errno::Busy`]
+/// for a file locked against it — any lock refuses a writable attach, a
+/// writer's any attach — or its volume being attached or detached;
+/// [`Errno::LimitExceeded`]
+/// past the caller's image bound; [`Errno::TimedOut`] for a driver that never
+/// answered; [`Errno::NotAttached`] for a volume detached before the attach
+/// could answer. A reply the kernel cannot write back attaches nothing.
+pub fn image_attach(
+    fd: u32,
+    attach: &tairix_abi::imageattach::ImageAttach<'_>,
+) -> Result<tairix_abi::imageattach::ImageAttachReply, Errno> {
+    use tairix_abi::imageattach::{ImageAttachReply, IMAGE_ATTACH_MAX, IMAGE_ATTACH_REPLY_LEN};
+    let mut frame = [0u8; IMAGE_ATTACH_MAX];
+    let len = attach.encode(&mut frame)?;
+    let mut reply = [0u8; IMAGE_ATTACH_REPLY_LEN];
+    // SAFETY: as `fsserve_attach`: both pairs are live local arrays the kernel
+    // validates before touching.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_IMAGE_ATTACH,
+            [
+                u64::from(fd),
+                frame.as_ptr() as usize as u64,
+                len as u64,
+                reply.as_mut_ptr() as usize as u64,
+                reply.len() as u64,
+                0,
+            ],
+        )
+    };
+    let answered = count_result(ret, reply.len()).map_err(Errno::from_syscall)?;
+    ImageAttachReply::decode(reply.get(..answered).ok_or(Errno::OutOfRange)?)
+}
+
+/// Attach the volume the disk image at `path` holds, as `attach` asks
+/// ([`image_attach`]), the image opened as its access asks: read-only,
+/// read-write where the caller may write it, or read-write. The descriptor
+/// closes on return; the kernel keeps its own hold on the file.
+///
+/// # Errors
+///
+/// The refusal to open `path` as asked, or [`image_attach`]'s.
+pub fn image_attach_path(
+    path: &[u8],
+    attach: &tairix_abi::imageattach::ImageAttach<'_>,
+) -> Result<tairix_abi::imageattach::ImageAttachReply, Errno> {
+    use tairix_abi::imageattach::ImageAccess;
+    let file = match attach.access {
+        ImageAccess::ReadOnly => File::open(path, OpenFlags::READ).map_err(Errno::from_syscall)?,
+        ImageAccess::WritableWherePossible => File::open_preferring_write(path, true)?.0,
+        ImageAccess::Writable => File::open(path, OpenFlags::READ.union(OpenFlags::WRITE))
+            .map_err(Errno::from_syscall)?,
+    };
+    image_attach(file.fd(), attach)
 }
 
 /// Tell the kernel `op` of a network volume this server offered
@@ -6867,6 +6938,22 @@ pub struct File {
     fd: u32,
 }
 
+/// [`File::open_preferring_write`]'s rule over `open`: the handle, and whether
+/// it is writable.
+fn writable_else_readable<F>(
+    write: bool,
+    mut open: impl FnMut(OpenFlags) -> Result<F, Errno>,
+) -> Result<(F, bool), Errno> {
+    if write {
+        match open(OpenFlags::READ.union(OpenFlags::WRITE)) {
+            Ok(file) => return Ok((file, true)),
+            Err(Errno::PermissionDenied | Errno::ReadOnly) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok((open(OpenFlags::READ)?, false))
+}
+
 impl File {
     /// Open the named `target` with `flags`, returning the owned handle.
     ///
@@ -6919,6 +7006,21 @@ impl File {
     /// [`tairix_abi::FS_MODE_MASK`].
     pub fn create(target: &[u8], flags: OpenFlags, mode: u32) -> Result<Self, i64> {
         Self::open_named(target, flags.union(OpenFlags::CREATE), mode)
+    }
+
+    /// Open the named `target` read-write when `write` asks it and the caller
+    /// may write it, read-only otherwise, answering whether it is open
+    /// read-write: a file the caller may only read, or one on a read-only
+    /// volume, is still theirs to read.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal to open `target` read-only, or any refusal of the
+    /// read-write open but those two.
+    pub fn open_preferring_write(target: &[u8], write: bool) -> Result<(Self, bool), Errno> {
+        writable_else_readable(write, |flags| {
+            Self::open(target, flags).map_err(Errno::from_syscall)
+        })
     }
 
     /// The one routing of a name between the filesystem and the resource
@@ -8069,6 +8171,53 @@ macro_rules! entry {
 
 #[cfg(test)]
 mod tests {
+    /// Open under `refusal` for a read-write ask, recording each ask's flags.
+    fn preferring_write(
+        write: bool,
+        refusal: Option<Errno>,
+    ) -> (Result<bool, Errno>, alloc::vec::Vec<OpenFlags>) {
+        let mut asked = alloc::vec::Vec::new();
+        let opened = super::writable_else_readable(write, |flags| {
+            asked.push(flags);
+            match refusal {
+                Some(err) if flags.contains(OpenFlags::WRITE) => Err(err),
+                _ => Ok(()),
+            }
+        });
+        (opened.map(|((), writable)| writable), asked)
+    }
+
+    #[test]
+    fn a_file_is_opened_read_write_where_the_caller_may_write_it() {
+        let (writable, asked) = preferring_write(true, None);
+        assert_eq!(writable, Ok(true));
+        assert_eq!(asked, [OpenFlags::READ.union(OpenFlags::WRITE)]);
+    }
+
+    /// A file the caller may only read, and one on a read-only volume — every
+    /// picture `/System` ships — are still opened to read.
+    #[test]
+    fn a_file_the_caller_may_not_write_is_opened_read_only() {
+        for refusal in [Errno::PermissionDenied, Errno::ReadOnly] {
+            let (writable, asked) = preferring_write(true, Some(refusal));
+            assert_eq!(writable, Ok(false), "{refusal:?}");
+            assert_eq!(
+                asked,
+                [OpenFlags::READ.union(OpenFlags::WRITE), OpenFlags::READ]
+            );
+        }
+    }
+
+    #[test]
+    fn any_other_refusal_ends_the_open_and_a_reader_never_asks_to_write() {
+        let (writable, asked) = preferring_write(true, Some(Errno::NotFound));
+        assert_eq!(writable, Err(Errno::NotFound));
+        assert_eq!(asked.len(), 1, "no read-only retry for a missing file");
+        let (writable, asked) = preferring_write(false, Some(Errno::PermissionDenied));
+        assert_eq!(writable, Ok(false));
+        assert_eq!(asked, [OpenFlags::READ]);
+    }
+
     use super::*;
     // The trap seam lives in `tairix-abi-trap` (the single trap home) and is reached here through the `host-seam`
     // dev-dependency feature; production builds never compile it.
@@ -8511,6 +8660,29 @@ mod tests {
         let (number, args) = capture(0, || assert_eq!(view_unbind("/Storage/x"), Ok(())));
         assert_eq!(number, NUM_VIEW_UNBIND);
         assert_eq!(args[1], 10);
+        let image = tairix_abi::imageattach::ImageAttach {
+            name: None,
+            presentation: Presentation::Private,
+            access: tairix_abi::imageattach::ImageAccess::ReadOnly,
+            target: None,
+            expects: None,
+            adopt: false,
+        };
+        let (number, args) = capture(
+            tairix_abi::imageattach::IMAGE_ATTACH_REPLY_LEN as u64,
+            || {
+                assert_eq!(image_attach(5, &image).err(), Some(Errno::OutOfRange));
+            },
+        );
+        assert_eq!(number, NUM_IMAGE_ATTACH);
+        assert_eq!(
+            (args[0], args[2], args[4]),
+            (
+                5,
+                20,
+                tairix_abi::imageattach::IMAGE_ATTACH_REPLY_LEN as u64
+            )
+        );
     }
 
     #[test]

@@ -132,6 +132,16 @@ pub(crate) const fn exact_len(bytes: &[u8], len: usize) -> Result<(), Errno> {
     }
 }
 
+/// Decode a wire boolean: exactly `0` or `1`, so a malformed byte is refused
+/// rather than read as truthy.
+pub(crate) const fn decode_bool(byte: u8) -> Result<bool, Errno> {
+    match byte {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
 /// A fail-closed reader over a variable-length frame: every accessor yields
 /// a value or an [`Errno`], and nothing is read past the frame's end.
 ///
@@ -300,10 +310,19 @@ impl<'a> Writer<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        exact_len, put_i32, put_i64, put_u16, put_u32, put_u64, read_i32, read_i64, read_u16,
-        read_u32, read_u64, Reader, Writer,
+        decode_bool, exact_len, put_i32, put_i64, put_u16, put_u32, put_u64, read_i32, read_i64,
+        read_u16, read_u32, read_u64, Reader, Writer,
     };
     use crate::Errno;
+
+    #[test]
+    fn a_wire_boolean_is_exactly_zero_or_one() {
+        assert_eq!(decode_bool(0), Ok(false));
+        assert_eq!(decode_bool(1), Ok(true));
+        for byte in 2..=u8::MAX {
+            assert_eq!(decode_bool(byte), Err(Errno::OutOfRange), "{byte}");
+        }
+    }
 
     #[test]
     fn a_frame_written_reads_back_field_by_field() {

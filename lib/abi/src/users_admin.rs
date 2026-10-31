@@ -30,7 +30,7 @@
 //! record). The list responses are described on
 //! [`UserEntry`] / [`GroupEntry`].
 
-use crate::le::{Reader, Writer};
+use crate::le::{decode_bool, Reader, Writer};
 use crate::{CapabilityId, Errno};
 
 /// Version of the `users_admin` request/response encoding.
@@ -346,11 +346,7 @@ impl<'a> UsersAdminRequest<'a> {
             },
             UsersAdminOp::SetAccountState => Self::SetAccountState {
                 username: cur.str()?,
-                locked: match cur.u8()? {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(Errno::OutOfRange),
-                },
+                locked: decode_bool(cur.u8()?)?,
             },
             UsersAdminOp::SetGrants => Self::SetGrants {
                 username: cur.str()?,

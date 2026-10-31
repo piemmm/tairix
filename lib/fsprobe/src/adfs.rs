@@ -50,6 +50,10 @@ pub const OLD_SECTOR_SIZE: u64 = OLD_SECTOR_SIZE_U32 as u64;
 /// Size of the raw two-sector old map image.
 pub const OLD_MAP_SIZE: usize = 512;
 
+/// The largest old-map floppy, the D format's 800 KiB; a larger old-map volume
+/// is a hard disc's.
+pub const OLD_MAP_FLOPPY_MAX: u64 = 800 * 1024;
+
 /// Maximum number of old-map free-area entries (82 three-byte entries fill
 /// bytes `0x00..0xF6`).
 pub const MAX_FREE_AREAS: usize = 82;

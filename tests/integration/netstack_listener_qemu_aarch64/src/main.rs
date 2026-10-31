@@ -35,20 +35,13 @@
 //! ## Why the PASS keys on the server's exit *then* the shell's exit
 //!
 //! On a fully verified exchange the server prints its `TCPSERVE PASS …` line
-//! and exits `0`; on **any** shortfall it prints the reason and parks forever
-//! — it never exits — so the server's audited `exit` (`SyscallInvoked`,
-//! `EventId(5000)`, `sc=exit`, `comm=tcpserve`) is itself the kernel-side
-//! witness of a verified exchange. Exiting QEMU on that record would tear the
-//! run down before the runner observed the marker and sent its final line, so
-//! the sink only *arms* there and reports PASS on the **next** audited `exit`
-//! — the shell's, which the runner types only after the `TCPSERVE PASS` marker
-//! appeared past the server's own output. The runner additionally fails the
-//! run if the guest exits before every scripted marker appeared, and the
-//! harness requires the client peer to report the whole transfer echoed and
-//! verified, so neither side can pass alone. A refused bind (missing
-//! `CAP_NET_BIND_PRIVILEGED`), a mismatched or truncated stream, or a server
-//! crash therefore never reaches the armed exit: the run times out with the
-//! diagnosis in the serial transcript — the documented fail-loud behaviour.
+//! and exits `0`; on any shortfall it prints the reason and parks. The run
+//! passes on the login shell's audited exit after the server's
+//! (`tairix_itest_witness::FixtureExit`), which the runner types only once the
+//! marker appeared, and the harness also requires the client peer to report
+//! the whole transfer echoed and verified, so neither side can pass alone. A
+//! refused bind (missing `CAP_NET_BIND_PRIVILEGED`), a mismatched or truncated
+//! stream, or a server crash times out with its diagnosis on serial.
 //!
 //! ## How it differs from a production kernel
 //!
@@ -67,10 +60,9 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
@@ -97,31 +89,16 @@ mod kernel {
     /// `kernel/syscall/src/audit.rs`.
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
-    /// Set once the `tcpserve` server's own audited `exit` has been observed —
-    /// the kernel-side witness that the server judged the exchange fully
-    /// verified (a failed exchange parks forever and never exits). The PASS
-    /// finisher fires on the next audited `exit`: the shell's, typed by the
-    /// runner only after the `TCPSERVE PASS` marker appeared, so the report
-    /// provably reached the transcript before the run ended.
-    static SERVER_EXITED: AtomicBool = AtomicBool::new(false);
+    /// The run's end: the shell's exit after the server's.
+    static END: FixtureExit = FixtureExit::new(&[COMMAND], SYSCALL_INVOKED_EVENT_ID);
 
-    /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// once the `tcpserve` server's audited `exit` has been observed and the
-    /// shell's subsequent scripted `exit` dispatches (see the module docs for
-    /// why the PASS is deferred to the second exit).
+    /// Replays every event to the serial console and ends the run at [`END`].
     struct ListenerSink;
 
     impl Sink for ListenerSink {
         fn write_event(&self, event: &Event<'_>) {
-            // Replay through the serial sink so the QEMU transcript records the
-            // full boot + autoload + accept + transfer timeline.
             SerialSink::new().write_event(event);
-            if event.id != SYSCALL_INVOKED_EVENT_ID || field_str(event, "sc") != Some("exit") {
-                return;
-            }
-            if field_str(event, "comm") == Some(COMMAND) {
-                SERVER_EXITED.store(true, Ordering::Release);
-            } else if SERVER_EXITED.load(Ordering::Acquire) {
+            if END.passed(event) {
                 qemu_exit::exit_success();
             }
         }

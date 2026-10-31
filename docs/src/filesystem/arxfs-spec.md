@@ -1778,8 +1778,8 @@ page). Indicative v1 entries: `acorn.filetype`/`loadaddr`/`execaddr`/
 `datestamp`, `amiga.protection`/`comment`, `atari.attributes`/`gemdos_date`,
 `mac.type`/`creator`/`finderflags`/`resourcefork`, `tairix.origin`/`mime`.
 *(`cp`, `mv`, `fstree` and the desktop copy carry the attributes through
-`lib/fscopy`; ADFS, ISO 9660 and UDF produce the `acorn`, `mac` and `amiga`
-entries. The archive tooling and the remaining per-family drivers are staged;
+`lib/fscopy`; ADFS, AmigaDOS, ISO 9660 and UDF produce the `acorn`, `mac` and
+`amiga` entries. The archive tooling and the remaining per-family drivers are staged;
 see §18.)*
 
 ---

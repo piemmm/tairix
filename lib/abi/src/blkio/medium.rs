@@ -96,13 +96,16 @@ pub enum BlkForm {
     /// The unit names none: a disk, a stick, a card.
     Unspecified = 0,
     /// An optical disc: the unit is a multimedia drive (INQUIRY peripheral
-    /// device type 05h, MMC-6).
+    /// device type 05h, MMC-6), or the image of a disc's volume.
     OpticalDisc = 1,
+    /// A floppy disk: the image of one, whose volume records the floppy
+    /// format it was laid out for.
+    FloppyDisk = 2,
 }
 
 impl BlkForm {
     /// Every form, so the C view is generated from the ABI.
-    pub const ALL: [Self; 2] = [Self::Unspecified, Self::OpticalDisc];
+    pub const ALL: [Self; 3] = [Self::Unspecified, Self::OpticalDisc, Self::FloppyDisk];
 
     /// The record byte for this form.
     #[must_use]
@@ -116,6 +119,7 @@ impl BlkForm {
         match value {
             0 => Some(Self::Unspecified),
             1 => Some(Self::OpticalDisc),
+            2 => Some(Self::FloppyDisk),
             _ => None,
         }
     }
@@ -648,7 +652,7 @@ mod tests {
             );
         }
         let mut unknown_form = valid;
-        unknown_form[FORM_OFF] = 2;
+        unknown_form[FORM_OFF] = 3;
         assert_eq!(
             BlkMedium::decode(&unknown_form),
             None,

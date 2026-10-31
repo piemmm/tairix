@@ -128,6 +128,7 @@ plan's ledger. A `blocked` row names its blocker.
 | FIX-IO | Storage I/O fault isolation (`plans/FIX-IO.md`) | in progress |
 | DEVICES | `lspci`/`lsusb`, USB mass storage, hotplug automount (`plans/DEVICES.md`) | done |
 | FOREIGN-MEDIA | ISO 9660, UDF, USB optical drives, and copies that keep holes and foreign metadata (`plans/FOREIGN-MEDIA.md`) | in progress |
+| DISK-IMAGES | Disk-image files mounted for their owner: `image_attach`, the AmigaDOS driver, the desktop's and `files.app`'s double-click, `mount IMAGE` and `unmount` (`plans/DISK-IMAGES.md`; DI8–DI11 planned) | in progress |
 | EXT4-RW | ext2/ext3/ext4 written as Linux leaves them: jbd2 journaling and crash replay, every checksum, lazily initialised groups, extent trees to full depth, indexed directories, POSIX ACLs, over the shared `lib/writeback` core | done |
 | EXFAT | An exFAT driver, for the removable drives other systems format | planned |
 | FS-USERSPACE | `fsserve-v1`, serving a filesystem from user space, and the removable-media drivers moved onto it (`plans/FSSERVE.md` FSS1–FSS5, `plans/OPEN-DEFECTS.md` D1072); network attachments are FSSERVE FSS6, with SMB9a | done |
@@ -472,9 +473,12 @@ top-level create is ordinary write permission on `/`. Drivers: `arxfs`
 journaled, with crash replay, every checksum maintained and POSIX ACLs honoured
 — validated against `mke2fs`/`e2fsck`), `fat32`, `adfs` (every Acorn
 FileCore format, with RISC OS metadata carried by `lib/fsmeta`'s `acorn.*`
-keys), `iso9660` (read-only, with Joliet, Rock Ridge and the RISC OS, Apple and
-Amiga records) and `udf` (1.02–2.60 read, rewritable media written;
-`plans/FOREIGN-MEDIA.md`). Each one that writes ships a first-party `format` and fails
+keys), `affs` (AmigaDOS OFS and FFS, DOS\0–\5 read and DOS\0–\3 written,
+with `amiga.*` metadata; `plans/DISK-IMAGES.md`), `iso9660` (read-only, with
+Joliet, Rock Ridge and the RISC OS, Apple and Amiga records) and `udf`
+(1.02–2.60 read, rewritable media written; `plans/FOREIGN-MEDIA.md`). A
+disk-image file mounts for its owner through `image_attach`
+(`plans/DISK-IMAGES.md`). Each one that writes ships a first-party `format` and fails
 with `NoSpace` on exhaustion. The write-back core ARXFS and ext4 share — the dirty set with
 per-operation undo, the machine-wide bound, the commit window — is
 `lib/writeback`. Coverage: the `posix_fs_suite`

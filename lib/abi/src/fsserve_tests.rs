@@ -1007,6 +1007,14 @@ fn a_serve_frame_round_trips_and_refuses_what_it_cannot_name() {
             format: FormatName::Iso9660,
         }),
         ServeFrame::Refuse(DriverError::BadMagic),
+        ServeFrame::Serve(ServeOffer {
+            root: NodeId::from_raw(880),
+            name_matching: NameMatching::Latin1CaseInsensitive,
+            node_identity: NodeIdentity::Stable,
+            attrs: true,
+            write_refusal: Some(WriteRefusal::UnsupportedFeature),
+            format: FormatName::Affs,
+        }),
     ];
     for frame in offers {
         assert_eq!(ServeFrame::decode(&frame.encode()), Ok(frame));
@@ -1019,12 +1027,12 @@ fn a_serve_frame_round_trips_and_refuses_what_it_cannot_name() {
     for (at, value) in [
         (0, 9),
         (2, 3),
-        (3, 2),
+        (3, 3),
         (4, 2),
         (5, 2),
         (6, 19),
         (7, 0),
-        (7, 10),
+        (7, 11),
     ] {
         let mut bad = good;
         bad[at] = value;

@@ -410,7 +410,8 @@ pub(crate) fn notice_alert(
 
 /// `reason` as the sentence an alert states it in: its first letter a capital
 /// and a full stop at its end. No reason stays none.
-fn alert_sentence(reason: &str) -> String {
+#[must_use]
+pub fn alert_sentence(reason: &str) -> String {
     let mut chars = reason.chars();
     let Some(first) = chars.next() else {
         return String::new();

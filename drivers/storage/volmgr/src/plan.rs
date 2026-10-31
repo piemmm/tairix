@@ -107,10 +107,18 @@ pub fn plan_volumes<B: Block>(
         summary.planned += 1;
     };
 
+    let mut amiga = false;
     let image = match recognise_extent(dev, whole)? {
         Some(Recognised::RaidMember(_)) => {
             summary.raid_members = 1;
             return Ok(summary);
+        }
+        // Partitions this build does not attach, unless a partition table
+        // written since over the disk's start says otherwise: a Rigid Disk
+        // Block past block 0 outlives a PC repartitioning it.
+        Some(Recognised::RigidDiskBlock) => {
+            amiga = true;
+            None
         }
         Some(Recognised::Volume(volume)) => match volume.span {
             Some(span) if !disc => Some((volume, span)),
@@ -132,6 +140,9 @@ pub fn plan_volumes<B: Block>(
         Err(err) => {
             match image {
                 Some((volume, _)) => plan(&volume, whole, &mut summary),
+                // Not blank, so never offered for an array that would
+                // overwrite its partitions.
+                None if amiga => summary.unrecognised = 1,
                 None => summary.no_scheme = err.is_absent(),
             }
             return Ok(summary);
@@ -157,7 +168,7 @@ pub fn plan_volumes<B: Block>(
         match recognise_extent(dev, extent)? {
             Some(Recognised::RaidMember(_)) => summary.raid_members += 1,
             Some(Recognised::Volume(volume)) => plan(&volume, extent, &mut summary),
-            None => summary.unrecognised += 1,
+            Some(Recognised::RigidDiskBlock) | None => summary.unrecognised += 1,
         }
     }
     Ok(summary)
@@ -262,6 +273,7 @@ mod tests {
 
     use tairix_abi::driver::block::DiscLayout;
     use tairix_partition::{mbr, PartitionType};
+    use tairix_test_amiga_image::rdb_disk;
 
     use super::*;
     use crate::plan::images;
@@ -592,6 +604,39 @@ mod tests {
         assert_eq!(summary.planned, 0);
         assert_eq!(summary.unrecognised, 0);
         assert!(!summary.no_scheme, "a member is not a blank device");
+    }
+
+    #[test]
+    fn an_amiga_partitioned_disk_is_never_planned_nor_offered_as_blank() {
+        // Its Rigid Disk Block describes partitions this build does not
+        // attach; offering the disk for an array would overwrite them.
+        let (plans, summary) = collect(&mut device(rdb_disk(32, 0), None));
+        assert!(plans.is_empty());
+        assert_eq!(summary.planned, 0);
+        assert_eq!(summary.unrecognised, 1);
+        assert!(!summary.no_scheme, "an Amiga disk is not a blank device");
+    }
+
+    #[test]
+    fn a_pc_table_written_over_an_amiga_disk_is_the_one_planned() {
+        // Repartitioned on a PC, which rewrote only block 0: the Rigid Disk
+        // Block at block 1 survives, and the table's FAT32 volume is planned.
+        let mut image = vec![0u8; 256 * BS];
+        let parts = [Partition {
+            ty: PartitionType::FatBoot,
+            start_lba: 8,
+            block_count: 64,
+        }];
+        image[..512].copy_from_slice(&mbr::encode(&parts).expect("encodes"));
+        image[BS..2 * BS].copy_from_slice(&rdb_disk(32, 1)[BS..2 * BS]);
+        write_fat32(&mut image, 8 * BS, [5, 6, 7, 8], b"PCCARD     ");
+        let (plans, summary) = collect(&mut device(image, None));
+        assert_eq!(summary.planned, 1);
+        assert_eq!(summary.unrecognised, 0);
+        assert_eq!(
+            (plans[0].first_lba, plans[0].fstype),
+            (8, VolumeFsType::Fat32)
+        );
     }
 
     #[test]

@@ -801,7 +801,7 @@ mod program {
     fn read_mounts(_: &mut (), (): &mut ()) -> Vec<VolumeReading> {
         let mut volumes = Vec::new();
         if let Err(err) = for_each_mount(&IpcTransport, |record| {
-            volumes.push(VolumeReading::of(record));
+            volumes.extend(VolumeReading::of(record));
             Ok(WalkStep::Continue)
         }) {
             app::report(

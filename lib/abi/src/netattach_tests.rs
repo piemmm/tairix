@@ -299,19 +299,26 @@ fn an_attach_frame_out_of_shape_is_refused() {
 
 #[test]
 fn an_attach_reply_round_trips_and_refuses_what_it_could_not_carry() {
-    let reply = AttachReply::new(*b"0123456789abcdef", "share-2").unwrap();
-    assert_eq!(reply.name(), "share-2");
+    let reply = AttachReply::new(*b"0123456789abcdef", "share-2", false).unwrap();
+    assert_eq!((reply.name(), reply.read_only()), ("share-2", false));
     let bytes = reply.encode();
     assert_eq!(bytes.len(), ATTACH_REPLY_LEN);
     assert_eq!(AttachReply::decode(&bytes), Ok(reply));
-    assert_eq!(AttachReply::new([0; 16], "-bad"), Err(Errno::OutOfRange));
+    let read_only = AttachReply::new(*b"0123456789abcdef", "share-2", true).unwrap();
+    assert!(read_only.read_only());
+    assert_eq!(AttachReply::decode(&read_only.encode()), Ok(read_only));
+    assert_eq!(
+        AttachReply::new([0; 16], "-bad", false),
+        Err(Errno::OutOfRange)
+    );
     let changed = |index: usize, byte: u8| {
         let mut bytes = bytes;
         bytes[index] = byte;
         bytes
     };
     for (what, bad) in [
-        ("a pad", changed(17, 1)),
+        ("an unknown flag", changed(17, 2)),
+        ("a pad", changed(18, 1)),
         ("a byte past the name", changed(ATTACH_REPLY_LEN - 1, b'x')),
         ("a name too long", changed(16, 33)),
     ] {

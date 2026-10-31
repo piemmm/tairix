@@ -15,7 +15,7 @@ use tairix_icon::{IconKind, IconRequest, Reading};
 
 use super::{
     ancestry, entry_icon, media_for_entry, media_for_name, name_endings, BlankDocument, Ending,
-    MediaType, ALL, EXTENSION_TABLE,
+    Family, MediaType, ALL, EXTENSION_TABLE,
 };
 use crate::entry::{Entry, EntryKind, LinkTarget};
 use crate::presentation::Pictures;
@@ -91,6 +91,28 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
     ("new.zst", MediaType::ArchiveZstd, IconKind::Archive),
     ("pack.7z", MediaType::Archive7z, IconKind::Archive),
     ("disk.rar", MediaType::ArchiveRar, IconKind::Archive),
+    ("Workbench.hdf", MediaType::RawDiskImage, IconKind::DiskHard),
+    ("install.iso", MediaType::CdImage, IconKind::DiskOptical),
+    (
+        "Lemmings.adf",
+        MediaType::RawFloppyDiskImage,
+        IconKind::DiskFloppy,
+    ),
+    (
+        "Elite.adl",
+        MediaType::RawFloppyDiskImage,
+        IconKind::DiskFloppy,
+    ),
+    (
+        "Welcome.adm",
+        MediaType::RawFloppyDiskImage,
+        IconKind::DiskFloppy,
+    ),
+    (
+        "Startup.ads",
+        MediaType::RawFloppyDiskImage,
+        IconKind::DiskFloppy,
+    ),
     ("song.mp3", MediaType::AudioMpeg, IconKind::Audio),
     ("broadcast.mp2", MediaType::AudioMpeg, IconKind::Audio),
     ("tape.mp1", MediaType::AudioMpeg, IconKind::Audio),
@@ -477,6 +499,12 @@ const TEXTUAL: &[MediaType] = &[
 /// Each codec's file and the container it is carried in.
 const CONTAINED: &[(MediaType, MediaType)] = &[(MediaType::AudioOpus, MediaType::AudioOgg)];
 
+/// Each medium's image and the disk image it is a kind of.
+const IMAGED: &[(MediaType, MediaType)] = &[
+    (MediaType::CdImage, MediaType::RawDiskImage),
+    (MediaType::RawFloppyDiskImage, MediaType::RawDiskImage),
+];
+
 /// What is not a stream of bytes: a directory, and a bundle, which is one.
 const NOT_BYTES: &[MediaType] = &[
     MediaType::InodeDirectory,
@@ -486,19 +514,23 @@ const NOT_BYTES: &[MediaType] = &[
 ];
 
 #[test]
-fn every_textual_type_reaches_plain_text_and_a_codec_its_container() {
+fn every_type_narrower_than_bytes_names_what_it_is_a_kind_of() {
     for media in TEXTUAL {
         assert!(
             ancestry(*media).any(|step| step == MediaType::TextPlain),
             "{media:?}"
         );
     }
-    for (codec, container) in CONTAINED {
-        assert_eq!(codec.parent(), Some(*container), "{codec:?}");
+    for (narrow, broad) in CONTAINED.iter().chain(IMAGED) {
+        assert_eq!(narrow.parent(), Some(*broad), "{narrow:?}");
     }
     // The converse: every other file type is bytes and nothing narrower.
     for media in ALL {
-        let narrower = TEXTUAL.contains(media) || CONTAINED.iter().any(|(codec, _)| codec == media);
+        let narrower = TEXTUAL.contains(media)
+            || CONTAINED
+                .iter()
+                .chain(IMAGED)
+                .any(|(narrow, _)| narrow == media);
         if !narrower && !NOT_BYTES.contains(media) && *media != MediaType::ApplicationOctetStream {
             assert_eq!(
                 media.parent(),
@@ -841,6 +873,8 @@ fn a_volume_root_is_pictured_as_its_drive() {
             filesystem: String::from("arxfs"),
             free: Some(1 << 30),
             availability: tairix_abi::sysinfo::MountAvailability::Available,
+            owner: None,
+            volume_id: [0; 16],
         },
     }));
     let mut scratch = String::new();
@@ -1018,5 +1052,30 @@ fn a_layout_names_its_own_files_and_pictures_its_programs_by_kind() {
             icon,
             "{folder}/{name}"
         );
+    }
+}
+
+#[test]
+fn a_disk_image_of_any_kind_holds_a_volume_and_nothing_else_does() {
+    for media in [
+        MediaType::RawDiskImage,
+        MediaType::CdImage,
+        MediaType::RawFloppyDiskImage,
+    ] {
+        assert!(media.holds_a_volume(), "{media:?}");
+        assert_eq!(media.family(), Some(Family::Archive));
+    }
+    assert_eq!(MediaType::CdImage.parent(), Some(MediaType::RawDiskImage));
+    assert_eq!(
+        MediaType::RawFloppyDiskImage.parent(),
+        Some(MediaType::RawDiskImage)
+    );
+    for media in ALL.iter().copied().filter(|media| {
+        !matches!(
+            media,
+            MediaType::RawDiskImage | MediaType::CdImage | MediaType::RawFloppyDiskImage
+        )
+    }) {
+        assert!(!media.holds_a_volume(), "{media:?}");
     }
 }

@@ -197,7 +197,18 @@ where
         .into_iter()
         .map(|(handle, fs)| {
             if served {
-                mounted.register_served(handle, fs, "vol", "memfs", [0u8; 16], None)
+                mounted.register_served(
+                    handle,
+                    fs,
+                    crate::fs::VolumeNames {
+                        source: "vol",
+                        fstype: "memfs",
+                        volume_id: [0u8; 16],
+                    },
+                    None,
+                    None,
+                    tairix_abi::sysinfo::VolumeClass::Local,
+                )
             } else {
                 mounted.register(handle, fs, "vol", "memfs", [0u8; 16], None)
             }

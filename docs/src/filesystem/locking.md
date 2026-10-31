@@ -62,6 +62,15 @@ This is the model POSIX record locks got wrong. Theirs are owned by the
 process, so closing *any* descriptor for the file drops them all, and two
 threads coordinating through one file cannot use them at all.
 
+One owner is not a description: the kernel's own, an attached disk image
+([images](./images.md)). An attachment locks its whole file — exclusive when
+the volume is writable, shared when not — under an owner of its own, so the
+lock outlives the attacher's close and exit and is released when the
+attachment ends: its eject, the end of its login sessions, or its file's
+volume leaving. `fs_lock_query` reports it with pid 0, no process, and it is
+charged to no process's `file-locks` limit: the image bound per principal
+bounds it.
+
 ## Ranges
 
 A range is `[start, start + len)`, with `len == 0` meaning "to the end of

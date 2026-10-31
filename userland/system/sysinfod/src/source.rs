@@ -164,18 +164,18 @@ pub trait SysinfoSource {
     /// query is ungated — exactly like [`uptime`](Self::uptime).
     fn load_average(&self, caller: &Caller) -> Result<LoadAverage, Errno>;
 
-    /// Return the current mount table.
+    /// Return the current mount table, whole.
     ///
-    /// The mount table is system-wide and secret-free, so the query is
-    /// ungated: unlike [`process_records`](Self::process_records)
-    /// there is no per-principal scope to narrow. As with the process list
-    /// the owned list is returned whole and [`crate::serve`] applies the
-    /// `offset`/`limit` paging; ordering must be stable across paged calls.
+    /// The query is ungated. [`crate::serve`] withholds from a caller what
+    /// another principal attached for itself, and applies the
+    /// `offset`/`limit` paging, as it does for the process list; ordering
+    /// must be stable across paged calls.
     fn mount_records(&self, caller: &Caller) -> Result<Vec<MountRecord>, Errno>;
 
     /// Return the view bindings onto the volumes
-    /// [`mount_records`](Self::mount_records) reports, ungated and paged on
-    /// the same terms.
+    /// [`mount_records`](Self::mount_records) reports, whole: ungated,
+    /// scoped by [`crate::serve`] to what the caller may see, and paged on the
+    /// same terms.
     fn view_records(&self, caller: &Caller) -> Result<Vec<ViewBindingRecord>, Errno>;
 
     /// Return `caller`'s effective resource limits and current live usage,

@@ -6,7 +6,8 @@
 //! operands it reports the binding covering each operand, from the volume that
 //! binding shows. The option surface follows GNU coreutils: `-a` lists every
 //! binding, so a volume's bind mounts and the `/Storage` catalog appear,
-//! `-T`/`-t`/`-x` add and filter by filesystem type, `-i` reports inodes, `-P`
+//! `-T`/`-t`/`-x` add and filter by filesystem type, `-l` leaves out network
+//! shares, `-i` reports inodes, `-P`
 //! selects the POSIX portable wording, `--total` appends a summary row, and
 //! `-k`/`-h`/`-H`/`--si`/`-B <size>` select the scale. `-?`/`--help` render the
 //! tool's own short help from its bundled `Help/` tree through the shared
@@ -27,24 +28,25 @@
 //! A **selection and rendering engine**, not a data source. For one
 //! parsed [`Command`] it reads the namespace, chooses the rows (each volume,
 //! every binding under `-a`, or each operand's covering binding), applies the
-//! type filters, and renders the GNU-shaped table. The operations that touch the
+//! type and locality filters, and renders the GNU-shaped table. The operations that touch the
 //! outside world are the injected seams:
 //!
 //! * [`tairix_procinfo::Transport`] — the `MOUNT_LIST` and `VIEW_LIST`
 //!   queries.
 //! * [`PathProbe`] — confirm a `file` operand exists.
 //! * [`Output`] — the table on standard output, diagnostics on standard
-//!   error, and the omission advisory on fd 3.
+//!   error, and the omission advisories on fd 3.
 //! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by
 //!   the short-help switches.
 //!
 //! # Advisory output
 //!
-//! When the default view leaves out rows `-a` shows — a volume reporting no
-//! capacity, a volume's further bindings, the `/Storage` catalog — `df` notes
-//! the omission on the standard information stream (fd 3) with the
-//! `fs.mounts_omitted` record — advisory only, never affecting the table, the
-//! ordering, or the exit status.
+//! When the default view leaves out rows `-a` shows, `df` notes the omission on
+//! the standard information stream (fd 3): a volume reporting no capacity, a
+//! volume's further bindings and the `/Storage` catalog with the
+//! `fs.mounts_omitted` record, and another user's private volume, whose
+//! figures are withheld, with `fs.private_mounts_omitted` — advisory only,
+//! never affecting the table, the ordering, or the exit status.
 //!
 //! # Fail loud, degrade gracefully
 //!

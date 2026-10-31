@@ -21,6 +21,9 @@ oculta los montajes sin capacidad propia (los enlaces de vista
 sintéticos del sistema) y los montajes adicionales de un volumen ya
 listado; `-a` lo muestra todo, y el número de entradas ocultas se
 anota en el flujo de información estándar (fd 3), nunca en la tabla.
+Un volumen que otro usuario mantiene privado también se omite, y se
+anota aparte; `-a` lo lista con `-` en cada cifra que solo ese usuario
+puede ver.
 
 Los tamaños se imprimen en bloques de 1024 bytes salvo que una opción
 de unidad elija otra cosa; una opción de unidad posterior sustituye a
@@ -37,8 +40,9 @@ están disponibles.
 
 ## OPTIONS
 
-- `-a, --all` — incluir los montajes sin capacidad y duplicados que
-  el comportamiento predeterminado oculta.
+- `-a, --all` — incluir los montajes sin capacidad y duplicados, y
+  los volúmenes privados de otros usuarios, que el comportamiento
+  predeterminado oculta.
 - `-T, --print-type` — añadir la columna del tipo de sistema de
   archivos.
 - `-t, --type <type>` — informar solo de los sistemas de archivos del
@@ -50,7 +54,7 @@ están disponibles.
 - `-P, --portability` — el formato portable POSIX (cabeceras
   `1024-blocks` y `Capacity`).
 - `-l, --local` — restringir el informe a sistemas de archivos
-  locales (todo montaje de TAIRiX hoy: no se filtra nada).
+  locales, omitiendo los recursos compartidos de red.
 - `--total` — añadir una fila etiquetada `total` que suma las cifras
   mostradas.
 - `-k` — bloques de 1024 bytes (el valor predeterminado).

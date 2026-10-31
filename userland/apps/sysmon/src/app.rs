@@ -570,7 +570,8 @@ const MOUNT_FSTYPE_COL: usize = 7;
 /// A volume whose driver reports no capacity (an all-zero
 /// [`VolumeStats`](tairix_abi::driver::filesystem::VolumeStats)) shows its
 /// identity with `-` for every figure — the honest "capacity unknown"
-/// answer, never a fabricated total. A volume that is not healthy
+/// answer, never a fabricated total — and another principal's private
+/// volume, whose figures are withheld, says so instead. A volume that is not healthy
 /// (surprise-removed, recovery-conflicted) is drawn in the warn rendition
 /// with the condition named, so a dead disk never looks mounted-and-well.
 fn storage_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
@@ -606,8 +607,13 @@ fn storage_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
             )
         } else {
             // No capacity known: state the identity, never a fabricated size.
+            let unknown = if record.is_withheld() {
+                "private to its owner"
+            } else {
+                "capacity unknown"
+            };
             format!(
-                "{:<MOUNT_TARGET_COL$} {:<MOUNT_FSTYPE_COL$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>4}  capacity unknown{condition}",
+                "{:<MOUNT_TARGET_COL$} {:<MOUNT_FSTYPE_COL$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>4}  {unknown}{condition}",
                 elide_middle(&target, MOUNT_TARGET_COL),
                 truncate_to_width(&fstype, MOUNT_FSTYPE_COL),
                 "-",

@@ -47,8 +47,8 @@ ledger registry. See [Reported cache ledgers](#reported-cache-ledgers).
 | `HARDWARE_TREE`          | `CAP_SYSINFO_HW`     | yes     | `HwTreeHeader` + `HwNode` page      |
 | `SYSTEM_IDENTITY`        | none                 | no      | `SystemIdentity`                    |
 | `UPTIME`                 | none                 | no      | `Uptime`                            |
-| `MOUNT_LIST`             | none                 | no      | packed `MountRecord`s               |
-| `VIEW_LIST`              | none                 | no      | packed `ViewBindingRecord`s         |
+| `MOUNT_LIST`             | none (scoped)        | no      | packed `MountRecord`s               |
+| `VIEW_LIST`              | none (scoped)        | no      | packed `ViewBindingRecord`s         |
 | `RESOURCE_LIMITS`        | none                 | no      | packed `ResourceLimitRecord`s       |
 | `PROCESS_IDENTITY`       | none                 | no      | the caller's own `Origin`           |
 | `LOAD_AVERAGE`           | none                 | no      | `LoadAverage`                       |
@@ -145,6 +145,16 @@ not the caller. It reads every stream under its own
 `CAP_SYSINFO_INTROSPECT` and keeps the caller's own for `SELF_AUDIO_STREAMS`,
 so the scope is decided here, once; `GLOBAL_AUDIO_STREAMS` hands over all of
 them to a caller holding `CAP_SYSINFO_GLOBAL`.
+
+The mount table is scoped here too. A volume another principal attached
+presented to itself alone (`MountRecord::private`) is listed
+`MountRecord::withheld` — its catalog name, owner, class and flags, but not
+the source it was attached from or the usage of what it holds; one presented
+to others too is listed whole. A binding is listed as the volume it shows is:
+one of a volume kept from the caller is left out unless it names that volume's
+catalog entry, which the catalog shows anyone, and is then listed without the
+subtree it shows. A private volume naming no owner is kept from everyone. No
+capability widens either list.
 
 ## Reported cache ledgers
 

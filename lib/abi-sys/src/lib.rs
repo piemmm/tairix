@@ -97,6 +97,7 @@ const NUM_FSSERVE_ATTACH: u64 = SyscallNumber::FSSERVE_ATTACH.as_u16() as u64;
 const NUM_FSSERVE_CTL: u64 = SyscallNumber::FSSERVE_CTL.as_u16() as u64;
 const NUM_VIEW_BIND: u64 = SyscallNumber::VIEW_BIND.as_u16() as u64;
 const NUM_VIEW_UNBIND: u64 = SyscallNumber::VIEW_UNBIND.as_u16() as u64;
+const NUM_IMAGE_ATTACH: u64 = SyscallNumber::IMAGE_ATTACH.as_u16() as u64;
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
@@ -1895,6 +1896,35 @@ pub extern "C" fn sys_view_unbind(target: *mut c_void, target_len: usize) -> i32
             NUM_VIEW_UNBIND,
             [ptr_arg(target), target_len as u64, 0, 0, 0, 0],
         ))
+    }
+}
+
+/// `image_attach`: attach the volume the disk-image file open as `fd` holds,
+/// as the attach at `frame` asks, writing the reply to `reply`
+/// (`SyscallNumber::IMAGE_ATTACH`). Returns the reply's length or a
+/// `TAIRIX_E_*` code reinterpreted into the result.
+#[must_use]
+#[export_name = "tairix_sys_image_attach"]
+pub extern "C" fn sys_image_attach(
+    fd: u32,
+    frame: *mut c_void,
+    frame_len: usize,
+    reply: *mut c_void,
+    reply_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both pointer pairs.
+    unsafe {
+        raw_syscall(
+            NUM_IMAGE_ATTACH,
+            [
+                u64::from(fd),
+                ptr_arg(frame),
+                frame_len as u64,
+                ptr_arg(reply),
+                reply_cap as u64,
+                0,
+            ],
+        )
     }
 }
 
@@ -4156,6 +4186,7 @@ mod tests {
         (NUM_FSSERVE_CTL, "fsserve_ctl", 2),
         (NUM_VIEW_BIND, "view_bind", 2),
         (NUM_VIEW_UNBIND, "view_unbind", 2),
+        (NUM_IMAGE_ATTACH, "image_attach", 5),
         (NUM_WAIT, "wait", 3),
         (NUM_RLIMIT_GET, "rlimit_get", 2),
         (NUM_RLIMIT_SET, "rlimit_set", 2),
@@ -4986,6 +5017,18 @@ mod tests {
         });
         assert_eq!(number, NUM_VIEW_UNBIND);
         assert_eq!(args, [at, 9, 0, 0, 0, 0]);
+        let (number, args) = capture(64, || {
+            let ret = sys_image_attach(
+                3,
+                data.as_mut_ptr().cast(),
+                20,
+                reply.as_mut_ptr().cast(),
+                64,
+            );
+            assert_eq!(ret, 64);
+        });
+        assert_eq!(number, NUM_IMAGE_ATTACH);
+        assert_eq!(args, [3, at, 20, reply_at, 64, 0]);
     }
 
     #[test]

@@ -534,6 +534,31 @@ fn a_mount_with_no_backing_volume_is_no_storage_device() {
 }
 
 #[test]
+fn another_principals_private_volume_is_no_storage_device() {
+    let theirs = mount_of(
+        "Letters.adf",
+        "/Storage/letters",
+        [3; VOLUME_ID_LEN],
+        512,
+        1760,
+        40,
+    )
+    .with_owner(tairix_abi::sysinfo::MountOwner {
+        uid: 1001,
+        private: true,
+    })
+    .withheld();
+    let sample = Sample {
+        mounts: Some(alloc::vec![mount("System:", 4_096, 100, 40), theirs]),
+        ..permitted()
+    };
+    assert_eq!(
+        storage(&report_of(&sample)),
+        [(UNSERVED, String::from("nvme0"))]
+    );
+}
+
+#[test]
 fn the_rail_states_a_refused_inventory_rather_than_reading_as_empty() {
     // An empty rail group and a refused one are different statements: with
     // the reading absent the report names the refusal, so the surface can

@@ -186,9 +186,8 @@ than a silent glyph on someone's desktop.
 
 Masters that no live consumer can select are **not** shipped. They live in
 `artwork/` (reference art, not shipped) and return to `lib/icon/assets/` in
-the change that gives them a consumer — `artwork/icons/disk-floppy.png` is
-the current example: nothing in the block stack can report a floppy medium,
-so shipping it would be a picture nothing could ever choose.
+the change that gives them a consumer, as `disk-floppy.png` did once a floppy
+image's volume and its file could choose it (`plans/DISK-IMAGES.md` DI4).
 
 ## 2. I1 — the vocabulary and the artwork layer (`lib/icon`)
 
@@ -204,8 +203,9 @@ so shipping it would be a picture nothing could ever choose.
   all-glyph `NoArtwork` implementation, `ArtworkCache`, and
   `IconArtworkSource` which binds a cache to its seams.
 - `disk_icon(Option<BlkMedium>)` maps a mounted volume's declared medium to
-  its icon (I14), with paravirtual and unknown both resolving to the generic
-  drive — the honest answer, not a guess.
+  its icon (I14), its form deciding before its transport, with a paravirtual
+  device of no stated form and an unknown medium both resolving to the
+  generic drive — the honest answer, not a guess.
 
 ## 3. I2 — the content-type registry (`lib/browse`)
 
@@ -598,9 +598,11 @@ medium reported rotating is `disk-hard` on an ATA bus or behind a USB bridge
 alike, a non-rotating ATA one `disk-solid-state`, an NVMe namespace
 `disk-nvme`, an SD or eMMC card `disk-sd`, a USB unit `disk-usb` (the flash
 stick) once it reported a non-rotating medium and `disk-external`, which shows
-no medium, while it reported neither, a disc in a multimedia drive
-(`BlkForm::OpticalDisc`) `disk-optical` whatever its transport, and an
-undeclared, paravirtual, or unreported ATA medium the generic `disk`. Each
+no medium, while it reported neither, an optical disc (`BlkForm::OpticalDisc`:
+a disc in a multimedia drive, or a disc image) `disk-optical` and a floppy
+image (`BlkForm::FloppyDisk`) `disk-floppy` whatever the transport, and an
+undeclared medium, a paravirtual device of no stated form, or an unreported
+ATA medium the generic `disk`. Each
 is a raster master in the existing drive style over the drive family's built-in
 glyph, so the rule stays total.
 

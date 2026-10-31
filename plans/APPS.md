@@ -79,9 +79,10 @@ omission, and the shared self-scope omission record `ps` and `sysinfo
 processes` both emit are live; the other registered commands have
 nothing non-obvious to add today), `Help/`
 trees for future command apps as each becomes a registered bundle,
-the §12.1 Stage B remainder (`getcap`/`setcap`/`mount` blocked on their
-kernel syscalls — `cp`/`mv`/`rm`/`chmod`/`chown`/`useradd`/`groupadd` are
-registered store bundles), the §12.1 Stage C remainder (the first
+the §12.1 Stage B remainder (`getcap`/`setcap` blocked on their kernel
+syscalls, and `mount` of a device on a discovery surface — `mount` of a disk
+image and `cp`/`mv`/`rm`/`chmod`/`chown`/`useradd`/`groupadd` are registered
+store bundles), the §12.1 Stage C remainder (the first
 batch's `true`/`false`/`yes`/`basename`/`dirname`/`mkdir`/`rmdir`/
 `head`/`wc`/`tee`/`seq`/`whoami` are registered store bundles; the rest
 land in further batches; the networking tools `ping`, `host`, `ss` and
@@ -986,12 +987,13 @@ platform floor).
   is changed itself and never followed, and each directory is changed
   after its contents.
   **Remaining, blocked on kernel prerequisites:** `getcap`/`setcap` need
-  per-inode capability-requirement get/set syscalls, and `mount` needs a user-facing
-  attach: `volume_attach` attaches a block-service partition under
-  `/Storage/<name>`, but nothing lets a user name an unattached storage
-  object to attach (`plans/DRIVES.md` §5.8's discover/attach/publish verbs),
-  so its `Mounter` has no implementation. A stubbed production seam is
-  forbidden; each tool registers in the change that lands its kernel half.
+  per-inode capability-requirement get/set syscalls. `mount` is a registered
+  store bundle that lists the mount table and mounts disk images through
+  `image_attach` (`plans/DISK-IMAGES.md` DI6); mounting a device needs a
+  user-facing attach, since nothing lets a user name an unattached storage
+  object (`plans/DRIVES.md` §5.8's discover/attach/publish verbs). A stubbed
+  production seam is forbidden; each tool registers in the change that lands
+  its kernel half.
 - **Stage C — missing coreutils commands (in progress; all wanted).**
   Every GNU coreutils command implementable on the current floor, in
   prioritised batches. **Done: `true`, `false`, `yes`, `basename`,
@@ -1459,8 +1461,8 @@ both landed; `plans/SHELL.md` command execution):
    The tools that gained filesystem reach for that read request
    `CAP_FS_ACCESS` in their manifests (the man/ls precedent — the secured
    VFS still authorises per-inode). The not-yet-registered utilities
-   (`getcap`, `setcap`, `mount`) gain their trees in the same change that
-   registers each as a store bundle (§12.1 Stage B). Each new tree ships
+   (`getcap`, `setcap`) gain their trees in the same change that registers
+   each as a store bundle (§12.1 Stage B). Each new tree ships
    by dropping its `Help/` files under the bundle — `tools/syshelp`
    rediscovers them, and no image-builder list is edited (§6.1).
 

@@ -41,7 +41,8 @@ the interrupt-lines panel) renders as that panel's spelled-out refusal,
 a failed call as the figure's honest absence — the session continues
 either way. The mounted-volume table is the ungated `MOUNT_LIST` walk
 (`tairix_procinfo::for_each_mount`); a volume whose driver reports no
-capacity shows `capacity unknown` rather than a fabricated size, and a
+capacity shows `capacity unknown` rather than a fabricated size, another
+user's private volume, whose figures are withheld, `private to its owner`, and a
 surprise-removed, recovery-conflicted, or live-but-unwell
 (`[degraded]`/`[recovering]`, `plans/FIX-IO.md` IO3) volume is drawn in
 the warn rendition with the condition named. The monitor's only fatal failure is

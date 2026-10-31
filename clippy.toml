@@ -97,4 +97,6 @@ doc-valid-idents = [
     "NTOWFv2",
     "LMv2",
     "NetBIOS",
+    "AmigaDOS",
+    "AmigaOS",
 ]

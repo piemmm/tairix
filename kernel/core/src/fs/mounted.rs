@@ -62,7 +62,7 @@ use tairix_abi::driver::DriverHandle;
 use tairix_abi::fs::{Access as Wanted, NodeExpect};
 use tairix_abi::home::USERS_DIR;
 use tairix_abi::sysinfo::{
-    MountAvailability, MountRecord, MountVolumeState, ViewBindingRecord, VolumeClass,
+    MountAvailability, MountOwner, MountRecord, MountVolumeState, ViewBindingRecord, VolumeClass,
     VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::time::Time64;
@@ -182,11 +182,21 @@ struct DriverEntry<F: 'static> {
     /// What a user-space driver serving the volume last said of itself: the
     /// writes it holds unpublished, and how its conduct reads.
     served: Option<Arc<ServedState>>,
-    /// The principal that attached a network volume, which may detach it
-    /// without the mount authority.
-    owner: Option<u32>,
+    /// The principal a network or image volume was attached for, which may
+    /// detach it without the mount authority.
+    owner: Option<MountOwner>,
     /// What kind of volume it is.
     class: VolumeClass,
+    /// The fail-closed stand-in answers for it while the volume is away.
+    stand_in: bool,
+}
+
+/// How a driver is filed under its handle.
+struct Filing {
+    watch: Option<ClaimRef>,
+    owner: Option<MountOwner>,
+    class: VolumeClass,
+    stand_in: bool,
 }
 
 /// One registered volume's snapshot facts, as [`LateFilesystem::entries`]
@@ -200,16 +210,19 @@ struct SnapshotEntry<F: 'static> {
     volume_id: [u8; 16],
     availability: MountAvailability,
     usage: Arc<SpinLock<VolumeStats>>,
-    owner: Option<u32>,
+    owner: Option<MountOwner>,
     class: VolumeClass,
 }
 
 /// What a registration names its volume by.
-#[derive(Clone, Copy)]
-struct Names<'a> {
-    source: &'a str,
-    fstype: &'a str,
-    volume_id: [u8; 16],
+#[derive(Clone, Copy, Debug)]
+pub struct VolumeNames<'a> {
+    /// What the mount listing reports the volume came from.
+    pub source: &'a str,
+    /// Its format's name.
+    pub fstype: &'a str,
+    /// Its published identity.
+    pub volume_id: [u8; 16],
 }
 
 /// The availability the mount snapshot reports for one registered volume:
@@ -375,7 +388,8 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
 
     /// [`register`](Self::register) a driver that answers from a user-space
     /// server, under a fresh registration
-    /// [reaped inline](VolumeNodes::reaped_inline).
+    /// [reaped inline](VolumeNodes::reaped_inline), as a volume of `class`
+    /// attached for `owner`.
     ///
     /// # Errors
     ///
@@ -384,13 +398,19 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         &self,
         handle: DriverHandle,
         driver: F,
-        source: &str,
-        fstype: &str,
-        volume_id: [u8; 16],
+        names: VolumeNames<'_>,
         watch: Option<ClaimRef>,
+        owner: Option<MountOwner>,
+        class: VolumeClass,
     ) -> Result<Arc<DriverLock<F>>, RegisterError> {
         let nodes = self.registration(VolumeNodes::reaped_inline)?;
-        self.register_with_nodes(handle, driver, source, fstype, volume_id, watch, nodes)
+        let filing = Filing {
+            watch,
+            owner,
+            class,
+            stand_in: false,
+        };
+        self.register_under(handle, driver, names, nodes, filing)
     }
 
     /// A fresh registration built by `make`, numbered after every earlier one.
@@ -427,14 +447,56 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         watch: Option<ClaimRef>,
         nodes: Arc<VolumeNodes>,
     ) -> Result<Arc<DriverLock<F>>, RegisterError> {
-        let shared =
-            Arc::try_new(DriverLock::new(driver, nodes)).map_err(|_| RegisterError::OutOfMemory)?;
-        let names = Names {
+        let names = VolumeNames {
             source,
             fstype,
             volume_id,
         };
-        self.insert(handle, shared, names, watch, None, VolumeClass::Local)
+        let filing = Filing {
+            watch,
+            owner: None,
+            class: VolumeClass::Local,
+            stand_in: false,
+        };
+        self.register_under(handle, driver, names, nodes, filing)
+    }
+
+    /// [`register_with_nodes`](Self::register_with_nodes) the fail-closed
+    /// stand-in `driver` for the volume `handle` serves, under its own
+    /// registration `nodes`, marked so [`reach`](Self::reach) says the volume
+    /// is away until a driver serves it again.
+    ///
+    /// # Errors
+    ///
+    /// As [`register_with_nodes`](Self::register_with_nodes).
+    pub fn register_stand_in(
+        &self,
+        handle: DriverHandle,
+        driver: F,
+        names: VolumeNames<'_>,
+        nodes: Arc<VolumeNodes>,
+    ) -> Result<Arc<DriverLock<F>>, RegisterError> {
+        let filing = Filing {
+            watch: None,
+            owner: None,
+            class: VolumeClass::Local,
+            stand_in: true,
+        };
+        self.register_under(handle, driver, names, nodes, filing)
+    }
+
+    /// File `driver` under `handle` and the registration `nodes`.
+    fn register_under(
+        &self,
+        handle: DriverHandle,
+        driver: F,
+        names: VolumeNames<'_>,
+        nodes: Arc<VolumeNodes>,
+        filing: Filing,
+    ) -> Result<Arc<DriverLock<F>>, RegisterError> {
+        let shared =
+            Arc::try_new(DriverLock::new(driver, nodes)).map_err(|_| RegisterError::OutOfMemory)?;
+        self.insert(handle, shared, names, filing)
     }
 
     /// Register a network volume served by `lanes`, presented to `owner`, under
@@ -452,17 +514,23 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         source: &str,
         fstype: &str,
         volume_id: [u8; 16],
-        owner: Option<u32>,
+        owner: Option<MountOwner>,
     ) -> Result<Arc<DriverLock<F>>, RegisterError> {
         let nodes = self.registration(VolumeNodes::reaped_inline)?;
         let lock = DriverLock::lanes(lanes, nodes).map_err(|_| RegisterError::OutOfMemory)?;
         let shared = Arc::try_new(lock).map_err(|_| RegisterError::OutOfMemory)?;
-        let names = Names {
+        let names = VolumeNames {
             source,
             fstype,
             volume_id,
         };
-        self.insert(handle, shared, names, None, owner, VolumeClass::Network)
+        let filing = Filing {
+            watch: None,
+            owner,
+            class: VolumeClass::Network,
+            stand_in: false,
+        };
+        self.insert(handle, shared, names, filing)
     }
 
     /// File `shared` under `handle` as the volume `names` describes.
@@ -470,12 +538,16 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         &self,
         handle: DriverHandle,
         shared: Arc<DriverLock<F>>,
-        names: Names<'_>,
-        watch: Option<ClaimRef>,
-        owner: Option<u32>,
-        class: VolumeClass,
+        names: VolumeNames<'_>,
+        filing: Filing,
     ) -> Result<Arc<DriverLock<F>>, RegisterError> {
-        let Names {
+        let Filing {
+            watch,
+            owner,
+            class,
+            stand_in,
+        } = filing;
+        let VolumeNames {
             source,
             fstype,
             volume_id,
@@ -502,6 +574,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             served: None,
             owner,
             class,
+            stand_in,
         };
         // Taken before the entry is visible, so the fast path takes them and
         // cannot park — the surprise-removal path registers a stand-in from a
@@ -565,6 +638,18 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             .iter()
             .find(|e| e.handle == raw)
             .map(|e| Arc::clone(&e.nodes))
+    }
+
+    /// The registration `handle` serves through, and whether the fail-closed
+    /// stand-in answers it, read together.
+    #[must_use]
+    pub fn reach(&self, handle: DriverHandle) -> Option<(Arc<VolumeNodes>, bool)> {
+        let raw = handle.as_u64();
+        self.drivers
+            .lock()
+            .iter()
+            .find(|e| e.handle == raw)
+            .map(|e| (Arc::clone(&e.nodes), e.stand_in))
     }
 
     /// The driver and published identity of the volume whose registration is
@@ -1072,7 +1157,12 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             .lock()
             .iter()
             .find(|e| &e.volume_id == volume_id)
-            .and_then(|e| Some((DriverHandle::from_raw(e.handle).ok()?, e.owner)))
+            .and_then(|e| {
+                Some((
+                    DriverHandle::from_raw(e.handle).ok()?,
+                    e.owner.map(|owner| owner.uid),
+                ))
+            })
     }
 
     /// Where security decisions about the registered volumes are recorded,
@@ -3154,8 +3244,8 @@ where
                 Some(at) => spell(at.components()).map_err(VfsError::to_errno)?,
                 None => String::new(),
             };
-            // `MountRecord::new` fails only on an over-long field or an
-            // inconsistent usage report; such a volume is left out rather
+            // `MountRecord::new` fails only on an over-long target or type, or
+            // an inconsistent usage report; such a volume is left out rather
             // than misreported.
             let Ok(record) = MountRecord::new(
                 entry.source.as_bytes(),
@@ -3195,14 +3285,14 @@ where
             // volume and is listed as such, so a path beneath it is never
             // credited to the volume above. A backed one is listed once its
             // volume is.
-            let (subtree, volume_id) = match mount.backing() {
-                None => (String::new(), [0u8; 16]),
+            let (subtree, volume_id, shown_owner) = match mount.backing() {
+                None => (String::new(), [0u8; 16], None),
                 Some(driver) => {
                     let Some(entry) = online_entry(&online, driver) else {
                         continue;
                     };
                     let subtree = spell(mount.backing_subtree()).map_err(VfsError::to_errno)?;
-                    (subtree, entry.volume_id)
+                    (subtree, entry.volume_id, entry.owner)
                 }
             };
             let target = spell(mount.path().components()).map_err(VfsError::to_errno)?;
@@ -3215,8 +3305,12 @@ where
             ) else {
                 continue;
             };
-            records.push(match mount.binder() {
+            let record = match mount.binder() {
                 Some(binder) => record.with_binder(binder),
+                None => record,
+            };
+            records.push(match shown_owner {
+                Some(owner) => record.with_volume_owner(owner),
                 None => record,
             });
         }

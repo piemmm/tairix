@@ -56,13 +56,13 @@ mod program {
     };
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::sound_cue::SoundEvent;
-    use tairix_abi::waitset::WaitSetOp;
+    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::OpenFlags;
     use tairix_abi::{Errno, HwNode, HwTreeHeader, WAITSET_TIMEOUT_NONE};
     use tairix_devmgr::audiobind::{AudioBaselineSource, AudiodBind};
     use tairix_devmgr::{
         events, DriverStoreCall, HwTreeService, NetstackBind, NetworkConfigSource,
-        NetworkInterfaceConfigSource, Presence, WAKE_SOURCES,
+        NetworkInterfaceConfigSource, Presence, Woken, WAKE_SOURCES,
     };
     use tairix_log::{log, Event, Field, Level};
     use tairix_netconfig::InterfaceConfigPlan;
@@ -162,7 +162,7 @@ mod program {
             tairix_rt::hw_tree_read(buf).map_err(Errno::from_syscall)
         }
 
-        fn wait_for_change(&mut self, timeout_ns: u64) -> Result<(), Errno> {
+        fn wait_for_change(&mut self, timeout_ns: u64) -> Result<Woken, Errno> {
             // Park until the tree or the mount table moves, or `timeout_ns`
             // elapses; the caller picks the deadline (unbounded once nothing
             // is outstanding). A negative return is a `-errno` the loop
@@ -180,10 +180,19 @@ mod program {
                 if waited < 0 {
                     return Err(Errno::from_syscall(waited));
                 }
-                if token != TOKEN_CUE {
-                    return Ok(());
+                if token == TOKEN_CUE {
+                    self.cues.collect(&mut self.cue_post, |_, _| {});
+                    continue;
                 }
-                self.cues.collect(&mut self.cue_post, |_, _| {});
+                // A token past the table is no source this set holds: read the
+                // tree again rather than miss a move.
+                let woken = token
+                    .checked_sub(1)
+                    .and_then(|at| WAKE_SOURCES.get(usize::try_from(at).ok()?));
+                return Ok(match woken {
+                    Some((WaitSourceKind::SystemNotice, _)) => Woken::Mounts,
+                    _ => Woken::Tree,
+                });
             }
         }
 

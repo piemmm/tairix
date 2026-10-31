@@ -111,7 +111,10 @@ fn places() -> Places {
                 filesystem: String::from("arxfs"),
                 free: None,
                 availability: MountAvailability::Available,
+                owner: None,
+                volume_id: [0; 16],
             },
+            offered: true,
         }],
     )
 }

@@ -159,6 +159,16 @@ pub enum MediaType {
     Archive7z,
     /// A RAR archive (`application/vnd.rar`).
     ArchiveRar,
+    /// The image of a disk, holding one volume (`application/x-raw-disk-image`):
+    /// a hard-disk partition's, and the broader type of the disc and floppy
+    /// images.
+    RawDiskImage,
+    /// The image of an optical disc (`application/x-cd-image`).
+    CdImage,
+    /// The image of a floppy disk, Acorn's or Amiga's alike
+    /// (`application/x-raw-floppy-disk-image`): which one is the kernel's probe
+    /// to tell, never the name.
+    RawFloppyDiskImage,
     /// An MPEG audio file of any layer — MP3, MP2 or MP1 (`audio/mpeg`).
     AudioMpeg,
     /// A FLAC audio file (`audio/flac`).
@@ -237,6 +247,9 @@ impl MediaType {
             Self::ArchiveZstd => "Zstandard archive",
             Self::Archive7z => "7z archive",
             Self::ArchiveRar => "RAR archive",
+            Self::RawDiskImage => "Disk image",
+            Self::CdImage => "Disc image",
+            Self::RawFloppyDiskImage => "Floppy disk image",
             Self::AudioMpeg => "MPEG audio",
             Self::AudioFlac => "FLAC audio",
             Self::AudioOgg => "Ogg audio",
@@ -301,6 +314,9 @@ impl MediaType {
             Self::ArchiveZstd => "application/zstd",
             Self::Archive7z => "application/x-7z-compressed",
             Self::ArchiveRar => "application/vnd.rar",
+            Self::RawDiskImage => "application/x-raw-disk-image",
+            Self::CdImage => "application/x-cd-image",
+            Self::RawFloppyDiskImage => "application/x-raw-floppy-disk-image",
             Self::AudioMpeg => "audio/mpeg",
             Self::AudioFlac => "audio/flac",
             Self::AudioOgg => "audio/ogg",
@@ -370,6 +386,7 @@ impl MediaType {
             | Self::ShellScript => Some(Self::TextPlain),
             Self::ImageSvg => Some(Self::Xml),
             Self::AudioOpus => Some(Self::AudioOgg),
+            Self::CdImage | Self::RawFloppyDiskImage => Some(Self::RawDiskImage),
             Self::InodeDirectory
             | Self::TairixApp
             | Self::TairixService
@@ -399,6 +416,7 @@ impl MediaType {
             | Self::ArchiveZstd
             | Self::Archive7z
             | Self::ArchiveRar
+            | Self::RawDiskImage
             | Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -493,6 +511,9 @@ impl MediaType {
             | Self::ArchiveZstd
             | Self::Archive7z
             | Self::ArchiveRar => IconKind::Archive,
+            Self::RawDiskImage => IconKind::DiskHard,
+            Self::CdImage => IconKind::DiskOptical,
+            Self::RawFloppyDiskImage => IconKind::DiskFloppy,
             Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -508,6 +529,13 @@ impl MediaType {
             | Self::VideoAvi => IconKind::Video,
             Self::ApplicationOctetStream => IconKind::File,
         }
+    }
+
+    /// Whether a file of this type holds a volume, so opening it is mounting
+    /// it: a disk image of any kind.
+    #[must_use]
+    pub fn holds_a_volume(self) -> bool {
+        ancestry(self).any(|media| media == Self::RawDiskImage)
     }
 
     /// What a new, empty document of this type is called, or `None` when an
@@ -561,6 +589,9 @@ impl MediaType {
             | Self::ArchiveZstd
             | Self::Archive7z
             | Self::ArchiveRar
+            | Self::RawDiskImage
+            | Self::CdImage
+            | Self::RawFloppyDiskImage
             | Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -593,7 +624,7 @@ pub enum Family {
     Audio,
     /// Video.
     Video,
-    /// Archives.
+    /// Archives and disk images: files that hold other files.
     Archive,
     /// Programs: bundles and executables.
     Program,
@@ -672,7 +703,10 @@ impl MediaType {
             | Self::ArchiveBzip2
             | Self::ArchiveZstd
             | Self::Archive7z
-            | Self::ArchiveRar => Some(Family::Archive),
+            | Self::ArchiveRar
+            | Self::RawDiskImage
+            | Self::CdImage
+            | Self::RawFloppyDiskImage => Some(Family::Archive),
             Self::TairixApp
             | Self::TairixService
             | Self::TairixScreensaver
@@ -840,6 +874,9 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::ArchiveZstd,
     MediaType::Archive7z,
     MediaType::ArchiveRar,
+    MediaType::RawDiskImage,
+    MediaType::CdImage,
+    MediaType::RawFloppyDiskImage,
     MediaType::AudioMpeg,
     MediaType::AudioFlac,
     MediaType::AudioOgg,
@@ -910,6 +947,9 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::ArchiveZstd, &["zst"]),
     (MediaType::Archive7z, &["7z"]),
     (MediaType::ArchiveRar, &["rar"]),
+    (MediaType::RawDiskImage, &["hdf"]),
+    (MediaType::CdImage, &["iso"]),
+    (MediaType::RawFloppyDiskImage, &["adf", "adl", "adm", "ads"]),
     (MediaType::AudioMpeg, &["mp3", "mp2", "mp1", "mpa"]),
     (MediaType::AudioFlac, &["flac"]),
     (MediaType::AudioOgg, &["ogg", "oga"]),

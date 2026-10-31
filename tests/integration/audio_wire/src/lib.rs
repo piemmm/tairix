@@ -25,7 +25,6 @@
 extern crate alloc;
 
 use core::iter;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_abi::sound_cue::SoundEvent;
 
@@ -73,7 +72,7 @@ pub const PASS_MARKER: &str = "AUDIO PASS";
 
 /// The fixture's command word: the name its bundle installs under and the
 /// `comm` its audited exit carries, so the image builder and the guest's
-/// own finisher cannot name different programs.
+/// end of the run cannot name different programs.
 pub const COMMAND: &str = "audiotone";
 
 /// The argument that has the fixture play the seat run: pause on
@@ -106,41 +105,6 @@ pub const CUE_EVENT: SoundEvent = SoundEvent::NotificationReminder;
 /// The witness line the cue run prints once the cue played out and its tail
 /// drained with no lost frames.
 pub const CUE_PASS_MARKER: &str = "AUDIO CUE PASS";
-
-/// The guest's verdict on the run, fed every audited process `exit`.
-///
-/// The run ends at the first exit that follows a player's: the host script
-/// types the shell's own `exit` only once the guest has printed its pass, so a
-/// player that failed never reaches it and the run times out instead. A
-/// player's exits — its own and its decoder worker's — all count as one.
-pub struct Finisher {
-    played: AtomicBool,
-}
-
-impl Default for Finisher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Finisher {
-    /// A run no player has ended yet.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            played: AtomicBool::new(false),
-        }
-    }
-
-    /// Whether the run is over now that the process named `comm` exited.
-    pub fn exited(&self, comm: &str) -> bool {
-        if comm == COMMAND || comm == PLAYER {
-            self.played.store(true, Ordering::Release);
-            return false;
-        }
-        self.played.load(Ordering::Acquire)
-    }
-}
 
 /// Samples quieter than this count as silence when the host trims the
 /// backend's own lead-in and tail.
@@ -903,20 +867,5 @@ mod tests {
             Err(WavMismatch::Differs { frame: HOLD_FRAME }),
             "the plain check allows no gap at all"
         );
-    }
-
-    #[test]
-    fn a_run_ends_at_the_first_exit_after_a_players() {
-        let finisher = Finisher::new();
-        assert!(!finisher.exited("elsh"), "the shell alone ends nothing");
-        assert!(!finisher.exited(PLAYER));
-        assert!(
-            !finisher.exited(PLAYER),
-            "the decoder worker is the player too"
-        );
-        assert!(finisher.exited("elsh"));
-        let tone = Finisher::new();
-        assert!(!tone.exited(COMMAND));
-        assert!(tone.exited("elsh"));
     }
 }

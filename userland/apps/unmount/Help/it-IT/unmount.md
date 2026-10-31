@@ -11,9 +11,20 @@ unmount — scollegare un volume montato
 Mette fuori servizio il volume montato sotto `name`: il filesystem e
 il dispositivo vengono svuotati, il montaggio sotto `/Storage` viene
 rimosso e la radice durevole `id::` del volume viene revocata. `name`
-è il nome di catalogo del volume (`usb1`) o il suo punto di montaggio
-(`/Storage/usb1`), confrontato con l'elenco dei montaggi dell'API di
-informazioni di sistema.
+è il nome di catalogo del volume (`usb1`), una directory su cui è
+montato (`/Storage/usb1`, o quella a cui `mount immagine directory`
+l'ha collegato), o il nome del file dell'immagine disco da cui è stato
+montato (`Workbench.adf`), confrontato con gli elenchi dei montaggi e
+delle viste dell'API di informazioni di sistema; un nome di file
+condiviso con l'immagine di un altro utente indica la vostra. Un nome di
+file che potrebbe indicare più di un volume, o di cui l'elenco conserva
+solo l'inizio, non ne indica alcuno: indicate allora il volume con il
+punto in cui è montato.
+Un percorso può essere relativo o terminare con una barra: viene
+risolto come `mount` ne risolve uno. Il volume privato di un altro
+utente non mostra né il nome del file né le directory a cui è
+collegato, quindi lo si indica con il punto in cui è montato in
+`/Storage`.
 
 Un volume il cui dispositivo è stato rimosso con scritture non ancora
 confermate resta visibile come `unavailable-dirty` (o
@@ -29,10 +40,11 @@ registro di controllo. Su un volume sano `--force` svuota e scollega
 comunque in modo pulito; nulla viene scartato quando una conferma pulita
 è possibile.
 
-Lo scollegamento richiede l'autorità di montaggio (`CAP_FS_MOUNT`);
-il kernel la verifica e registra ogni decisione. I volumi di avvio
-permanenti e i collegamenti di vista del sistema non sono
-scollegabili.
+Potete scollegare un'immagine disco o una condivisione di rete che
+avete montato voi stessi; qualsiasi altro volume richiede l'autorità
+di montaggio (`CAP_FS_MOUNT`). Il kernel la verifica e registra ogni
+decisione. I volumi di avvio permanenti e i collegamenti di vista del
+sistema non sono scollegabili.
 
 ## OPTIONS
 
@@ -40,7 +52,7 @@ scollegabili.
   vi sono file aperti, un programma vi lavora o i suoi dati non ancora
   confermati non possono esserlo, tagliando fuori i file aperti e
   scartando i dati trattenuti.
-- `-?, --help` — mostrare la guida breve di questo comando.
+- `-h, -?, --help` — mostrare la guida breve di questo comando.
 
 ## EXAMPLES
 
@@ -48,6 +60,8 @@ scollegabili.
   `usb1`.
 - `unmount /Storage/usb1` — lo stesso, indicato dal punto di
   montaggio.
+- `unmount Workbench.adf` — scollegare l'immagine disco montata da
+  `Workbench.adf`.
 - `unmount --force usb1` — rimuovere un volume non disponibile
   scartando i suoi dati trattenuti.
 
@@ -55,9 +69,12 @@ scollegabili.
 
 - `0` — il volume è stato scollegato (o la guida breve è stata
   scritta).
-- `1` — il volume non è stato trovato, non è scollegabile o il kernel
-  ha rifiutato lo scollegamento. Anche una riga di comando non
-  compresa termina con `1`.
+- `1` — la riga di comando non è stata compresa, o il chiamante non può
+  scollegare il volume.
+- `2` — il servizio di informazioni di sistema, o la scrittura sul
+  terminale, non è riuscito.
+- `32` — il volume non era montato o non è scollegabile, il percorso che
+  lo indica non è stato risolto, o il suo scollegamento non è riuscito.
 
 ## ENVIRONMENT
 

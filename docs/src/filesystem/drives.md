@@ -252,12 +252,13 @@ it is neither unbound nor detached (`NotEmpty`). A bind leaves with its volume,
 or by `view_unbind` from its binder or a holder; a forced detach, a medium that
 left, a lost server or a returning medium withdraws the binds standing within
 the volume with it. A descriptor opened through a bind that left answers stale.
-`VIEW_LIST` reports each with its binder.
+`VIEW_LIST` reports each with its binder, and lists it as the volume it shows
+is listed.
 
 ## 10. Storage catalog `Storage:`
 
 `Storage:/` is a synthetic catalog of published non-core aliases (removable
-media, extra disks, network shares), projected into the `/` view as
+media, extra disks, network shares, disk images), projected into the `/` view as
 `/Storage/<name>`. It is a *view projection only*: `/Storage/backup` is nothing
 more than a rendering of a volume root — `Backup:/` once an alias names it — and
 `Backup:/file` must open even when the
@@ -284,6 +285,11 @@ A network share is attached here too: its server offers it to one principal
 and that principal attaches it, privately unless it holds `CAP_FS_MOUNT`
 ([Volumes served from user space](./served.md#network-volumes)). Its owner
 detaches it without the mount authority.
+
+So is the volume a disk-image file holds: the principal holding a descriptor
+of the file attaches it, privately unless it holds `CAP_FS_MOUNT`, and ejects
+it without the mount authority; it leaves when its login sessions end or with
+the volume its file lies on ([Disk images](./images.md)).
 
 ## 11. Fail-closed rules
 
@@ -583,7 +589,11 @@ driver awaited, serving again, refused, or gone — see
 recorded when its driver first serves it),
 `fs.network.{offered,attached,attach_refused,detached,detach_refused,retired}`
 (a network volume offered, attached by its principal, detached, or retired by
-its server), and `fs.conflict.alias_ambiguous`. No secret, key,
+its server),
+`fs.image.{awaiting,attached,attach_refused,detached,detach_refused,retired}`
+(an image volume published for its driver, served and mounted, refused,
+detached, or retired with its file's volume or its driver), and
+`fs.conflict.alias_ambiguous`. No secret, key,
 capability-token value, or private path content beyond the audit subsystem's
 policy set is logged.
 

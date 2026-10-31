@@ -3447,6 +3447,24 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Attach the volume the disk-image file open as `fd` holds, as the
+    /// `ImageAttach` at `frame` asks, writing the `ImageAttachReply` to
+    /// `reply`. The handler judges the descriptor's authority and the
+    /// presentation asked for.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn image_attach(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _frame: u64,
+        _frame_len: usize,
+        _reply: u64,
+        _reply_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// End the machine's power state: flush every mounted volume, then
     /// power the platform off or reset it (`plans/NEW-TASKBAR.md` T13).
     ///
@@ -4755,6 +4773,18 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::VIEW_UNBIND => {
                 let target_len = decode_len(args.0[1])?;
                 self.handlers.view_unbind(caller, args.0[0], target_len)
+            }
+            SyscallNumber::IMAGE_ATTACH => {
+                let frame_len = decode_len(args.0[2])?;
+                let reply_cap = decode_len(args.0[4])?;
+                self.handlers.image_attach(
+                    caller,
+                    decode_u32(args.0[0]),
+                    args.0[1],
+                    frame_len,
+                    args.0[3],
+                    reply_cap,
+                )
             }
             SyscallNumber::FS_CHDIR => {
                 // args[0] is the start directory; args[1]/args[2] the path,
@@ -6765,6 +6795,19 @@ mod tests {
 
         fn view_unbind(&self, _c: &CallerContext<'_>, _target: u64, _len: usize) -> SyscallResult {
             self.record("view_unbind");
+            Ok(0)
+        }
+
+        fn image_attach(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _frame: u64,
+            _frame_len: usize,
+            _reply: u64,
+            _reply_cap: usize,
+        ) -> SyscallResult {
+            self.record("image_attach");
             Ok(0)
         }
 

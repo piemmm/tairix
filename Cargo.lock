@@ -2144,6 +2144,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-drv-fs-affs"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-bytedev",
+ "tairix-collections",
+ "tairix-fsmeta",
+ "tairix-fsprobe",
+ "tairix-fsserve",
+ "tairix-fuzzseed",
+ "tairix-rt",
+ "tairix-util",
+ "tairix-writeback",
+]
+
+[[package]]
 name = "tairix-drv-fs-arxfs"
 version = "0.0.0"
 dependencies = [
@@ -2500,6 +2517,7 @@ dependencies = [
  "tairix-partition",
  "tairix-raidmeta",
  "tairix-rt",
+ "tairix-test-amiga-image",
  "tairix-test-iso9660-image",
  "tairix-util",
 ]
@@ -2757,6 +2775,7 @@ dependencies = [
  "tairix-path",
  "tairix-raidmeta",
  "tairix-resref",
+ "tairix-test-amiga-image",
  "tairix-test-iso9660-image",
  "tairix-util",
 ]
@@ -3161,6 +3180,7 @@ dependencies = [
  "tairix-drv-bus-mmio",
  "tairix-drv-bus-virtio",
  "tairix-drv-fs-adfs",
+ "tairix-drv-fs-affs",
  "tairix-drv-fs-arxfs",
  "tairix-drv-fs-ext4",
  "tairix-drv-fs-fat32",
@@ -3202,6 +3222,7 @@ dependencies = [
  "tairix-supervisor",
  "tairix-sync",
  "tairix-sysconfig",
+ "tairix-test-amiga-image",
  "tairix-test-arxfs-image",
  "tairix-test-encrypted-root-image",
  "tairix-users",
@@ -3705,7 +3726,10 @@ name = "tairix-mount"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-help",
  "tairix-procinfo",
+ "tairix-rt",
  "tairix-util",
 ]
 
@@ -5030,6 +5054,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-amiga-image"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-drv-fs-affs",
+ "tairix-fsprobe",
+]
+
+[[package]]
 name = "tairix-test-appbar-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -6044,6 +6077,29 @@ dependencies = [
  "tairix-kernel-sched-eevdf",
  "tairix-kernel-syscall",
  "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-images"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-rt",
+ "tairix-test-iso9660-image",
+]
+
+[[package]]
+name = "tairix-test-images-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-images",
 ]
 
 [[package]]
@@ -9152,6 +9208,7 @@ dependencies = [
  "tairix-drv-display-gpu-virtio",
  "tairix-drv-dma-bcm2835",
  "tairix-drv-fs-adfs",
+ "tairix-drv-fs-affs",
  "tairix-drv-fs-arxfs",
  "tairix-drv-fs-ext4",
  "tairix-drv-fs-fat32",
@@ -9221,6 +9278,7 @@ dependencies = [
  "tairix-taskbar",
  "tairix-telnet",
  "tairix-terminal",
+ "tairix-test-amiga-image",
  "tairix-test-appbar-qemu-aarch64",
  "tairix-test-arxfs-image",
  "tairix-test-audio-wire",
@@ -9233,6 +9291,7 @@ dependencies = [
  "tairix-test-filepick-qemu-aarch64",
  "tairix-test-framestats",
  "tairix-test-handover-qemu-aarch64",
+ "tairix-test-images",
  "tairix-test-iso9660-image",
  "tairix-test-memsoak",
  "tairix-test-menu-qemu-aarch64",

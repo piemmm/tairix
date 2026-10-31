@@ -123,7 +123,10 @@ fn volume(label: &str, target: &str, medium: Option<BlkMedium>) -> Volume {
             filesystem: String::new(),
             free: None,
             availability: tairix_abi::sysinfo::MountAvailability::Available,
+            owner: None,
+            volume_id: [0; 16],
         },
+        offered: true,
     }
 }
 
@@ -240,7 +243,7 @@ fn mount(
 
 /// A volume is offered while its data can be read, labelled by its mount
 /// point's leaf and stating what its record says of it; one whose device has
-/// gone is not offered at all.
+/// gone is not offered.
 #[test]
 fn a_mount_is_offered_as_a_volume_while_it_serves() {
     use tairix_abi::sysinfo::MountAvailability;
@@ -252,17 +255,154 @@ fn a_mount_is_offered_as_a_volume_while_it_serves() {
     assert_eq!(degraded.facts.filesystem, "fat32");
     assert_eq!(degraded.facts.free, Some(250 * 4096));
     assert_eq!(degraded.facts.availability, MountAvailability::Degraded);
+    assert!(degraded.offered);
     for gone in [
         MountAvailability::UnavailableDirty,
         MountAvailability::UnavailableLost,
     ] {
-        assert_eq!(Volume::from_mount(&mount("/Storage/Stick", gone, 1)), None);
+        let unavailable =
+            Volume::from_mount(&mount("/Storage/Stick", gone, 1)).expect("a listed volume");
+        assert!(!unavailable.offered, "its device is gone");
     }
     assert_eq!(
         Volume::from_mount(&mount("/", MountAvailability::Available, 1)),
         None,
         "a mount point naming no leaf is no volume to label"
     );
+}
+
+/// A volume attached for one principal is theirs to eject, by the identity its
+/// record carries; a machine's volume is no one's.
+#[test]
+fn a_volume_attached_for_a_principal_is_theirs_to_eject() {
+    use tairix_abi::sysinfo::{MountAvailability, MountRecord, VolumeClass};
+    let machine = Volume::from_mount(&mount("/Storage/Stick", MountAvailability::Available, 1))
+        .expect("a volume");
+    assert_eq!(machine.facts.owner, None);
+    assert!(!machine.facts.ejectable_by(1000));
+    let record = mount("/Storage/floppy", MountAvailability::Available, 1);
+    let image = MountRecord::new(
+        record.source_bytes(),
+        record.target_bytes(),
+        record.fstype_bytes(),
+        record.flags(),
+        tairix_abi::sysinfo::MountVolumeState {
+            usage: record.usage(),
+            availability: record.availability(),
+            medium: record.medium(),
+        },
+        [7; tairix_abi::sysinfo::VOLUME_ID_LEN],
+    )
+    .expect("a well-formed record")
+    .with_owner(tairix_abi::sysinfo::MountOwner {
+        uid: 1000,
+        private: true,
+    })
+    .with_class(VolumeClass::Image);
+    let image = Volume::from_mount(&image).expect("a volume");
+    assert_eq!(image.facts.owner, Some(1000));
+    assert_eq!(image.facts.volume_id, [7; 16]);
+    assert!(image.facts.ejectable_by(1000));
+    assert!(!image.facts.ejectable_by(1001), "someone else's");
+}
+
+/// Another principal's private volume is withheld from this session, which
+/// cannot open it, so it is no place on the rail; listed in `/Storage`, its
+/// root is still a drive, so the catalog stays a list of drives.
+#[test]
+fn another_principals_private_volume_is_no_place_but_still_a_drive() {
+    use tairix_abi::sysinfo::MountAvailability;
+    let theirs = Volume::from_mount(
+        &mount("/Storage/letters", MountAvailability::Available, 1)
+            .with_owner(tairix_abi::sysinfo::MountOwner {
+                uid: 1001,
+                private: true,
+            })
+            .withheld(),
+    )
+    .expect("a volume");
+    assert!(!theirs.offered);
+    assert_eq!(theirs.facts.free, None, "its figures are withheld");
+    let mine = volume("Backup", "/Storage/Backup", Some(HARD_DISK));
+    let places = Places::new(&home(), &[mine, theirs]);
+    assert_eq!(place_labels(&places), ["Home", "Desktop", "Backup"]);
+    let mut fs = MockFs::fixture();
+    fs.dirs.insert(
+        "/Storage".to_string(),
+        ["Backup", "letters"]
+            .into_iter()
+            .map(Entry::directory)
+            .collect(),
+    );
+    let mut browser = Browser::open_at(fs, components("/Storage")).expect("Storage");
+    assert!(browser.mark_volume_roots(&places));
+    let marked = drives(&browser);
+    assert!(
+        marked.iter().all(|(_, drive)| drive.is_some()),
+        "every entry is a drive: {marked:?}"
+    );
+}
+
+/// A volume listed at a target an offered one holds marks no second drive
+/// there: the offered one's facts are the drive's.
+#[test]
+fn an_unoffered_volume_never_marks_a_target_an_offered_one_holds() {
+    use tairix_abi::sysinfo::MountAvailability;
+    let mut gone = volume("Backup", "/Storage/Backup", None);
+    gone.offered = false;
+    gone.facts.availability = MountAvailability::UnavailableLost;
+    let places = Places::new(
+        &home(),
+        &[gone, volume("Backup", "/Storage/Backup", Some(HARD_DISK))],
+    );
+    let mut fs = MockFs::fixture();
+    fs.dirs.insert(
+        "/Storage".to_string(),
+        ["Backup"].into_iter().map(Entry::directory).collect(),
+    );
+    let mut browser = Browser::open_at(fs, components("/Storage")).expect("Storage");
+    assert!(browser.mark_volume_roots(&places));
+    assert_eq!(
+        browser.entries()[0]
+            .volume()
+            .map(|facts| facts.availability),
+        Some(MountAvailability::Available)
+    );
+}
+
+/// One row per target, whatever the order the mount table pages the volumes
+/// out in: the least label survives a duplicate, and equal labels keep the
+/// order they were offered in.
+#[test]
+fn a_duplicated_target_keeps_one_row_whatever_the_paging_order() {
+    let offered = [
+        volume("Zeta", "/Storage/a", None),
+        volume("Same", "/Storage/second", None),
+        volume("Alpha", "/Storage/a", None),
+        volume("Same", "/Storage/first", None),
+        volume("Home", "/Storage/a", None),
+    ];
+    let forwards = Places::new(&home(), &offered);
+    assert_eq!(
+        place_labels(&forwards),
+        ["Home", "Desktop", "Alpha", "Same", "Same"]
+    );
+    let same: Vec<&[String]> = forwards.rows()[3..]
+        .iter()
+        .map(crate::places::Place::components)
+        .collect();
+    assert_eq!(
+        same,
+        [
+            ["Storage", "second"].map(String::from).as_slice(),
+            ["Storage", "first"].map(String::from).as_slice()
+        ],
+        "equal labels in the order offered"
+    );
+    let mut reversed = offered.clone();
+    reversed.reverse();
+    let backwards = Places::new(&home(), &reversed);
+    assert_eq!(backwards.rows()[2], forwards.rows()[2], "the same survivor");
 }
 
 /// A bare open lands among the user's own files first and their home next;
@@ -4731,6 +4871,44 @@ fn the_browse_intent_changes_nothing_for_a_directory_or_a_file() {
 }
 
 #[test]
+fn a_disk_image_of_any_kind_is_activated_as_a_mount() {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[
+            (b"Lemmings.adf", FileKind::Regular),
+            (b"install.iso", FileKind::Regular),
+            (b"notes.txt", FileKind::Regular),
+            (b"Work.hdf", FileKind::Regular),
+        ]),
+    );
+    let mut browser = Browser::open_root(tree_source(dirs)).expect("root");
+    let mut activated = |name: &str| {
+        let at = browser
+            .entries()
+            .iter()
+            .position(|entry| entry.name() == name)
+            .expect("listed");
+        browser.activate_index(at, BundleIntent::Launch)
+    };
+    for name in ["Lemmings.adf", "install.iso", "Work.hdf"] {
+        assert_eq!(
+            activated(name),
+            Ok(Activation::MountImage {
+                path: alloc::format!("/{name}")
+            }),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        activated("notes.txt"),
+        Ok(Activation::OpenFile {
+            path: "/notes.txt".to_string()
+        })
+    );
+}
+
+#[test]
 fn browsing_an_unreadable_bundle_fails_closed_and_stays_put() {
     let mut dirs = BTreeMap::new();
     dirs.insert(
@@ -6078,6 +6256,8 @@ fn context_commands_list_covers_every_variant_once() {
         &[
             ContextCommand::Open,
             ContextCommand::OpenWith,
+            ContextCommand::MountReadOnly,
+            ContextCommand::Eject,
             ContextCommand::GetInfo,
             ContextCommand::Rename,
             ContextCommand::Cut,
@@ -6787,13 +6967,101 @@ fn a_declared_context_row_is_disabled_with_its_reason_never_left_out() {
                 .any(|command| command.acts_on_selection() && command.label() == item.label)
         })
         .collect();
-    assert_eq!(on_plate.len(), 7);
-    let open_with = on_plate
-        .iter()
-        .find(|item| item.label == ContextCommand::OpenWith.label())
-        .expect("Open With… is declared");
-    assert!(!open_with.enabled);
-    assert_eq!(open_with.reason, "only a file opens with an application");
+    assert_eq!(on_plate.len(), 9);
+    for (command, reason) in [
+        (
+            ContextCommand::OpenWith,
+            "only a file opens with an application",
+        ),
+        (ContextCommand::MountReadOnly, "only a disk image mounts"),
+        (ContextCommand::Eject, "only a volume ejects"),
+    ] {
+        let row = on_plate
+            .iter()
+            .find(|item| item.label == command.label())
+            .expect("declared");
+        assert!(!row.enabled, "{command:?}");
+        assert_eq!(row.reason, reason, "{command:?}");
+    }
+}
+
+#[test]
+fn a_disk_image_mounts_read_only_and_only_its_attachers_volume_ejects() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+    use crate::places::{Places, Volume, VolumeFacts};
+    use tairix_abi::sysinfo::MountAvailability;
+
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[(b"Storage", FileKind::Directory)]),
+    );
+    dirs.insert(
+        "/Storage".to_string(),
+        encoded_stream(&[
+            (b"floppy", FileKind::Directory),
+            (b"stick", FileKind::Directory),
+            (b"Lemmings.adf", FileKind::Regular),
+        ]),
+    );
+    let volume = |label: &str, owner| Volume {
+        label: label.to_string(),
+        target: alloc::format!("/Storage/{label}"),
+        medium: None,
+        facts: VolumeFacts {
+            filesystem: String::from("affs"),
+            free: None,
+            availability: MountAvailability::Available,
+            owner,
+            volume_id: [5; 16],
+        },
+        offered: true,
+    };
+    let places = Places::new(
+        &["Users".to_string(), "ann".to_string()],
+        &[volume("floppy", Some(1000)), volume("stick", None)],
+    );
+    let mut browser = Browser::open_root(tree_source(dirs)).expect("root");
+    browser
+        .navigate_to(alloc::vec!["Storage".to_string()])
+        .expect("navigates");
+    browser.mark_volume_roots(&places);
+    let reasons = |browser: &Browser<_>, name: &str, viewer: u32| {
+        let model = ContextMenuModel::for_browser(browser, false).viewed_by(viewer);
+        (
+            model.reason(ContextCommand::MountReadOnly),
+            model.reason(ContextCommand::Eject),
+            name.to_string(),
+        )
+    };
+    let select = |browser: &mut Browser<_>, name: &str| {
+        let at = browser
+            .entries()
+            .iter()
+            .position(|entry| entry.name() == name)
+            .expect("listed");
+        browser.select(at).expect("selects");
+    };
+    select(&mut browser, "Lemmings.adf");
+    assert_eq!(
+        reasons(&browser, "Lemmings.adf", 1000),
+        ("", "only a volume ejects", String::from("Lemmings.adf"))
+    );
+    select(&mut browser, "floppy");
+    assert_eq!(
+        reasons(&browser, "floppy", 1000),
+        ("only a disk image mounts", "", String::from("floppy"))
+    );
+    assert_eq!(
+        reasons(&browser, "floppy", 1001).1,
+        "only a volume you attached ejects"
+    );
+    select(&mut browser, "stick");
+    assert_eq!(
+        reasons(&browser, "stick", 1000).1,
+        "only a volume you attached ejects",
+        "a machine's volume is no one's to eject here"
+    );
 }
 
 #[test]
@@ -11953,6 +12221,93 @@ mod deferred {
         assert_eq!(source.refreshed_for("/Users"), 0);
     }
 
+    /// Asking for the folder shown while a navigation is on its way elsewhere
+    /// gives that navigation up, says the view changed, and re-reads the
+    /// folder: the source then stops reading the place given up, so nothing
+    /// of it lands, nor is held, and a climb starts afresh.
+    #[test]
+    fn asking_for_the_folder_shown_gives_up_a_navigation_elsewhere() {
+        let (mut browser, source) = browser();
+        source.deliver("/");
+        browser.resume().expect("resume");
+        let _ = browser.select(0);
+        browser.open_selected().expect("navigate");
+        assert!(
+            browser.listing_elsewhere(),
+            "the premise: /Users is on its way"
+        );
+        let counted = browser.navigations();
+        source.ready.borrow_mut().clear();
+
+        assert_eq!(browser.navigate_to(Vec::new()), Ok(true), "the cue goes");
+        assert!(!browser.listing_elsewhere());
+        assert_eq!(
+            browser.listing_target(),
+            Some(&Location::Folder(Vec::new())),
+            "the folder shown is read afresh"
+        );
+        assert_eq!(source.refreshed_for("/"), 1, "its source asked for it anew");
+        assert_eq!(
+            browser.navigations(),
+            counted + 1,
+            "the user stayed: a navigation"
+        );
+        source.deliver("/Users");
+        source.deliver("/");
+        assert!(browser.resume().expect("resume"), "the fresh read commits");
+        assert_eq!(browser.folder(), Some(&[][..]), "never the place given up");
+        assert_eq!(
+            browser.navigate_to(Vec::new()),
+            Ok(false),
+            "with nothing on its way, staying changes nothing"
+        );
+    }
+
+    /// A place asked for before the user moved on is not where they are
+    /// taken: the move they made is the latest thing they asked for.
+    #[test]
+    fn a_place_asked_for_before_a_move_is_not_followed() {
+        let (mut browser, source) = browser();
+        source.deliver("/");
+        source.deliver("/Users");
+        browser.resume().expect("resume");
+        let asked_at = browser.navigations();
+        let _ = browser.select(0);
+        browser.open_selected().expect("navigate");
+        browser.resume().expect("resume");
+        assert_eq!(
+            browser.navigate_as_asked(Vec::new(), asked_at),
+            Ok(false),
+            "the user went to /Users since"
+        );
+        assert_eq!(browser.folder(), Some(&[String::from("Users")][..]));
+        let asked_at = browser.navigations();
+        assert_eq!(browser.navigate_as_asked(Vec::new(), asked_at), Ok(true));
+        browser.resume().expect("resume");
+        assert_eq!(browser.folder(), Some(&[][..]));
+    }
+
+    /// Every move counts as a navigation, and no re-read of the place shown.
+    #[test]
+    fn a_move_is_a_navigation_and_a_reload_is_none() {
+        let (mut browser, source) = browser();
+        source.deliver("/");
+        source.deliver("/Users");
+        browser.resume().expect("resume");
+        let at = browser.navigations();
+        browser.refresh().expect("refresh");
+        browser.resume().expect("resume");
+        assert_eq!(browser.navigations(), at);
+        let _ = browser.select(0);
+        browser.open_selected().expect("navigate");
+        assert_eq!(browser.navigations(), at + 1);
+        browser.resume().expect("resume");
+        assert!(browser.go_back().expect("back"));
+        assert_eq!(browser.navigations(), at + 2);
+        assert!(browser.navigate_to_network());
+        assert_eq!(browser.navigations(), at + 3);
+    }
+
     #[test]
     fn a_refresh_that_is_pending_keeps_showing_what_it_had() {
         let (mut browser, source) = browser();
@@ -13085,4 +13440,74 @@ fn a_presentation_listing_the_same_names_leaves_the_listing_alone() {
     assert_eq!(browser.set_presentation(shown), Ok(false));
     assert_eq!(listed_names(&browser), [".cache", "b", ".profile", "a.txt"]);
     assert_eq!(browser.chosen_name(), Some("a.txt"));
+}
+
+#[test]
+fn a_rail_menu_ejects_only_a_volume_its_viewer_attached() {
+    use crate::chrome::{context_choice_from_item, place_menu, ContextChoice, ContextCommand};
+    use crate::places::{Places, Volume, VolumeFacts};
+    use tairix_abi::sysinfo::MountAvailability;
+    use tairix_abi::window_ipc::AppMenuRowView;
+
+    let volume = |label: &str, owner| Volume {
+        label: label.to_string(),
+        target: alloc::format!("/Storage/{label}"),
+        medium: None,
+        facts: VolumeFacts {
+            filesystem: String::from("iso9660"),
+            free: None,
+            availability: MountAvailability::Available,
+            owner,
+            volume_id: [3; 16],
+        },
+        offered: true,
+    };
+    let places = Places::new(
+        &["Users".to_string(), "ann".to_string()],
+        &[volume("disc", Some(1000)), volume("stick", None)],
+    );
+    let rows = |label: &str, viewer| {
+        let place = places
+            .rows()
+            .iter()
+            .find(|place| place.label() == label)
+            .expect("a row");
+        let menu = place_menu(place, viewer, "Files").expect("fits");
+        menu.rows()
+            .filter_map(|(row, _)| match row {
+                AppMenuRowView::Item(item) => Some((
+                    context_choice_from_item(item.id),
+                    item.enabled,
+                    String::from(item.reason),
+                )),
+                _ => None,
+            })
+            .collect::<alloc::vec::Vec<_>>()
+    };
+    let open = Some(ContextChoice::Command(ContextCommand::Open));
+    let eject = Some(ContextChoice::Command(ContextCommand::Eject));
+    assert_eq!(
+        rows("disc", Some(1000)),
+        [(open, true, String::new()), (eject, true, String::new())]
+    );
+    assert_eq!(
+        rows("disc", Some(1001))[1],
+        (
+            eject,
+            false,
+            String::from("only a volume you attached ejects")
+        )
+    );
+    assert_eq!(
+        rows("stick", Some(1000))[1],
+        (
+            eject,
+            false,
+            String::from("only a volume you attached ejects")
+        )
+    );
+    assert_eq!(
+        rows("Home", Some(1000))[1],
+        (eject, false, String::from("only a volume ejects"))
+    );
 }

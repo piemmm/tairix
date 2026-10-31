@@ -1,6 +1,6 @@
 //! The catalog-naming policy (`docs/src/drivers/block.md`): the one the
 //! volume manager names a recognised volume by and the kernel names a network
-//! volume by (`plans/FSSERVE.md` §6).
+//! or disk-image volume by (`plans/FSSERVE.md` §6, `plans/DISK-IMAGES.md`).
 //!
 //! A volume is published under `/Storage/<name>`, a name derived from the
 //! volume itself, never from its format or from what else is attached:
@@ -105,6 +105,14 @@ pub fn candidates(base: NameBase, identity: [u8; 16]) -> impl Iterator<Item = Vo
             .into_iter()
             .map(move |take| suffixed(stem, &print[..take])),
     )
+}
+
+/// Whether `name` is one a volume may be given by choice rather than by the
+/// policy: a label's own kebab-case spelling, and no reserved word, so a
+/// chosen name never takes one the policy generates for another volume.
+#[must_use]
+pub fn chosen(name: &[u8]) -> bool {
+    kebab(name).is_some_and(|label| label.as_bytes() == name) && !reserved(name)
 }
 
 /// `label` in kebab case, or `None` when no ASCII letter or digit survives.
@@ -300,5 +308,26 @@ mod tests {
         }
         let last = names(label(&long), [0xA5; 16]).pop().expect("a candidate");
         assert!(last.ends_with(&print([0xA5; 16], FINGERPRINT_CHARS)));
+    }
+
+    #[test]
+    fn a_name_is_chosen_only_as_a_label_would_be_given_it() {
+        for name in [&b"work"[..], b"my-backup-disk", b"disk2"] {
+            assert!(chosen(name), "{name:?}");
+        }
+        let victim = [0x5C; 16];
+        for generated in names(label(b"backup"), victim)
+            .into_iter()
+            .skip(1)
+            .chain(names(NameBase::Unlabelled(Some(BlkTransport::Usb)), victim))
+        {
+            assert!(!chosen(&generated), "{generated:?} is generated");
+        }
+        for name in [&b"system"[..], b"users", b"storage", b"id", b"alias"] {
+            assert!(!chosen(name), "{name:?} is reserved");
+        }
+        for name in [&b"my--disk"[..], b"-disk", b"Disk", b"disk_", b""] {
+            assert!(!chosen(name), "{name:?} is no label's spelling");
+        }
     }
 }

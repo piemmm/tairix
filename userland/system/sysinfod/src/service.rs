@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::audio::{AudioDeviceDescriptor, ControlAccess, StreamDescriptor};
 use tairix_abi::display_ipc::DisplayStats;
+use tairix_abi::fs::STORAGE_CATALOG;
 use tairix_abi::hwtree::{snapshot_nodes, HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
@@ -181,6 +182,50 @@ pub fn serve(
     )
 }
 
+/// The mount table as `caller` is shown it: a volume presented to another
+/// principal alone withheld. One presented to others too is theirs to see
+/// whole.
+fn mounts_shown(mut mounts: Vec<MountRecord>, caller: &Caller) -> Vec<MountRecord> {
+    for record in &mut mounts {
+        if kept_from(caller, record.private(), record.owner()) {
+            *record = record.withheld();
+        }
+    }
+    mounts
+}
+
+/// The view bindings as `caller` is shown them: as the volume each shows is,
+/// so one of a volume kept from `caller` is left out unless it names a
+/// catalog entry, which the catalog shows anyone.
+fn views_shown(mut views: Vec<ViewBindingRecord>, caller: &Caller) -> Vec<ViewBindingRecord> {
+    views.retain_mut(|view| {
+        if !kept_from(caller, view.private(), view.volume_owner()) {
+            return true;
+        }
+        let listed = names_a_catalog_entry(view.target_bytes());
+        if listed {
+            *view = view.withheld();
+        }
+        listed
+    });
+    views
+}
+
+/// Whether a volume presented to its `owner` alone (`private`) is kept from
+/// `caller`: one claiming privacy without an owner is kept from everyone.
+fn kept_from(caller: &Caller, private: bool, owner: Option<u32>) -> bool {
+    private && owner != Some(caller.uid())
+}
+
+/// Whether `target` is `/Storage/<name>`.
+fn names_a_catalog_entry(target: &[u8]) -> bool {
+    target
+        .strip_prefix(b"/")
+        .and_then(|path| path.strip_prefix(STORAGE_CATALOG.as_bytes()))
+        .and_then(|rest| rest.strip_prefix(b"/"))
+        .is_some_and(|name| !name.is_empty() && !name.contains(&b'/'))
+}
+
 /// Route a capability-cleared request to its [`SysinfoSource`] method and
 /// encode the answer.
 fn dispatch(
@@ -306,11 +351,20 @@ fn inventory_list(
             ProcessRecord::to_le_bytes,
         ),
         SysinfoQueryId::HARDWARE_TREE => hardware_tree(source, caller, page.payload, page.response),
-        SysinfoQueryId::MOUNT_LIST => {
-            page.of(|| source.mount_records(caller), MountRecord::to_le_bytes)
-        }
+        SysinfoQueryId::MOUNT_LIST => page.of(
+            || {
+                source
+                    .mount_records(caller)
+                    .map(|mounts| mounts_shown(mounts, caller))
+            },
+            MountRecord::to_le_bytes,
+        ),
         SysinfoQueryId::VIEW_LIST => page.of(
-            || source.view_records(caller),
+            || {
+                source
+                    .view_records(caller)
+                    .map(|views| views_shown(views, caller))
+            },
             ViewBindingRecord::to_le_bytes,
         ),
         SysinfoQueryId::SEAT_LIST => page.of(|| source.seats(caller), SeatRecord::to_le_bytes),
@@ -819,7 +873,7 @@ fn query_field(name: &'static str) -> Field<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::{serve, SelfReports, Walks};
+    use super::{mounts_shown, serve, views_shown, SelfReports, Walks};
     use crate::events;
     use crate::reporters::{MIN_REPORTERS, RAM_BYTES_PER_REPORTER};
     use crate::source::{Caller, LiveInstances, ProcessScope, SysinfoSource};
@@ -850,17 +904,17 @@ mod tests {
         CpuLoadRecord, CpuTimeRecord, CrashAccess, CrashFaultBucket, CrashFaultClass, CrashRecord,
         DesktopFrameRecord, DesktopFrameTotals, GroupDirectoryRecord, IrqRecord, KernelMemoryStats,
         LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountAvailability,
-        MountRecord, MountVolumeState, PageRequest, ProcessRecord, ProcessState, RamzipStats,
-        ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SelfAccountRecord, SysinfoQueryId,
-        SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, ViewBindingRecord,
-        VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord, IRQ_FLAG_QUARANTINED,
-        LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MAX_CACHE_REPORT_ENTRIES, RECLAIM_CLASS_COUNT,
-        RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
-        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
+        MountOwner, MountRecord, MountVolumeState, PageRequest, ProcessRecord, ProcessState,
+        RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SelfAccountRecord,
+        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
+        ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+        IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MAX_CACHE_REPORT_ENTRIES,
+        RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY,
+        SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
     use tairix_abi::sysinfo::{
         DmaFaultSignal, DmaGroupRecord, DmaNodeRecord, DmaOwnerState, DmaTables, DmaUnitFamily,
-        DmaUnitRecord, DmaUnitState, NetInterfaceRatesRequest,
+        DmaUnitRecord, DmaUnitState, NetInterfaceRatesRequest, VolumeClass, MOUNT_NO_OWNER,
     };
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::MEMORY_CLASS_COUNT;
@@ -1099,7 +1153,8 @@ mod tests {
         /// How many times the process list has been read.
         process_reads: RefCell<usize>,
         hwtree: alloc::vec::Vec<u8>,
-        mounts: [MountRecord; 2],
+        mounts: alloc::vec::Vec<MountRecord>,
+        views: alloc::vec::Vec<ViewBindingRecord>,
         cache_ledgers: alloc::vec::Vec<CacheLedgerRecord>,
         /// The boot-time configuration document the fixture serves.
         system_config: alloc::vec::Vec<u8>,
@@ -1164,7 +1219,7 @@ mod tests {
                 ]),
                 process_reads: RefCell::new(0),
                 hwtree: tree_blob(7, &tree_nodes()),
-                mounts: [
+                mounts: alloc::vec![
                     MountRecord::new(
                         b"rootfs",
                         b"/",
@@ -1191,6 +1246,11 @@ mod tests {
                         [0u8; 16],
                     )
                     .unwrap(),
+                ],
+                views: alloc::vec![
+                    ViewBindingRecord::new(b"/", b"/", MountFlags::READ_ONLY, [0u8; 16]).unwrap(),
+                    ViewBindingRecord::new(b"/Storage/data", b"/", MountFlags::NOEXEC, [0u8; 16])
+                        .unwrap(),
                 ],
                 cache_ledgers: fixture_cache_ledgers(),
                 system_config: alloc::vec::Vec::from(&b"os.loginType text\n"[..]),
@@ -1292,17 +1352,13 @@ mod tests {
             })
         }
         fn mount_records(&self, _caller: &Caller) -> Result<alloc::vec::Vec<MountRecord>, Errno> {
-            Ok(self.mounts.to_vec())
+            Ok(self.mounts.clone())
         }
         fn view_records(
             &self,
             _caller: &Caller,
         ) -> Result<alloc::vec::Vec<ViewBindingRecord>, Errno> {
-            Ok(alloc::vec![
-                ViewBindingRecord::new(b"/", b"/", MountFlags::READ_ONLY, [0u8; 16]).unwrap(),
-                ViewBindingRecord::new(b"/Storage/data", b"/", MountFlags::NOEXEC, [0u8; 16])
-                    .unwrap(),
-            ])
+            Ok(self.views.clone())
         }
         fn cpu_times(&self, _caller: &Caller) -> Result<alloc::vec::Vec<CpuTimeRecord>, Errno> {
             Ok(alloc::vec![
@@ -2411,6 +2467,162 @@ mod tests {
         );
     }
 
+    /// An image volume `owner` attached from `file`, shown as `name`.
+    fn image_mount(file: &[u8], name: &[u8], owner: MountOwner) -> MountRecord {
+        let usage = VolumeStats {
+            block_size: 512,
+            in_reserve: false,
+            total_blocks: 1760,
+            free_blocks: 40,
+            avail_blocks: 40,
+            files: 0,
+            files_free: 0,
+        };
+        MountRecord::new(
+            file,
+            name,
+            b"affs",
+            MountFlags::NOEXEC,
+            MountVolumeState {
+                usage,
+                availability: MountAvailability::Available,
+                medium: Some(BlkMedium::of_transport(BlkTransport::Virtual)),
+            },
+            [owner.uid.to_le_bytes()[0]; 16],
+        )
+        .unwrap()
+        .with_owner(owner)
+        .with_class(VolumeClass::Image)
+    }
+
+    /// `uid` as an owner of a volume presented to it alone, or to others too.
+    fn owner(uid: u32, private: bool) -> MountOwner {
+        MountOwner { uid, private }
+    }
+
+    #[test]
+    fn another_principals_own_volume_is_listed_without_its_source_or_usage() {
+        let other = crate::testing::FIXTURE_UID + 1;
+        let mine = image_mount(
+            b"Mine.adf",
+            b"/Storage/mine",
+            owner(crate::testing::FIXTURE_UID, true),
+        );
+        let theirs = image_mount(
+            b"Private Letters.adf",
+            b"/Storage/letters",
+            owner(other, true),
+        );
+        let shared = image_mount(b"Team.adf", b"/Storage/team", owner(other, false));
+        let mounts = alloc::vec![mine, theirs, shared];
+        let shown = mounts_shown(mounts.clone(), &caller(&Caps(&[])));
+        assert_eq!(shown[0], mine, "the caller's own, whole");
+        assert_eq!(shown[1], theirs.withheld());
+        assert!(shown[1].is_withheld());
+        assert_eq!(
+            shown[1].target_bytes(),
+            b"/Storage/letters",
+            "where it is stays"
+        );
+        assert_eq!(
+            shown[2], shared,
+            "one presented to others too is theirs to see whole"
+        );
+        assert_eq!(
+            mounts_shown(
+                mounts.clone(),
+                &caller(&Caps(&[CapabilityId::SYSINFO_GLOBAL]))
+            ),
+            shown,
+            "no capability widens what the query shows"
+        );
+    }
+
+    #[test]
+    fn a_private_volume_claiming_no_owner_is_withheld_from_everyone() {
+        let ownerless = image_mount(
+            b"Orphan.adf",
+            b"/Storage/orphan",
+            owner(MOUNT_NO_OWNER, true),
+        );
+        assert_eq!(ownerless.owner(), None);
+        assert_eq!(
+            mounts_shown(alloc::vec![ownerless], &caller(&Caps(&[]))),
+            [ownerless.withheld()]
+        );
+        let binding =
+            ViewBindingRecord::new(b"/Users/me/Home/disk", b"/", MountFlags::NOEXEC, [3; 16])
+                .unwrap()
+                .with_binder(crate::testing::FIXTURE_UID)
+                .with_volume_owner(owner(MOUNT_NO_OWNER, true));
+        assert!(
+            views_shown(alloc::vec![binding], &caller(&Caps(&[]))).is_empty(),
+            "not even to the principal that bound it"
+        );
+    }
+
+    #[test]
+    fn a_binding_is_shown_as_the_volume_it_shows_is() {
+        let me = crate::testing::FIXTURE_UID;
+        let other = me + 1;
+        let bound = |target: &[u8], binder: Option<u32>, volume: Option<MountOwner>| {
+            let view =
+                ViewBindingRecord::new(target, b"/Team", MountFlags::NOEXEC, [3; 16]).unwrap();
+            let view = binder.map_or(view, |binder| view.with_binder(binder));
+            volume.map_or(view, |volume| view.with_volume_owner(volume))
+        };
+        let views = alloc::vec![
+            bound(b"/Storage/data", None, None),
+            bound(b"/Users/me/Home/disk", Some(me), Some(owner(me, true))),
+            bound(
+                b"/Users/them/Home/Private/disk",
+                Some(other),
+                Some(owner(other, true))
+            ),
+            bound(
+                b"/Storage/them/inner",
+                Some(other),
+                Some(owner(other, true))
+            ),
+            bound(b"/Storage/letters", Some(0), Some(owner(other, true))),
+            bound(b"/Storage/data/team", Some(0), Some(owner(0, false))),
+            bound(
+                b"/Users/them/Home/shared",
+                Some(other),
+                Some(owner(other, false))
+            ),
+            bound(b"/Users/me/Home/lent", Some(0), Some(owner(me, true))),
+        ];
+        let targets = |views: &[ViewBindingRecord]| {
+            views
+                .iter()
+                .map(|view| view.target_bytes().to_vec())
+                .collect::<alloc::vec::Vec<_>>()
+        };
+        let shown = views_shown(views.clone(), &caller(&Caps(&[])));
+        assert_eq!(
+            targets(&shown),
+            [
+                b"/Storage/data".to_vec(),
+                b"/Users/me/Home/disk".to_vec(),
+                b"/Storage/letters".to_vec(),
+                b"/Storage/data/team".to_vec(),
+                b"/Users/them/Home/shared".to_vec(),
+                b"/Users/me/Home/lent".to_vec(),
+            ]
+        );
+        assert_eq!(shown[2], views[4].withheld(), "a catalog entry, withheld");
+        assert_eq!(
+            shown[3], views[5],
+            "an administrator's binding of a shared volume, whole"
+        );
+        assert_eq!(
+            views_shown(views, &caller(&Caps(&[CapabilityId::SYSINFO_GLOBAL]))),
+            shown,
+            "no capability widens what the query shows"
+        );
+    }
+
     #[test]
     fn view_list_needs_no_capability_and_pages() {
         let source = FixtureSource::new();
@@ -2438,6 +2650,48 @@ mod tests {
         assert_eq!(
             serve_once(&source, &caller(&caps), &sink, &page(2), &mut resp),
             Ok(0)
+        );
+    }
+
+    #[test]
+    fn the_listings_served_keep_another_principals_private_volume_to_it() {
+        let other = crate::testing::FIXTURE_UID + 1;
+        let private = image_mount(b"Letters.adf", b"/Storage/letters", owner(other, true));
+        let shared = image_mount(b"Team.adf", b"/Storage/team", owner(other, false));
+        let theirs =
+            ViewBindingRecord::new(b"/Users/them/Home/disk", b"/", MountFlags::NOEXEC, [3; 16])
+                .unwrap()
+                .with_binder(other)
+                .with_volume_owner(owner(other, true));
+        let source = FixtureSource {
+            mounts: alloc::vec![private, shared],
+            views: alloc::vec![theirs],
+            ..FixtureSource::new()
+        };
+        let sink = RecordingSink::new();
+        let listing = |query| {
+            let all = PageRequest {
+                offset: 0,
+                limit: 10,
+                flags: 0,
+                walk: PageRequest::FRESH,
+            };
+            let mut resp = [0u8; 1024];
+            let request = request_bytes(query, &all.to_le_bytes());
+            let n = serve_once(&source, &caller(&Caps(&[])), &sink, &request, &mut resp)
+                .expect("served");
+            resp[..n].to_vec()
+        };
+        let mounts = listing(SysinfoQueryId::MOUNT_LIST);
+        let record = |at: usize| {
+            MountRecord::from_bytes(&mounts[at * MountRecord::WIRE_LEN..]).expect("a record")
+        };
+        assert_eq!(mounts.len(), 2 * MountRecord::WIRE_LEN);
+        assert_eq!(record(0), private.withheld());
+        assert_eq!(record(1), shared);
+        assert!(
+            listing(SysinfoQueryId::VIEW_LIST).is_empty(),
+            "a binding of another principal's private volume is left out"
         );
     }
 

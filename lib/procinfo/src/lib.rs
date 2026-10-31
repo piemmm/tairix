@@ -261,6 +261,6 @@ const _: () = {
     assert!(fits(GROUP_DIRECTORY_PAGE, GroupDirectoryRecord::WIRE_LEN));
 };
 pub use volume::{
-    availability_marker, availability_name, medium_name, mount_name_bytes, volume_health_name,
-    write_medium_facts, VolumeBytes,
+    availability_marker, availability_name, medium_name, mount_name_bytes, source_text,
+    volume_health_name, write_medium_facts, VolumeBytes,
 };

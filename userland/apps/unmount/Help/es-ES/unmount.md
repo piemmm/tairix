@@ -11,9 +11,19 @@ unmount — desmontar un volumen montado
 Retira del servicio el volumen montado bajo `name`: el sistema de
 archivos y el dispositivo se vacían, el montaje bajo `/Storage` se
 retira y la raíz duradera `id::` del volumen se revoca. `name` es el
-nombre de catálogo del volumen (`usb1`) o su punto de montaje
-(`/Storage/usb1`), comparado con la lista de montajes de la API de
-información del sistema.
+nombre de catálogo del volumen (`usb1`), un directorio en el que está
+montado (`/Storage/usb1`, o aquel al que `mount imagen directorio` lo
+enlazó), o el nombre de archivo de la imagen de disco desde la que se
+montó (`Workbench.adf`), comparado con las listas de montajes y de
+vistas de la API de información del sistema; un nombre de archivo que
+coincide con el de la imagen de otro usuario designa la de usted. Un
+nombre de archivo que podría designar más de un volumen, o del que la
+lista solo guarda el principio, no designa ninguno: nombre entonces el
+volumen por el lugar donde está montado.
+Una ruta puede ser relativa o terminar en una barra: se resuelve como
+`mount` resuelve una. El volumen privado de otro usuario no muestra ni
+su nombre de archivo ni los directorios a los que está enlazado, así que
+se nombra por el lugar donde está montado en `/Storage`.
 
 Un volumen cuyo dispositivo fue retirado con escrituras aún sin
 confirmar sigue visible como `unavailable-dirty` (o
@@ -29,10 +39,11 @@ en el registro de auditoría. En un volumen sano, `--force` sigue
 vaciando y desmontando limpiamente; nada se descarta cuando es posible
 una confirmación limpia.
 
-Desmontar requiere la autoridad de montaje (`CAP_FS_MOUNT`); el
-núcleo la comprueba y audita cada decisión. Los volúmenes de arranque
-permanentes y los enlaces de vista del sistema no se pueden
-desmontar.
+Puede desmontar una imagen de disco o un recurso compartido de red que
+haya montado usted mismo; cualquier otro volumen requiere la autoridad
+de montaje (`CAP_FS_MOUNT`). El núcleo la comprueba y audita cada
+decisión. Los volúmenes de arranque permanentes y los enlaces de vista
+del sistema no se pueden desmontar.
 
 ## OPTIONS
 
@@ -40,7 +51,7 @@ desmontar.
   archivos abiertos en él, un programa trabaje en él o sus datos sin
   confirmar no puedan confirmarse, desconectando los archivos abiertos
   y descartando los datos retenidos.
-- `-?, --help` — mostrar la ayuda breve de esta orden.
+- `-h, -?, --help` — mostrar la ayuda breve de esta orden.
 
 ## EXAMPLES
 
@@ -48,15 +59,20 @@ desmontar.
   `usb1`.
 - `unmount /Storage/usb1` — lo mismo, nombrado por su punto de
   montaje.
+- `unmount Workbench.adf` — desmontar la imagen de disco montada desde
+  `Workbench.adf`.
 - `unmount --force usb1` — retirar un volumen no disponible
   descartando sus datos retenidos sin confirmar.
 
 ## EXIT STATUS
 
 - `0` — el volumen se desmontó (o se escribió la ayuda breve).
-- `1` — el volumen no se encontró, no es desmontable o el núcleo
-  rechazó el desmontaje. Una línea de órdenes no entendida también
-  termina con `1`.
+- `1` — no se entendió la línea de órdenes, o quien llama no puede
+  desmontar el volumen.
+- `2` — falló el servicio de información del sistema o la escritura en
+  el terminal.
+- `32` — el volumen no estaba montado o no es desmontable, la ruta que
+  lo nombra no pudo resolverse, o su desmontaje falló.
 
 ## ENVIRONMENT
 

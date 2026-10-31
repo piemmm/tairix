@@ -54,11 +54,14 @@ over a resolution-independent design grid, so the same glyph is
   and shared by Google and used according to terms described in the Creative
   Commons 3.0 Attribution License).
 - The drive kinds are `Disk` (the generic drive), `DiskHard`,
-  `DiskSolidState`, `DiskNvme`, `DiskUsb`, `DiskExternal`, `DiskSdCard` and
-  `DiskOptical`; they share one built-in disk glyph. `disk_icon(medium)` maps the
-  `BlkMedium` a mounted volume's device declared onto its kind, and resolves a
-  paravirtual device and an unknown medium alike to the generic `Disk`
-  rather than guessing. The mapping lives here, beside the vocabulary, so
+  `DiskSolidState`, `DiskNvme`, `DiskUsb`, `DiskExternal`, `DiskSdCard`,
+  `DiskOptical` and `DiskFloppy`; they share one built-in disk glyph. `disk_icon(medium)` maps the
+  `BlkMedium` a mounted volume's device declared onto its kind, the form
+  before the transport: an optical disc — a disc in a multimedia drive, or a
+  disc image — is `DiskOptical` and a floppy image `DiskFloppy`, whatever the
+  transport, and only an undeclared medium, a paravirtual device of no
+  stated form, or an ATA disk that reported no rotation, is the generic
+  `Disk`, never a guess. The mapping lives here, beside the vocabulary, so
   every desktop consumer draws the same icon for the same medium.
 - `account` — `monogram_of(name)` and `monogram_disc(mark, side, font, colours)`:
   an account's **circular identity picture**. One definition, drawn by the

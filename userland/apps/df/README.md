@@ -5,13 +5,15 @@ registered as the system command store bundle `df.app` so the shell resolves
 the bare word `df` to it. `df` reports, one row per attached volume,
 the volume's size, the space used, the space available, the percentage
 used, and the view path showing it; with `file` operands it reports the
-binding covering each operand, from the volume that binding shows. The
+binding covering each operand, from the volume that binding shows (another
+user's private volume lists no binding but its catalog entry, so a
+directory it is bound at elsewhere is reported as the volume beneath it). The
 option surface follows GNU coreutils (`AGENTS.md` §16.7): `-a` lists
 every binding, so a volume's bind mounts and the `/Storage` catalog
 appear, `-T`/`-t`/`-x` add and filter by filesystem type,
 `-i` reports inodes, `-P` selects the POSIX portable wording, `--total`
-appends a summary row, `-l` accepts the local-only filter (every TAIRiX
-mount is local), and `-k`/`-h`/`-H`/`--si`/`-B <size>` select the scale
+appends a summary row, `-l` leaves out the network shares, and
+`-k`/`-h`/`-H`/`--si`/`-B <size>` select the scale
 through the shared GNU size vocabulary in `lib/util`
 (`tairix_util::size`), the same definition `du` renders with.
 `-?`/`--help` render the tool's own short help from its bundled `Help/`
@@ -27,7 +29,9 @@ A volume with a dynamic inode table reports zero inode figures (the
 honest "untracked" answer). When the default view leaves out rows `-a`
 shows — a volume reporting no capacity, a further binding, the catalog —
 the omission is noted on fd 3 (`fs.mounts_omitted`, `AGENTS.md` §20.1),
-never in the table.
+never in the table; another user's private volume, whose figures are
+withheld, is noted apart (`fs.private_mounts_omitted`) and listed by `-a`
+with `-` for each figure.
 
 Documented divergences from GNU `df`: the `--output` field list and
 `--sync`/`--no-sync` are not yet available; a relative `file` operand is

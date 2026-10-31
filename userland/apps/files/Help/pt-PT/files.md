@@ -100,12 +100,20 @@ destino não consiga guardar é indicado num aviso no fim da operação.
 O menu de contexto começa por *Visualização*. Por baixo, um submenu nomeia
 aquilo sobre que o menu atua — *Ficheiro «notes.txt»*, um nome longo
 encurtado ao meio para que a extensão continue visível, ou *Seleção* quando
-há vários itens selecionados — e contém *Abrir*, *Abrir com…*, *Obter
-informações…*, *Mudar o nome*, *Cortar*, *Copiar* e *Eliminar*; uma linha que
-ali não pode atuar fica a cinzento e diz porquê. Seguem-se *Novo*, depois
-*Selecionar tudo* e *Limpar seleção*, e por fim *Colar*. Um clique com o
-botão direito num espaço vazio limpa a seleção, pelo que o submenu do item
-fica a cinzento.
+há vários itens selecionados — e contém *Abrir*, *Abrir com…*, *Montar só de
+leitura*, *Ejetar*, *Obter informações…*, *Mudar o nome*, *Cortar*, *Copiar*
+e *Eliminar*; uma linha que ali não pode atuar fica a cinzento e diz porquê.
+Seguem-se *Novo*, depois *Selecionar tudo* e *Limpar seleção*, e por fim
+*Colar*. Um clique com o botão direito num espaço vazio limpa a seleção,
+pelo que o submenu do item fica a cinzento.
+
+Abrir uma imagem de disco — um ficheiro `.iso`, `.adf`, `.hdf` e afins —
+monta-a para si em `/Storage`, gravável onde o ficheiro o é, e abre a sua
+janela; *Montar só de leitura* monta-a só de leitura. Fica montada até a
+ejetar ou a sua sessão terminar. *Ejetar* retira um volume que montou, a
+partir do seu ícone ou da sua linha na barra de locais, cujo menu de
+contexto próprio contém *Abrir* e *Ejetar*; as suas janelas nele passam
+primeiro para `/Storage`.
 
 O submenu *Novo* do menu de contexto cria uma pasta, ou um documento vazio
 de cada tipo que um editor instalado escreve, e abre o seu nome para edição.

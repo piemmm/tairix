@@ -433,6 +433,86 @@ fn amiga_comment_is_length_bounded() {
     );
 }
 
+#[test]
+fn an_amiga_datestamp_round_trips_through_time64() {
+    // 1978-01-01 00:00:00, AmigaDOS's epoch.
+    assert_eq!(
+        amiga::datestamp_to_time64(0, 0, 0),
+        Ok(Time64::from_secs(252_460_800))
+    );
+    // 2038-01-19 03:14:08, past the 32-bit Unix boundary: day 21933.
+    let after_2038 = amiga::datestamp_to_time64(21_933, 3 * 60 + 14, 8 * 50 + 25).unwrap();
+    assert_eq!(after_2038.secs(), 2_147_483_648);
+    assert_eq!(after_2038.subsec_nanos(), 500_000_000);
+    assert_eq!(
+        amiga::time64_to_datestamp(after_2038),
+        Ok((21_933, 194, 425))
+    );
+    let far = amiga::datestamp_to_time64(u32::MAX, 1439, 2999).unwrap();
+    assert_eq!(amiga::time64_to_datestamp(far), Ok((u32::MAX, 1439, 2999)));
+    for (mins, ticks) in [(1440, 0), (0, 3000)] {
+        assert_eq!(
+            amiga::datestamp_to_time64(0, mins, ticks),
+            Err(MetadataError::NotRepresentable)
+        );
+    }
+    // Before 1978 and finer than a tick are refused, never truncated.
+    assert_eq!(
+        amiga::time64_to_datestamp(Time64::from_secs(-1)),
+        Err(MetadataError::TimestampOutOfRange)
+    );
+    assert_eq!(
+        amiga::time64_to_datestamp(Time64::from_secs(252_460_799)),
+        Err(MetadataError::TimestampOutOfRange)
+    );
+    let fine = Time64::new(300_000_000, 30_000_001).unwrap();
+    assert_eq!(
+        amiga::time64_to_datestamp(fine),
+        Err(MetadataError::TimestampOutOfRange)
+    );
+    let ticked = amiga::to_tick(fine);
+    assert_eq!(ticked.subsec_nanos(), 20_000_000);
+    assert!(amiga::time64_to_datestamp(ticked).is_ok());
+    let past_days = Time64::from_secs(252_460_800 + (i64::from(u32::MAX) + 1) * 86_400);
+    assert_eq!(
+        amiga::time64_to_datestamp(past_days),
+        Err(MetadataError::TimestampOutOfRange)
+    );
+}
+
+#[test]
+fn an_amiga_object_carries_only_what_it_records() {
+    let full = amiga::Object {
+        protection: Some(0b0100_0000),
+        comment: b"Startup",
+    };
+    assert_eq!(full.key(0), Some(amiga::PROTECTION_KEY));
+    assert_eq!(full.key(1), Some(amiga::COMMENT_KEY));
+    assert_eq!(full.key(2), None);
+    assert_eq!(
+        full.value(amiga::PROTECTION_KEY)
+            .map(|v| v.as_bytes().to_vec()),
+        Some(b"-s------".to_vec())
+    );
+    assert_eq!(
+        full.value(amiga::COMMENT_KEY),
+        Some(amiga::Value::Comment(b"Startup"))
+    );
+    assert_eq!(full.value(b"amiga.other"), None);
+    let bare = amiga::Object {
+        protection: None,
+        comment: b"",
+    };
+    assert_eq!(bare.key(0), None);
+    assert!(!bare.carries(amiga::COMMENT_KEY));
+    assert_eq!(bare.value(amiga::PROTECTION_KEY), None);
+    let commented = amiga::Object {
+        protection: None,
+        comment: b"note",
+    };
+    assert_eq!(commented.key(0), Some(amiga::COMMENT_KEY));
+}
+
 // --- preset: atari -------------------------------------------------------
 
 #[test]

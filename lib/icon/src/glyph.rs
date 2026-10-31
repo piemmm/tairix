@@ -184,6 +184,8 @@ pub enum IconKind {
     DiskExternal,
     /// An optical disc in its drive; shares the disk glyph.
     DiskOptical,
+    /// A floppy disk, or the image of one; shares the disk glyph.
+    DiskFloppy,
     /// The fallback glyph for an unrecognised asset id: a filled diamond.
     Generic,
     /// Two upright bars, for pausing what is playing.
@@ -676,6 +678,7 @@ impl IconKind {
             "disk-sd" => Self::DiskSdCard,
             "disk-external" => Self::DiskExternal,
             "disk-optical" => Self::DiskOptical,
+            "disk-floppy" => Self::DiskFloppy,
             "pause" => Self::Pause,
             "resume" => Self::Resume,
             "zoom-in" => Self::ZoomIn,
@@ -1162,6 +1165,7 @@ impl IconKind {
             Self::WasmModule => 259,
             Self::DiskOptical => 260,
             Self::BoardFan => 261,
+            Self::DiskFloppy => 262,
         }
     }
 
@@ -1222,6 +1226,7 @@ impl IconKind {
             Self::DiskSdCard => "disk-sd",
             Self::DiskExternal => "disk-external",
             Self::DiskOptical => "disk-optical",
+            Self::DiskFloppy => "disk-floppy",
             Self::Pause => "pause",
             Self::Resume => "resume",
             Self::FolderFilled => "folder-filled",
@@ -1448,18 +1453,22 @@ impl IconKind {
 /// The icon that represents a mounted volume's storage medium.
 ///
 /// A picture claims only what the device reported: an optical disc is a
-/// disc on any bus, a medium reported rotating is the hard disk on an ATA bus
-/// or behind a USB bridge alike, a USB unit is a stick once it reported a
+/// disc on any bus, and a floppy a floppy, a disk image laid out for either
+/// included; a medium reported rotating is the hard disk on an ATA bus or
+/// behind a USB bridge alike, a USB unit is a stick once it reported a
 /// non-rotating medium, and one that reported neither is the external drive,
-/// which shows no medium. An undeclared or paravirtual device is the generic
+/// which shows no medium. An undeclared medium, a paravirtual device of no
+/// stated form, or an ATA disk that reported no rotation is the generic
 /// drive.
 #[must_use]
 pub const fn disk_icon(medium: Option<BlkMedium>) -> IconKind {
     let Some(medium) = medium else {
         return IconKind::Disk;
     };
-    if matches!(medium.form, BlkForm::OpticalDisc) {
-        return IconKind::DiskOptical;
+    match medium.form {
+        BlkForm::OpticalDisc => return IconKind::DiskOptical,
+        BlkForm::FloppyDisk => return IconKind::DiskFloppy,
+        BlkForm::Unspecified => {}
     }
     match (medium.transport, medium.rotation) {
         (BlkTransport::Virtual, _) | (BlkTransport::Ata, BlkRotation::Unknown) => IconKind::Disk,
@@ -1605,7 +1614,8 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::DiskNvme
         | IconKind::DiskSdCard
         | IconKind::DiskExternal
-        | IconKind::DiskOptical => disk(color),
+        | IconKind::DiskOptical
+        | IconKind::DiskFloppy => disk(color),
         IconKind::Generic => generic(color),
         IconKind::Pause => pause(color),
         IconKind::Resume => resume(color),

@@ -144,6 +144,7 @@ pub mod layout;
 pub mod marquee;
 pub mod media;
 pub mod mode_edit;
+pub mod mount;
 pub mod network;
 pub mod open_with;
 pub mod owner_edit;
@@ -166,9 +167,9 @@ pub mod watch;
 pub use activate::{Activation, BundleIntent};
 pub use browser::{Browser, Item, Location, PendingEntry, PendingRename};
 pub use chrome::{
-    apply_command, context_choice_from_item, context_menu, network_context_menu, ContextChoice,
-    ContextCommand, ContextMenuModel, ContextQuick, ManagerTool, ManagerToolModel, ToolbarBand,
-    ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS, TOOLBAR_COMMANDS,
+    apply_command, context_choice_from_item, context_menu, network_context_menu, place_menu,
+    ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, ManagerTool, ManagerToolModel,
+    ToolbarBand, ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS, TOOLBAR_COMMANDS,
 };
 pub use clipboard::{
     drop_operation, plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan,

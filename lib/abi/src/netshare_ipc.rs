@@ -65,7 +65,7 @@
 use core::net::IpAddr;
 
 use crate::account::MAX_PASSWORD_LEN;
-use crate::le::{Reader, Writer};
+use crate::le::{decode_bool, Reader, Writer};
 use crate::net_ipc::{
     address_parts, ip_from_parts, is_unicast, validate_if_name, NetAddrFamily, IF_NAME_LEN,
 };
@@ -890,11 +890,7 @@ impl<'a> ShareEntry<'a> {
 
     fn read(r: &mut Reader<'a>) -> Result<Self, Errno> {
         let name = r.str()?;
-        let special = match r.u8()? {
-            0 => false,
-            1 => true,
-            _ => return Err(Errno::OutOfRange),
-        };
+        let special = decode_bool(r.u8()?)?;
         let remark = r.str()?;
         if !is_share_name(name) || remark.len() > REMARK_MAX {
             return Err(Errno::OutOfRange);
@@ -962,11 +958,7 @@ impl<'a> MountEntry<'a> {
         let offer = OfferId::new(r.u64()?).ok_or(Errno::OutOfRange)?;
         let host = r.str()?;
         let share = r.str()?;
-        let read_only = match r.u8()? {
-            0 => false,
-            1 => true,
-            _ => return Err(Errno::OutOfRange),
-        };
+        let read_only = decode_bool(r.u8()?)?;
         let state = MountState::from_u8(r.u8()?)?;
         if !is_host_name(host) || !is_share_name(share) {
             return Err(Errno::OutOfRange);

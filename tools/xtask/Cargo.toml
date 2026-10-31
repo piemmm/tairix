@@ -155,7 +155,11 @@ tairix-test-stalltrace = { path = "../../tests/integration/stalltrace_program", 
 # types and the pass it waits for — and the RISC OS disc the run puts in the
 # drive, mastered by the one ISO 9660 fixture.
 tairix-test-optical = { path = "../../tests/integration/optical_program", version = "=0.0.0", default-features = false }
+# The disk-image vertical's fixture vocabulary — its command word, its pass,
+# and what each image it plants holds.
+tairix-test-images = { path = "../../tests/integration/images_program", version = "=0.0.0", default-features = false }
 tairix-test-iso9660-image = { path = "../../tests/integration/iso9660_image", version = "=0.0.0" }
+tairix-test-amiga-image = { path = "../../tests/integration/amiga_image", version = "=0.0.0" }
 # The SVG-text vertical's fixture vocabulary: the command word its script
 # types and the bundle directory the fixture installs under, pinned against
 # the fixture's own `COMMAND` by a unit test so the script and the bundle
@@ -321,6 +325,7 @@ tairix-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0
 tairix-drv-fs-iso9660 = { path = "../../drivers/filesystem/iso9660", version = "=0.0.0" }
 tairix-drv-fs-udf = { path = "../../drivers/filesystem/udf", version = "=0.0.0" }
 tairix-drv-fs-adfs = { path = "../../drivers/filesystem/adfs", version = "=0.0.0" }
+tairix-drv-fs-affs = { path = "../../drivers/filesystem/affs", version = "=0.0.0" }
 tairix-drv-storage-raid-member = { path = "../../drivers/storage/raid_member", version = "=0.0.0" }
 tairix-drv-storage-raid = { path = "../../drivers/storage/raid", version = "=0.0.0" }
 # The shared desktop theme definition: the display vertical's screendump

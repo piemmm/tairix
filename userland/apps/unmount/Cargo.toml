@@ -40,9 +40,8 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # parser, and the shared own-bundle short-help render the `-?`/`--help`
 # switches use (plans/APPS.md).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
-# The shared System Information API client: the `MOUNT_LIST` paging walk
-# (`for_each_mount`) `mount` and `df` use too — never a second query
-# client.
+# The shared System Information API client: the namespace read
+# (`Namespace`) `mount` and `df` use too — never a second query client.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`

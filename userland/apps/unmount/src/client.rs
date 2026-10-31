@@ -1,14 +1,15 @@
 //! The `unmount` engine: resolve the named volume through the System
-//! Information API's mount listing, then hand its identity to the
+//! Information API's mount and view listings, then hand its identity to the
 //! kernel's detach path.
 
 use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
-use tairix_abi::sysinfo::{MountAvailability, VOLUME_ID_LEN};
+use tairix_abi::sysinfo::{MountAvailability, MountRecord, VOLUME_ID_LEN};
+use tairix_abi::{Errno, STORAGE_CATALOG};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{for_each_mount, Transport, WalkStep};
+use tairix_procinfo::{Namespace, Transport};
 
 use crate::command::Command;
 use crate::error::UnmountError;
@@ -28,6 +29,15 @@ struct Resolved {
     unavailable: bool,
 }
 
+impl Resolved {
+    fn of(volume: &MountRecord) -> Self {
+        Self {
+            volume_id: volume.volume_id(),
+            unavailable: volume.availability() != MountAvailability::Available,
+        }
+    }
+}
+
 /// Run a parsed `unmount` command against the injected seams.
 ///
 /// A successful detach writes nothing, matching the established `umount`
@@ -36,6 +46,13 @@ struct Resolved {
 /// # Errors
 ///
 /// * [`UnmountError::NotFound`] — no mounted filesystem matches `NAME`.
+/// * [`UnmountError::NotShown`] — none shown to the caller matches `NAME`,
+///   though another user's withheld private volume might.
+/// * [`UnmountError::Path`] — the path `NAME` spells could not be resolved.
+/// * [`UnmountError::Ambiguous`] — `NAME` is a file name more than one
+///   volume was attached from.
+/// * [`UnmountError::NameCut`] — `NAME` is a file name longer than the
+///   listing keeps, so it identifies no volume.
 /// * [`UnmountError::NotDetachable`] — the matched mount carries no
 ///   detachable volume identity (a permanent boot volume or view
 ///   binding).
@@ -43,7 +60,7 @@ struct Resolved {
 ///   `unavailable` distinguishes the surprise-removed case whose plain
 ///   detach is refused by design (the `--force` suggestion is also
 ///   emitted on fd 3, additive and ignorable).
-/// * [`UnmountError::Service`] — the mount-table query failed.
+/// * [`UnmountError::Service`] — the mount or view listing failed.
 /// * [`UnmountError::Output`] — the short help could not be written.
 pub fn run(
     command: Command,
@@ -64,8 +81,7 @@ pub fn run(
         Command::Unmount { name, force } => (name, force),
     };
 
-    let resolved =
-        resolve(&name, transport)?.ok_or_else(|| UnmountError::NotFound(name.clone()))?;
+    let resolved = resolve(&name, detacher, transport)?;
     if resolved.volume_id == [0u8; VOLUME_ID_LEN] {
         return Err(UnmountError::NotDetachable(name));
     }
@@ -76,6 +92,7 @@ pub fn run(
                 emit_force_suggestion(err, &name);
             }
             Err(UnmountError::Detach {
+                name,
                 errno,
                 unavailable: resolved.unavailable,
             })
@@ -83,29 +100,95 @@ pub fn run(
     }
 }
 
-/// Resolve `name` against the mount listing: the first record whose
-/// backing source, mount-point path, or `/Storage/<name>` catalog
-/// location matches. Listing order is the service's stable mount order,
-/// and catalog names are unique in the mount table, so the first match
-/// is the only match for a detachable volume and the walk ends there
-/// rather than paging the rest of the table.
-fn resolve(name: &str, transport: &dyn Transport) -> Result<Option<Resolved>, UnmountError> {
-    let catalog_path = format!("/Storage/{name}");
-    let mut found: Option<Resolved> = None;
-    for_each_mount(transport, |record| {
-        let source = String::from_utf8_lossy(record.source_bytes());
-        let target = String::from_utf8_lossy(record.target_bytes());
-        if source != name && target != name && target != catalog_path {
-            return Ok(WalkStep::Continue);
+/// Resolve `name` against the namespace: a path — any name holding a slash,
+/// canonicalised first — names the binding at it, a catalog entry or a
+/// directory a volume was bound at, and a bare word the catalog entry it
+/// spells or, failing that, the file a volume was attached from. A binding is
+/// unique, but a file name is not: two users' images may share one, so a
+/// volume the caller attached is taken over another's, and a name two of
+/// either could mean, or one longer than the listing keeps, names nothing.
+/// Another user's private volume shows neither its source nor its bindings
+/// but its catalog entry, so a miss with one listed may be that volume.
+fn resolve(
+    name: &str,
+    detacher: &dyn Detacher,
+    transport: &dyn Transport,
+) -> Result<Resolved, UnmountError> {
+    let namespace = Namespace::read(transport)?;
+    let path = name.contains('/');
+    let at = if path {
+        detacher.canonical(name).map_err(|errno| match errno {
+            Errno::NotFound => UnmountError::NotFound(String::from(name)),
+            errno => UnmountError::Path {
+                name: String::from(name),
+                errno,
+            },
+        })?
+    } else {
+        format!("/{STORAGE_CATALOG}/{name}")
+    };
+    if let Some(view) = namespace
+        .views()
+        .iter()
+        .find(|view| view.target_bytes() == at.as_bytes())
+    {
+        if !view.shows_volume() {
+            return Err(UnmountError::NotDetachable(String::from(name)));
         }
-        found = Some(Resolved {
-            volume_id: record.volume_id(),
-            unavailable: record.availability() != MountAvailability::Available,
-        });
-        Ok(WalkStep::Stop)
+        return namespace
+            .volume_of(view)
+            .map(Resolved::of)
+            .ok_or_else(|| UnmountError::NotFound(String::from(name)));
+    }
+    let unseen = || {
+        if namespace.volumes().iter().any(MountRecord::is_withheld) {
+            UnmountError::NotShown(String::from(name))
+        } else {
+            UnmountError::NotFound(String::from(name))
+        }
+    };
+    if path {
+        return Err(unseen());
+    }
+    by_file_name(name, detacher.user(), namespace.volumes()).map_err(|err| match err {
+        UnmountError::NotFound(_) => unseen(),
+        err => err,
     })
-    .map_err(UnmountError::from)?;
-    Ok(found)
+}
+
+/// The volume attached from the file `name`, in one pass over `volumes`.
+fn by_file_name(
+    name: &str,
+    user: Option<u32>,
+    volumes: &[MountRecord],
+) -> Result<Resolved, UnmountError> {
+    let (mut taken, mut takers) = (None, 0usize);
+    let (mut anothers, mut others) = (None, 0usize);
+    let mut cut = false;
+    for volume in volumes {
+        let source = volume.source_bytes();
+        if volume.source_cut() {
+            cut |= name.as_bytes().starts_with(source);
+            continue;
+        }
+        if source != name.as_bytes() {
+            continue;
+        }
+        if volume.owner().is_some_and(|owner| Some(owner) != user) {
+            anothers.get_or_insert(volume);
+            others += 1;
+        } else {
+            taken.get_or_insert(volume);
+            takers += 1;
+        }
+    }
+    let owned = || String::from(name);
+    match (taken, takers, anothers, others) {
+        (Some(volume), 1, ..) | (None, 0, Some(volume), 1) => Ok(Resolved::of(volume)),
+        (Some(_), ..) | (None, 0, Some(_), _) => Err(UnmountError::Ambiguous(owned())),
+        _ if cut => Err(UnmountError::NameCut(owned())),
+        _ => Err(UnmountError::NotFound(owned())),
+    }
 }
 
 /// Emit the fd-3 `suggestion` record for a refused plain detach of an
@@ -150,17 +233,53 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{
-        MountAvailability, MountRecord, MountVolumeState, PageRequest, SysinfoRequestHeader,
+        MountAvailability, MountOwner, MountRecord, MountVolumeState, PageRequest, SysinfoQueryId,
+        SysinfoRequestHeader, ViewBindingRecord, VolumeClass, MOUNT_SOURCE_MAX,
     };
     use tairix_abi::Errno;
     use tairix_help::{HelpSource, SourceError};
     use tairix_procinfo::Transport;
 
-    /// An in-memory `sysinfod` stand-in answering mount-list queries from
-    /// a fixture, decoding the request the same way the real service does.
+    /// An in-memory `sysinfod` stand-in answering the mount and view lists
+    /// from a fixture, decoding the request the same way the real service
+    /// does.
     struct Fixture {
         records: Vec<MountRecord>,
+        views: Vec<ViewBindingRecord>,
         fail: Option<Errno>,
+    }
+
+    impl Fixture {
+        /// `records`, each shown from its root at its own target, as the
+        /// kernel lists them.
+        fn of(records: Vec<MountRecord>) -> Self {
+            let views = records
+                .iter()
+                .filter(|record| !record.target_bytes().is_empty())
+                .map(|record| {
+                    ViewBindingRecord::new(
+                        record.target_bytes(),
+                        b"/",
+                        MountFlags::NOEXEC,
+                        record.volume_id(),
+                    )
+                    .expect("view")
+                })
+                .collect();
+            Self {
+                records,
+                views,
+                fail: None,
+            }
+        }
+
+        /// This fixture with the volume `volume_id` bound at `target` too.
+        fn bound_at(mut self, target: &[u8], volume_id: [u8; 16]) -> Self {
+            self.views.push(
+                ViewBindingRecord::new(target, b"/", MountFlags::NOEXEC, volume_id).expect("view"),
+            );
+            self
+        }
     }
 
     impl Transport for Fixture {
@@ -172,16 +291,26 @@ mod tests {
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
             let req = PageRequest::from_bytes(payload)?;
-            let offset = req.offset as usize;
-            if offset >= self.records.len() {
-                return Ok(Vec::new());
-            }
-            let take = core::cmp::min(self.records.len() - offset, req.limit as usize);
-            let mut out = Vec::with_capacity(take * MountRecord::WIRE_LEN);
-            for record in &self.records[offset..offset + take] {
-                out.extend_from_slice(&record.to_le_bytes());
-            }
-            Ok(out)
+            let encoded: Vec<Vec<u8>> = match header.query {
+                SysinfoQueryId::MOUNT_LIST => self
+                    .records
+                    .iter()
+                    .map(|record| record.to_le_bytes().to_vec())
+                    .collect(),
+                SysinfoQueryId::VIEW_LIST => self
+                    .views
+                    .iter()
+                    .map(|view| view.to_le_bytes().to_vec())
+                    .collect(),
+                _ => return Err(Errno::NotImplemented),
+            };
+            Ok(encoded
+                .iter()
+                .skip(req.offset as usize)
+                .take(req.limit as usize)
+                .flatten()
+                .copied()
+                .collect())
         }
     }
 
@@ -214,6 +343,10 @@ mod tests {
     }
 
     impl Detacher for MemDetacher {
+        fn user(&self) -> Option<u32> {
+            Some(VIEWER)
+        }
+
         fn detach(&self, volume_id: [u8; 16], force: bool) -> Result<(), Errno> {
             self.detached
                 .borrow_mut()
@@ -221,6 +354,25 @@ mod tests {
             match self.fail {
                 Some(errno) => Err(errno),
                 None => Ok(()),
+            }
+        }
+
+        /// As `realpath` resolves in `/Users/ada`, where nothing named
+        /// `missing` exists and `forbidden` may not be entered.
+        fn canonical(&self, path: &str) -> Result<String, Errno> {
+            let joined = if path.starts_with('/') {
+                String::from(path)
+            } else {
+                alloc::format!("/Users/ada/{path}")
+            };
+            let parts: Vec<&str> = joined
+                .split('/')
+                .filter(|part| !part.is_empty() && *part != ".")
+                .collect();
+            match parts.last() {
+                Some(&"missing") => Err(Errno::NotFound),
+                Some(&"forbidden") => Err(Errno::PermissionDenied),
+                _ => Ok(alloc::format!("/{}", parts.join("/"))),
             }
         }
     }
@@ -290,25 +442,48 @@ mod tests {
         .expect("record")
     }
 
+    /// The user running `unmount` in these tests.
+    const VIEWER: u32 = 1000;
+
     fn table() -> Fixture {
-        Fixture {
-            records: alloc::vec![
-                record(b"ARXFSRoot", b"/", MountAvailability::Available, [0u8; 16]),
-                record(
-                    b"usb1",
-                    b"/Storage/usb1",
-                    MountAvailability::Available,
-                    [1u8; 16],
-                ),
-                record(
-                    b"usb2",
-                    b"/Storage/usb2",
-                    MountAvailability::UnavailableDirty,
-                    [2u8; 16],
-                ),
-            ],
-            fail: None,
-        }
+        Fixture::of(alloc::vec![
+            record(b"ARXFSRoot", b"/", MountAvailability::Available, [0u8; 16]),
+            record(
+                b"usb1",
+                b"/Storage/usb1",
+                MountAvailability::Available,
+                [1u8; 16],
+            ),
+            record(
+                b"usb2",
+                b"/Storage/usb2",
+                MountAvailability::UnavailableDirty,
+                [2u8; 16],
+            ),
+        ])
+    }
+
+    /// A disk image `owner` attached from `file`, at `target`.
+    /// An image `owner` mounted from `file`, as `sysinfod` lists it to the
+    /// viewer: the viewer's own private, another's shared with everyone.
+    fn image(file: &[u8], target: &[u8], owner: u32, id: u8) -> MountRecord {
+        record(file, target, MountAvailability::Available, [id; 16])
+            .with_owner(MountOwner {
+                uid: owner,
+                private: owner == VIEWER,
+            })
+            .with_class(VolumeClass::Image)
+    }
+
+    /// Another user's private image, as `sysinfod` lists it to the viewer.
+    fn withheld_image(file: &[u8], target: &[u8], id: u8) -> MountRecord {
+        record(file, target, MountAvailability::Available, [id; 16])
+            .with_owner(MountOwner {
+                uid: VIEWER + 1,
+                private: true,
+            })
+            .with_class(VolumeClass::Image)
+            .withheld()
     }
 
     fn run_args(
@@ -360,6 +535,159 @@ mod tests {
                 force: false,
             }]
         );
+    }
+
+    /// Two users' disk images may share a file name, and the listing shows
+    /// both: `unmount` by that name detaches the caller's own, never the one
+    /// listed first, and a name only another user's image bears is still
+    /// tried, for the kernel to refuse.
+    #[test]
+    fn a_shared_source_name_resolves_to_the_caller_s_own_volume() {
+        let fixture = Fixture::of(alloc::vec![
+            image(b"disk.adf", b"/Storage/disk", VIEWER + 1, 3),
+            image(b"disk.adf", b"/Storage/disk-2", VIEWER, 4),
+        ]);
+        let detacher = MemDetacher::new();
+        run_args(&["disk.adf"], &fixture, &detacher, &Recorder::new()).expect("detaches");
+        assert_eq!(detacher.detached.borrow()[0].volume_id, [4u8; 16]);
+        let theirs = Fixture::of(alloc::vec![image(
+            b"disk.adf",
+            b"/Storage/disk",
+            VIEWER + 1,
+            3
+        )]);
+        let detacher = MemDetacher::new();
+        run_args(&["disk.adf"], &theirs, &detacher, &Recorder::new()).expect("asked");
+        assert_eq!(detacher.detached.borrow()[0].volume_id, [3u8; 16]);
+    }
+
+    /// `mount IMAGE DIR` binds the volume at `DIR` too, and `DIR` names it as
+    /// the catalog entry does.
+    #[test]
+    fn the_directory_an_image_was_mounted_on_names_it() {
+        let fixture = Fixture::of(alloc::vec![image(
+            b"wb.adf",
+            b"/Storage/workbench",
+            VIEWER,
+            5
+        )])
+        .bound_at(b"/Users/ada/Home/wb", [5; 16]);
+        let detacher = MemDetacher::new();
+        run_args(
+            &["/Users/ada/Home/wb"],
+            &fixture,
+            &detacher,
+            &Recorder::new(),
+        )
+        .expect("detaches");
+        assert_eq!(detacher.detached.borrow()[0].volume_id, [5u8; 16]);
+        let detacher = MemDetacher::new();
+        assert_eq!(
+            run_args(&["/Users/ada/Home"], &fixture, &detacher, &Recorder::new()),
+            Err(UnmountError::NotFound(String::from("/Users/ada/Home"))),
+            "only the directory it is bound at"
+        );
+        assert!(detacher.detached.borrow().is_empty());
+    }
+
+    /// A path is canonicalised as `mount` resolved it: relative, with a `.`
+    /// or a trailing slash, it names the directory it spells.
+    #[test]
+    fn a_directory_is_named_however_it_is_spelled() {
+        let fixture = Fixture::of(alloc::vec![image(
+            b"wb.adf",
+            b"/Storage/workbench",
+            VIEWER,
+            5
+        )])
+        .bound_at(b"/Users/ada/Home/wb", [5; 16]);
+        for spelled in ["Home/wb", "./Home/wb", "/Users/ada/Home/wb/"] {
+            let detacher = MemDetacher::new();
+            run_args(&[spelled], &fixture, &detacher, &Recorder::new()).expect(spelled);
+            assert_eq!(
+                detacher.detached.borrow()[0].volume_id,
+                [5u8; 16],
+                "{spelled}"
+            );
+        }
+        let detacher = MemDetacher::new();
+        assert_eq!(
+            run_args(&["Home/missing"], &fixture, &detacher, &Recorder::new()),
+            Err(UnmountError::NotFound(String::from("Home/missing")))
+        );
+        let refused = run_args(&["Home/forbidden"], &fixture, &detacher, &Recorder::new());
+        assert_eq!(
+            refused,
+            Err(UnmountError::Path {
+                name: String::from("Home/forbidden"),
+                errno: Errno::PermissionDenied,
+            })
+        );
+        assert_eq!(refused.expect_err("refused").status(), 32);
+        assert!(detacher.detached.borrow().is_empty());
+    }
+
+    /// Another user's private volume lists neither its source nor its
+    /// bindings, so a miss beside one says it may be that volume, and its
+    /// catalog entry still names it.
+    #[test]
+    fn a_miss_beside_another_users_private_volume_says_what_names_it() {
+        let fixture = Fixture::of(alloc::vec![withheld_image(b"", b"/Storage/letters", 6)]);
+        for name in ["letters.adf", "/Users/them/Home/letters"] {
+            let detacher = MemDetacher::new();
+            let missed = run_args(&[name], &fixture, &detacher, &Recorder::new());
+            assert_eq!(missed, Err(UnmountError::NotShown(String::from(name))));
+            let said = alloc::format!("{}", missed.expect_err("missed"));
+            assert!(
+                said.contains("by where it is mounted in /Storage"),
+                "{said}"
+            );
+        }
+        let detacher = MemDetacher::new();
+        run_args(&["letters"], &fixture, &detacher, &Recorder::new()).expect("asked");
+        assert_eq!(detacher.detached.borrow()[0].volume_id, [6u8; 16]);
+    }
+
+    /// A file name two volumes were mounted from names neither, whoever's
+    /// they are: the caller is told to name the volume by where it is.
+    #[test]
+    fn a_file_name_two_volumes_share_names_neither() {
+        for owners in [[VIEWER, VIEWER], [VIEWER + 1, VIEWER + 2]] {
+            let fixture = Fixture::of(alloc::vec![
+                image(b"disk.adf", b"/Storage/disk", owners[0], 3),
+                image(b"disk.adf", b"/Storage/disk-2", owners[1], 4),
+            ]);
+            let detacher = MemDetacher::new();
+            assert_eq!(
+                run_args(&["disk.adf"], &fixture, &detacher, &Recorder::new()),
+                Err(UnmountError::Ambiguous(String::from("disk.adf"))),
+                "{owners:?}"
+            );
+            assert!(detacher.detached.borrow().is_empty());
+        }
+    }
+
+    /// A file name the listing keeps only the start of identifies no volume:
+    /// another image's name may start the same.
+    #[test]
+    fn a_file_name_the_listing_cut_names_no_volume() {
+        let long = "Amiga Workbench 1.3 Install and Extras Collection (Commodore 1988) Disk 1.adf";
+        let listed = image(long.as_bytes(), b"/Storage/wb13", VIEWER, 6);
+        assert!(listed.source_cut());
+        let fixture = Fixture::of(alloc::vec![listed]);
+        let other_disk = long.replace("Disk 1", "Disk 2");
+        for name in [long, &other_disk, &long[..MOUNT_SOURCE_MAX]] {
+            let detacher = MemDetacher::new();
+            assert_eq!(
+                run_args(&[name], &fixture, &detacher, &Recorder::new()),
+                Err(UnmountError::NameCut(String::from(name))),
+                "{name}"
+            );
+            assert!(detacher.detached.borrow().is_empty());
+        }
+        let detacher = MemDetacher::new();
+        run_args(&["wb13"], &fixture, &detacher, &Recorder::new()).expect("by its catalog name");
+        assert_eq!(detacher.detached.borrow()[0].volume_id, [6u8; 16]);
     }
 
     #[test]
@@ -417,6 +745,7 @@ mod tests {
         assert_eq!(
             run_args(&["usb2"], &table(), &detacher, &err),
             Err(UnmountError::Detach {
+                name: String::from("usb2"),
                 errno: Errno::DeviceFault,
                 unavailable: true,
             })
@@ -432,15 +761,12 @@ mod tests {
     /// escaped: a quote in it must not end the JSON string it is written in.
     #[test]
     fn a_volume_name_json_would_misread_is_escaped_in_the_suggestion() {
-        let fixture = Fixture {
-            records: alloc::vec![record(
-                b"odd\"name",
-                b"/Storage/odd\"name",
-                MountAvailability::UnavailableDirty,
-                [3u8; 16],
-            )],
-            fail: None,
-        };
+        let fixture = Fixture::of(alloc::vec![record(
+            b"odd\"name",
+            b"/Storage/odd\"name",
+            MountAvailability::UnavailableDirty,
+            [3u8; 16],
+        )]);
         let detacher = MemDetacher::failing(Errno::DeviceFault);
         let err = Recorder::new();
         assert!(run_args(&["odd\"name"], &fixture, &detacher, &err).is_err());
@@ -460,11 +786,74 @@ mod tests {
         assert_eq!(
             run_args(&["usb1"], &table(), &detacher, &err),
             Err(UnmountError::Detach {
+                name: String::from("usb1"),
                 errno: Errno::PermissionDenied,
                 unavailable: false,
             })
         );
         assert!(err.infos.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failed_unmount_ends_as_util_linux_ends_one() {
+        let detach = |errno| UnmountError::Detach {
+            name: String::from("workbench"),
+            errno,
+            unavailable: false,
+        };
+        assert_eq!(detach(Errno::Busy).status(), 32, "a failed unmount");
+        assert_eq!(UnmountError::NotFound(String::from("usb9")).status(), 32);
+        assert_eq!(UnmountError::NotDetachable(String::from("/")).status(), 32);
+        assert_eq!(UnmountError::Ambiguous(String::from("d.adf")).status(), 32);
+        assert_eq!(UnmountError::NameCut(String::from("d.adf")).status(), 32);
+        assert_eq!(
+            detach(Errno::PermissionDenied).status(),
+            1,
+            "a detach the caller may not make"
+        );
+        assert_eq!(UnmountError::Usage.status(), 1);
+        assert_eq!(UnmountError::Service(Errno::TimedOut).status(), 2);
+        assert_eq!(UnmountError::Output(Errno::BrokenPipe).status(), 2);
+    }
+
+    #[test]
+    fn a_failure_names_the_volume_and_ends_its_sentence() {
+        use alloc::string::ToString;
+        let refused = |name: &str, errno, unavailable| {
+            UnmountError::Detach {
+                name: String::from(name),
+                errno,
+                unavailable,
+            }
+            .to_string()
+        };
+        assert_eq!(
+            refused("workbench", Errno::Busy, false),
+            alloc::format!("workbench: {}.", Errno::Busy)
+        );
+        assert!(refused("usb2", Errno::DeviceFault, true).starts_with("usb2: volume holds"));
+        assert!(refused("usb2", Errno::DeviceFault, true).ends_with('.'));
+        assert_eq!(
+            UnmountError::NotFound(String::from("usb9")).to_string(),
+            "usb9: not mounted."
+        );
+        assert_eq!(
+            UnmountError::NotDetachable(String::from("/")).to_string(),
+            "/: not a detachable volume."
+        );
+        assert_eq!(
+            UnmountError::Ambiguous(String::from("disk.adf")).to_string(),
+            "disk.adf: more than one volume was mounted from a file of that name; \
+             name it by where it is mounted."
+        );
+        assert!(UnmountError::NameCut(String::from("disk.adf"))
+            .to_string()
+            .ends_with("name the volume by where it is mounted."));
+        assert_eq!(
+            UnmountError::Usage.to_string(),
+            "invalid usage",
+            "no sentence"
+        );
     }
 
     /// Every locale's `OPTIONS` section documents exactly the switches
@@ -481,7 +870,7 @@ mod tests {
         for locale in tairix_help::REQUIRED_LOCALES {
             let path = alloc::format!("{help_root}/{locale}/unmount.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-            for switch in ["`-f, --force`", "`-?, --help`"] {
+            for switch in ["`-f, --force`", "`-h, -?, --help`"] {
                 assert!(
                     text.contains(switch),
                     "{locale}/unmount.md must document {switch}"

@@ -301,6 +301,19 @@ fn disk_icon_draws_only_what_the_device_reported() {
         )),
         IconKind::DiskOptical
     );
+    // A floppy is a floppy whatever carries it: a drive, or a disk image laid
+    // out for one.
+    assert_eq!(
+        disk_icon(Some(usb.with_form(tairix_abi::blkio::BlkForm::FloppyDisk))),
+        IconKind::DiskFloppy
+    );
+    assert_eq!(
+        disk_icon(Some(
+            BlkMedium::of_transport(BlkTransport::Virtual)
+                .with_form(tairix_abi::blkio::BlkForm::FloppyDisk)
+        )),
+        IconKind::DiskFloppy
+    );
     // A disk in a USB enclosure whose bridge reported its rotation is a hard
     // disk, exactly as one on an ATA bus is.
     let enclosed = BlkRotation::from_rate_field(5400, BlkRotationEvidence::RotationRateVpd);

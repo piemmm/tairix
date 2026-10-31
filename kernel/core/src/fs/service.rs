@@ -904,11 +904,11 @@ pub trait FilesystemService: Send + Sync {
     /// [`MountRecord`], in attach order, for the System Information
     /// introspection feed.
     ///
-    /// This is a read-only, system-wide, secret-free observation — it names
-    /// the mounted volumes and their permission flags, never file contents —
-    /// so it is ungated at this seam (the `sysinfo_introspect` syscall that
-    /// reaches it is itself capability-gated, and the `sysinfod` broker
-    /// applies any per-client policy). The default returns an empty snapshot,
+    /// This is a read-only, system-wide observation — every volume's source,
+    /// usage and owner, never file contents — ungated at this seam: the
+    /// `sysinfo_introspect` syscall that reaches it is itself
+    /// capability-gated, and the `sysinfod` broker withholds what one
+    /// principal keeps private from the others. The default returns an empty snapshot,
     /// so a service that owns no mount table (the fail-closed
     /// [`NullFilesystemService`]) truthfully reports "no mounts" rather than
     /// fabricating one.

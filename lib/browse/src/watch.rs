@@ -774,6 +774,33 @@ impl<C: Copy + Ord, H: Clone> Watches<C, H> {
         slot.watching.take().map(|(_, handle)| handle)
     }
 
+    /// The window is leaving everything `within` names — a volume about to
+    /// be ejected: the watch it holds there, and one offered with a listing
+    /// of there it has not taken, for the window to release. Anything it
+    /// holds elsewhere stays.
+    pub fn release_within(
+        &mut self,
+        client: C,
+        within: impl Fn(&[String]) -> bool,
+    ) -> [Option<H>; 2] {
+        let Some(slot) = self.slots.get_mut(&client) else {
+            return [None, None];
+        };
+        let watching = slot
+            .watching
+            .take_if(|(at, _)| within(at))
+            .map(|(_, handle)| handle);
+        if watching.is_some() {
+            slot.wanted = false;
+            slot.landed = WatchUpdate::Quiet;
+        }
+        let offered = slot
+            .offered
+            .take_if(|(at, _)| within(at))
+            .map(|(_, handle)| handle);
+        [watching, offered]
+    }
+
     /// The consumer is gone: everything it held goes, its watch and any
     /// offer returned to let go of outside the caller's lock.
     pub fn forget(&mut self, client: C) -> [Option<H>; 2] {

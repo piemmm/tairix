@@ -372,6 +372,12 @@ pub const TARGETS: &[Target] = &[
             "ADFS mount / decode (maps, disc records, boot block, fixed + big directories)",
     },
     Target {
+        package: "tairix-drv-fs-affs",
+        test: "fuzz_affs_mount",
+        description:
+            "AmigaDOS mount / walk / change (root, hash chains, extensions, OFS blocks, links, bitmap)",
+    },
+    Target {
         package: "tairix-drv-fs-iso9660",
         test: "fuzz_iso9660_mount",
         description:

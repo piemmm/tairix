@@ -49,34 +49,31 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
-    use tairix_test_audio_wire::Finisher;
+    use tairix_test_audio_wire::{COMMAND, PLAYER};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
     // because QEMU passes no `x0` DTB pointer at an ELF `-kernel` entry.
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-    /// `SyscallInvoked`, the audited record the finisher below counts.
+    /// `SyscallInvoked`, the audited record [`END`] reads.
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
-    /// The guest's verdict, fed every audited `exit`.
-    static FINISHER: Finisher = Finisher::new();
+    /// The run's end: the shell's exit after the tone fixture's or the
+    /// player's, whose decoder worker runs as the player too.
+    static END: FixtureExit = FixtureExit::new(&[COMMAND, PLAYER], SYSCALL_INVOKED_EVENT_ID);
 
-    /// Sink that replays every event through [`SERIAL_SINK`] and ends the run
-    /// once [`FINISHER`] says so.
+    /// Replays every event to the serial console and ends the run at [`END`].
     struct AudioSink;
 
     impl Sink for AudioSink {
         fn write_event(&self, event: &Event<'_>) {
             SerialSink::new().write_event(event);
-            if event.id != SYSCALL_INVOKED_EVENT_ID || field_str(event, "sc") != Some("exit") {
-                return;
-            }
-            if field_str(event, "comm").is_some_and(|comm| FINISHER.exited(comm)) {
+            if END.passed(event) {
                 qemu_exit::exit_success();
             }
         }
@@ -120,7 +117,7 @@ mod kernel {
             &SERIAL_SINK,
             &AUDIT_SINK,
             // `SyscallInvoked` is `Debug`, below the default filter, and
-            // the finisher above counts it.
+            // the run's end reads it.
             tairix_log::Level::Debug,
             &tairix_kernel::hwtree_store::HW_TREE_SOURCE,
         )

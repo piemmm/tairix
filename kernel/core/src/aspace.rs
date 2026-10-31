@@ -704,9 +704,7 @@ impl Drop for Description {
             return;
         }
         for wakes in crate::filelock::release_owner(self.lock_owner) {
-            if let Some(key) = wakes.key {
-                crate::waitq::file_lock_wake(WakeKey::new(key), &wakes.tasks);
-            }
+            wakes.wake();
         }
     }
 }

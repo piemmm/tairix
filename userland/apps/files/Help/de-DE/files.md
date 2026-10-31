@@ -108,11 +108,22 @@ Das Rechtsklickmenü beginnt mit *Anzeige*. Darunter nennt ein Untermenü,
 worauf das Menü wirkt — *Datei ‚notes.txt‘*, ein langer Name in der Mitte
 gekürzt, sodass seine Endung sichtbar bleibt, oder *Auswahl*, wenn mehrere
 Einträge ausgewählt sind — und enthält *Öffnen*, *Öffnen mit…*,
-*Informationen…*, *Umbenennen*, *Ausschneiden*, *Kopieren* und *Löschen*;
-eine Zeile, die dort nicht wirken kann, ist ausgegraut und nennt den Grund.
-Danach folgen *Neu*, dann *Alles auswählen* und *Auswahl aufheben* und
-zuletzt *Einfügen*. Ein Rechtsklick auf eine freie Stelle hebt die Auswahl
-auf, sodass das Untermenü des Eintrags ausgegraut ist.
+*Schreibgeschützt einhängen*, *Auswerfen*, *Informationen…*, *Umbenennen*,
+*Ausschneiden*, *Kopieren* und *Löschen*; eine Zeile, die dort nicht wirken
+kann, ist ausgegraut und nennt den Grund. Danach folgen *Neu*, dann *Alles
+auswählen* und *Auswahl aufheben* und zuletzt *Einfügen*. Ein Rechtsklick
+auf eine freie Stelle hebt die Auswahl auf, sodass das Untermenü des
+Eintrags ausgegraut ist.
+
+Das Öffnen eines Datenträgerabbilds — einer `.iso`-, `.adf`- oder
+`.hdf`-Datei und dergleichen — hängt es für Sie unter `/Storage` ein,
+beschreibbar, wo die Datei es ist, und öffnet sein Fenster;
+*Schreibgeschützt einhängen* hängt es stattdessen schreibgeschützt ein. Es
+bleibt eingehängt, bis Sie es auswerfen oder Ihre Anmeldesitzung endet.
+*Auswerfen* nimmt einen Datenträger heraus, den Sie eingehängt haben, von
+seinem Symbol oder von seiner Zeile in der Ortsleiste aus, deren eigenes
+Rechtsklickmenü *Öffnen* und *Auswerfen* enthält; Ihre Fenster darauf
+wechseln zuvor nach `/Storage`.
 
 Das Untermenü *Neu* des Rechtsklickmenüs legt einen Ordner oder ein leeres
 Dokument jeder Art an, die ein installierter Editor schreibt, und öffnet

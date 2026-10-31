@@ -90,7 +90,7 @@ pub use network::{
 
 use crate::bounded_text::BoundedText;
 use crate::driver::display::MAX_ACCEL_LAYERS;
-use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::le::{decode_bool, put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::power::PowerAction;
 use crate::Errno;
@@ -533,17 +533,6 @@ impl SwitchboardRequest {
             }),
             _ => Err(Errno::OutOfRange),
         }
-    }
-}
-
-/// Decode a wire boolean flag: exactly `0` or `1`, never a truthy-nonzero
-/// convention that would let a malformed frame silently mean something the
-/// sender never wrote.
-fn decode_bool(byte: u8) -> Result<bool, Errno> {
-    match byte {
-        0 => Ok(false),
-        1 => Ok(true),
-        _ => Err(Errno::OutOfRange),
     }
 }
 

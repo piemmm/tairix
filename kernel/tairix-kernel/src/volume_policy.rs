@@ -1,7 +1,8 @@
 //! How a volume whose format stores no owner model is presented: the
 //! removable-volume storage-group map (`plans/DEVICES.md` D3d), and the
-//! private, shared and explicit presentations of a network volume
-//! (`plans/FSSERVE.md` §6).
+//! private, shared and explicit presentations of a volume attached for one
+//! principal, a network share's or a disk image's (`plans/FSSERVE.md` §6,
+//! `plans/DISK-IMAGES.md`).
 //!
 //! A foreign filesystem such as FAT32 stores no per-file owner, mode,
 //! ACL, or capability gate, so its driver honestly reports one uniform,
@@ -39,8 +40,11 @@ use tairix_abi::driver::filesystem::{
     VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
-use tairix_abi::DriverError;
+use tairix_abi::netattach::Presentation;
+use tairix_abi::sysinfo::MountOwner;
 use tairix_abi::SeekRegion;
+use tairix_abi::{DriverError, Errno};
+use tairix_kernel_core::fs::Principal;
 use tairix_kernel_core::{Metadata, Mode};
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_sync::OnceCell;
@@ -63,14 +67,14 @@ impl Presented {
         Self::explicit(0, gid, 0o775, 0o664)
     }
 
-    /// A network volume private to `uid` and its primary group `gid`:
-    /// directories `rwx------`, files `rw-------`.
+    /// A volume private to `uid` and its primary group `gid`: directories
+    /// `rwx------`, files `rw-------`.
     #[must_use]
     pub const fn private(uid: u32, gid: GroupId) -> Self {
         Self::explicit(uid, gid, 0o700, 0o600)
     }
 
-    /// A network volume shared with the storage group `gid`: directories
+    /// A volume shared with the storage group `gid`: directories
     /// `rwxrwx---`, files `rw-rw----`.
     #[must_use]
     pub const fn shared(gid: GroupId) -> Self {
@@ -93,6 +97,56 @@ impl Presented {
     #[must_use]
     pub fn template(&self) -> Metadata {
         Metadata::new(UserId(self.uid), self.gid, Mode::from_bits(self.dir_mode))
+    }
+
+    /// The owner a volume `attacher` attached, presented so, is listed with:
+    /// private when it is presented to `attacher` and no one else, so another
+    /// principal is shown it withheld.
+    #[must_use]
+    pub const fn owner(&self, attacher: u32) -> MountOwner {
+        let others = 0o077;
+        MountOwner {
+            uid: attacher,
+            private: self.uid == attacher
+                && self.dir_mode & others == 0
+                && self.file_mode & others == 0,
+        }
+    }
+
+    /// How `caller` may be shown a volume attached for it, as it `asked`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for a shared or explicit presentation
+    /// without the mount authority, and [`Errno::NotFound`] for a shared one
+    /// on a system with no storage group to share it with.
+    pub fn asked_by(caller: &Principal<'_>, asked: Presentation) -> Result<Self, Errno> {
+        match asked {
+            Presentation::Private => Ok(Self::private(caller.uid, GroupId(caller.gid))),
+            Presentation::Shared | Presentation::Explicit { .. } if !caller.may_mount() => {
+                Err(Errno::PermissionDenied)
+            }
+            Presentation::Shared => LATE_STORAGE_GID
+                .get()
+                .map(Self::shared)
+                .ok_or(Errno::NotFound),
+            Presentation::Explicit {
+                uid,
+                gid,
+                dir_mode,
+                file_mode,
+            } => Ok(Self::explicit(uid, GroupId(gid), dir_mode, file_mode)),
+        }
+    }
+}
+
+/// The word an audit record names a presentation by.
+#[must_use]
+pub const fn presentation_word(presentation: Presentation) -> &'static str {
+    match presentation {
+        Presentation::Private => "private",
+        Presentation::Shared => "shared",
+        Presentation::Explicit { .. } => "explicit",
     }
 }
 

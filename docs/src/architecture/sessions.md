@@ -117,8 +117,20 @@ it, so walking on the path the anchor's death landed on would run every such
 teardown back to back there; the reaper runs them where the scheduler can
 preempt between them. Until it is serving, and for a session it cannot queue,
 the walk runs where the session ended (`SESSION_REAPER_UNAVAILABLE`, 4039, when
-it could not start at all). A session inside one that is already ending leaves
-its members to the outer walk, so the walk nests one level deep. Each member
+it could not start at all). What outlives a session's members and ends with
+it — an image volume one of them attached — is told of the end on the
+notifier, a pool of kernel tasks of its own (`NOTIFIER_TASKS`, four): the
+telling only notes what the observer now owes, and the tasks then do that
+work a piece each, parking where they must, so no session's end waits on a
+slow device's flush, and one owner's slow piece holds up only that owner's
+others. Each closed session is judged under a short hold of the table of its
+own, so the observer's work never runs with the table held. Word of several
+ends arrives as one telling, and wakes one task, which wakes the next only
+while more is owed; work a task that may not park comes to owe — an attach
+that gave up, say — wakes one too; and until the notifier serves, a session's
+end is told where it lands, on a caller that may park. A session inside one
+that is already ending leaves its members to the outer walk, so the walk
+nests one level deep. Each member
 ended is audited as `SessionMemberEnded` (4038) with its task, process, name
 and session — only when the session's kill recorded its death, so a member
 already dying of something else is not.

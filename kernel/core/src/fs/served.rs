@@ -123,7 +123,8 @@ impl ServerActivity {
 
     /// A reading that changes whenever the driver makes progress, or `None`
     /// while it is inside a transfer.
-    fn mark(&self) -> Option<u64> {
+    #[must_use]
+    pub fn mark(&self) -> Option<u64> {
         (self.busy.load(Ordering::Relaxed) == 0).then(|| self.progress.load(Ordering::Relaxed))
     }
 }
@@ -724,7 +725,8 @@ fn calling_task() -> Option<u64> {
 
 /// Whether a driver whose activity read `before` shows life reading `now`:
 /// it is inside a transfer, or finished one in between.
-fn shows_life(before: Option<u64>, now: Option<u64>) -> bool {
+#[must_use]
+pub fn shows_life(before: Option<u64>, now: Option<u64>) -> bool {
     now.is_none() || now != before
 }
 

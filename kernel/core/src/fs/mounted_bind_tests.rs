@@ -181,7 +181,10 @@ fn fixture() -> Fixture {
             "//nas/share",
             "smb3",
             SHARE_ID,
-            Some(ANN),
+            Some(tairix_abi::sysinfo::MountOwner {
+                uid: ANN,
+                private: true,
+            }),
         )
         .expect("share");
     let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
@@ -246,6 +249,16 @@ fn an_owner_binds_its_volume_over_an_empty_directory_it_owns() {
     assert_eq!(shown.binder(), Some(ANN));
     assert_eq!(shown.volume_id(), SHARE_ID);
     assert_eq!(shown.flags(), MountFlags::NOEXEC, "its volume's flags");
+    assert_eq!(
+        (shown.volume_owner(), shown.private()),
+        (Some(ANN), true),
+        "whose volume it shows, so it is shown as that volume is"
+    );
+    let root = listed
+        .iter()
+        .find(|view| view.target_bytes() == b"/")
+        .expect("the root");
+    assert_eq!((root.volume_owner(), root.private()), (None, false));
     assert!(f.audit.event_ids().contains(&AuditEvent::ViewBound.id().0));
 }
 

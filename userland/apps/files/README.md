@@ -152,6 +152,19 @@ the listing on show. Closing a window cancels what it was running, removing a
 file it was part-way through copying; every bring-up refusal exits fail-loud
 with a reserved code and a stated reason on `stderr`.
 
+Opening a **disk image** (`.iso`, `.adf`, `.adl`, `.adm`, `.ads`, `.hdf`)
+mounts the volume it holds, privately, and opens a window onto it at
+`/Storage/<name>`; *Mount Read-Only* in the context menu mounts it read-only
+however the file may be written. *Eject*, in the context menu and on a rail
+row's own menu, detaches a disk image's or a share's volume the user attached.
+A mount runs on a mount worker of its own (`tairix_browse::mount::MountWorker`),
+since an attach waits for the volume's driver; an eject runs on the app's
+reader, after the read under way, so no read or watch of the app's own still
+holds the volume (`plans/DISK-IMAGES.md`). A refusal of either is stated in an
+alert in the words the desktop uses too. The mount is
+the kernel's decision, made on the user's own open of the file
+(`CAP_FS_ACCESS`); no capability is added for it.
+
 The window's **title is the directory it is showing**, retitled over the
 window channel whenever — and only when — the browser moves, so the desktop
 and its taskbar always name the location rather than the program. A location
@@ -167,8 +180,8 @@ must never destroy the window. A primary press always closes.
 ## The places / devices sidebar
 
 A shortcut rail runs down the leading edge of the window, below the toolbar
-band: the user's own places above, every mounted volume below, with the
-listing and its scrollbar gutter inset beside it. A place name too long for
+band: the user's own places above, every mounted volume they can open below,
+with the listing and its scrollbar gutter inset beside it. A place name too long for
 the rail ends in the shared ellipsis, so hidden text is never silent. The
 row order is fixed, so the rail never reshuffles under the user: Home (the
 `Home` folder of their own files), Desktop, a drawn separation, then the
@@ -178,10 +191,11 @@ so a machine with many volumes reaches every one of them.
 
 The volumes are **real mount data, not a guess**. The app reads the
 `MOUNT_LIST` System Information query through the shared `lib/procinfo`
-client and offers only mounts reporting themselves *available*, so a
-surprise-removed device is never drawn as a row that would fail on the
-first click; a refused or failed query yields no volumes at all rather than
-a fabricated list. Each offered volume carries the storage medium its
+client and offers only mounts reporting themselves *available* and not
+withheld from the user, so neither a surprise-removed device nor another
+user's private volume is drawn as a row that would fail on the first click;
+listed in `/Storage`, each is still drawn as a drive. A refused or failed
+query yields no volumes at all rather than a fabricated list. Each offered volume carries the storage medium its
 backing device actually reports, and `tairix_icon::disk_icon` turns that
 medium into the shipped drive artwork — a hard disk (on an ATA bus or behind a
 USB bridge), an SSD, an NVMe drive, a USB flash drive, a USB unit that

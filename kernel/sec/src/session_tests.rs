@@ -82,23 +82,50 @@ fn nothing_joins_an_ending_session_or_one_nested_in_it() {
 }
 
 #[test]
+fn a_session_is_closed_once_it_or_an_enclosing_one_ends_and_the_root_never_is() {
+    let mut tree = SessionTree::new();
+    let login = found(&mut tree, 10, 1, ROOT_SESSION);
+    let desktop = found(&mut tree, 20, 2, login);
+    let lone = found(&mut tree, 30, 3, ROOT_SESSION);
+    assert!(!tree.closed(login) && !tree.closed(desktop) && !tree.closed(lone));
+    tree.depart(ProcessId(10), instance(1), login);
+    assert!(tree.closed(login), "ending, with members left");
+    assert!(tree.closed(desktop), "inside one that is ending");
+    tree.depart(ProcessId(30), instance(3), lone);
+    assert!(tree.closed(lone), "emptied and dropped");
+    assert!(tree.closed(instance(9)), "never held");
+    assert!(!tree.closed(ROOT_SESSION));
+}
+
+#[test]
 fn an_anchor_leaving_ends_its_session_only_while_members_remain() {
     let mut tree = SessionTree::new();
     let lone = found(&mut tree, 10, 1, ROOT_SESSION);
-    tree.depart(ProcessId(10), instance(1), lone);
+    assert!(tree
+        .depart(ProcessId(10), instance(1), lone)
+        .ended_a_session());
     assert!(released(&tree, lone), "an emptied session is dropped");
 
     let desktop = found(&mut tree, 20, 2, ROOT_SESSION);
     tree.place(ProcessId(30), instance(3), Placement::join(desktop))
         .expect("joined");
-    tree.depart(ProcessId(30), instance(3), desktop);
+    assert!(
+        !tree
+            .depart(ProcessId(30), instance(3), desktop)
+            .ended_a_session(),
+        "a member leaving ends nothing, so nothing is told"
+    );
     assert!(!tree.is_ending(desktop), "a member leaving ends nothing");
     tree.place(ProcessId(31), instance(4), Placement::join(desktop))
         .expect("joined");
-    tree.depart(ProcessId(20), instance(2), desktop);
+    assert!(tree
+        .depart(ProcessId(20), instance(2), desktop)
+        .ended_a_session());
     assert!(tree.is_ending(desktop));
     assert_eq!(members(&tree, desktop), [31]);
-    tree.depart(ProcessId(31), instance(4), desktop);
+    assert!(tree
+        .depart(ProcessId(31), instance(4), desktop)
+        .ended_a_session());
     assert!(released(&tree, desktop), "the last member frees it");
 }
 

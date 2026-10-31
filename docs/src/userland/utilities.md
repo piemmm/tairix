@@ -3,8 +3,8 @@
 Stage 6 ships a set of small command-line utilities, each its own crate.
 This page documents the ones that have landed (`sysinfo`, `ps`, `man`,
 `cat`, `clear`, `reset`, `ls`, `rm`, `cp`, `mv`, `chmod`, `chown`,
-`getcap`, `setcap`, `true`, `false`, `yes`, `basename`, and `dirname`)
-and is extended as the others (`mount`, …) arrive.
+`getcap`, `setcap`, `mount`, `unmount`, `true`, `false`, `yes`, `basename`,
+and `dirname`) and is extended as the others arrive.
 
 Every tool's `Output` below is the one shared byte stream,
 `tairix_util::output::Output`: its engine writes through it, a test captures
@@ -373,121 +373,135 @@ the denied-global capability mapping, the self-scope advisory record
 write-failure paths. The shared page walk and rendering carry their own
 unit tests in `lib/procinfo` (`cargo test -p tairix-procinfo`).
 
-## `mount` — list and attach filesystems (`userland/apps/mount`)
+## `mount` — list filesystems and mount disk images (`userland/apps/mount`)
 
-`tairix-mount` both reports and changes the mount table, and the two
-halves take deliberately different paths. **Listing** the mounted
-filesystems is a *read* of live system state, so — like `ps` — it goes
-through the System Information API (`AGENTS.md` §16.6): there is no
-`/proc` and no mount-table file, so `mount` issues the ungated
-`sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries served by
-`/System/Services/sysinfod.app/Run`. No `mount` bundle ships, and nothing
-implements the attach seam outside the tests (`plans/OPEN-DEFECTS.md`).
-**Attaching** a filesystem is privileged (it needs `CAP_FS_MOUNT`,
-`AGENTS.md` §5.2), and the kernel — not this tool — makes that decision
-(`AGENTS.md` §5.4).
+With no operands `mount` lists the mount table, a read of live system state
+through the ungated `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries — there
+is no `/proc` and no mount-table file. With an `IMAGE` operand it mounts the
+volume that disk-image file holds, privately, for the user who runs it
+([disk images](../filesystem/images.md)). The kernel recognises the image,
+decides whether it may be mounted, and audits the decision; `mount` makes no
+permission decision of its own. A device or volume `SOURCE` is not mounted:
+nothing yet lets a user name an unattached storage object
+(`plans/OPEN-DEFECTS.md` D1014).
 
-The crate is `no_std` (with `alloc`, used only by the test fixtures), has
-no `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
-(`AGENTS.md` §2.9). It depends only on the audited `tairix-abi` crate and
-the shared `tairix-procinfo` client helpers, so it never links a kernel
-or driver crate (`AGENTS.md` §17.4).
+The library is `no_std` with `alloc`, holds no `unsafe`, and reaches the
+outside world only through injected seams: `lib/procinfo`'s `Transport` for
+the listing, a `Mounter` for the mount, `lib/help`'s `HelpSource` for the
+short help.
 
 ### Grammar
 
 ```
-mount [-r] [-t TYPE] [-o OPTIONS] [--] [SOURCE TARGET]
+mount [-lrvw] [-t TYPE] [-o OPTIONS] [--] [IMAGE [TARGET]]
 
-  (no operands)        list the mounted filesystems
-  SOURCE TARGET        mount SOURCE at TARGET (needs CAP_FS_MOUNT)
-  -r, --read-only      mount read-only (same as -o ro)
-  -t, --types TYPE     filesystem type (probed when omitted)
-  -o, --options LIST   comma-separated: ro,rw,noexec
-  -h, --help           show the usage banner
+  (no operands)            list the mounted filesystems, of the types -t names
+  IMAGE                    mount the disk image IMAGE, at /Storage/NAME
+  IMAGE /Storage/NAME      mount it as NAME
+  IMAGE DIRECTORY          mount it, and show it at DIRECTORY too
+  -r, --read-only          mount read-only (as -o ro)
+  -w, --rw, --read-write   mount read-write, or not at all
+  -t, --types TYPE         the filesystem IMAGE must hold, or auto
+  -o, --options LIST       comma-separated: ro,rw,noexec,loop,name=NAME
+  -v, --verbose            say where it was mounted
+  -l, --show-labels        accepted for the listing, which carries no labels
+  -h, -?, --help           show the command's own short help
 ```
 
-With no operands `mount` lists the table; with exactly `SOURCE TARGET` it
-attaches. Value options accept their value attached (`-text4`,
-`--types=ext4`) or as the following argument; `-r` may cluster with other
-toggles. `--` ends option parsing. The recognised `-o` names map onto the
-`MountFlags` bitmap (`ro`/`rw` plus the `noexec` restriction). GNU `mount`'s
-`nosuid` and `nodev` are refused: TAIRiX has no setuid programs or device
-files for them to restrict.
+The options follow util-linux's `mount`: the last of `-r`, `-w`, `-o ro` and
+`-o rw` wins, `noexec` and `loop` are what an image is mounted as anyway, and
+`--` ends option parsing. `-w` never falls back to read-only: an image the user
+may not write, or whose filesystem is not written, is not mounted
+(`ImageAccess::Writable`), where `-o rw` and no option mount read-write where
+they can. `-t` takes a filesystem as the mount table names it
+(`tairix_abi::volume::FormatName`), or `auto` for whatever the image holds; an
+image holding another is refused `NotExpected`, and a type no disk image holds
+— a network protocol (`smb3`) among them — is an unknown filesystem type. `nosuid`,
+`nodev` and `exec` are refused: there are no setuid programs or device files to
+restrict, and an image never runs programs. `name=NAME` is TAIRiX's own, for
+the catalog name. With no operands `-t` filters the listing as util-linux's
+list does — comma-separated, matched without regard to ASCII case, an element
+spelled `no<type>` left out, a list beginning `no` showing every type it does
+not name (a binding showing no volume is of type `none`) — and `-v` and `-l`
+change nothing; only `-r`, `-w` and `-o` with nothing to mount are usage
+errors.
 
-### Listing — a client of the mount-list query
+### Mounting
 
-A listing reads the attached volumes (`MOUNT_LIST`) and the view bindings
-onto them (`VIEW_LIST`) through the same `lib/procinfo` machinery `ps`
-uses — the `Transport`/`Output` seams, the request framing, the generic
-`offset`/`limit` page walk, and the `Namespace` join of each binding to its
-volume by identity — so none of it is copied (`AGENTS.md` §2.2). The
-shared renderer prints one familiar `source on target type fstype
-(options)` line per binding, a carved-out subtree as `source[/subtree]`
-(as `findmnt` writes it) and the `/Storage` catalog, which shows no volume,
-as `none on /Storage type none`. The option list opens with `ro`/`rw` and
-then names each restriction in force, and a
-surprise-removed volume carries a trailing ` [unavailable-dirty]` /
-` [unavailable-lost]` marker (`plans/DEVICES.md` D4b), a re-inserted
-volume whose non-mutation could not be proven carries
-` [recovery-conflict]` (`plans/DEVICES.md` D4c), and a live volume whose
-backing device reports itself unwell carries ` [degraded]` or
-` [recovering]` from its I/O health (`plans/FIX-IO.md` IO3) — additive, so
-a healthy volume's line keeps the classic shape while an unwell, dead, or
-conflicted one never looks healthy. The query
-is ungated: the mount table is system-wide and secret-free, so any task
-may read it (`AGENTS.md` §16.6).
+`IMAGE` is opened read-write unless `-r` asked otherwise — read-only where the
+user may only read it, unless `-w` asked for it read-write
+(`tairix_rt::image_attach_path`) — and attached with the `Private`
+presentation. A `TARGET` of `/Storage/NAME` asks for that catalog
+name; any other is bound as well, first resolved through `realpath` as
+util-linux canonicalises a mount point, and refused as itself where it does
+not resolve or is longer than a binding is listed with
+(`tairix_abi::volume::is_binding_path`). The kernel answers a directory that
+would not take the volume as such (`ImageAttachReply::TargetRefused`), and a
+name asked that the volume may not take (`ImageAttachReply::NameRefused`), so
+each refusal names the directory or the catalog entry, never the image: a name
+its naming policy keeps reads as a name no volume may take (exit `1`, with the
+hint to `--help`), one in use as `/Storage/NAME` refusing the mount (exit
+`32`). `mount`
+is silent on success. `-v` writes
+`mount: IMAGE mounted on TARGET.`; a volume mounted read-only that was not asked
+to be is warned of on standard error as util-linux warns of a write-protected
+source, as the attach's reply says (`AttachReply::read_only`).
 
-### Attaching — a presenter, not a policy point
+### Listing
 
-For a `SOURCE TARGET` request `mount` parses and validates the arguments
-and hands a `MountSpec` to the injected `Mounter` seam; it makes no
-permission decision of its own. The kernel is the policy point
-(`AGENTS.md` §5.4): a caller lacking `CAP_FS_MOUNT`, an unknown source, a
-bad superblock, or an already-mounted target is refused there and
-surfaced as `MountError::Mount(errno)`. `mount` writes nothing on a
-successful attach. A `None` filesystem type asks the kernel to identify
-the volume by probing; `mount` never guesses one (`AGENTS.md` §2.1).
+The listing reads the attached volumes and the view bindings onto them
+through the same `lib/procinfo` machinery `ps` uses, and the shared renderer
+prints one `source on target type fstype (options)` line per binding: a
+carved-out subtree as `source[/subtree]`, the `/Storage` catalog as
+`none on /Storage type none`, and a surprise-removed, conflicted or unwell
+volume with a trailing marker (` [unavailable-dirty]`, ` [recovery-conflict]`,
+` [degraded]`, …), so it never looks healthy.
 
-### Fail closed
+### Exit status
 
-- An option `getopt` refuses (an unknown one, a missing value, a value
-  given to a flag) is a `MountError::Option`, worded as it words it.
-- A number of operands other than zero or two is a `MountError::Usage`;
-  mount options given with no operands are also a usage error (there is
-  nothing to mount).
-- An unknown or empty `-o`/`-t` value is a `MountError::BadOption`.
-- A listing transport failure or a reply that does not decode against
-  `sysinfo-v1` is a hard `MountError::Service`, never a partially-rendered
-  guess; a refused or failed attach is `MountError::Mount`; a failed
-  terminal write is `MountError::Output`. There is no panic (`AGENTS.md`
-  §2.9).
+As util-linux's: `0` on success, `1` for a command line not understood (an
+option `getopt` refuses, more than two operands, options with nothing to
+mount, two different names, an unknown `-o` element or an empty listing `-t`
+type, a name no volume may take — the kernel's naming policy's among them),
+`2` when the listing or the terminal failed, and `32` when the image was not
+mounted — an unknown filesystem type, a directory that would not take it, a
+write-protected image `-w`
+asked to write, its refusal stated in the user's words
+(`ImageRefusal::reason`), the kernel's `Errno`, or `already mounted on` where
+the volume is, after where it was asked to go. A failure is a sentence ending
+in a full stop, as util-linux words it — `IMAGE is write-protected but explicit
+read-write mode requested.` among them — and is printed alone; a command line
+not understood is not, and is followed by the hint to `--help`.
 
-### Tests
-
-`cargo test -p tairix-mount` drives the parser and the engine against an
-in-memory `sysinfod` fixture, a recording output, and an in-memory
-mounter: the command grammar (list vs mount vs help, every option form,
-attached/space values, the read-only shorthand, `--`, and the
-usage/bad-option rejections), the binding listing and its query
-routing, the empty table, the service- and output-failure paths, the
-attach request reaching the mounter with the right fields, and the denied
-attach mapping to `MountError::Mount`. The shared page walk and the
-`source on target type fstype (options)` rendering carry their own unit
-tests in `lib/procinfo` (`cargo test -p tairix-procinfo`).
+Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS`. `cargo test -p tairix-mount`
+drives the grammar, the listing and its query routing, the private attach and
+every field it carries, targets, the verbose line and the read-only warning,
+every refusal and its status, and the thirteen-locale `OPTIONS` pinning of
+the bundled `Help/` documents.
 
 ## `unmount` — detach a runtime-attached volume (`userland/apps/unmount`)
 
 `tairix-unmount` is `mount`'s counterpart (`plans/DEVICES.md` D4b):
 `unmount NAME` takes the volume mounted under `NAME` out of service.
-`NAME` is the volume's catalog name (`usb1`) or its mount-point path
-(`/Storage/usb1`), resolved through the same ungated `sysinfo-v1`
-`MOUNT_LIST` query the other tools use — whose records carry each
-mount's stable 16-byte volume identity and its availability — and the
-resolved identity is handed to the kernel's `volume_detach` path
-through the injected `Detacher` seam. The kernel is the policy point
-(`AGENTS.md` §5.4): it requires `CAP_FS_MOUNT`, flushes the filesystem
-and the device, retracts the mount, withdraws the durable `id::` root,
-and audits every decision. A successful detach writes nothing, matching
+`NAME` is the volume's catalog name (`usb1`), a directory it is mounted on
+(`/Storage/usb1`, or the one `mount IMAGE DIR` bound it at), or the source it
+was mounted from — a disk image's file name — resolved through the same
+ungated `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries the other tools use
+(`tairix_procinfo::Namespace`), whose records carry each mount's stable
+16-byte volume identity, availability and owner. A path names the binding at
+it, never one above it. A file name two users' images share resolves to the
+caller's own; one two of either could mean, or one the listing keeps only the
+start of (`MountRecord::source_cut`), names no volume and says to name it by
+where it is mounted. A path — any name holding a slash, relative or ending in
+one — is canonicalised first, as `mount` resolves one. Another user's private
+volume lists neither its file name nor the directories it is bound at, so it
+is named by its catalog entry, and a miss beside one says so rather than
+"not mounted". The resolved identity is handed to the kernel's
+`volume_detach` path through the injected `Detacher` seam. The kernel is the
+policy point (`AGENTS.md` §5.4): the user who attached a disk image or a
+network share may detach it, any other volume needs `CAP_FS_MOUNT`, and the
+kernel flushes the filesystem and the device, retracts the mount, withdraws
+the durable `id::` root, and audits every decision. A successful detach writes nothing, matching
 the established `umount` behaviour (`AGENTS.md` §16.7).
 
 ### Grammar
@@ -495,9 +509,10 @@ the established `umount` behaviour (`AGENTS.md` §16.7).
 ```
 unmount [-f | --force] [--] NAME
 
-  NAME          the volume to detach (catalog name or mount point)
+  NAME          the volume to detach (catalog name, a directory it is mounted on,
+                or a disk image's file name)
   -f, --force   force-unmount: revoke open files, discard retained uncommitted data
-  -?, --help    show the command's own short help
+  -h, -?, --help  show the command's own short help
 ```
 
 ### Force-unmount — the audited exit for an unavailable volume
@@ -516,7 +531,11 @@ still commits cleanly; nothing is discarded when the flush succeeds.
 A volume a descriptor still holds a file of, or a process's working
 directory is on, refuses a plain detach too (`Busy`); `--force` then
 revokes the descriptors and working directories, which answer stale from
-then on, and the event carries how many it revoked.
+then on, and the device's event carries how many it revoked. A disk image's
+detach is audited as its own (`fs.image.detached`, 4323, with the nodes
+revoked and whether a flush was given up), and a network share's as its own
+(`fs.network.detached`, 4303, caused `forced` or `forced_unflushed`), never
+as a device's force-unmount.
 A verified re-insert needs no tool at all: a re-attached volume whose
 non-mutation is proven has its retained writes replayed by the kernel
 and returns to full service (`fs.hotplug.reinsert_replayed`).
@@ -527,19 +546,24 @@ an fd-3 `suggestion` record (`fs.volume_unavailable_force_required`,
 
 ### Fail closed
 
-- An unknown option or a number of operands other than one is a usage
-  error (exit `1`).
+- An unknown option, a number of operands other than one, or an empty
+  `NAME` (an unset variable expanded to nothing) is a usage error (exit
+  `1`).
 - A name matching no mount is `NotFound`; a matched mount with no
   detachable volume identity (the permanent boot volumes, the in-RAM
   view bindings) is `NotDetachable` — the tool never sends the kernel a
-  nil identity or guesses a volume.
-- A refused detach surfaces the kernel's exact `Errno`; a listing
-  failure is a hard `Service` error, never a partially-resolved guess.
-  There is no panic (`AGENTS.md` §2.9).
+  nil identity or guesses a volume. Both exit `32`, util-linux's status
+  for an unmount that failed.
+- A refused detach surfaces the kernel's exact `Errno`: exit `1` when the
+  caller may not detach the volume, `32` when the detach itself failed
+  (the volume busy, its flush refused). A listing or terminal failure is
+  a hard error, exit `2`, never a partially-resolved guess. There is no
+  panic (`AGENTS.md` §2.9).
 
 Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` + `CAP_FS_MOUNT`.
 `cargo test -p tairix-unmount` drives the parser, the resolver (catalog
-name, mount-point path, unknown name, non-detachable mounts), the
+name, mount-point path, a source another user's image shares, unknown name,
+non-detachable mounts), the
 force flag reaching the kernel, the refusal paths with and without the
 fd-3 suggestion, the service-failure path, and the thirteen-locale
 `OPTIONS` pinning of the bundled `Help/` documents.
@@ -654,19 +678,24 @@ available space, use percentage, and the view path showing it — or, with
 `file` operands, the binding covering each operand (the longest view path
 prefixing it, one row per binding) reported from the volume that binding
 shows, so `/System/Logs`, carved out of the root volume, reports the root
-volume's figures rather than `/System`'s. Like `mount`'s listing, the data
+volume's figures rather than `/System`'s. Another user's private volume
+lists no binding but its catalog entry, so a directory it is bound at
+elsewhere is reported as the volume beneath it. Like `mount`'s listing, the data
 is a read of live system state through the ungated `sysinfo-v1`
 `MOUNT_LIST` and `VIEW_LIST` queries (the shared `tairix_procinfo::Namespace`
 join — never a second query client and never a `/proc`), whose volume
 records carry each volume's `VolumeStats` as the mounted driver reports
 its own accounting. The default view leaves out a volume reporting no
-capacity; `-a` lists every binding instead, a volume's bind mounts and the
-`/Storage` catalog (a `none` pseudo filesystem) included, and the hidden
-count is noted on fd 3 (`fs.mounts_omitted`, `AGENTS.md` §20.1).
+capacity, and another user's private volume, whose figures are withheld;
+`-a` lists every binding instead, a volume's bind mounts and the `/Storage`
+catalog (a `none` pseudo filesystem) included, and a withheld volume with `-`
+for every figure, as GNU writes one it does not know. Each hidden count is
+noted on fd 3 (`fs.mounts_omitted`, `fs.private_mounts_omitted`,
+`AGENTS.md` §20.1).
 `-T`/`-t`/`-x` add and filter by filesystem type, `-i` reports inode
 counts (a dynamic-inode volume reports the honest zeros), `-P` selects
-the POSIX portable wording, `--total` appends a summed row, `-l` accepts
-the local-only filter (every TAIRiX mount is local), and
+the POSIX portable wording, `--total` appends a summed row, `-l` leaves
+out the network shares, and
 `-k`/`-h`/`-H`/`--si`/`-B <size>` select the scale through the shared
 `tairix_util::size` vocabulary `du` uses too (`AGENTS.md` §2.2). Columns
 are auto-sized; numbers right-align. A missing or relative operand is
@@ -1575,7 +1604,10 @@ covering the **canonical** path (`fs_realpath`), matched by whole components,
 and the volume that binding shows — so a link into another volume reports the
 volume it lands on, `/vol` never claims `/volume/x`, and `/System/Logs`,
 carved out of the root volume, reports the root volume rather than
-`/System`'s. `%U` comes from the ungated user directory `whoami` reads.
+`/System`'s. Another user's private volume lists no binding but its catalog
+entry, so a directory it is bound at elsewhere names the binding beneath it,
+while `%d`, the kernel's own answer, names the volume. `%U` comes from the
+ungated user directory `whoami` reads.
 Neither adds a capability. A fact that cannot be read renders `?`, or GNU's
 `UNKNOWN` for a name, never a plausible substitute.
 

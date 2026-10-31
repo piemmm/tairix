@@ -181,6 +181,7 @@ members = [
 
     # Drivers — filesystem
     "drivers/filesystem/adfs",
+    "drivers/filesystem/affs",
     "drivers/filesystem/ext4",
     "drivers/filesystem/fat32",
     "drivers/filesystem/arxfs",
@@ -525,6 +526,8 @@ members = [
     "tests/integration/memsoak_qemu_aarch64",
     "tests/integration/optical_program",
     "tests/integration/optical_qemu_aarch64",
+    "tests/integration/images_program",
+    "tests/integration/images_qemu_aarch64",
     "tests/integration/stalltrace_program",
     "tests/integration/stalltrace_qemu_aarch64",
     "tests/integration/watchdog_service_program",
@@ -542,6 +545,7 @@ members = [
     "tests/integration/virtio_qemu_support",
     "tests/integration/fat32_image",
     "tests/integration/iso9660_image",
+    "tests/integration/amiga_image",
     "tests/integration/netstack_wire",
     "tests/integration/spawn_supervision",
     "tests/integration/rtc_fixture",

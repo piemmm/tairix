@@ -82,8 +82,8 @@ static UNLOCK_BOOT: SpinLock<UnlockBoot> = SpinLock::new(UnlockBoot::EMPTY);
 
 /// Resolve the bootstrap root binding from the discovered `tree`, stash it
 /// with the firmware DTB pointer for the init seam, and move `tree` — plus
-/// the synthetic virtual bus every machine has ([`crate::virtual_bus`]) —
-/// into the authoritative hardware inventory
+/// the kernel's two synthetic parents every machine has — into the
+/// authoritative hardware inventory
 /// ([`crate::hwtree_store::HW_TREE`]), which then holds the kernel's one
 /// copy of it.
 ///
@@ -93,16 +93,17 @@ static UNLOCK_BOOT: SpinLock<UnlockBoot> = SpinLock::new(UnlockBoot::EMPTY);
 /// same inventory through `hw_emit_node`, and the autoload load gate resolves
 /// a matched node's grants from it.
 ///
-/// The virtual bus is added here rather than by each architecture's
-/// discovery because firmware cannot describe it and every port needs it
-/// identically: it is the parent a *composed* block device hangs from.
+/// The virtual bus and the image volumes' parent are added here rather than
+/// by each architecture's discovery because firmware cannot describe them and
+/// every port needs them identically: they are the parents a *composed* block
+/// device and an image volume hang from.
 ///
 /// The endpoint registry reports to the inventory from here on which link
 /// suppliers are serving, so the device manager binds their consumers only
 /// once they are.
 ///
 /// The store takes one seed for the boot, so a tree it refuses, or no memory
-/// to add the bus, leaves the inventory empty and no device autoloads; the
+/// to add those two, leaves the inventory empty and no device autoloads; the
 /// refusal is logged with its errno ([`BOOT_TREE_REFUSED`]), and the binding
 /// is stashed either way.
 ///
@@ -113,9 +114,10 @@ pub fn record_boot(dtb: u64, mut tree: Vec<HwNode>, audit: &dyn Sink) {
     *UNLOCK_BOOT.lock() = UnlockBoot { binding, dtb };
     tairix_kernel_core::callreg::install_link_observer(&crate::hwtree_store::LINK_SERVICE);
     tairix_kernel_core::hwtree::install_driver_tree(&crate::hwtree_store::HW_TREE);
-    let seeded = match tree.try_reserve(1) {
+    let seeded = match tree.try_reserve(2) {
         Ok(()) => {
             tree.push(crate::virtual_bus::node());
+            tree.push(crate::volume_service::image_volumes_node());
             crate::hwtree_store::HW_TREE.seed(tree)
         }
         Err(_) => Err(Errno::OutOfMemory),
@@ -1066,10 +1068,24 @@ mod tests {
                 .expect("the snapshot fits in memory")
         };
         let snap = inventory();
-        assert_eq!(snap.len(), 4, "the seeded tree plus the virtual bus");
+        assert_eq!(
+            snap.len(),
+            5,
+            "the seeded tree plus the kernel's two parents"
+        );
         assert_eq!(snap[0], seed[0], "existing nodes are kept whole");
         assert_eq!(snap[1], seed[1]);
         assert_eq!(snap[3], seed[2]);
+        assert_eq!(
+            snap[4],
+            crate::volume_service::image_volumes_node(),
+            "every boot publishes the image volumes' parent"
+        );
+        assert_eq!(snap[4].parent(), HW_NODE_ROOT_ID);
+        assert!(
+            snap[4].match_keys().is_empty() && snap[4].resources().is_empty(),
+            "no driver binds the image volumes' parent, and it grants nothing"
+        );
         assert_eq!(
             snap[2],
             crate::virtual_bus::node(),
@@ -1098,9 +1114,9 @@ mod tests {
             .expect("an id is free");
         assert!(id > audio, "issued above every seeded id");
         let snap = inventory();
-        assert_eq!(snap.len(), 5, "the runtime child is added, nothing dropped");
-        assert_eq!(snap[4].id(), id, "the store assigned the published id");
-        assert_eq!(snap[4].parent(), 2, "parented under the emitter's node");
+        assert_eq!(snap.len(), 6, "the runtime child is added, nothing dropped");
+        assert_eq!(snap[5].id(), id, "the store assigned the published id");
+        assert_eq!(snap[5].parent(), 2, "parented under the emitter's node");
 
         // A second boot record cannot re-seed, which would drop the child; it
         // says so under its own id with the store's cause, and still stashes

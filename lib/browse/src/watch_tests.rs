@@ -455,6 +455,28 @@ fn closing_or_leaving_hands_the_watch_back_to_release() {
 }
 
 #[test]
+fn leaving_a_volume_releases_what_lies_on_it_and_nothing_else() {
+    let mut watches = Watches::new();
+    let on_disk = |at: &[String]| at.starts_with(&self::at(&["Storage", "disk"]));
+    installed(&mut watches, 0, &["Storage"], 1);
+    watches.offer(0, &at(&["Storage", "disk"]), 2);
+    assert_eq!(
+        watches.release_within(0, on_disk),
+        [None, Some(2)],
+        "an offer there not yet taken goes, the catalog's watch stays"
+    );
+    assert!(watches.want_drain(0), "still watching the catalog");
+    installed(&mut watches, 1, &["Storage", "disk", "Games"], 3);
+    watches.want_drain(1);
+    assert_eq!(watches.release_within(1, on_disk), [Some(3), None]);
+    assert!(
+        watches.next_drain().is_some_and(|(whose, ..)| whose == 0),
+        "the released window drains nothing"
+    );
+    assert_eq!(watches.release_within(2, on_disk), [None, None]);
+}
+
+#[test]
 fn a_stopping_desk_records_nothing() {
     let mut watches = Watches::new();
     installed(&mut watches, 0, &["Users"], 1);

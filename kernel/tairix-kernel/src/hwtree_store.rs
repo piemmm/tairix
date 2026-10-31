@@ -40,6 +40,20 @@ use tairix_sync::SpinLock;
 /// The first id an unseeded store issues: the root's is never handed out.
 const FIRST_ISSUED_ID: u32 = HW_NODE_ROOT_ID + 1;
 
+/// Halfway from `next_id` to the end of the id space: below it a principal's
+/// requests are issued ids. No id is reissued, so without it an unprivileged
+/// principal cycling requests could spend the ids every device needs.
+const fn requested_ceiling(next_id: u32) -> u32 {
+    next_id + (HW_NODE_ROOT - next_id) / 2
+}
+
+/// Whose discovery or request a published node is issued an id for.
+#[derive(Copy, Clone)]
+enum IssuedFor {
+    Device,
+    Principal,
+}
+
 /// The lock-guarded inventory and its change counter, mutated together so
 /// a snapshot and the generation it was taken at are always consistent.
 struct Inner {
@@ -53,6 +67,8 @@ struct Inner {
     /// The id the next published node is given: above every id the store has
     /// ever held, so no id is reissued within a boot.
     next_id: u32,
+    /// [`requested_ceiling`] of the ids left once the store was seeded.
+    requested_ceiling: u32,
     /// The admission generation of the driver each driven node is held by,
     /// so a release that lands after a successor's admission frees nothing.
     driven: BTreeMap<u32, u64>,
@@ -98,6 +114,7 @@ impl HwTreeStore {
                 nodes: Vec::new(),
                 generation: 0,
                 next_id: FIRST_ISSUED_ID,
+                requested_ceiling: requested_ceiling(FIRST_ISSUED_ID),
                 driven: BTreeMap::new(),
             }),
         }
@@ -143,6 +160,7 @@ impl HwTreeStore {
             }
             inner.nodes = tree;
             inner.next_id = next_id;
+            inner.requested_ceiling = requested_ceiling(next_id);
             inner.generation += 1;
         }
         // Woken after the inner lock is dropped so the scheduler's `unpark`
@@ -181,7 +199,31 @@ impl HwTreeStore {
     /// [`Errno::NoSpace`] once the id space is spent; the root sentinel
     /// ([`HW_NODE_ROOT`]) is never issued. [`Errno::OutOfMemory`] when the
     /// inventory cannot grow.
-    pub fn publish_child(&self, parent_id: u32, mut node: HwNode) -> Result<u32, Errno> {
+    pub fn publish_child(&self, parent_id: u32, node: HwNode) -> Result<u32, Errno> {
+        self.publish_for(parent_id, node, IssuedFor::Device)
+    }
+
+    /// [`Self::publish_child`] for a node a principal's request publishes
+    /// rather than a device's discovery: issued only from the lower half of
+    /// the ids left once the store was seeded, so however fast an
+    /// unprivileged principal cycles its requests, the devices and drivers
+    /// keep the other half.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::publish_child`]; [`Errno::NoSpace`] once the requested half
+    /// is spent.
+    pub fn publish_requested_child(&self, parent_id: u32, node: HwNode) -> Result<u32, Errno> {
+        self.publish_for(parent_id, node, IssuedFor::Principal)
+    }
+
+    /// Publish `node` under `parent_id`, issued an id for `issued_for`.
+    fn publish_for(
+        &self,
+        parent_id: u32,
+        mut node: HwNode,
+        issued_for: IssuedFor,
+    ) -> Result<u32, Errno> {
         let id = {
             let mut inner = self.inner.lock();
             let Some(parent) = inner.node(parent_id) else {
@@ -189,7 +231,11 @@ impl HwTreeStore {
             };
             node.admit_published(parent.is_settled());
             let id = inner.next_id;
-            if id == HW_NODE_ROOT {
+            let ceiling = match issued_for {
+                IssuedFor::Device => HW_NODE_ROOT,
+                IssuedFor::Principal => inner.requested_ceiling,
+            };
+            if id >= ceiling {
                 return Err(Errno::NoSpace);
             }
             inner.nodes.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
@@ -533,20 +579,29 @@ impl HwTreeStore {
     ///
     /// Encoded under the store's lock straight into one buffer, so the header
     /// always matches the nodes that follow it and no intermediate copy of
-    /// the node list is made. Defined here, beside the store it serialises,
-    /// so the wire layout has exactly one encoder.
+    /// the node list is made. The buffer is allocated before the lock is
+    /// taken, so a publish or a driver's resource lookup does not wait out
+    /// the allocator; only a tree grown meanwhile allocates the rest under
+    /// it. Defined here, beside the store it serialises, so the wire layout
+    /// has exactly one encoder.
     ///
     /// # Errors
     ///
     /// [`Errno::OutOfMemory`] when the buffer cannot be allocated.
     pub fn encode_snapshot(&self) -> Result<Vec<u8>, Errno> {
+        let wire_len = |count: usize| {
+            count
+                .checked_mul(HwNode::WIRE_LEN)
+                .and_then(|nodes| nodes.checked_add(HwTreeHeader::WIRE_LEN))
+                .ok_or(Errno::OutOfMemory)
+        };
+        let mut blob = Vec::new();
+        let seen = self.inner.lock().nodes.len();
+        blob.try_reserve_exact(wire_len(seen)?)
+            .map_err(|_| Errno::OutOfMemory)?;
         let inner = self.inner.lock();
         let count = inner.nodes.len();
-        let len = count
-            .checked_mul(HwNode::WIRE_LEN)
-            .and_then(|nodes| nodes.checked_add(HwTreeHeader::WIRE_LEN))
-            .ok_or(Errno::OutOfMemory)?;
-        let mut blob = Vec::new();
+        let len = wire_len(count)?;
         blob.try_reserve_exact(len)
             .map_err(|_| Errno::OutOfMemory)?;
         let header = HwTreeHeader::new(
@@ -1028,6 +1083,42 @@ mod tests {
         );
         assert_eq!(snapshot(&store).len(), 2, "nothing was added");
         assert_eq!(store.generation(), before);
+    }
+
+    #[test]
+    fn a_principals_requests_never_spend_the_ids_devices_need() {
+        let seeded = 0x8008_0000;
+        let ceiling = requested_ceiling(seeded + 1);
+        assert_eq!(ceiling - (seeded + 1), (HW_NODE_ROOT - (seeded + 1)) / 2);
+        let store = HwTreeStore::new();
+        store
+            .seed(alloc::vec![
+                HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+                HwNode::new(seeded, 1, HwDeviceClass::Bus),
+            ])
+            .expect("a fresh store seeds");
+        let requested = || {
+            store.publish_requested_child(1, HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Storage))
+        };
+        assert_eq!(
+            requested(),
+            Ok(seeded + 1),
+            "half of what is left after the seed"
+        );
+        store.inner.lock().next_id = ceiling - 1;
+        assert_eq!(requested(), Ok(ceiling - 1));
+        let before = store.generation();
+        assert_eq!(
+            requested(),
+            Err(Errno::NoSpace),
+            "the requested half is spent"
+        );
+        assert_eq!(store.generation(), before, "nothing was added");
+        assert_eq!(
+            publish(&store, 1, HwDeviceClass::Input),
+            ceiling,
+            "a device is still issued the next id"
+        );
     }
 
     #[test]

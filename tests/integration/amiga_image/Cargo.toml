@@ -1,0 +1,24 @@
+[package]
+name = "tairix-test-amiga-image"
+description = "AmigaDOS disks laid out for tests: a Fast File System volume holding one file, and a disk an Amiga Rigid Disk Block partitions, shared by the kernel's image scenarios, the volume probe's tests and the disk-image vertical."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` + `alloc`, so it links into the kernel's and the probe's host tests
+# and the host build tool that plants the vertical's floppy.
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The volume is laid out by the driver's own formatter.
+tairix-drv-fs-affs = { path = "../../../drivers/filesystem/affs", version = "=0.0.0" }
+# The AmigaDOS long and checksum encoders and the date stamp.
+tairix-fsprobe = { path = "../../../lib/fsprobe", version = "=0.0.0" }

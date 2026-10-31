@@ -20,7 +20,9 @@ propria contabilità. Per impostazione predefinita il rapporto nasconde
 i montaggi senza capacità propria (i collegamenti di vista sintetici
 del sistema) e i montaggi ulteriori di un volume già elencato; `-a`
 mostra tutto, e il numero di voci nascoste è annotato sul flusso di
-informazioni standard (fd 3), mai nella tabella.
+informazioni standard (fd 3), mai nella tabella. Anche un volume che
+un altro utente tiene privato è omesso, e annotato a parte; `-a` lo
+elenca con `-` per ogni cifra che solo quell'utente può vedere.
 
 Le dimensioni sono stampate in blocchi da 1024 byte salvo che
 un'opzione di unità scelga diversamente; un'opzione di unità
@@ -37,8 +39,9 @@ continua con il resto. Le opzioni GNU `--output`, `--sync` e
 
 ## OPTIONS
 
-- `-a, --all` — includere i montaggi senza capacità e duplicati che
-  il comportamento predefinito nasconde.
+- `-a, --all` — includere i montaggi senza capacità e duplicati, e i
+  volumi privati di altri utenti, che il comportamento predefinito
+  nasconde.
 - `-T, --print-type` — aggiungere la colonna del tipo di filesystem.
 - `-t, --type <type>` — riportare solo i filesystem del tipo `type`
   (ripetibile).
@@ -48,8 +51,8 @@ continua con il resto. Le opzioni GNU `--output`, `--sync` e
   dei blocchi.
 - `-P, --portability` — il formato portabile POSIX (intestazioni
   `1024-blocks` e `Capacity`).
-- `-l, --local` — limitare il rapporto ai filesystem locali (oggi
-  ogni montaggio TAIRiX: non si filtra nulla).
+- `-l, --local` — limitare il rapporto ai filesystem locali,
+  omettendo le condivisioni di rete.
 - `--total` — aggiungere una riga etichettata `total` che somma le
   cifre mostrate.
 - `-k` — blocchi da 1024 byte (il valore predefinito).

@@ -362,16 +362,7 @@ mod program {
             // list says so — never an error, never a fabricated volume.
             let mut volumes = Vec::new();
             let walked = for_each_mount(&IpcTransport, |record| {
-                let Ok(target) = core::str::from_utf8(record.target_bytes()) else {
-                    return Ok(WalkStep::Continue);
-                };
-                let fstype =
-                    String::from(core::str::from_utf8(record.fstype_bytes()).unwrap_or("?"));
-                volumes.push(VolumeInfo {
-                    target: String::from(target),
-                    fstype,
-                    space: VolumeBytes::of(&record.usage()),
-                });
+                volumes.extend(VolumeInfo::of(record));
                 Ok(WalkStep::Continue)
             });
             match walked {

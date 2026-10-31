@@ -172,10 +172,26 @@ mod tests {
 
     #[test]
     fn an_exhausted_gid_space_fails_closed() {
-        let channel = MemChannel::new(&[("wheel", 0), ("max", u32::MAX)]);
+        let top = tairix_abi::UNASSIGNABLE_ID - 1;
+        assert!(
+            tairix_users::IdRange::User.contains(top)
+                && !tairix_users::IdRange::User.contains(top + 1),
+            "the band's last gid"
+        );
+        let channel = MemChannel::new(&[("wheel", 0), ("max", top)]);
         let db = GroupsAdminDb::new(&channel);
         assert_eq!(db.create(&spec("audio", None)), Err(Errno::OutOfRange));
         assert!(channel.created().is_empty());
+    }
+
+    /// The id every sentinel is spelled with names no group, so one a
+    /// registry somehow holds never steers the allocation.
+    #[test]
+    fn the_unassignable_gid_steers_no_allocation() {
+        let channel = MemChannel::new(&[("wheel", 0), ("odd", tairix_abi::UNASSIGNABLE_ID)]);
+        let db = GroupsAdminDb::new(&channel);
+        assert_eq!(db.create(&spec("audio", None)), Ok(()));
+        assert_eq!(channel.created(), [("audio".to_string(), 1000)]);
     }
 
     #[test]

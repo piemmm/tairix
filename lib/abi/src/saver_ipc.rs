@@ -23,7 +23,7 @@ use crate::font_ipc::{
     FontRequest, FONT_MAX_FAMILIES_REPLY, FONT_MAX_GLYPH_REPLY, FONT_MAX_OUTLINE_REPLY,
     FONT_METRICS_REPLY_LEN,
 };
-use crate::le::{read_u16, read_u32, read_u64};
+use crate::le::{decode_bool, read_u16, read_u32, read_u64};
 use crate::saver::{
     ChoiceValue, OptionKey, SaverFeeds, SaverValue, SAVER_CHOICE_VALUE_MAX, SAVER_MAX_OPTIONS,
     SAVER_OPTION_KEY_MAX,
@@ -483,11 +483,7 @@ impl Start {
         )?;
         let refresh =
             RefreshRate::from_mhz(read_u32(bytes, START_REFRESH)).ok_or(Errno::OutOfRange)?;
-        let reduced_motion = match bytes[START_FLAGS] {
-            0 => false,
-            1 => true,
-            _ => return Err(Errno::OutOfRange),
-        };
+        let reduced_motion = decode_bool(bytes[START_FLAGS])?;
         let mut start = Self {
             now_ns: read_u64(bytes, START_NOW),
             reduced_motion,

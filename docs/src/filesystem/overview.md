@@ -8,7 +8,7 @@ TAIRiX separates **filesystem policy** from **filesystem I/O**:
   on `lib/abi`, `lib/caps`, and `kernel/sec`.
 - **I/O** — reading and writing blocks and parsing an on-disk format —
   lives in the `drivers/filesystem/*` crates (`arxfs`, `ext4`, `fat32`,
-  `adfs`, `iso9660`, `udf`) behind the [`Filesystem`] trait in `lib/abi`; on
+  `adfs`, `affs`, `iso9660`, `udf`) behind the [`Filesystem`] trait in `lib/abi`; on
   removable media each runs in user space
   ([Volumes served from user space](./served.md)). The VFS never duplicates a
   driver's block I/O. The frozen `Filesystem` trait is mount/unmount only;
@@ -331,6 +331,7 @@ call without being refused for spelling.
 | ext4   | yes — both the fast (inline `i_block`) and slow (block-backed) spellings | no; this driver reads foreign links but does not author them | reports `i_links_count` and honours it on unlink; authors none |
 | FAT32  | no — the format has no link object type | no | no — a directory entry *is* the file's identity |
 | ADFS   | no — the format has no link object type | no | no — the format has no such object |
+| AmigaDOS | yes — stored in AmigaDOS's spelling, read in POSIX's | yes | creates them; the count is the chain of names, and removing the object's own name promotes its newest link |
 
 A "no" is `VfsError::NotSupported`: the permanent format (or driver) limit a
 caller can tell apart from a structural refusal, never a substituted file.
@@ -378,6 +379,7 @@ deletion it deferred:
 | ext4 | joins the orphan chain in the journalled unlink; released at the last unpin | mount-time orphan recovery frees it |
 | FAT32 | its entry is deleted and its cluster chain kept under a token until the last unpin | the chain is lost to the format's checker |
 | ADFS | its fragments are kept under a token until the last unpin | the fragments are lost to the format's checker |
+| AmigaDOS | its header and blocks are kept until the last unpin, the root marked unvalidated meanwhile | AmigaDOS validates the volume and reclaims them |
 | UDF | its file entry and extents are kept at link count 0 until the last unpin | the space is lost to the format's checker |
 | ISO 9660 | read-only, so a hold keeps no state | — |
 
@@ -429,8 +431,8 @@ unchanged. A volume never hands one out twice, so a node's identity and its
 generation name exactly one version of its content — what a cache of something
 derived from a file (a thumbnail, an index) keys on to be exact rather than
 merely likely. ARXFS keeps one for every file and link (`arxfs-spec.md` §13,
-§14); ext4, FAT32 and ADFS keep none and report `0`, which a consumer treats as
-no exact version at all.
+§14); ext4, FAT32, ADFS, AmigaDOS, ISO 9660 and UDF keep none and report `0`,
+which a consumer treats as no exact version at all.
 
 [`Filesystem`]: ../abi/driver_traits.md
 [`Metadata`]: ./permissions.md

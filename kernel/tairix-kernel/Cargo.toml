@@ -462,5 +462,8 @@ tairix-users = { path = "../../lib/users", version = "=0.0.0" }
 tairix-fsserve = { path = "../../lib/fsserve", version = "=0.0.0" }
 tairix-drv-fs-ext4 = { path = "../../drivers/filesystem/ext4", version = "=0.0.0" }
 tairix-drv-fs-adfs = { path = "../../drivers/filesystem/adfs", version = "=0.0.0" }
+tairix-drv-fs-affs = { path = "../../drivers/filesystem/affs", version = "=0.0.0" }
 tairix-drv-fs-iso9660 = { path = "../../drivers/filesystem/iso9660", version = "=0.0.0" }
+# The Amiga floppies and partitioned disk the image scenarios attach.
+tairix-test-amiga-image = { path = "../../tests/integration/amiga_image", version = "=0.0.0" }
 tairix-drv-fs-udf = { path = "../../drivers/filesystem/udf", version = "=0.0.0" }

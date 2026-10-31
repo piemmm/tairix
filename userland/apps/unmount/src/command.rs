@@ -2,7 +2,7 @@
 
 use alloc::string::String;
 
-use tairix_util::getopt::{Arg, Opt, Order, Scan};
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
 
 use crate::error::UnmountError;
 
@@ -13,13 +13,14 @@ pub enum Command {
     /// audited force-unmount that discards retained uncommitted data
     /// when a clean commit is impossible.
     Unmount {
-        /// The volume's catalog name (`usb1`) or its mount-point path
-        /// (`/Storage/usb1`), matched against the mount listing.
+        /// The volume's catalog name (`usb1`), a directory it is mounted on
+        /// (`/Storage/usb1`), or the file name of the disk image it was
+        /// mounted from, resolved against the mount and view listings.
         name: String,
         /// `true` for `-f`/`--force`.
         force: bool,
     },
-    /// Render the tool's own short help (`-?`/`--help`).
+    /// Render the tool's own short help (`-h`/`-?`/`--help`).
     Help,
 }
 
@@ -33,7 +34,8 @@ enum Flag {
 /// `unmount`'s option, as `umount` spells it, and the reserved help switches.
 const OPTIONS: &[Opt<Flag>] = &[
     Opt::flag('f', &["force"], Flag::Force),
-    Opt::flag('?', &["help"], Flag::Help),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
 ];
 
 /// Parse `args` (the tool's arguments, excluding the program name) into a
@@ -44,22 +46,26 @@ const OPTIONS: &[Opt<Flag>] = &[
 /// options anywhere among the operands, a long one by any unambiguous
 /// prefix, `--` ending them.
 ///
-/// * `NAME` — the volume to detach, by catalog name or mount-point path.
+/// * `NAME` — the volume to detach: its catalog name, a directory it is
+///   mounted on, or the file name of the disk image it was mounted from.
 /// * `-f` / `--force` — force-unmount: retract the volume even when its
 ///   uncommitted data cannot be committed, deliberately discarding the
 ///   retained set (an audited, capability-gated kernel decision).
-/// * `-?` / `--help` — the tool's own short help (wins immediately).
+/// * `-h` / `-?` / `--help` — the tool's own short help (wins immediately).
 ///
 /// # Errors
 ///
 /// * [`UnmountError::Option`] — an option `getopt` refuses, in its words.
-/// * [`UnmountError::Usage`] — a number of operands other than exactly one.
+/// * [`UnmountError::Usage`] — a number of operands other than exactly one,
+///   or an empty one, which names no volume.
 pub fn parse(args: &[&str]) -> Result<Command, UnmountError> {
     let mut force = false;
     let mut name: Option<String> = None;
     for arg in Scan::new(OPTIONS, args, Order::Permute) {
         match arg.map_err(UnmountError::Option)? {
-            Arg::Operand(_) if name.is_some() => return Err(UnmountError::Usage),
+            Arg::Operand(operand) if name.is_some() || operand.is_empty() => {
+                return Err(UnmountError::Usage);
+            }
             Arg::Operand(operand) => name = Some(String::from(operand)),
             Arg::Opt(Flag::Force, _) => force = true,
             Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
@@ -104,8 +110,10 @@ mod tests {
     #[test]
     fn help_switches_win_immediately() {
         assert_eq!(parse(&["-?"]), Ok(Command::Help));
+        assert_eq!(parse(&["-h"]), Ok(Command::Help));
         assert_eq!(parse(&["--help"]), Ok(Command::Help));
         assert_eq!(parse(&["-f", "--help", "usb1"]), Ok(Command::Help));
+        assert_eq!(parse(&["usb1", "-fh"]), Ok(Command::Help));
     }
 
     #[test]
@@ -122,6 +130,14 @@ mod tests {
         assert_eq!(parse(&[]), Err(UnmountError::Usage));
         assert_eq!(parse(&["-f"]), Err(UnmountError::Usage));
         assert_eq!(parse(&["a", "b"]), Err(UnmountError::Usage));
+    }
+
+    /// An unset variable expanded to nothing names no volume, never the
+    /// first whose source this caller is not shown.
+    #[test]
+    fn an_empty_name_is_usage() {
+        assert_eq!(parse(&[""]), Err(UnmountError::Usage));
+        assert_eq!(parse(&["-f", "--", ""]), Err(UnmountError::Usage));
     }
 
     /// GNU 9.4's words for each refusal.

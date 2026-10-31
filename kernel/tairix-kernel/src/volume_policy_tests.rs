@@ -1,11 +1,14 @@
-//! Unit tests for the storage-group identity map and its late gid cell.
+//! Unit tests for the storage-group identity map and its late gid cell, and
+//! the presentation a principal may ask for.
 
 use super::*;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
     NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeStats,
 };
+use tairix_abi::netattach::Presentation;
 use tairix_abi::DriverError;
+use tairix_abi::{CapabilityId, CapabilityQuery};
 use tairix_kernel_core::fs::wrapper_conformance as conformance;
 use tairix_kernel_sec::GroupId;
 
@@ -226,6 +229,22 @@ fn a_network_volume_is_presented_privately_shared_or_as_its_holder_chose() {
 }
 
 #[test]
+fn only_a_volume_presented_to_its_attacher_alone_is_listed_as_private() {
+    let listed = |presented: Presented| presented.owner(1000);
+    assert!(listed(Presented::private(1000, GroupId(1000))).private);
+    assert!(listed(Presented::explicit(1000, GroupId(7), 0o700, 0o600)).private);
+    for shown in [
+        Presented::shared(STORAGE),
+        Presented::explicit(42, GroupId(7), 0o700, 0o600),
+        Presented::explicit(1000, GroupId(7), 0o750, 0o600),
+        Presented::explicit(1000, GroupId(7), 0o700, 0o604),
+    ] {
+        let owner = listed(shown);
+        assert_eq!((owner.uid, owner.private), (1000, false), "{shown:?}");
+    }
+}
+
+#[test]
 fn a_node_its_format_marks_read_only_is_presented_without_write_bits() {
     let marked = TwoNodeFs { read_only: true };
     let mut fs = PresentedFs::new(marked, Presented::shared(STORAGE));
@@ -340,5 +359,45 @@ fn a_recorded_owner_keeps_its_rules_beside_mapped_nodes() {
     assert_eq!(
         mapped.set_security(dir, changed),
         Err(DriverError::Unsupported)
+    );
+}
+
+struct Holding(Option<CapabilityId>);
+impl CapabilityQuery for Holding {
+    fn holds(&self, cap: CapabilityId) -> bool {
+        self.0 == Some(cap)
+    }
+}
+
+#[test]
+fn others_are_shown_a_volume_only_by_the_mount_authority() {
+    let nothing = Holding(None);
+    let caller = Principal {
+        uid: 1000,
+        gid: 100,
+        caps: &nothing,
+    };
+    let private = Presented::asked_by(&caller, Presentation::Private).expect("anyone's own");
+    assert_eq!(private, Presented::private(1000, GroupId(100)));
+    let explicit = Presentation::Explicit {
+        uid: 42,
+        gid: 7,
+        dir_mode: 0o750,
+        file_mode: 0o640,
+    };
+    for asked in [Presentation::Shared, explicit] {
+        assert_eq!(
+            Presented::asked_by(&caller, asked),
+            Err(Errno::PermissionDenied)
+        );
+    }
+    let mount = Holding(Some(CapabilityId::FS_MOUNT));
+    let holder = Principal {
+        caps: &mount,
+        ..caller
+    };
+    assert_eq!(
+        Presented::asked_by(&holder, explicit),
+        Ok(Presented::explicit(42, GroupId(7), 0o750, 0o640))
     );
 }

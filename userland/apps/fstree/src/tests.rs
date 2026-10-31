@@ -2787,6 +2787,48 @@ fn volumed_fixture() -> FakeFs {
 }
 
 #[test]
+fn a_volume_record_is_a_root_unless_it_is_withheld() {
+    use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+    use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState};
+    let record = MountRecord::new(
+        b"Letters.adf",
+        b"/Storage/letters",
+        b"affs",
+        MountFlags::NOEXEC,
+        MountVolumeState {
+            usage: VolumeStats {
+                block_size: 512,
+                total_blocks: 1760,
+                free_blocks: 40,
+                avail_blocks: 40,
+                ..VolumeStats::default()
+            },
+            availability: MountAvailability::Available,
+            medium: None,
+        },
+        [4; 16],
+    )
+    .expect("a record");
+    assert_eq!(
+        VolumeInfo::of(&record),
+        Some(VolumeInfo {
+            target: String::from("/Storage/letters"),
+            fstype: String::from("affs"),
+            space: Some(VolumeBytes {
+                total: 1760 * 512,
+                free: 40 * 512,
+                available: 40 * 512,
+            }),
+        })
+    );
+    assert_eq!(
+        VolumeInfo::of(&record.withheld()),
+        None,
+        "another principal's, which this session cannot open"
+    );
+}
+
+#[test]
 fn the_volume_list_opens_navigates_and_reroots_the_session() {
     let mut fs = volumed_fixture();
     let mut m = model(&mut fs);

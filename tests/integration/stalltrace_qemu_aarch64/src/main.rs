@@ -159,10 +159,10 @@ mod kernel {
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
     use tairix_itest_finisher::fail_point;
-    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::{field_str, field_u64, FixtureExit};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_log::{Event, EventId, FieldValue, Sink};
+    use tairix_log::{Event, EventId, Sink};
 
     use super::{assess, Verdict, LATENCY_OVERRUN_EVENT_ID};
 
@@ -207,26 +207,9 @@ mod kernel {
     /// diagnostic trail.
     static OVERRUN_SEEN: AtomicBool = AtomicBool::new(false);
 
-    /// Set once the fixture's own audited `exit` has been observed, so the
-    /// PASS fires on the *next* one — the shell's, typed by the runner only
-    /// after the fixture's marker appeared. Exiting QEMU on the fixture's
-    /// own exit would tear the run down with the last scripted line still
-    /// owed, which the harness fails as an incomplete script.
-    static FIXTURE_EXITED: AtomicBool = AtomicBool::new(false);
-
-    /// The unsigned value of `event`'s field `key`, if present.
-    fn field_u64(event: &Event<'_>, key: &str) -> Option<u64> {
-        event.fields.iter().find_map(|field| {
-            if field.key == key {
-                match field.value {
-                    FieldValue::UnsignedInt(v) => Some(v),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        })
-    }
+    /// The run's end: the fixture's exit, then the shell's.
+    static END: FixtureExit =
+        FixtureExit::new(&[tairix_test_stalltrace::COMMAND], SYSCALL_INVOKED_EVENT_ID);
 
     /// Gate on the diagnostic trail: replay everything to serial, judge each
     /// overrun record, and arm the PASS on an accepted one.
@@ -276,13 +259,7 @@ mod kernel {
     impl Sink for AuditObserver {
         fn write_event(&self, event: &Event<'_>) {
             SerialSink::new().write_event(event);
-            if event.id != SYSCALL_INVOKED_EVENT_ID || field_str(event, "sc") != Some("exit") {
-                return;
-            }
-            if field_str(event, "comm") == Some(tairix_test_stalltrace::COMMAND) {
-                FIXTURE_EXITED.store(true, Ordering::Release);
-            } else if OVERRUN_SEEN.load(Ordering::Acquire) && FIXTURE_EXITED.load(Ordering::Acquire)
-            {
+            if END.passed(event) && OVERRUN_SEEN.load(Ordering::Acquire) {
                 qemu_exit::exit_success();
             }
         }

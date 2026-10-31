@@ -242,8 +242,9 @@ struct Mount {
     target: String,
     /// The filesystem type the volume was attached with.
     fstype: String,
-    /// The volume's live usage and geometry, as its driver reports it.
-    usage: VolumeStats,
+    /// The volume's live usage and geometry, as its driver reports it;
+    /// `None` for another principal's private volume, withheld from this one.
+    usage: Option<VolumeStats>,
 }
 
 impl Mount {
@@ -254,8 +255,15 @@ impl Mount {
         Some(Self {
             target: field_lossy(view.target_bytes()),
             fstype: field_lossy(volume.fstype_bytes()),
-            usage: volume.usage(),
+            usage: (!volume.is_withheld()).then(|| volume.usage()),
         })
+    }
+
+    /// `figure` of the volume's usage, or `?` where it is withheld.
+    fn figure(&self, figure: fn(&VolumeStats) -> u64) -> String {
+        self.usage
+            .as_ref()
+            .map_or_else(|| String::from("?"), |usage| figure(usage).to_string())
     }
 }
 
@@ -325,7 +333,10 @@ fn file_field(letter: char, stat: &FileStat, facts: &Facts, mount: Option<&Mount
         },
         // `st_blksize`'s role — the transfer size the backing prefers — is
         // the mounted format's own block size.
-        'o' => mount.map_or_else(|| String::from("?"), |m| m.usage.block_size.to_string()),
+        'o' => mount.map_or_else(
+            || String::from("?"),
+            |m| m.figure(|usage| u64::from(usage.block_size)),
+        ),
         's' => stat.size.to_string(),
         'u' => stat.uid.to_string(),
         'U' => facts
@@ -348,20 +359,19 @@ fn file_field(letter: char, stat: &FileStat, facts: &Facts, mount: Option<&Mount
 
 /// One field of the filesystem vocabulary.
 fn fs_field(letter: char, mount: &Mount, facts: &Facts) -> String {
-    let usage = &mount.usage;
     match letter {
-        'a' => usage.avail_blocks.to_string(),
-        'b' => usage.total_blocks.to_string(),
-        'c' => usage.files.to_string(),
-        'd' => usage.files_free.to_string(),
-        'f' => usage.free_blocks.to_string(),
+        'a' => mount.figure(|usage| usage.avail_blocks),
+        'b' => mount.figure(|usage| usage.total_blocks),
+        'c' => mount.figure(|usage| usage.files),
+        'd' => mount.figure(|usage| usage.files_free),
+        'f' => mount.figure(|usage| usage.free_blocks),
         'i' => volume_hex(facts.stat.id.volume),
         'l' => FS_NAME_MAX.to_string(),
         'n' => facts.shown.clone(),
         // A TAIRiX volume declares one block size, which is both the
         // transfer size and the fundamental one, so the pair agrees rather
         // than one of them being invented.
-        's' | 'S' => usage.block_size.to_string(),
+        's' | 'S' => mount.figure(|usage| u64::from(usage.block_size)),
         'T' => {
             if mount.fstype.is_empty() {
                 String::from("?")

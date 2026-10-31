@@ -99,15 +99,23 @@ Mae copïo neu symud yn cadw tyllau pob ffeil a'i phriodoleddau
 estynedig, megis math ffeil RISC OS; caiff unrhyw briodoledd na all y
 gyrchfan ei chadw ei henwi mewn rhybudd pan ddaw'r weithred i ben.
 
-Mae'r ddewislen clic de yn dechrau gyda *Dangos*. Oddi tani mae
-is-ddewislen yn enwi'r hyn y mae'r ddewislen yn gweithredu arno — *Ffeil
-‘notes.txt’*, gydag enw hir wedi'i fyrhau yn ei ganol fel bod ei estyniad yn
-dal i'w weld, neu *Dewis* pan fo sawl eitem wedi'u dewis — ac mae'n dal
-*Agor*, *Agor gyda…*, *Cael gwybodaeth…*, *Ailenwi*, *Torri*, *Copïo* a
-*Dileu*; mae rhes na all weithredu yno wedi'i llwydo ac yn dweud pam. Wedyn
-daw *Newydd*, yna *Dewis y cyfan* a *Clirio'r dewis*, ac yn olaf *Gludo*. Mae
-clic de ar le gwag yn clirio'r dewis, felly mae is-ddewislen yr eitem wedi'i
-llwydo.
+Mae'r ddewislen clic de yn dechrau gyda *Dangos*. Oddi tani mae is-ddewislen
+yn enwi'r hyn y mae'r ddewislen yn gweithredu arno — *Ffeil ‘notes.txt’*,
+gydag enw hir wedi'i fyrhau yn ei ganol fel bod ei estyniad yn dal i'w weld,
+neu *Dewis* pan fo sawl eitem wedi'u dewis — ac mae'n dal *Agor*, *Agor
+gyda…*, *Mowntio darllen-yn-unig*, *Taflu allan*, *Cael gwybodaeth…*,
+*Ailenwi*, *Torri*, *Copïo* a *Dileu*; mae rhes na all weithredu yno wedi'i
+llwydo ac yn dweud pam. Wedyn daw *Newydd*, yna *Dewis y cyfan* a *Clirio'r
+dewis*, ac yn olaf *Gludo*. Mae clic de ar le gwag yn clirio'r dewis, felly
+mae is-ddewislen yr eitem wedi'i llwydo.
+
+Mae agor delwedd ddisg — ffeil `.iso`, `.adf`, `.hdf` ac ati — yn ei gosod i
+chi yn `/Storage`, yn ysgrifenadwy lle mae'r ffeil, ac yn agor ei ffenestr;
+mae *Mowntio darllen-yn-unig* yn ei gosod yn ddarllen-yn-unig yn lle hynny.
+Mae'n aros wedi'i gosod nes i chi ei thaflu allan neu i'ch sesiwn ddod i
+ben. Mae *Taflu allan* yn tynnu cyfrol a osodwyd gennych, o'i heicon neu o'i
+rhes yn y bar lleoedd, y mae ei dewislen clic de ei hun yn dal *Agor* a
+*Taflu allan*; mae'ch ffenestri arni'n symud i `/Storage` yn gyntaf.
 
 Mae is-ddewislen *Newydd* y ddewislen clic de yn creu ffolder, neu ddogfen
 wag o bob math y mae golygydd wedi'i osod yn ei ysgrifennu, ac yn agor ei

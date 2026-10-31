@@ -147,9 +147,13 @@ is, so it declares it:
   | `Virtual`    | 10 s  | 10 s  | 10 s  | 10 s  | 8 MiB/s    | 2       | 16 (parallel) | ≈30 s |
 
 - The record also says what **form** the medium takes (`BlkForm`:
-  `Unspecified`, or `OpticalDisc` for a disc in a multimedia drive), which is
-  how a consumer tells a disc from a disk: the volume manager attaches a disc
-  whole, and the desktop draws it with the optical-disc icon.
+  `Unspecified`; `OpticalDisc` for a disc in a multimedia drive, or a disc
+  image's volume; `FloppyDisk` for a floppy image's volume), which is how a
+  consumer tells a disc from a disk: the volume manager attaches a disc whole,
+  and the desktop draws it with the optical-disc or floppy icon. An image's
+  volume has `Virtual` transport with the form its probe found, so an
+  `OpticalDisc` there names a layout, not a drive whose disc can be asked
+  about ([Disk images](../filesystem/images.md)).
 - A disc's **layout** — where its last session starts and the last block it
   recorded, as far as the drive can say (`Block::disc_layout`,
   `DiscLayout`) — rides the geometry completion beside its size

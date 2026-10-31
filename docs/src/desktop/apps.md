@@ -564,7 +564,9 @@ The drawn window chrome — the `lib/controls` toolbar
   act on the selection (`ContextCommand::acts_on_selection`), so they need one;
   the single-entry verbs need exactly one. **Open With…** is offered only for a
   regular file — a directory descends and a bundle launches itself, so neither
-  has an application to choose. **Select All**, **Clear Selection** and
+  has an application to choose. **Mount Read-Only** is offered for a disk
+  image, and **Eject** for a volume the user attached (a disk image's or a
+  share's), each disabled with its reason otherwise. **Select All**, **Clear Selection** and
   **Paste** act on the folder. Paste needs only a held clipboard, not a
   selection; because the clipboard lives in the app rather than the browser
   (`Browser::clipboard` *captures* a fresh one from the selection), whether a
@@ -725,7 +727,11 @@ identically (`AGENTS.md` §2.2). It is exhaustive over the three entry kinds:
   naming the bundle for the caller to launch through the ordinary signed
   app-load gate;
 - a **regular file** returns `OpenFile { path }`, naming the file for the
-  caller to open in the associated viewer;
+  caller to open in the associated viewer — unless it is a **disk image**
+  (`MediaType::holds_a_volume`: `.iso`, `.adf`, `.adl`, `.adm`, `.ads`,
+  `.hdf`), which returns `MountImage { path }` for the caller to mount on its
+  mount worker and show ([disk images](../filesystem/images.md)), whatever
+  application claims the type;
 - at the network, an **endpoint** that can be reached returns
   `MountEndpoint`, naming it as it was displayed for the caller to mount
   (`plans/ZEROCONF.md` §6.3); one with no known address is `Unreachable`,
@@ -1429,18 +1435,21 @@ reached by navigating as any folder is.
 
 **Volumes come from the live mount table, and the medium is real data.** The
 app reads the ungated `MOUNT_LIST` query through `lib/procinfo`'s
-`for_each_mount`, keeps every mount still serving its data — a degraded,
-recovering or read-only conflicted volume stays, only one whose device vanished
-goes — and passes each one's label, target, and `MountRecord::medium()` to the
-model. The serving driver declares the medium (`Block::medium`), a layered
+`for_each_mount`, offers every mount still serving its data — a degraded,
+recovering or read-only conflicted volume stays; one whose device vanished,
+and another user's private volume withheld from this one, are no row but stay
+drives where `/Storage` lists them — and passes each one's label, target, and
+`MountRecord::medium()` to the model. The serving driver declares the medium (`Block::medium`), a layered
 device composes its members' (`BlkMedium::of_members`), and the icon is
 `tairix_icon::disk_icon(medium)`, which draws only what the device reported: a
 disk reported rotating is the hard disk whether it sits on an ATA bus or
 behind a USB bridge, a non-rotating ATA disk, an NVMe namespace and an SD card
 each get their own artwork, a USB unit is a flash stick once it reported a
 non-rotating medium and the external drive, which shows no medium, while it
-reported neither, and an undeclared or paravirtual device is the generic drive
-— never a guessed classification.
+reported neither, an optical disc — in a multimedia drive, or a disc image —
+and a floppy image are drawn by their form whatever the transport, and an
+undeclared medium, a paravirtual device of no stated form, or an ATA disk that
+reported no rotation, is the generic drive — never a guessed classification.
 
 **A volume's root is drawn as its drive wherever it is listed.**
 `Browser::mark_volume_roots` marks each directory entry that is the mount point
@@ -1526,7 +1535,9 @@ selection state (an exact component match — standing inside a place is not
 standing on it), and a row whose navigation was refused reads *disabled*.
 
 **Input.** A primary press on a row focuses the rail, moves its cursor there,
-and navigates. A press on the rail's bar, the drag that follows it, and a wheel
+and navigates. A secondary press on a row asks the desktop for that row's own
+menu, **Open** and **Eject** (`chrome::place_menu`), Eject disabled with its
+reason unless the row shows a volume the user attached. A press on the rail's bar, the drag that follows it, and a wheel
 turn while the pointer is over the rail scroll the rail and never the listing
 (`render::sidebar_scroll_pointer`, `sidebar_scroll_wheel`). The window records
 where every pointer event puts the pointer, whether or not it draws a rail,

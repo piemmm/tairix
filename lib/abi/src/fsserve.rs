@@ -24,8 +24,8 @@ use crate::fs::{
     FS_SYMLINK_MAX,
 };
 use crate::le::{
-    exact_len, put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64, Reader,
-    Writer,
+    decode_bool, exact_len, put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32,
+    read_u64, Reader, Writer,
 };
 use crate::time::Time64;
 use crate::volume::FormatName;
@@ -1311,6 +1311,7 @@ impl ServeFrame {
                 out[3] = match offer.name_matching {
                     NameMatching::Exact => 0,
                     NameMatching::AsciiCaseInsensitive => 1,
+                    NameMatching::Latin1CaseInsensitive => 2,
                 };
                 out[4] = match offer.node_identity {
                     NodeIdentity::Stable => 0,
@@ -1347,6 +1348,7 @@ impl ServeFrame {
                 let name_matching = match bytes[3] {
                     0 => NameMatching::Exact,
                     1 => NameMatching::AsciiCaseInsensitive,
+                    2 => NameMatching::Latin1CaseInsensitive,
                     _ => return Err(Errno::OutOfRange),
                 };
                 let node_identity = match bytes[4] {
@@ -1354,11 +1356,7 @@ impl ServeFrame {
                     1 => NodeIdentity::ContentDerived,
                     _ => return Err(Errno::OutOfRange),
                 };
-                let attrs = match bytes[5] {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(Errno::OutOfRange),
-                };
+                let attrs = decode_bool(bytes[5])?;
                 let write_refusal = match bytes[6] {
                     0 => None,
                     raw => Some(WriteRefusal::from_u8(raw).map_err(|_| Errno::OutOfRange)?),

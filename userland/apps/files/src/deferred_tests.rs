@@ -5,7 +5,7 @@ use tairix_abi::time::Time64;
 use tairix_abi::{Errno, NodeTimes};
 use tairix_browse::{EntryKind, Properties};
 
-use super::{FilesClients, PropertyJob, PropertyReads};
+use super::{EjectDesk, FilesClients, PropertyJob, PropertyReads, ReadKind, READ_ORDER};
 
 /// Every browser window lists under a consumer of its own: sharing one, two
 /// windows discarded each other's answers and neither ever listed.
@@ -177,4 +177,49 @@ fn an_answer_read_on_the_asking_thread_is_collected_like_a_workers() {
 fn a_client_round_trips_through_its_number() {
     let client = FilesClients::default().mint();
     assert_eq!(super::FilesClient::from_number(client.number()), client);
+}
+
+/// A write the user committed before an eject is carried out before it, and
+/// the eject before a document opened after it.
+#[test]
+fn a_committed_write_goes_before_an_eject_and_an_eject_before_an_open() {
+    let at = |kind| {
+        READ_ORDER
+            .iter()
+            .position(|ordered| *ordered == kind)
+            .expect("ordered")
+    };
+    assert!(at(ReadKind::Write) < at(ReadKind::Locate));
+    assert!(at(ReadKind::Locate) < at(ReadKind::Settle));
+    assert!(at(ReadKind::Settle) < at(ReadKind::Open));
+    for (index, kind) in READ_ORDER.iter().enumerate() {
+        assert_eq!(at(*kind), index, "{kind:?} is ordered once");
+    }
+}
+
+/// An eject keeps its room from its admission until its outcome lands, while
+/// it is being located or carried out too, so one let go of its windows is
+/// never refused afterwards.
+#[test]
+fn an_eject_keeps_its_room_until_its_outcome_lands() {
+    let mut desk = EjectDesk::<u32, (), &str>::new(2);
+    assert_eq!(desk.admit(1), Ok(()));
+    assert_eq!(desk.admit(2), Ok(()));
+    assert_eq!(desk.admit(3), Err(3), "two are held");
+    let locating = desk.next_locate().expect("the first");
+    assert_eq!(desk.admit(4), Err(4), "one being located still counts");
+    desk.located(locating, ());
+    let (located, ()) = desk.take_located().expect("located");
+    desk.settle(located);
+    let settling = desk.next_settle().expect("to carry out");
+    assert_eq!(settling, 1);
+    assert_eq!(desk.admit(5), Err(5), "one being carried out still counts");
+    desk.landed("ejected");
+    assert_eq!(desk.take_landed(), Some("ejected"));
+    assert_eq!(
+        desk.admit(6),
+        Ok(()),
+        "its outcome landed, so its room is free"
+    );
+    assert_eq!(desk.take_landed(), None);
 }

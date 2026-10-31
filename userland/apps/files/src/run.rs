@@ -119,6 +119,7 @@ mod program {
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::time::Duration64;
+    use tairix_abi::STORAGE_CATALOG;
 
     use crate::netbrowse::{
         self, Browse, Need, NetworkAnswer, NetworkAsk, NetworkLanded, NetworkReading,
@@ -129,9 +130,7 @@ mod program {
     use tairix_abi::fs::{
         FileId, FileKind, OpenFlags, FS_MODE_MASK, FS_NAME_MAX, FS_NEW_DIR_MODE, FS_NEW_FILE_MODE,
     };
-    use tairix_abi::input::{
-        KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
-    };
+    use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{
         AlertOutcome, AlertSpec, DialogModality, DocumentName, DragAt, DragItems, DropOperation,
@@ -146,6 +145,7 @@ mod program {
     use tairix_appstore::{DirEntry as StoreDirEntry, StoreReader, Verdict};
     use tairix_browse::document;
     use tairix_browse::marquee::{self, report_band};
+    use tairix_browse::mount::{MountAct, MountDone, MountWorker, Projection};
     use tairix_browse::render::{
         chooser_art, delete_alert, draw_open_with_chooser, draw_progress_window,
         draw_properties_window, draw_rename_field, drop_folder_at, manager_art, manager_tool_at,
@@ -161,19 +161,19 @@ mod program {
     use tairix_browse::{
         applications_for, association_from_manifest, blank_documents, browser_floor,
         context_choice_from_item, context_menu, drop_operation, empty_trash_plan, fitted_sizing,
-        manager_opening, network_context_menu, paste_strategy, plan_paste, quick_applications,
-        trash_dest_path, trash_dir, trash_strategy, validate_new_name, win_floor_width, Activation,
-        AppAssociation, Attribute, Attributes, BlankDocument, Browser, BundleIntent, Clipboard,
-        ClipboardOp, ContextChoice, ContextCommand, ContextMenuModel, ContextQuick,
-        DeleteDisposition, DeletePlan, DeleteTarget, DirectorySource, Drive, DriveChange,
-        DriveSample, Entry, EntryKind, HiddenEndings, Listed, Listing, ListingDesk, ListingJob,
-        Location, ManagerChrome, ManagerTool, ManagerToolModel, Marquee, NetworkItem, NewEntry,
-        OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, PendingEntry,
-        PendingRename, Places, Probe, Probes, ProgressModel, ProgressOp, Properties, RenameError,
-        RowList, RtLinkReader, ScrollColumn, SortMode, Subject, Survey, SurveyStep, Tally, Took,
-        ToolbarBand, ToolbarCommand, TrashError, TrashStrategy, Volume, VolumeId, WatchUpdate,
-        WatchedDirectory, Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_WINDOW_GROUND,
-        WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
+        manager_opening, network_context_menu, paste_strategy, place_menu, plan_paste,
+        quick_applications, trash_dest_path, trash_dir, trash_strategy, validate_new_name,
+        win_floor_width, Activation, AppAssociation, Attribute, Attributes, BlankDocument, Browser,
+        BundleIntent, Clipboard, ClipboardOp, ContextChoice, ContextCommand, ContextMenuModel,
+        ContextQuick, DeleteDisposition, DeletePlan, DeleteTarget, DirectorySource, Drive,
+        DriveChange, DriveSample, Entry, EntryKind, HiddenEndings, Listed, Listing, ListingDesk,
+        ListingJob, Location, ManagerChrome, ManagerTool, ManagerToolModel, Marquee, NetworkItem,
+        NewEntry, OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy,
+        PendingEntry, PendingRename, Places, Probe, Probes, ProgressModel, ProgressOp, Properties,
+        RenameError, RowList, RtLinkReader, ScrollColumn, SortMode, Subject, Survey, SurveyStep,
+        Tally, Took, ToolbarBand, ToolbarCommand, TrashError, TrashStrategy, Volume, VolumeId,
+        WatchUpdate, WatchedDirectory, Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS,
+        MANAGER_WINDOW_GROUND, WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::text::{Keystroke, TextAction, TextField};
@@ -210,7 +210,8 @@ mod program {
     use crate::chrome::{Accelerator, Chrome, SelectionVerb};
     use crate::command::{self, Command, Ladder, Role, UsageError, USAGE};
     use crate::deferred::{
-        DriveJob, DriveReading, DriveReads, FilesClient, FilesClients, PropertyJob, PropertyReads,
+        DriveJob, DriveReading, DriveReads, EjectDesk, FilesClient, FilesClients, PropertyJob,
+        PropertyReads, ReadKind, READ_ORDER,
     };
     use crate::gesture::{
         self, bundle_intent, press_step, DragArm, Keyboard, NamePress, PressHit, PressHold,
@@ -276,9 +277,13 @@ mod program {
     /// once per change it queues, so a few say all a drain needs to know.
     const DOORBELL_CAPACITY: usize = 4;
 
+    /// The wait-set token the mount worker wakes the loop under: a mount or
+    /// eject it carried out has an answer for the loop to adopt.
+    const MOUNT_WORKER_TOKEN: u64 = DOORBELL_TOKEN + 1;
+
     /// Each browser window's directory watch reports under this plus the
     /// number its listing consumer was minted as, so a wake names its window.
-    const WATCH_TOKEN_BASE: u64 = DOORBELL_TOKEN + 1;
+    const WATCH_TOKEN_BASE: u64 = MOUNT_WORKER_TOKEN + 1;
 
     /// The maximum digit count the owner/group id editor accepts — a `u32` id
     /// is at most ten decimal digits, so a longer entry cannot be a valid id.
@@ -1342,6 +1347,9 @@ mod program {
         /// The endings the Rename row's field showed its name without, which
         /// a commit restores.
         endings: HiddenEndings,
+        /// The rail row the menu was opened on, by where it navigates: `None`
+        /// for the listing's own menu.
+        place: Option<Vec<String>>,
     }
 
     /// Fold one round's conclusion about `win`, and the region it reported,
@@ -2052,8 +2060,13 @@ mod program {
     enum BrowserWrite {
         /// New ▸ made this entry: on success it is selected and renamed.
         Entry(PendingEntry),
-        /// Go to Trash made sure the Trash exists: on success it is shown.
-        Trash(alloc::vec::Vec<String>),
+        /// Go to Trash made sure the Trash exists: on success it is shown,
+        /// unless the window has begun another navigation since it was asked
+        /// at the browser's `asked_at` navigation count.
+        Trash {
+            trash: alloc::vec::Vec<String>,
+            asked_at: u64,
+        },
         /// Delete asked whether the targets of this plan can go to Trash: the
         /// answer opens the confirmation worded for what will happen.
         Delete(DeletePlan),
@@ -2067,7 +2080,7 @@ mod program {
         const fn refusal_title(&self) -> &'static str {
             match self {
                 Self::Entry(_) => NOT_MADE,
-                Self::Trash(_) => NO_TRASH,
+                Self::Trash { .. } => NO_TRASH,
                 Self::Delete(_) => NOT_DELETED,
                 Self::EmptyTrash(_) => NOT_EMPTIED,
             }
@@ -2265,8 +2278,8 @@ mod program {
                     }
                 }
             }
-            BrowserWrite::Trash(trash) => match answer.status() {
-                Ok(()) => match state.browser.navigate_to(trash) {
+            BrowserWrite::Trash { trash, asked_at } => match answer.status() {
+                Ok(()) => match state.browser.navigate_as_asked(trash, asked_at) {
                     Ok(true) => {
                         tairix_browse::render::reveal_selection(
                             &mut state.browser,
@@ -3991,19 +4004,68 @@ mod program {
         /// alert holding no window: by the time one is known, the window that
         /// asked may have moved on or closed.
         notices: Notices,
+        /// The user this file manager runs as, whose own disk images and
+        /// shares it offers to eject; `None` when the kernel would not say.
+        viewer: Option<u32>,
+        /// The worker a disk image is mounted on; `None` when there was no
+        /// memory for one.
+        mounts: Option<alloc::sync::Arc<MountWorker>>,
+        /// Ejects asked for this turn, which wait for the loop to let go of
+        /// what it holds on their volumes.
+        ejecting: Vec<MountAct>,
     }
 
     impl Launcher {
         /// An idle launcher with no children in flight, opening documents on
-        /// `reads` for the applications `installed` declares.
-        fn new(reads: alloc::sync::Arc<Reads>, installed: alloc::rc::Rc<Installed>) -> Self {
+        /// `reads` for the applications `installed` declares and mounting
+        /// disk images on `mounts`.
+        fn new(
+            reads: alloc::sync::Arc<Reads>,
+            installed: alloc::rc::Rc<Installed>,
+            mounts: Option<alloc::sync::Arc<MountWorker>>,
+        ) -> Self {
             Self {
                 in_flight: BTreeMap::new(),
                 awaiting: Vec::new(),
                 reads,
                 installed,
                 notices: Notices::default(),
+                viewer: tairix_rt::self_origin().ok().map(|origin| origin.uid()),
+                mounts,
+                ejecting: Vec::new(),
             }
+        }
+
+        /// Mount a disk image or eject a volume, as `act` asks, off the loop:
+        /// what it came to lands with the loop's next turn. An eject waits for
+        /// the loop to let go of the volume first.
+        fn mount(&mut self, act: MountAct) {
+            if !matches!(act, MountAct::Eject { .. }) {
+                self.submit(act);
+            } else if self.ejecting.len() < tairix_browse::mount::ACTS_WAITING {
+                self.ejecting.push(act);
+            } else {
+                self.refuse(&act, tairix_browse::mount::CROWDED);
+            }
+        }
+
+        /// Hand `act` to the mount worker.
+        fn submit(&mut self, act: MountAct) {
+            let act = match &self.mounts {
+                Some(mounts) => match mounts.submit(act) {
+                    Ok(_) => return,
+                    Err(act) => return self.refuse(&act, tairix_browse::mount::CROWDED),
+                },
+                None => act,
+            };
+            self.refuse(&act, tairix_browse::mount::UNSERVED);
+        }
+
+        /// State that `act` was not carried out, for `reason`.
+        fn refuse(&mut self, act: &MountAct, reason: &'static str) {
+            let refusal = act.refused(reason);
+            self.notices
+                .refuse(NoticeSource::Mount, &refusal.headline, refusal.reason);
         }
 
         /// State that the item `name` could not be opened, because of
@@ -4475,12 +4537,7 @@ mod program {
     /// that reads it: each is a read of somebody's disk, which on the loop
     /// froze the window for as long as that disk took.
     ///
-    /// One worker serves them in one stated order, [`Reads::next_read`]'s: a
-    /// document opened, a listing navigated to, a shown folder's changes, a
-    /// Properties read, icon artwork, folder cues, thumbnails, the bundle scan,
-    /// the places rail. Nothing starves: each set is finite, refilled only by the user
-    /// asking again or, for a folder's changes, by a watch the kernel paces to
-    /// one report a window per latency.
+    /// One worker serves them in one stated order, [`READ_ORDER`].
     struct Reads {
         work: tairix_rt::sync::Mutex<Work>,
         /// Signalled when a read is recorded, and on teardown.
@@ -4538,7 +4595,7 @@ mod program {
         bundles: tairix_util::defer::JobDesk<(), Vec<AppAssociation>>,
         /// The user's home components and the mounted volumes the places rail
         /// is built from, re-read when the kernel says the mount table moved.
-        places: tairix_util::defer::JobDesk<(), (Vec<String>, Vec<Volume>)>,
+        places: tairix_util::defer::JobDesk<(), PlacesFound>,
         /// The network catalogue a window shows or is on its way to.
         network: tairix_util::defer::JobDesk<NetworkAsk, NetworkAnswer>,
         /// Set once the app is tearing down, so a parked worker leaves instead
@@ -4552,6 +4609,8 @@ mod program {
         scratch: Vec<u8>,
         /// The long operations the operations worker carries out.
         operations: OperationDesk<Job>,
+        /// The ejects: located, their windows let go, carried out and landed.
+        ejects: EjectDesk<MountAct, Vec<Projection>, MountDone>,
     }
 
     /// State that a window's folder no longer follows its changes, and why.
@@ -4742,6 +4801,11 @@ mod program {
         Places,
         /// Collect from, or close, the network session.
         Network(NetworkAsk),
+        /// Read where an eject's volume is bound, for the loop to take its
+        /// windows off it first.
+        Locate(MountAct),
+        /// Carry out an eject once the read before it has finished.
+        Settle(MountAct),
     }
 
     impl Reads {
@@ -4770,6 +4834,7 @@ mod program {
                     alone: false,
                     scratch: Vec::new(),
                     operations: OperationDesk::new(OPERATIONS_MAX),
+                    ejects: EjectDesk::new(tairix_browse::mount::ACTS_WAITING),
                 }),
                 signal: tairix_rt::sync::Condvar::new(),
                 operation_signal: tairix_rt::sync::Condvar::new(),
@@ -4874,6 +4939,18 @@ mod program {
                         let answer = self.browse_network(ask);
                         self.work.lock().network.deliver(answer)
                     }
+                    // Carried out here, where every read of this app's runs,
+                    // so none of them holds the volume as it goes.
+                    Read::Locate(act) => {
+                        let bound = bindings_of(&act);
+                        self.work.lock().ejects.located(act, bound);
+                        true
+                    }
+                    Read::Settle(act) => {
+                        let done = tairix_browse::mount::carry_out(act);
+                        self.work.lock().ejects.landed(done);
+                        true
+                    }
                 };
                 if owed {
                     self.wake.nudge();
@@ -4881,56 +4958,40 @@ mod program {
             }
         }
 
-        /// The next unit of work, in the stated order.
+        /// The next unit of work, in [`READ_ORDER`].
         fn next_read(work: &mut Work) -> Option<Read> {
-            // A document the user opened is what they are waiting for.
-            if let Some(job) = work.opens.next_job() {
-                return Some(Read::Open(job));
+            READ_ORDER
+                .iter()
+                .find_map(|kind| Self::next_of(work, *kind))
+        }
+
+        /// The next unit of work of `kind`, if any waits.
+        fn next_of(work: &mut Work, kind: ReadKind) -> Option<Read> {
+            match kind {
+                ReadKind::Write => work.writes.next_job().map(Read::Write),
+                ReadKind::Locate => work.ejects.next_locate().map(Read::Locate),
+                ReadKind::Settle => work.ejects.next_settle().map(Read::Settle),
+                ReadKind::Open => work.opens.next_job().map(Read::Open),
+                ReadKind::List => work.listings.next_job().map(Read::List),
+                ReadKind::Network => work.network.next_job().map(Read::Network),
+                ReadKind::Drain => work
+                    .watches
+                    .next_drain()
+                    .map(|(client, location, dir)| Read::Drain(client, location, dir)),
+                ReadKind::Properties => work
+                    .properties
+                    .next_job()
+                    .map(|(window, job)| Read::Properties(window, job)),
+                ReadKind::Drive => work
+                    .drives
+                    .next_job()
+                    .map(|(window, job)| Read::Drive(window, job)),
+                ReadKind::Artwork => work.artwork.next_job().map(Read::Artwork),
+                ReadKind::Probe => work.probes.next_batch().map(Read::Probe),
+                ReadKind::Thumbnail => work.artwork.next_thumbnail().map(Read::Artwork),
+                ReadKind::Bundles => work.bundles.next_job().map(|()| Read::Bundles),
+                ReadKind::Places => work.places.next_job().map(|()| Read::Places),
             }
-            // So is a write: its window waits on the answer.
-            if let Some(job) = work.writes.next_job() {
-                return Some(Read::Write(job));
-            }
-            if let Some(job) = work.listings.next_job() {
-                return Some(Read::List(job));
-            }
-            // A window showing the network, or on its way there, waits on
-            // the catalogue as a folder's on its listing.
-            if let Some(ask) = work.network.next_job() {
-                return Some(Read::Network(ask));
-            }
-            // A folder on screen that changed is next: what the user sees is
-            // wrong until it lands.
-            if let Some((client, location, dir)) = work.watches.next_drain() {
-                return Some(Read::Drain(client, location, dir));
-            }
-            // A node the user asked to be described comes before the icon
-            // decodes and folder cues: those are decoration a frame already
-            // draws without, and a Properties window shows nothing until its
-            // answer lands.
-            if let Some((window, job)) = work.properties.next_job() {
-                return Some(Read::Properties(window, job));
-            }
-            // A drive window's reading is watched live, so it goes before the
-            // decoration below, which a frame already draws without.
-            if let Some((window, job)) = work.drives.next_job() {
-                return Some(Read::Drive(window, job));
-            }
-            if let Some(job) = work.artwork.next_job() {
-                return Some(Read::Artwork(job));
-            }
-            if let Some(batch) = work.probes.next_batch() {
-                return Some(Read::Probe(batch));
-            }
-            // A picture file's own content last of the decoration: its class
-            // picture already stands in, and it costs a whole file's read.
-            if let Some(job) = work.artwork.next_thumbnail() {
-                return Some(Read::Artwork(job));
-            }
-            if work.bundles.next_job().is_some() {
-                return Some(Read::Bundles);
-            }
-            work.places.next_job().map(|()| Read::Places)
         }
 
         /// Answer the browser's request for `components`, recording it if this
@@ -5028,6 +5089,74 @@ mod program {
         /// The window stopped watching: the watch it held, to release.
         fn unwatch(&self, client: FilesClient) -> Option<alloc::sync::Arc<WatchedDirectory>> {
             self.work.lock().watches.unwatch(client)
+        }
+
+        /// Have the eject `act` carried out once the read under way, which
+        /// may hold its volume, has finished, by the reader, so no later read
+        /// overlaps it either; here, with no reader, since the loop reads
+        /// then. Its room was taken as it was located.
+        fn settle(&self, act: MountAct) {
+            let mut work = self.work.lock();
+            if !work.alone {
+                work.ejects.settle(act);
+                drop(work);
+                self.signal.notify_one();
+                return;
+            }
+            drop(work);
+            let done = tairix_browse::mount::carry_out(act);
+            self.work.lock().ejects.landed(done);
+        }
+
+        /// Have the reader read where the volume `act` ejects is bound, so the
+        /// loop can take its windows off it before the eject is carried out.
+        /// Its room is taken now and kept until its outcome lands.
+        ///
+        /// # Errors
+        ///
+        /// `act`, when as many ejects are under way as may be.
+        fn locate(&self, act: MountAct) -> Result<(), MountAct> {
+            let alone = {
+                let mut work = self.work.lock();
+                work.ejects.admit(act)?;
+                work.alone
+            };
+            if !alone {
+                self.signal.notify_one();
+                return Ok(());
+            }
+            let mut work = self.work.lock();
+            let Some(act) = work.ejects.next_locate() else {
+                return Ok(());
+            };
+            drop(work);
+            let bound = bindings_of(&act);
+            self.work.lock().ejects.located(act, bound);
+            Ok(())
+        }
+
+        /// The next eject the reader has located, with where its volume is
+        /// bound.
+        fn take_located(&self) -> Option<(MountAct, Vec<Projection>)> {
+            self.work.lock().ejects.take_located()
+        }
+
+        /// What the next eject carried out came to.
+        fn take_ejected(&self) -> Option<MountDone> {
+            self.work.lock().ejects.take_landed()
+        }
+
+        /// The window is leaving every place within `roots`, a volume about to
+        /// be ejected: what it watches there, or was offered there, to release.
+        fn release_within(
+            &self,
+            client: FilesClient,
+            roots: &[&[String]],
+        ) -> [Option<alloc::sync::Arc<WatchedDirectory>>; 2] {
+            self.work
+                .lock()
+                .watches
+                .release_within(client, |at| roots.iter().any(|root| at.starts_with(root)))
         }
 
         /// The folders among `changes` in `dir` changed, so an answer about one
@@ -5335,7 +5464,7 @@ mod program {
         /// The mount table is read through the System Information service, so
         /// a synchronous read here would be an IPC round trip on the loop that
         /// owes the user a frame.
-        fn want_places(&self) -> Option<(Vec<String>, Vec<Volume>)> {
+        fn want_places(&self) -> Option<PlacesFound> {
             let submitted = {
                 let mut work = self.work.lock();
                 if work.stopping {
@@ -5351,7 +5480,7 @@ mod program {
         }
 
         /// Take a landed places read, if one has.
-        fn take_places(&self) -> Option<(Vec<String>, Vec<Volume>)> {
+        fn take_places(&self) -> Option<PlacesFound> {
             self.work.lock().places.collect()
         }
 
@@ -5947,12 +6076,15 @@ mod program {
         /// Set when the discovery service rang the network session, cleared
         /// when the loop asks for what moved.
         network_rung: &'a Cell<bool>,
+        /// The mount worker, whose wake is drained on a
+        /// [`MOUNT_WORKER_TOKEN`] wake for the loop to adopt its answer.
+        mounts: Option<&'a MountWorker>,
     }
 
     /// Places read on the loop's own thread because no worker was there to
     /// read them, adopted on the loop's next turn exactly as a reader's answer
     /// is — whether the mount notice or the refresh gesture asked.
-    type PlacesRead = RefCell<Option<(Vec<String>, Vec<Volume>)>>;
+    type PlacesRead = RefCell<Option<PlacesFound>>;
 
     impl EventDrain for RtEventSource<'_> {
         fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
@@ -5993,6 +6125,13 @@ mod program {
                 // adopt.
                 Wake::App(SETTINGS_TOKEN) => {
                     self.settings.wake().drain();
+                    return Ok(Parked::Interrupted);
+                }
+                // A mount was carried out; its answer is the loop's.
+                Wake::App(MOUNT_WORKER_TOKEN) => {
+                    if let Some(mounts) = self.mounts {
+                        mounts.wake().drain();
+                    }
                     return Ok(Parked::Interrupted);
                 }
                 // A child-exit wake reaps the exited bundle(s) in place, so a
@@ -7097,6 +7236,9 @@ mod program {
             let Some(gesture) = acts.menu.open.take() else {
                 return (Repaint::Nothing, false);
             };
+            if let Some(place) = &gesture.place {
+                return apply_place_choice(browser, places, overlays, acts, place, outcome);
+            }
             return apply_menu_outcome(
                 browser, overlays, acts, &gesture, canvas, viewport, outcome, damage,
             );
@@ -7259,6 +7401,10 @@ mod program {
             if let Some(outcome) = sidebar::apply_event(
                 browser, places, scale, theme, window, toolbar, *pointer, event, damage,
             ) {
+                if let Some((index, point)) = outcome.menu_on {
+                    let viewer = acts.launcher.borrow().viewer;
+                    open_place_menu(places, index, point, &mut acts.menu, viewer);
+                }
                 if let Some(reason) = &outcome.refused {
                     report_error(reason);
                     overlays
@@ -7496,12 +7642,12 @@ mod program {
         (whole_if(outcome.0), outcome.1)
     }
 
-    /// The mounted volumes offered to the places rail, read from the live
-    /// mount table through the shared System Information client, each as
-    /// [`Volume::from_mount`] reads its record. A refused or failed query
-    /// yields no volumes at all, so the rail falls back to the user's own
-    /// places rather than guessing what is mounted. The rail itself then
-    /// re-validates every row.
+    /// The mounted volumes, read from the live mount table through the shared
+    /// System Information client, each as [`Volume::from_mount`] reads its
+    /// record: the rail's places, and the drives listed where they are
+    /// mounted. A refused or failed query yields no volumes at all, so the
+    /// rail falls back to the user's own places rather than guessing what is
+    /// mounted. The rail itself then re-validates every row.
     fn mounted_volumes() -> alloc::vec::Vec<Volume> {
         let mut volumes = alloc::vec::Vec::new();
         let _ = tairix_procinfo::for_each_mount(&IpcTransport, |record| {
@@ -7511,13 +7657,41 @@ mod program {
         volumes
     }
 
+    /// Every place the volume `act` ejects is bound at besides its catalog
+    /// entry, from the live view bindings, read when it is ejected and never
+    /// before: what an eject has this app leave too. A refused query yields
+    /// none, so an eject is refused for a hold it would have let go rather
+    /// than guessed at.
+    fn bindings_of(act: &MountAct) -> alloc::vec::Vec<Projection> {
+        let mut bound = alloc::vec::Vec::new();
+        let MountAct::Eject { volume_id, .. } = act else {
+            return bound;
+        };
+        let _ = tairix_procinfo::for_each_view(&IpcTransport, |view| {
+            if view.volume_id() == *volume_id {
+                bound.extend(Projection::of(view));
+            }
+            Ok(WalkStep::Continue)
+        });
+        bound
+    }
+
     /// Everything the places rail is built from, read from the live system:
     /// the logged-in user's home and whatever is mounted right now.
     ///
     /// The one place the rail's inputs are gathered, so the first build and
     /// every later refresh read exactly the same sources.
-    fn places_source() -> (alloc::vec::Vec<String>, alloc::vec::Vec<Volume>) {
-        (home_components().unwrap_or_default(), mounted_volumes())
+    fn places_source() -> PlacesFound {
+        PlacesFound {
+            home: home_components().unwrap_or_default(),
+            volumes: mounted_volumes(),
+        }
+    }
+
+    /// What the places rail is built from.
+    struct PlacesFound {
+        home: Vec<String>,
+        volumes: Vec<Volume>,
     }
 
     /// Route one pointer event in navigation mode, reporting whether the view
@@ -7727,16 +7901,18 @@ mod program {
                 );
             }
         }
-        if let Some(point) = secondary_press_point(*action, *x, *y) {
+        if let Some(point) = sidebar::secondary_press_point(*action, *x, *y) {
             let hit = tairix_browse::render::entry_index_at(
                 browser, scale, theme, viewport, toolbar, point,
             );
+            let viewer = acts.launcher.borrow().viewer;
             return whole(open_context_menu(
                 browser,
                 overlays,
                 &mut acts.menu,
                 acts.reads,
                 acts.installed,
+                viewer,
                 point,
                 hit,
             ));
@@ -7882,6 +8058,13 @@ mod program {
                 acts.launcher
                     .borrow_mut()
                     .open_file(acts.menu.client, &path);
+                false
+            }
+            Ok(Activation::MountImage { path }) => {
+                acts.launcher.borrow_mut().mount(MountAct::Attach {
+                    path,
+                    read_only: false,
+                });
                 false
             }
             // Mounting is what opening an endpoint means, and this system
@@ -9087,16 +9270,6 @@ mod program {
         (false, false)
     }
 
-    /// The window-local [`Point`] of a **secondary**-button (right-click)
-    /// press, or `None` for any other pointer action — the mirror of
-    /// [`press_point`] for the button that opens the right-click context menu.
-    fn secondary_press_point(action: PointerAction, x: u32, y: u32) -> Option<Point> {
-        if action != PointerAction::Pressed(PointerButtonCode::Secondary) {
-            return None;
-        }
-        Some(pointer_point(x, y))
-    }
-
     /// Ask the desktop to open this window's context menu at window-local
     /// `point`, on the item `index` the caller's hit-test resolved (`None` for
     /// empty space or the chrome).
@@ -9118,12 +9291,14 @@ mod program {
     ///
     /// The press also breaks any half-finished primary pair, so a click either
     /// side of a right-click cannot read as a double-click.
+    #[allow(clippy::too_many_arguments)] // The window's state, its links, and the press.
     fn open_context_menu<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         menu: &mut MenuLink<'_>,
         reads: &Reads,
         installed: &Installed,
+        viewer: Option<u32>,
         point: Point,
         index: Option<usize>,
     ) -> (bool, bool) {
@@ -9146,6 +9321,7 @@ mod program {
         // current.
         adopt_bundles(reads, installed);
         let model = ContextMenuModel::for_browser(browser, overlays.clipboard.is_some());
+        let model = viewer.map_or(model, |uid| model.viewed_by(uid));
         let target = open_with_target(browser);
         let held = installed.borrow();
         let ranked = target
@@ -9192,6 +9368,7 @@ mod program {
                     candidates,
                     documents,
                     endings: browser.presentation().endings,
+                    place: None,
                 });
             }
             Err(err) => report_error(&alloc::format!("menu refused ({err}); not shown")),
@@ -9458,6 +9635,8 @@ mod program {
                 false,
             ),
             ContextCommand::OpenWith => begin_open_with(browser, overlays, acts, canvas),
+            ContextCommand::MountReadOnly => (mount_selected(browser, acts), false),
+            ContextCommand::Eject => (eject_selected(browser, acts), false),
             ContextCommand::Rename => begin_rename(
                 browser,
                 &mut overlays.rename,
@@ -9482,6 +9661,185 @@ mod program {
             ContextCommand::Delete => begin_delete(browser, overlays),
         };
         (whole_if(changed), close)
+    }
+
+    /// Ask the desktop to open the rail's menu on the place at `index`, at
+    /// window-local `point`: Open, and Eject for a volume the user attached.
+    /// A refusal is reported and the rail carries on with no menu.
+    fn open_place_menu(
+        places: &Places,
+        index: usize,
+        point: Point,
+        menu: &mut MenuLink<'_>,
+        viewer: Option<u32>,
+    ) {
+        let Some(place) = places.rows().get(index) else {
+            return;
+        };
+        let rows = match place_menu(place, viewer, MANAGER_MENU_TITLE) {
+            Ok(rows) => rows,
+            Err(err) => {
+                report_error(&alloc::format!("menu model refused ({err}); not shown"));
+                return;
+            }
+        };
+        let anchor = match WindowRegion::new(point.x, point.y, 0, 0) {
+            Ok(anchor) => anchor,
+            Err(err) => {
+                report_error(&alloc::format!("menu anchor refused ({err}); not shown"));
+                return;
+            }
+        };
+        match menu.client.open_menu(menu.window, anchor, &rows) {
+            Ok(open_id) => {
+                *menu.open = Some(OpenMenuState {
+                    open_id,
+                    target: None,
+                    candidates: Vec::new(),
+                    documents: Vec::new(),
+                    endings: HiddenEndings::NONE,
+                    place: Some(place.components().to_vec()),
+                });
+            }
+            Err(err) => report_error(&alloc::format!("menu refused ({err}); not shown")),
+        }
+    }
+
+    /// Carry out the row chosen from the rail's menu opened on the place shown
+    /// at `place`: go there, or eject the volume it shows. A row the rail
+    /// re-read away since names nothing.
+    fn apply_place_choice<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        places: &mut Places,
+        overlays: &mut Overlays,
+        acts: &mut Acts<'_>,
+        place: &[String],
+        outcome: MenuOutcome,
+    ) -> (Repaint, bool) {
+        let MenuOutcome::Chosen(item) = outcome else {
+            return (Repaint::Nothing, false);
+        };
+        let Some(index) = places
+            .rows()
+            .iter()
+            .position(|row| row.components() == place)
+        else {
+            return (Repaint::Nothing, false);
+        };
+        match context_choice_from_item(item) {
+            Some(ContextChoice::Command(ContextCommand::Open)) => {
+                let went = sidebar::navigate_to(browser, places, index);
+                if let Some(reason) = &went.refused {
+                    report_error(reason);
+                    overlays
+                        .notices
+                        .refuse(NoticeSource::Listing, NOT_OPENED, reason);
+                }
+                (went.repaint, false)
+            }
+            Some(ContextChoice::Command(ContextCommand::Eject)) => {
+                let mut launcher = acts.launcher.borrow_mut();
+                if let Some(eject) = MountAct::eject_row(&places.rows()[index], launcher.viewer) {
+                    launcher.mount(eject);
+                }
+                (Repaint::Nothing, false)
+            }
+            _ => (Repaint::Nothing, false),
+        }
+    }
+
+    /// Mount the selected disk image read-only, as the menu offered it: the
+    /// engine names the image, so the path mounted is the one the window shows.
+    fn mount_selected<S: DirectorySource>(browser: &mut Browser<S>, acts: &mut Acts<'_>) -> bool {
+        let offered = ContextMenuModel::for_browser(browser, false);
+        if !offered.is_enabled(ContextCommand::MountReadOnly) {
+            return false;
+        }
+        if let Ok(Activation::MountImage { path }) = browser.activate_selected(BundleIntent::Launch)
+        {
+            acts.launcher.borrow_mut().mount(MountAct::Attach {
+                path,
+                read_only: true,
+            });
+        }
+        false
+    }
+
+    /// Eject the selected volume, as the menu offered it: one attached for the
+    /// user this file manager runs as.
+    fn eject_selected<S: DirectorySource>(browser: &Browser<S>, acts: &mut Acts<'_>) -> bool {
+        let mut launcher = acts.launcher.borrow_mut();
+        let Some(viewer) = launcher.viewer else {
+            return false;
+        };
+        let offered = ContextMenuModel::for_browser(browser, false).viewed_by(viewer);
+        if !offered.is_enabled(ContextCommand::Eject) {
+            return false;
+        }
+        let Some((entry, facts)) = browser
+            .chosen_entry()
+            .and_then(|entry| entry.volume().map(|facts| (entry, facts)))
+        else {
+            return false;
+        };
+        launcher.mount(MountAct::Eject {
+            volume_id: facts.volume_id,
+            name: String::from(entry.name()),
+        });
+        false
+    }
+
+    /// Let go of what this app holds on the volume shown at `roots`, so an
+    /// eject of it is not refused for this app's own sake: a window showing
+    /// a place on it, or on its way to one, goes to the catalog, giving that
+    /// way up; what any window watches or was offered there — one left from a
+    /// navigation given up included — is let go now; and a window still
+    /// opening there is given up. The reader carries the eject out after the
+    /// read under way, so no read of this app's holds it then.
+    fn release_volume(
+        windows: &mut [OpenWindow],
+        opening: &Opening,
+        reads: &Reads,
+        roots: &[&[String]],
+    ) {
+        if roots.is_empty() {
+            return;
+        }
+        for win in windows.iter_mut() {
+            let Some(state) = win.browser() else {
+                continue;
+            };
+            drop(reads.release_within(state.listing, roots));
+            if !tairix_browse::mount::holds_within(&state.browser, roots) {
+                continue;
+            }
+            if let Err(err) = state
+                .browser
+                .navigate_to(alloc::vec![String::from(STORAGE_CATALOG)])
+            {
+                report_error(&alloc::format!(
+                    "could not leave the ejected volume ({err:?})"
+                ));
+            }
+            win.owed.owe_whole();
+        }
+        opening.borrow_mut().retain(|pending| {
+            let keep = !tairix_browse::mount::holds_within(&pending.browser, roots);
+            if !keep {
+                reads.forget_listing(pending.listing);
+            }
+            keep
+        });
+    }
+
+    /// What a mount act came to, for the loop: where a volume to show is, or
+    /// nothing, with a refusal stated in `notices`.
+    fn land_mount(done: MountDone, notices: &mut Notices) -> Option<Vec<String>> {
+        done.shown().unwrap_or_else(|refusal| {
+            report_error(&alloc::format!("{}: {}", refusal.headline, refusal.reason));
+            notices.refuse(NoticeSource::Mount, &refusal.headline, refusal.reason);
+            None
+        })
     }
 
     /// Open the "Open With…" application chooser for the selected regular
@@ -9868,7 +10226,7 @@ mod program {
     ) -> (bool, bool) {
         match tool {
             ManagerTool::NewFolder => begin_new_entry(browser, overlays, NewEntry::Folder),
-            ManagerTool::Trash => go_to_trash(overlays),
+            ManagerTool::Trash => go_to_trash(overlays, browser.navigations()),
             ManagerTool::EmptyTrash => begin_empty_trash(browser, overlays),
         }
     }
@@ -9902,9 +10260,11 @@ mod program {
 
     /// Show the user's Trash (`plans/NEW-FILEMANAGER.md` `FM11`): the reader
     /// makes sure the fixed `Library/Trash` subtree exists, and the window
-    /// goes there once it has. An absent home is stated in the window.
-    fn go_to_trash(overlays: &mut Overlays) -> (bool, bool) {
-        let repeats = |then: &BrowserWrite| matches!(then, BrowserWrite::Trash(_));
+    /// goes there once it has, unless it has gone elsewhere since this was
+    /// asked at the browser's `asked_at` navigation count. An absent home is
+    /// stated in the window.
+    fn go_to_trash(overlays: &mut Overlays, asked_at: u64) -> (bool, bool) {
+        let repeats = |then: &BrowserWrite| matches!(then, BrowserWrite::Trash { .. });
         if let Some(changed) = overlays.while_writing(NO_TRASH, repeats) {
             return (changed, false);
         }
@@ -9918,7 +10278,7 @@ mod program {
         let trash = trash_dir(&home);
         overlays.writing = Some(Writing::new(
             WriteAct::EnsureTrash(trash.clone()),
-            BrowserWrite::Trash(trash),
+            BrowserWrite::Trash { trash, asked_at },
         ));
         (false, false)
     }
@@ -11641,6 +12001,17 @@ mod program {
         if operations.is_none() {
             reads.operations_alone();
         }
+        // A mount waits for its volume's driver, so it has a worker of its
+        // own, detached at teardown as the reader is. With no memory for one,
+        // every mount is refused, saying so, and the rest of the app runs on.
+        let mounts = tairix_browse::mount::mount_worker()
+            .ok()
+            .map(alloc::sync::Arc::new);
+        match &mounts {
+            Some(worker) => app::start_worker(APP_NAME, worker, set, MOUNT_WORKER_TOKEN, "mount"),
+            None => report_error("no memory for the mount worker; disk images are not mounted"),
+        }
+        let _mounts_guard = mounts.as_ref().map(tairix_rt::work::WorkerGuard::new);
         // Declared after the reader's handle, so it runs first: the desks stop,
         // the operations worker is joined, then the reader detaches.
         let _reads_guard = ReadsGuard {
@@ -11708,6 +12079,7 @@ mod program {
         let launcher = RefCell::new(Launcher::new(
             alloc::sync::Arc::clone(&reads),
             alloc::rc::Rc::clone(&installed),
+            mounts.clone(),
         ));
         let can_chown = holds_chown();
 
@@ -11732,6 +12104,7 @@ mod program {
             places_read: &places_read,
             due: &due,
             network_rung: &network_rung,
+            mounts: mounts.as_deref(),
         });
         // The event a park woke for, served first by the turn after it.
         let mut woken = None;
@@ -11859,13 +12232,13 @@ mod program {
                 .borrow_mut()
                 .take()
                 .or_else(|| reads.take_places());
-            if let Some((home, volumes)) = landed {
+            if let Some(PlacesFound { home, volumes }) = landed {
                 places = Places::new(&home, &volumes);
                 for win in &mut windows {
                     let Some(state) = win.browser() else {
                         continue;
                     };
-                    sidebar::refresh_places(&mut state.places, &home, &volumes);
+                    sidebar::refresh_places(&mut state.places, &places);
                     // A listing no volume records changes for — the
                     // namespace's own roots, the mount points under
                     // `/Storage` — moves with the mount table.
@@ -11895,6 +12268,54 @@ mod program {
             // opened for.
             while let Some(opened) = reads.take_opened() {
                 launcher.borrow_mut().opened(&mut client, opened);
+            }
+            // A disk the mount worker mounted is shown; a refusal is stated. A
+            // window asked for here opens on a later turn, which has to come
+            // whether or not a reader's answer brings it.
+            if let Some(mounts) = &mounts {
+                mounts.collect_landed(|done| {
+                    let settings = *kept.borrow().live();
+                    let shown = land_mount(done, &mut launcher.borrow_mut().notices);
+                    if let Some(location) = shown {
+                        open_more(
+                            &mut windows,
+                            &opening,
+                            &mut client,
+                            &reads,
+                            (Some(location), &settings),
+                        );
+                        moved = true;
+                    }
+                });
+            }
+            // An eject lets go of what this app holds on its volume first, its
+            // windows there going to the catalog once the reader has said where
+            // the volume is bound, and is carried out by the reader once the
+            // read under way, which may hold the volume too, has finished.
+            let ejects = core::mem::take(&mut launcher.borrow_mut().ejecting);
+            for eject in ejects {
+                if let Err(eject) = reads.locate(eject) {
+                    launcher
+                        .borrow_mut()
+                        .refuse(&eject, tairix_browse::mount::CROWDED);
+                    moved = true;
+                }
+            }
+            while let Some((eject, bound)) = reads.take_located() {
+                if let MountAct::Eject { volume_id, .. } = &eject {
+                    let roots: Vec<&[String]> =
+                        tairix_browse::mount::shown_at(&places, &bound, *volume_id).collect();
+                    release_volume(&mut windows, &opening, &reads, &roots);
+                }
+                reads.settle(eject);
+                moved = true;
+            }
+            // What an eject came to lands the turn it is known: at once when
+            // there is no reader to carry it out, never left for an unrelated
+            // wake.
+            while let Some(done) = reads.take_ejected() {
+                let _ = land_mount(done, &mut launcher.borrow_mut().notices);
+                moved = true;
             }
             // A listing the reader has answered is adopted here: the browser
             // holds the navigation it could not complete, and resuming it is

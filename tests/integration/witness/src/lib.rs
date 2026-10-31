@@ -64,6 +64,52 @@ pub fn names_bundle(bundle: &str, store: &str, name: &str) -> bool {
         .is_some_and(|leaf| leaf == name)
 }
 
+/// The command word the login shell runs as.
+pub const LOGIN_SHELL: &str = "elsh";
+
+/// A scripted vertical's end: the login shell's audited exit after a fixture's.
+///
+/// The record names no exit status, so a failing fixture's exit arms it too;
+/// what keeps a failure from passing is the script, which types the shell's
+/// `exit` only once the fixture has printed its pass, so a fixture that fails
+/// leaves the run to time out with its reason on serial. No other process's
+/// exit ends the run, and ending it on the fixture's own would leave the
+/// script's last line owed.
+pub struct FixtureExit {
+    fixtures: &'static [&'static str],
+    syscall_invoked: EventId,
+    exited: AtomicBool,
+}
+
+impl FixtureExit {
+    /// Neither exit in, for a run whose fixture runs as any of `fixtures`,
+    /// read off the kernel's audited `syscall_invoked` record.
+    #[must_use]
+    pub const fn new(fixtures: &'static [&'static str], syscall_invoked: EventId) -> Self {
+        Self {
+            fixtures,
+            syscall_invoked,
+            exited: AtomicBool::new(false),
+        }
+    }
+
+    /// Read `event`, answering whether it is the shell's exit after a
+    /// fixture's.
+    pub fn passed(&self, event: &Event<'_>) -> bool {
+        if event.id != self.syscall_invoked || field_str(event, "sc") != Some("exit") {
+            return false;
+        }
+        match field_str(event, "comm") {
+            Some(comm) if self.fixtures.contains(&comm) => {
+                self.exited.store(true, Ordering::Release);
+                false
+            }
+            Some(LOGIN_SHELL) => self.exited.load(Ordering::Acquire),
+            _ => false,
+        }
+    }
+}
+
 /// The login screen's witnesses that its frame reached a display: the system
 /// service store's greeter bundle was verified and loaded, and then the
 /// process the kernel names as serving the display endpoint reported the first
@@ -148,10 +194,71 @@ mod tests {
     use std::format;
 
     use super::{
-        field, field_str, field_u64, names_bundle, sector0_byte, GreeterFrame, GreeterRecords,
+        field, field_str, field_u64, names_bundle, sector0_byte, FixtureExit, GreeterFrame,
+        GreeterRecords, LOGIN_SHELL,
     };
     use tairix_abi::{SYSTEM_APPLICATION_STORE, SYSTEM_SERVICE_STORE};
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
+
+    /// The audited exit of the process running as `comm`.
+    fn exit_of(comm: &'static str, run: impl FnOnce(&Event<'_>)) {
+        let fields = [
+            Field {
+                key: "sc",
+                value: FieldValue::Str("exit"),
+            },
+            Field {
+                key: "comm",
+                value: FieldValue::Str(comm),
+            },
+        ];
+        run(&Event {
+            level: Level::Debug,
+            id: EventId(5000),
+            message: "",
+            fields: &fields,
+        });
+    }
+
+    #[test]
+    fn a_vertical_ends_on_the_shell_s_exit_after_its_fixture_s_and_on_nothing_else() {
+        let end = FixtureExit::new(&["images"], EventId(5000));
+        exit_of(LOGIN_SHELL, |event| {
+            assert!(!end.passed(event), "the shell before the fixture");
+        });
+        exit_of("mount", |event| assert!(!end.passed(event)));
+        exit_of("images", |event| {
+            assert!(!end.passed(event), "the fixture's own exit");
+        });
+        exit_of("unmount", |event| {
+            assert!(!end.passed(event), "another program's exit");
+        });
+        exit_of(LOGIN_SHELL, |event| assert!(end.passed(event)));
+        let other = FixtureExit::new(&["images"], EventId(4999));
+        exit_of("images", |event| assert!(!other.passed(event)));
+        exit_of(LOGIN_SHELL, |event| {
+            assert!(!other.passed(event), "another record names no exit");
+        });
+    }
+
+    #[test]
+    fn any_of_a_run_s_fixtures_arms_it_and_each_of_their_exits_counts_as_one() {
+        let end = FixtureExit::new(&["audiotone", "play"], EventId(5000));
+        exit_of("play", |event| assert!(!end.passed(event)));
+        exit_of("play", |event| {
+            assert!(
+                !end.passed(event),
+                "the player's decoder worker is the player"
+            );
+        });
+        exit_of("soundd", |event| {
+            assert!(!end.passed(event), "a service's exit is not the shell's");
+        });
+        exit_of(LOGIN_SHELL, |event| assert!(end.passed(event)));
+        let tone = FixtureExit::new(&["audiotone", "play"], EventId(5000));
+        exit_of("audiotone", |event| assert!(!tone.passed(event)));
+        exit_of(LOGIN_SHELL, |event| assert!(tone.passed(event)));
+    }
 
     #[test]
     fn a_value_reads_as_the_first_field_under_its_key() {

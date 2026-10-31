@@ -69,7 +69,8 @@ there.
   puts the row back rather than leaving a value the next login would not
   restore.
 - **Storage reports what the machine holds and changes nothing.** One card
-  per mounted volume — its name, where it is mounted, its filesystem, device
+  per mounted volume but another user's private one, which the listing
+  withholds — its name, where it is mounted, its filesystem, device
   and medium, a capacity track, and its banded health — derived by the one
   shared volume view model (`lib/procinfo`), so a disk cannot read half full
   here and nearly full in the Switchboard. A volume whose format tracks no

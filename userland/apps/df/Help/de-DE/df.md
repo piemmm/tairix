@@ -21,7 +21,10 @@ verbirgt der Bericht Einhängungen ohne eigene Kapazität (die
 synthetischen Sichtbindungen des Systems) und weitere Einhängungen
 eines bereits gelisteten Datenträgers; `-a` zeigt alles, und die Zahl
 der verborgenen Einträge wird auf dem Standard-Informationsstrom
-(fd 3) vermerkt, nie in der Tabelle.
+(fd 3) vermerkt, nie in der Tabelle. Ein Datenträger, den ein anderer
+Benutzer privat hält, wird ebenfalls ausgelassen und gesondert
+vermerkt; `-a` listet ihn mit `-` für jede Zahl, die nur dieser
+Benutzer sehen darf.
 
 Größen werden in 1024-Byte-Blöcken ausgegeben, sofern keine
 Einheitenoption etwas anderes wählt; eine spätere Einheitenoption
@@ -38,7 +41,8 @@ nicht verfügbar.
 ## OPTIONS
 
 - `-a, --all` — auch die kapazitätslosen und doppelten Einhängungen
-  einbeziehen, die die Voreinstellung verbirgt.
+  sowie die privaten Datenträger anderer Benutzer einbeziehen, die die
+  Voreinstellung verbirgt.
 - `-T, --print-type` — die Dateisystemtyp-Spalte hinzufügen.
 - `-t, --type <type>` — nur Dateisysteme des Typs `type` melden
   (wiederholbar).
@@ -48,7 +52,7 @@ nicht verfügbar.
 - `-P, --portability` — das portable POSIX-Format (Kopfzeilen
   `1024-blocks` und `Capacity`).
 - `-l, --local` — den Bericht auf lokale Dateisysteme beschränken
-  (heute jede TAIRiX-Einhängung, es wird also nichts ausgefiltert).
+  und Netzwerkfreigaben auslassen.
 - `--total` — eine mit `total` beschriftete Summenzeile anhängen.
 - `-k` — 1024-Byte-Blöcke (die Voreinstellung).
 - `-h, --human-readable` — menschenlesbare Größen in Zweierpotenzen

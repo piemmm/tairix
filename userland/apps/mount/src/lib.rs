@@ -1,62 +1,34 @@
-//! TAIRiX `mount` — list mounted filesystems and attach new ones (Stage 6 `userland/apps/`).
+//! TAIRiX `mount` — list the mounted filesystems, and mount a disk image.
 //!
-//! With no operands `mount` lists the current mount table; with a
-//! `SOURCE TARGET` pair it attaches a filesystem. The two halves use
-//! different paths, both kernel-plumbing-free behind injected seams:
+//! With no operands `mount` lists the mount table through the System
+//! Information API's ungated `MOUNT_LIST` and `VIEW_LIST` queries, one
+//! `source on target type fstype (options)` line per view binding. With an
+//! `IMAGE` operand it mounts the volume that disk-image file holds,
+//! privately, for the user who runs it — at `/Storage/NAME`, and at a
+//! `TARGET` directory too when one is given (`plans/DISK-IMAGES.md`). The
+//! kernel recognises the image, decides whether it may be mounted, and
+//! audits the decision; nothing here grants anything.
 //!
-//! * **Listing** is a *read* of live system state, so — like `ps` — it goes
-//!   through the System Information API: TAIRiX has no
-//!   `/proc` and no mount-table file. `mount` issues the typed, versioned
-//!   `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries served by
-//!   `/System/Services/sysinfod.app/Run` and renders one
-//!   `source on target type fstype (options)` line per view binding, a
-//!   carved-out subtree read as `source[/subtree]`. The queries are ungated;
-//!   the shared paging, join, and rendering live in `lib/procinfo` so no
-//!   client duplicates them.
-//! * **Attaching** is privileged — it needs `CAP_FS_MOUNT` — and the **kernel** makes that decision, not
-//!   this tool. `mount` parses and presents a request to the injected
-//!   [`Mounter`] seam; an unauthorised or invalid attempt is refused there
-//!   and surfaced as [`MountError::Mount`].
+//! The operations that touch the outside world are injected seams, so every
+//! parsing, rendering and routing decision is tested without a kernel:
 //!
-//! # What this crate is
+//! * [`Transport`](tairix_procinfo::Transport) — the list queries, shared
+//!   with the other `sysinfo` clients.
+//! * [`Mounter`] — the image mount.
+//! * [`HelpSource`](tairix_help::HelpSource) — the bundle's own `Help/` tree,
+//!   for the short help.
 //!
-//! A command-line parser and presenter, not a policy point. The operations
-//! that touch the outside world are the injected seams:
-//!
-//! * [`Transport`](tairix_procinfo::Transport) / [`Output`](tairix_procinfo::Output)
-//!   — issue the list queries and write each rendered line (shared with the
-//!   other `sysinfo` clients).
-//! * [`Mounter`] — perform the privileged attach.
-//!
-//! No `mount` bundle ships and nothing implements [`Mounter`] outside the
-//! tests, which wire in-memory fixtures (`plans/OPEN-DEFECTS.md`).
-//!
-//! # Fail closed
-//!
-//! An option `getopt` refuses is a [`MountError::Option`], in its words; a
-//! number of operands other than zero or two is a [`MountError::Usage`]; an
-//! unknown `-o`/`-t` value is a [`MountError::BadOption`]. A listing
-//! transport failure surfaces the underlying [`Errno`](tairix_abi::Errno) as
-//! [`MountError::Service`], a refused or failed attach as
-//! [`MountError::Mount`], and a terminal write failure as
-//! [`MountError::Output`]. There is no panic.
+//! A device or volume `SOURCE` is not mounted: nothing yet lets a user name
+//! an unattached storage object (`plans/OPEN-DEFECTS.md` D1014).
 //!
 //! # Module map
 //!
-//! * [`error`] — [`MountError`], the outcomes of [`run`].
-//! * [`command`] — the [`Command`]/[`MountRequest`] shapes and the [`parse`]r.
-//! * [`io`] — the [`Mounter`] seam and the [`MountSpec`] it carries.
+//! * [`command`] — [`Command`], [`MountRequest`] and the [`parse`]r.
+//! * [`error`] — [`MountError`] and the exit status each failure gives.
+//! * [`io`] — the [`Mounter`] seam.
 //! * [`client`] — the [`run`] entry point.
-//!
-//! # Layering & safety
-//!
-//! `no_std` (with `alloc`); the only dependencies are the audited `lib/abi`
-//! and `lib/procinfo` crates and the shared `lib/util` command-line scanner,
-//! so this userland tool never links a kernel or driver crate. No `unsafe`,
-//! and no `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
-#![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
 extern crate alloc;
@@ -69,4 +41,4 @@ pub mod io;
 pub use client::{run, USAGE};
 pub use command::{parse, Command, MountRequest};
 pub use error::MountError;
-pub use io::{MountSpec, Mounter};
+pub use io::Mounter;

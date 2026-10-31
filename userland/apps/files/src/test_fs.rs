@@ -69,7 +69,10 @@ pub fn mounted(label: &str, target: &str, medium: Option<BlkMedium>) -> Volume {
             filesystem: String::new(),
             free: None,
             availability: MountAvailability::Available,
+            owner: None,
+            volume_id: [0; 16],
         },
+        offered: true,
     }
 }
 

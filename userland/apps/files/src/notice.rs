@@ -23,6 +23,8 @@ pub enum NoticeSource {
     Omission,
     /// Browsing the network.
     Network,
+    /// Mounting a disk image, or ejecting a volume.
+    Mount,
 }
 
 /// A window's refusal notices, by where each came from.

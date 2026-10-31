@@ -188,6 +188,11 @@ pub enum NameMatching {
     Exact,
     /// ASCII letters match regardless of case (FAT, `FileCore`).
     AsciiCaseInsensitive,
+    /// ASCII letters and the Latin-1 letters U+00E0–U+00FE, U+00F7 excepted,
+    /// match regardless of case: AmigaDOS's international mode, which folds
+    /// neither `ß` nor `ÿ`. A name that is not UTF-8 matches only its own
+    /// bytes.
+    Latin1CaseInsensitive,
 }
 
 impl NameMatching {
@@ -198,6 +203,33 @@ impl NameMatching {
         match self {
             Self::Exact => a == b,
             Self::AsciiCaseInsensitive => a.eq_ignore_ascii_case(b),
+            Self::Latin1CaseInsensitive => match (core::str::from_utf8(a), core::str::from_utf8(b))
+            {
+                (Ok(a), Ok(b)) => a
+                    .chars()
+                    .map(|c| self.fold(c))
+                    .eq(b.chars().map(|c| self.fold(c))),
+                _ => a == b,
+            },
+        }
+    }
+
+    /// The capital `c` is compared as under this rule: the one fold a format
+    /// that hashes its names by it, as AmigaDOS does, shares with [`Self::matches`].
+    #[must_use]
+    pub const fn fold(self, c: char) -> char {
+        match self {
+            Self::Exact => c,
+            Self::AsciiCaseInsensitive => c.to_ascii_uppercase(),
+            Self::Latin1CaseInsensitive => match c {
+                'a'..='z' | '\u{E0}'..='\u{F6}' | '\u{F8}'..='\u{FE}' => {
+                    match char::from_u32(c as u32 - 0x20) {
+                        Some(upper) => upper,
+                        None => c,
+                    }
+                }
+                _ => c,
+            },
         }
     }
 }
@@ -209,7 +241,7 @@ impl NameMatching {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum NodeIdentity {
     /// A node is reported under one id for as long as it keeps its name, and
-    /// a pin does not change it (ARXFS, ext4, UDF, ISO 9660).
+    /// a pin does not change it (ARXFS, ext4, UDF, ISO 9660, AmigaDOS).
     Stable,
     /// The id a node is reported under may change after a write, a truncate,
     /// a rename, a pin or the last unpin: FAT32 and ADFS report a pinned node
@@ -1750,6 +1782,37 @@ mod tests {
         assert!(!NameMatching::AsciiCaseInsensitive.matches(b"foo", b"food"));
         // Only ASCII letters fold.
         assert!(!NameMatching::AsciiCaseInsensitive.matches("é".as_bytes(), "É".as_bytes()));
+        assert!(
+            NameMatching::AsciiCaseInsensitive.matches(b"\xFFa", b"\xFFA"),
+            "the ASCII rule folds a name's ASCII letters whether or not it is UTF-8"
+        );
+    }
+
+    #[test]
+    fn the_latin1_rule_folds_amigados_international_letters_and_no_others() {
+        let rule = NameMatching::Latin1CaseInsensitive;
+        assert!(rule.matches("Ärger.txt".as_bytes(), "äRGER.TXT".as_bytes()));
+        assert!(rule.matches("þorn".as_bytes(), "ÞORN".as_bytes()));
+        // Division and multiplication signs share the rows but are not letters.
+        assert!(!rule.matches("÷".as_bytes(), "×".as_bytes()));
+        // AmigaDOS folds neither sharp s nor y-diaeresis.
+        assert!(!rule.matches("ß".as_bytes(), "ẞ".as_bytes()));
+        assert!(!rule.matches("ÿ".as_bytes(), "Ÿ".as_bytes()));
+        assert!(!rule.matches("œ".as_bytes(), "Œ".as_bytes()));
+        assert!(!rule.matches(b"foo", b"food"));
+        // A name that is not UTF-8 matches only its own bytes.
+        assert!(rule.matches(b"\xFF", b"\xFF"));
+        assert!(!rule.matches(b"\xE9", b"\xC9"));
+        for byte in 0..=u8::MAX {
+            let c = char::from(byte);
+            let expected = match byte {
+                b'a'..=b'z' | 0xE0..=0xF6 | 0xF8..=0xFE => char::from(byte - 0x20),
+                _ => c,
+            };
+            assert_eq!(rule.fold(c), expected, "{byte:#04x}");
+        }
+        assert_eq!(NameMatching::AsciiCaseInsensitive.fold('é'), 'é');
+        assert_eq!(NameMatching::Exact.fold('a'), 'a');
     }
 
     #[test]

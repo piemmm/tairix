@@ -18,7 +18,9 @@ each mounted filesystem driver reports its own accounting. By default
 the report hides mounts with no capacity of their own (the system's
 synthetic view bindings) and further mounts of an already-listed
 volume; `-a` shows everything, and the hidden count is noted on the
-standard information stream (fd 3), never in the table.
+standard information stream (fd 3), never in the table. A volume
+another user keeps private is left out too, noted apart; `-a` lists it
+with `-` for each figure that is theirs to see.
 
 Sizes are printed in 1024-byte blocks unless a unit option selects
 otherwise; a later unit option overrides an earlier one, and block
@@ -33,8 +35,8 @@ available.
 
 ## OPTIONS
 
-- `-a, --all` — include the capacity-less and duplicate mounts the
-  default hides.
+- `-a, --all` — include the capacity-less and duplicate mounts, and
+  other users' private volumes, that the default hides.
 - `-T, --print-type` — add the filesystem-type column.
 - `-t, --type <type>` — report only filesystems of `type`
   (repeatable).
@@ -43,8 +45,8 @@ available.
 - `-i, --inodes` — report inode counts instead of block usage.
 - `-P, --portability` — the POSIX portable format (`1024-blocks` and
   `Capacity` header wording).
-- `-l, --local` — restrict the report to local filesystems (every
-  TAIRiX mount today, so nothing is filtered away).
+- `-l, --local` — restrict the report to local filesystems, leaving
+  out network shares.
 - `--total` — append a row labelled `total` summing the displayed
   figures.
 - `-k` — 1024-byte blocks (the default).

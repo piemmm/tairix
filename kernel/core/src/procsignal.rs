@@ -881,13 +881,15 @@ struct SessionMember {
 ///
 /// Driven once the anchor's own teardown has finished. The session is handed
 /// to the reaper ([`crate::session_reaper`]), which walks it off this path;
-/// only a session the reaper does not take is walked here. A kernel with no
+/// only a session the reaper does not take is walked here, its observer told
+/// on the notifier. A kernel with no
 /// lander installed kills nothing — it has no scheduler to drive a death
 /// through.
 pub fn end_session(caps: &RwLock<CapTable>, audit: &(dyn Sink + Sync), anchor: ProcId) {
     if let Ok(Some(lander)) = DEFERRED_KILL_LANDER.get() {
         if !crate::session_reaper::hand_over(caps, anchor) {
             end_session_through(caps, audit, anchor, *lander, &mut || {});
+            crate::session_reaper::session_over(caps, false);
         }
     }
 }

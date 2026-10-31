@@ -147,7 +147,11 @@ can never diverge in navigation semantics, listing policy, or look.
   navigation as descend / climb: the target is listed before any state or
   history changes, a fresh navigation clears the forward branch, and the
   history is a bounded ring that drops the oldest location rather than growing
-  without bound.
+  without bound. Asking for the folder already shown while a navigation is on
+  its way elsewhere gives that navigation up and reads the folder afresh, so
+  the source stops reading the place given up, and reports the change.
+  `Browser::navigations` counts every navigation begun, so a caller that asked
+  for something at one count knows whether the user has gone anywhere since.
 - **Frame model** (`chrome`, `plans/NEW-FILEMANAGER.md` FM4b): the pure
   model behind the drawn toolbar, host-proven ahead
   of the chrome it drives. `ToolbarModel::for_browser` snapshots which
@@ -382,17 +386,28 @@ can never diverge in navigation semantics, listing policy, or look.
   the first free name — `New Folder`, `New Text Document.txt`, then ` 2`, ` 3`
   before any extension — in one pass over the listing. A `BlankDocument` is a
   type whose empty file is a complete document (`MediaType::blank_noun`).
+- **Disk images** (`mount`, `plans/DISK-IMAGES.md`): what opening a disk
+  image means for every surface that offers it. `Activation::MountImage` names
+  a file whose type holds a volume (`MediaType::holds_a_volume`); `MountAct`
+  is a mount or an eject, both carried out by `carry_out` over the `rt`
+  feature's `image_attach_path` and `volume_detach` — a mount on a
+  `MountWorker`, the runtime's one queued worker (`tairix_rt::work::Worker`),
+  because an attach waits for a driver, and an eject wherever the launcher's
+  own holds on the volume have let go (`files.app`'s reader); and
+  `MountDone::shown` answers where the volume is or the refusal, in the one
+  wording `files.app` and the desktop both state.
 - **Places / devices rail** (`places`, `layout::SidebarView`,
   `plans/NEW-FILEMANAGER.md`): the shortcut column down the leading edge of a
   file-manager window — the user's own places above, every mounted volume
-  below. `Places::new(home, volumes)` is **pure**: it takes the home
+  they can open below. `Places::new(home, volumes)` is **pure**: it takes the home
   directory's path components and the volumes the caller has already learned
   about and returns an ordered, validated, deduplicated list, so the model
   cannot open, stat, or list anything and is host-proven without a kernel.
   Reading the live mount table is the composing app's job — the file manager
-  reads `MOUNT_LIST` through `lib/procinfo` and offers only mounts reporting
-  themselves available, so a surprise-removed device is never drawn as a row
-  that would fail on the first click.
+  reads `MOUNT_LIST` through `lib/procinfo`; a volume that is not available,
+  or is another principal's withheld one, is no row (`Volume::offered`), so
+  none is drawn that would fail on the first click, but its root is still a
+  drive wherever it is listed.
   - **One fixed order**, so the rail never reshuffles between two paints of
     the same state: Home — the user's own files — and Desktop, the fixed user
     places, offered whether or not their directories

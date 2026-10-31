@@ -28,7 +28,7 @@
 use crate::blkio::{BlkMedium, BLK_MEDIUM_LEN};
 use crate::driver::block::{DiscLayout, DiscardCapability, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE};
 use crate::driver::filesystem::MountFlags;
-use crate::le::{exact_len, put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::le::{decode_bool, exact_len, put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::sysinfo::MOUNT_TARGET_MAX;
 use crate::Errno;
 
@@ -53,9 +53,22 @@ pub enum VolumeFsType {
     Udf = 4,
     /// Acorn ADFS / RISC OS `FileCore` (`drivers/filesystem/adfs`).
     Adfs = 5,
+    /// The AmigaDOS filesystems, OFS and FFS (`drivers/filesystem/affs`).
+    Affs = 6,
 }
 
 impl VolumeFsType {
+    /// Every filesystem type, in wire order.
+    pub const ALL: [Self; 7] = [
+        Self::ARXFS,
+        Self::Ext4,
+        Self::Fat32,
+        Self::Iso9660,
+        Self::Udf,
+        Self::Adfs,
+        Self::Affs,
+    ];
+
     /// The wire byte for this filesystem type.
     #[must_use]
     pub const fn as_u8(self) -> u8 {
@@ -75,6 +88,7 @@ impl VolumeFsType {
             3 => Ok(Self::Iso9660),
             4 => Ok(Self::Udf),
             5 => Ok(Self::Adfs),
+            6 => Ok(Self::Affs),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -90,6 +104,7 @@ impl VolumeFsType {
             Self::Iso9660 => b"tairix,volume-iso9660",
             Self::Udf => b"tairix,volume-udf",
             Self::Adfs => b"tairix,volume-adfs",
+            Self::Affs => b"tairix,volume-affs",
         }
     }
 }
@@ -122,9 +137,32 @@ pub enum FormatName {
     Adfs = 8,
     /// A share served over SMB 3.
     Smb3 = 9,
+    /// An AmigaDOS volume, OFS or FFS.
+    Affs = 10,
 }
 
 impl FormatName {
+    /// Every name, in wire order.
+    pub const ALL: [Self; 10] = [
+        Self::Arxfs,
+        Self::Ext2,
+        Self::Ext3,
+        Self::Ext4,
+        Self::Fat32,
+        Self::Iso9660,
+        Self::Udf,
+        Self::Adfs,
+        Self::Smb3,
+        Self::Affs,
+    ];
+
+    /// The format a user and `mount` call `name`, as [`as_str`](Self::as_str)
+    /// spells it, exactly.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|format| format.as_str() == name)
+    }
+
     /// The name as a user and `mount` know it.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -138,6 +176,7 @@ impl FormatName {
             Self::Udf => "udf",
             Self::Adfs => "adfs",
             Self::Smb3 => "smb3",
+            Self::Affs => "affs",
         }
     }
 
@@ -152,6 +191,7 @@ impl FormatName {
             Self::Iso9660 => VolumeFsType::Iso9660,
             Self::Udf => VolumeFsType::Udf,
             Self::Adfs => VolumeFsType::Adfs,
+            Self::Affs => VolumeFsType::Affs,
             Self::Smb3 => return None,
         })
     }
@@ -178,6 +218,7 @@ impl FormatName {
             7 => Self::Udf,
             8 => Self::Adfs,
             9 => Self::Smb3,
+            10 => Self::Affs,
             _ => return Err(Errno::OutOfRange),
         })
     }
@@ -589,11 +630,7 @@ impl VolumeDetachRequest {
         if volume_id == [0u8; VOLUME_ID_LEN] {
             return Err(Errno::OutOfRange);
         }
-        let force = match bytes[VOLUME_ID_LEN] {
-            0 => false,
-            1 => true,
-            _ => return Err(Errno::OutOfRange),
-        };
+        let force = decode_bool(bytes[VOLUME_ID_LEN])?;
         Ok(Self { volume_id, force })
     }
 }
@@ -863,24 +900,31 @@ mod tests {
 
     #[test]
     fn every_format_name_round_trips_into_its_family() {
-        for raw in 1..=9 {
-            let name = FormatName::from_u8(raw).expect("a name");
-            assert_eq!(name.as_u8(), raw);
-            assert!(!name.as_str().is_empty());
+        let coded: alloc::vec::Vec<FormatName> = (0..=u8::MAX)
+            .filter_map(|raw| FormatName::from_u8(raw).ok())
+            .collect();
+        assert_eq!(
+            coded,
+            FormatName::ALL,
+            "every code is listed, in wire order"
+        );
+        for name in FormatName::ALL {
+            assert_eq!(FormatName::from_u8(name.as_u8()), Ok(name));
+            assert_eq!(FormatName::from_name(name.as_str()), Some(name));
             assert_eq!(name.family().is_none(), name == FormatName::Smb3);
         }
+        for unknown in ["", "ISO9660", "vfat", "iso9660 "] {
+            assert_eq!(FormatName::from_name(unknown), None, "{unknown:?}");
+        }
         assert_eq!(FormatName::Ext2.family(), Some(VolumeFsType::Ext4));
+        assert_eq!(FormatName::Affs.family(), Some(VolumeFsType::Affs));
         assert_eq!(FormatName::from_u8(0), Err(Errno::OutOfRange));
-        assert_eq!(FormatName::from_u8(10), Err(Errno::OutOfRange));
+        assert_eq!(FormatName::from_u8(11), Err(Errno::OutOfRange));
     }
 
     #[test]
     fn every_format_names_its_own_volume_node() {
-        let keys = [0, 1, 2, 3, 4, 5].map(|raw| {
-            VolumeFsType::from_u8(raw)
-                .expect("a format")
-                .served_compatible()
-        });
+        let keys = VolumeFsType::ALL.map(VolumeFsType::served_compatible);
         for (at, key) in keys.iter().enumerate() {
             assert!(key.starts_with(b"tairix,volume-"));
             assert!(!keys[..at].contains(key), "{key:?} named twice");
@@ -900,17 +944,11 @@ mod tests {
 
     #[test]
     fn fstype_round_trips_and_rejects_unknown() {
-        for fstype in [
-            VolumeFsType::ARXFS,
-            VolumeFsType::Ext4,
-            VolumeFsType::Fat32,
-            VolumeFsType::Iso9660,
-            VolumeFsType::Udf,
-            VolumeFsType::Adfs,
-        ] {
+        for (at, fstype) in VolumeFsType::ALL.into_iter().enumerate() {
+            assert_eq!(usize::from(fstype.as_u8()), at);
             assert_eq!(VolumeFsType::from_u8(fstype.as_u8()), Ok(fstype));
         }
-        assert_eq!(VolumeFsType::from_u8(6), Err(Errno::OutOfRange));
+        assert_eq!(VolumeFsType::from_u8(7), Err(Errno::OutOfRange));
         assert_eq!(VolumeFsType::from_u8(u8::MAX), Err(Errno::OutOfRange));
     }
 

@@ -42,6 +42,8 @@ tairix-raidmeta = { path = "../../../lib/raidmeta", version = "=0.0.0" }
 # The ISO 9660 records the probe's shared test images, which the plan tests
 # include, are made of.
 tairix-test-iso9660-image = { path = "../../../tests/integration/iso9660_image", version = "=0.0.0" }
+# The partitioned Amiga disk the plan never attaches.
+tairix-test-amiga-image = { path = "../../../tests/integration/amiga_image", version = "=0.0.0" }
 
 # Everything the freestanding program links beyond the `lib` is pulled in only
 # for the bare-metal targets the binary is actually built for; on the host the

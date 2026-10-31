@@ -1226,6 +1226,33 @@ fn storage_model(mounts: Vec<MountRecord>) -> Model {
 }
 
 #[test]
+fn another_principals_private_volume_says_why_its_figures_are_not_shown() {
+    let usage = VolumeStats {
+        block_size: 512,
+        total_blocks: 1760,
+        free_blocks: 40,
+        avail_blocks: 40,
+        ..VolumeStats::default()
+    };
+    let theirs = mount_record(
+        b"Letters.adf",
+        b"/Storage/letters",
+        b"affs",
+        MountFlags::NOEXEC,
+        usage,
+        MountAvailability::Available,
+    )
+    .withheld();
+    let model = storage_model(alloc::vec![theirs]);
+    let row = detail_rows(&model)
+        .into_iter()
+        .find(|row| row.text.contains("/Storage/letters"))
+        .expect("listed");
+    assert!(row.text.contains("private to its owner"), "{}", row.text);
+    assert!(!row.text.contains("capacity unknown"), "{}", row.text);
+}
+
+#[test]
 fn two_deep_mount_points_stay_distinguishable_in_their_column() {
     // Two volumes whose paths agree for the whole width of the column and
     // differ only at the leaf. Telling them apart is the column's entire

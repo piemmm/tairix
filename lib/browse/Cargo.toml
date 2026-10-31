@@ -9,16 +9,18 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-# The production `RtLinkReader` and folder probe: the `fs_readlink` + resolving
-# `fs_stat` pair a listed symbolic link needs and the one-batch directory read a
-# folder cue needs, written once here so every surface that lists a directory
-# shares one implementation rather than a copy each (the charter forbids that
+# The production `RtLinkReader`, folder probe and mount worker: the
+# `fs_readlink` + resolving `fs_stat` pair a listed symbolic link needs, the
+# one-batch directory read a folder cue needs, and the image attach and detach
+# a double-click or an eject needs, written once here so every surface shares
+# one implementation rather than a copy each (the charter forbids that
 # duplication). Enabled only by a freestanding `Run` binary; host tooling builds
 # the engine without it and injects its own.
 rt = ["dep:tairix-rt"]
 
 [dependencies]
-# For the `rt` feature's `RtLinkReader` only: the userland `fs_*` wrappers.
+# For the `rt` feature only: the userland `fs_*`, image-attach and detach
+# wrappers, and the shared worker a mount is carried out on.
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 # The frozen `Errno` the directory source reports failures with; the browser
 # invents no parallel error set for the kernel boundary and never links

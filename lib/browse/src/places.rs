@@ -167,6 +167,27 @@ pub struct VolumeFacts {
     pub free: Option<u64>,
     /// Whether the volume is serving, and how well.
     pub availability: MountAvailability,
+    /// The principal it was attached for — a network share's or a disk
+    /// image's — who may eject it, or `None` for one no one owns.
+    pub owner: Option<u32>,
+    /// The identity a detach names it by, all-zero for one it cannot name.
+    pub volume_id: [u8; 16],
+}
+
+impl VolumeFacts {
+    /// Whether the principal `uid` may eject the volume: it was attached for
+    /// them.
+    #[must_use]
+    pub fn ejectable_by(&self, uid: u32) -> bool {
+        self.ejector() == Some(uid)
+    }
+
+    /// The principal who may eject the volume — the one it was attached for —
+    /// or `None` where no one may, or a detach could not name it.
+    #[must_use]
+    pub fn ejector(&self) -> Option<u32> {
+        self.owner.filter(|_| self.volume_id != [0; 16])
+    }
 }
 
 /// One mounted volume offered to [`Places::new`].
@@ -187,34 +208,39 @@ pub struct Volume {
     pub medium: Option<BlkMedium>,
     /// What the volume is and how it is doing.
     pub facts: VolumeFacts,
+    /// Whether the rail offers it as a place to go. One this session cannot
+    /// navigate to is still drawn as a drive wherever it is listed.
+    pub offered: bool,
 }
 
 impl Volume {
     /// The volume `record` reports, labelled by its mount point's leaf, or
-    /// `None` for one this session cannot navigate to: a mount whose device
-    /// has gone, or whose target is not valid text or names no leaf.
+    /// `None` for one whose target is not valid text or names no leaf. One
+    /// this session cannot navigate to — another principal's private volume,
+    /// withheld from it, or a mount whose device has gone — is not offered.
     ///
     /// A degraded, recovering or read-only conflicted volume still serves its
     /// data, so it is offered, its facts saying how it is doing.
     #[must_use]
     pub fn from_mount(record: &MountRecord) -> Option<Self> {
         let availability = record.availability();
-        if matches!(
+        let gone = matches!(
             availability,
             MountAvailability::UnavailableDirty | MountAvailability::UnavailableLost
-        ) {
-            return None;
-        }
+        );
         let target = core::str::from_utf8(record.target_bytes()).ok()?;
         let label = target.rsplit('/').find(|part| !part.is_empty())?;
         Some(Self {
             label: String::from(label),
             target: String::from(target),
             medium: record.medium(),
+            offered: !record.is_withheld() && !gone,
             facts: VolumeFacts {
                 filesystem: field_lossy(record.fstype_bytes()),
                 free: VolumeBytes::of(&record.usage()).map(|bytes| bytes.available),
                 availability,
+                owner: record.owner(),
+                volume_id: record.volume_id(),
             },
         })
     }
@@ -228,6 +254,9 @@ impl Volume {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Places {
     rows: Vec<Place>,
+    /// The storage volumes not offered as rows, in target order: drives where
+    /// they are listed, never places to go.
+    unoffered: Vec<Place>,
     cursor: usize,
     focused: bool,
     hovered: Option<usize>,
@@ -255,7 +284,9 @@ impl Places {
     /// target does not parse as an absolute path; when it is neither the
     /// storage catalog nor directly beneath it — the root volume and the
     /// system tree's own mounts are not the user's storage; or when an
-    /// already-accepted row already navigates to that same target.
+    /// already-accepted row already navigates to that same target. A volume
+    /// not [offered](Volume::offered) is no row, but still marks its root a
+    /// drive ([`crate::Browser::mark_volume_roots`]).
     #[must_use]
     pub fn new(home: &[String], volumes: &[Volume]) -> Self {
         let mut rows: Vec<Place> = Vec::new();
@@ -274,19 +305,45 @@ impl Places {
             }
         }
 
-        let mut accepted: Vec<Place> = volumes.iter().filter_map(volume_row).collect();
-        // Sorting before deduplicating makes the surviving row of a duplicated
-        // target depend only on the set of volumes, never on the order the
-        // mount table happened to page them out in.
-        accepted.sort_by(|a, b| a.label.cmp(&b.label));
-        for row in accepted {
-            if rows.iter().any(|seen| seen.components == row.components) {
-                continue;
-            }
-            rows.push(row);
-        }
+        let (offered, unoffered): (Vec<&Volume>, Vec<&Volume>) =
+            volumes.iter().partition(|volume| volume.offered);
+        let mut accepted: Vec<(usize, Place)> = offered
+            .into_iter()
+            .filter_map(volume_row)
+            .enumerate()
+            .collect();
+        // A duplicated target keeps its least label, then the first offered, so
+        // the survivor depends only on the set of volumes and never on the order
+        // the mount table happened to page them out in.
+        accepted.sort_by(|(i, a), (j, b)| {
+            a.components
+                .cmp(&b.components)
+                .then_with(|| a.label.cmp(&b.label))
+                .then(i.cmp(j))
+        });
+        accepted.dedup_by(|(_, later), (_, kept)| later.components == kept.components);
+        let fixed = |place: &Place| rows.iter().any(|row| row.components == place.components);
+        accepted.retain(|(_, row)| !fixed(row));
+        let mut unoffered: Vec<Place> = unoffered.into_iter().filter_map(volume_row).collect();
+        unoffered.sort_by(|a, b| {
+            a.components
+                .cmp(&b.components)
+                .then_with(|| a.label.cmp(&b.label))
+        });
+        unoffered.dedup_by(|later, kept| later.components == kept.components);
+        // Searched while the offered rows are still in target order, so a
+        // catalog of thousands of withheld volumes costs no pass per row.
+        unoffered.retain(|place| {
+            !fixed(place)
+                && accepted
+                    .binary_search_by(|(_, row)| row.components.cmp(&place.components))
+                    .is_err()
+        });
+        accepted.sort_by(|(i, a), (j, b)| a.label.cmp(&b.label).then(i.cmp(j)));
+        rows.extend(accepted.into_iter().map(|(_, row)| row));
         Self {
             rows,
+            unoffered,
             cursor: 0,
             focused: false,
             hovered: None,
@@ -298,6 +355,11 @@ impl Places {
     #[must_use]
     pub fn rows(&self) -> &[Place] {
         &self.rows
+    }
+
+    /// The storage volumes listed but not offered as rows.
+    pub(crate) fn unoffered(&self) -> &[Place] {
+        &self.unoffered
     }
 
     /// How many rows the rail has.

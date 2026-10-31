@@ -389,7 +389,8 @@ pub fn install_system_mount<B: Block + 'static>(
     // sink and pressure gauge the boot mounts use; until the mount table
     // below is published its operations still fail closed. The service
     // also observes endpoint teardown, so a surprise-removed disk's
-    // volume transitions the moment its serving driver dies.
+    // volume transitions the moment its serving driver dies, and the end of
+    // each session, whose disk images go with it.
     crate::volume_service::VOLUME_SERVICE.install(
         audit,
         pressure,
@@ -397,6 +398,7 @@ pub fn install_system_mount<B: Block + 'static>(
         &crate::hwtree_store::HW_TREE,
     );
     tairix_kernel_core::callreg::install_vanish_observer(&crate::volume_service::VOLUME_SERVICE);
+    tairix_kernel_core::session_reaper::observe(&crate::volume_service::VOLUME_SERVICE);
     // Locate the `/System` extent on a first window, then drop it so the
     // second, owned window is the one promoted into the `'static` mount.
     let extent = {

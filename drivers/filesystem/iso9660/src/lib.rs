@@ -165,11 +165,8 @@ fn keys(node: &Node) -> impl Iterator<Item = &'static [u8]> + '_ {
         .iter()
         .flat_map(|finder| (0..).map_while(move |index| finder.key(index)));
     let amiga = node.amiga.iter().flat_map(|amiga| {
-        amiga
-            .protection
-            .map(|_| &b"amiga.protection"[..])
-            .into_iter()
-            .chain((!amiga.comment.is_empty()).then_some(&b"amiga.comment"[..]))
+        let object = amiga.object();
+        (0..).map_while(move |index| object.key(index))
     });
     acorn.chain(finder).chain(amiga)
 }
@@ -178,20 +175,13 @@ fn keys(node: &Node) -> impl Iterator<Item = &'static [u8]> + '_ {
 fn value(node: &Node, key: &[u8], out: &mut [u8]) -> Result<Option<usize>, DriverError> {
     let mut staging = [0u8; acorn::ATTR_VALUE_MAX];
     let mut code = [0u8; mac::FINDER_VALUE_MAX];
-    let protection;
-    let bytes: &[u8] = match (key, &node.amiga) {
-        (
-            b"amiga.protection",
-            Some(susp::Amiga {
-                protection: Some(bits),
-                ..
-            }),
-        ) => {
-            protection = tairix_fsmeta::preset::amiga::protection_to_value(*bits);
-            &protection
-        }
-        (b"amiga.comment", Some(amiga)) if !amiga.comment.is_empty() => &amiga.comment,
-        _ => {
+    let amiga = node
+        .amiga
+        .as_ref()
+        .and_then(|amiga| amiga.object().value(key));
+    let bytes: &[u8] = match &amiga {
+        Some(value) => value.as_bytes(),
+        None => {
             if let Some(len) = node.finder.and_then(|finder| finder.value(key, &mut code)) {
                 &code[..len]
             } else if let Some(object) = node.acorn {

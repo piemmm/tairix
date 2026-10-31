@@ -148,6 +148,18 @@ pub const fn availability_name(availability: MountAvailability) -> &'static str 
     }
 }
 
+/// `record`'s source as a listing shows it, ending `…` where the record keeps
+/// only the start of a longer name ([`MountRecord::source_cut`]), so a cut is
+/// never read as the whole.
+#[must_use]
+pub fn source_text(record: &MountRecord) -> alloc::string::String {
+    let mut text = crate::field_lossy(record.source_bytes());
+    if record.source_cut() {
+        text.push('…');
+    }
+    text
+}
+
 /// The bytes a mount is named by: its backing source, or its mount point
 /// where the table reports no source, so no volume is ever nameless.
 ///

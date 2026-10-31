@@ -9,14 +9,17 @@
 mod images;
 
 use images::{device, iso, udf_image, Image};
+use tairix_abi::blkio::BlkForm;
 use tairix_abi::driver::block::DiscLayout;
 use tairix_abi::volume::VolumeFsType;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
 use tairix_fsprobe::{
-    fingerprint, iso9660, recognise, udf, Evidence, ProbedVolume, Recognised, ARXFS_RING_BLOCKS,
-    FAT_ATTR_LONG_NAME, FAT_ATTR_VOLUME_ID, FAT_DELETED_ENTRY, FAT_DIR_ENTRY_LEN,
+    adfs, affs, fingerprint, iso9660, recognise, udf, Evidence, ProbedVolume, Recognised,
+    ARXFS_RING_BLOCKS, FAT_ATTR_LONG_NAME, FAT_ATTR_VOLUME_ID, FAT_DELETED_ENTRY,
+    FAT_DIR_ENTRY_LEN,
 };
+use tairix_test_amiga_image::rdb_disk;
 
 fn recognise_with(
     bytes: Vec<u8>,
@@ -29,7 +32,7 @@ fn recognise_with(
 fn recognised(bytes: &[u8]) -> Option<ProbedVolume> {
     match recognise_with(bytes.to_vec(), 512, None)? {
         Recognised::Volume(volume) => Some(volume),
-        Recognised::RaidMember(_) => None,
+        Recognised::RaidMember(_) | Recognised::RigidDiskBlock => None,
     }
 }
 
@@ -677,4 +680,184 @@ fn a_session_the_drive_places_beyond_any_byte_address_is_no_disc() {
     assert!(iso9660::identify(&mut dev, Some(layout))
         .expect("no device fault")
         .is_none());
+}
+
+#[test]
+fn an_amiga_floppy_is_recognised_with_its_name_identity_and_root_as_evidence() {
+    let image = images::affs_volume(0, 512, affs::DD_FLOPPY_BLOCKS, b"Workbench1.3");
+    let probed = recognised(&image).expect("matches");
+    assert_eq!(probed.fstype, VolumeFsType::Affs);
+    assert_eq!(probed.label(), b"Workbench1.3");
+    assert_eq!(probed.form, BlkForm::FloppyDisk);
+    assert_eq!(
+        probed.evidence,
+        Some(Evidence {
+            offset: 880 * 512,
+            len: 512
+        })
+    );
+    assert_eq!(probed.span, None);
+    let mut dev = device(image.clone(), 512, None);
+    let layout = affs::identify(&mut dev)
+        .expect("no fault")
+        .expect("a volume");
+    assert_eq!(probed.identity, layout.identity());
+    assert_eq!((layout.root, layout.blocks), (880, 1760));
+    assert!(layout.bitmap_valid);
+    let renamed = images::affs_volume(0, 512, affs::DD_FLOPPY_BLOCKS, b"Workbench1.2");
+    assert_ne!(
+        recognised(&renamed).expect("matches").identity,
+        probed.identity
+    );
+}
+
+#[test]
+fn a_latin1_volume_name_is_labelled_in_utf8() {
+    let image = images::affs_volume(3, 512, affs::HD_FLOPPY_BLOCKS, b"Gr\xFC\xDFe");
+    let probed = recognised(&image).expect("matches");
+    assert_eq!(probed.label(), "Grüße".as_bytes());
+    assert_eq!(probed.form, BlkForm::FloppyDisk);
+}
+
+#[test]
+fn every_dos_type_is_an_amiga_volume_and_no_other_is() {
+    for flags in 0..=7 {
+        let image = images::affs_volume(flags, 512, 40, b"Work");
+        assert_eq!(fstype(&image), Some(VolumeFsType::Affs), "DOS\\{flags}");
+        let dos = affs::DosType::new(flags).expect("a type");
+        assert_eq!(dos.is_fast(), flags & 1 == 1);
+        assert_eq!(dos.is_international(), flags >= 2);
+        assert_eq!(dos.has_dir_cache(), matches!(flags, 4 | 5));
+        assert_eq!(dos.has_long_names(), flags >= 6);
+    }
+    let mut unknown = images::affs_volume(0, 512, 40, b"Work");
+    unknown[3] = 8;
+    assert_eq!(fstype(&unknown), None);
+    let mut kickstart = images::affs_volume(0, 512, 40, b"Work");
+    kickstart[..4].copy_from_slice(b"KICK");
+    assert_eq!(fstype(&kickstart), None);
+}
+
+#[test]
+fn a_volume_formatted_with_larger_blocks_is_found_at_its_own_middle() {
+    for block_size in [1024, 4096, 32768] {
+        let image = images::affs_volume(1, block_size, 64, b"HardFile");
+        let probed = recognised(&image).expect("matches");
+        assert_eq!(probed.fstype, VolumeFsType::Affs, "{block_size}");
+        assert_eq!(probed.form, BlkForm::Unspecified);
+        let layout = affs::identify(&mut device(image, 512, None))
+            .expect("no fault")
+            .expect("a volume");
+        assert_eq!(layout.block_size as usize, block_size);
+        assert_eq!(layout.root, 32);
+    }
+}
+
+#[test]
+fn the_root_the_boot_block_names_is_tried_when_the_middle_holds_none() {
+    // A partition formatted with more reserved blocks than the boot pair keeps
+    // its root off the middle; its boot block says where.
+    let mut image = vec![0u8; 100 * 512];
+    image[..4].copy_from_slice(b"DOS\x01");
+    image[8..12].copy_from_slice(&52u32.to_be_bytes());
+    images::write_affs_root(&mut image[52 * 512..53 * 512], b"Moved");
+    assert_eq!(fstype(&image), Some(VolumeFsType::Affs));
+    image[8..12].copy_from_slice(&100u32.to_be_bytes());
+    assert_eq!(fstype(&image), None, "a pointer past the volume is no root");
+}
+
+/// A named corruption of one block.
+type Lie = (&'static str, fn(&mut [u8]));
+
+#[test]
+fn amiga_root_lies_are_refused() {
+    let good = images::affs_volume(1, 512, 40, b"Work");
+    let root = 20 * 512;
+    assert_eq!(fstype(&good), Some(VolumeFsType::Affs));
+    let cases: [Lie; 7] = [
+        ("not a header", |b| b[3] = 8),
+        ("a header key", |b| b[7] = 1),
+        ("a hash table of another block size", |b| b[15] = 128),
+        ("a first data block", |b| b[19] = 1),
+        ("not the root", |b| b[511] = 2),
+        ("a name past its bound", |b| b[432] = 31),
+        ("a broken checksum", |b| b[100] ^= 1),
+    ];
+    for (what, corrupt) in cases {
+        let mut bad = good.clone();
+        let block = &mut bad[root..root + 512];
+        corrupt(block);
+        if what != "a broken checksum" {
+            images::seal_affs(block);
+        }
+        assert_eq!(fstype(&bad), None, "{what}");
+    }
+    assert_eq!(fstype(&good[..3 * 512]), None, "too small for a root");
+}
+
+#[test]
+fn acorn_and_amiga_floppies_are_never_taken_for_each_other() {
+    let acorn = images::adfs_old_map(b"Acorn     ");
+    let amiga = images::affs_volume(0, 512, affs::DD_FLOPPY_BLOCKS, b"Amiga");
+    assert_eq!(fstype(&acorn), Some(VolumeFsType::Adfs));
+    assert_eq!(fstype(&amiga), Some(VolumeFsType::Affs));
+    assert!(affs::identify(&mut device(acorn, 512, None))
+        .expect("no fault")
+        .is_none());
+    assert!(adfs::identify(&mut device(amiga, 512, None))
+        .expect("no fault")
+        .is_none());
+}
+
+#[test]
+fn a_volume_reports_the_medium_its_format_was_laid_out_for() {
+    assert_eq!(
+        recognised(&images::adfs_old_map(b"Acorn     "))
+            .expect("adfs")
+            .form,
+        BlkForm::FloppyDisk
+    );
+    assert_eq!(
+        recognised(&images::affs_volume(1, 512, 40, b"Part"))
+            .expect("affs")
+            .form,
+        BlkForm::Unspecified
+    );
+    let iso = iso::image(&iso::Spec {
+        volume_id: b"DISC",
+        ..Default::default()
+    });
+    assert_eq!(recognised(&iso).expect("iso").form, BlkForm::OpticalDisc);
+    let disc = udf_image::image(&udf_image::Spec::default());
+    let Some(Recognised::Volume(udf)) = recognise_with(disc, 2048, None) else {
+        panic!("a udf volume");
+    };
+    assert_eq!(udf.form, BlkForm::OpticalDisc);
+    let stick = udf_image::image(&udf_image::Spec {
+        block_size: 512,
+        blocks: 2400,
+        ..Default::default()
+    });
+    assert_eq!(recognised(&stick).expect("udf").form, BlkForm::Unspecified);
+    let head = images::fat32_boot(*b"SRLN", b"MYDISK     ");
+    assert_eq!(recognised(&head).expect("fat32").form, BlkForm::Unspecified);
+}
+
+#[test]
+fn a_rigid_disk_block_is_partitions_not_a_volume() {
+    for at in [0, 15] {
+        assert_eq!(
+            recognise_with(rdb_disk(32, at), 512, None),
+            Some(Recognised::RigidDiskBlock),
+            "block {at}"
+        );
+    }
+    let mut broken = rdb_disk(32, 0);
+    broken[40] ^= 1;
+    assert_eq!(recognise_with(broken, 512, None), None, "its sum fails");
+    assert_eq!(
+        recognise_with(rdb_disk(32, 16), 512, None),
+        None,
+        "past the blocks it is looked for in"
+    );
 }
