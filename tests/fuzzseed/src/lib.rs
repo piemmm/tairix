@@ -179,8 +179,12 @@ pub fn budget_deadline(budget_env: &str) -> Option<Instant> {
     if secs == 0 {
         return None;
     }
-    let close = std::env::var_os(SOAK_UNTIL_ENV).map(|raw| parse_close(&raw));
-    let span = soak_span(Duration::from_secs(secs), close, SystemTime::now())?;
+    let budget = Duration::from_secs(secs);
+    // Only a window needs the realtime clock; a plain budget stays monotonic.
+    let span = match std::env::var_os(SOAK_UNTIL_ENV) {
+        Some(close) => window_span(budget, parse_close(&close), SystemTime::now())?,
+        None => budget,
+    };
     Some(Instant::now() + span)
 }
 
@@ -194,12 +198,9 @@ fn parse_close(raw: &OsStr) -> SystemTime {
         .unwrap_or(UNIX_EPOCH)
 }
 
-/// How long a run of `budget` starting at `now` may soak: the budget, cut
-/// short at the window's `close`, or `None` once the window has closed.
-fn soak_span(budget: Duration, close: Option<SystemTime>, now: SystemTime) -> Option<Duration> {
-    let Some(close) = close else {
-        return Some(budget);
-    };
+/// How long a run of `budget` starting at `now` may soak in a window shutting
+/// at `close`: the budget cut short at the close, or `None` once it has shut.
+fn window_span(budget: Duration, close: SystemTime, now: SystemTime) -> Option<Duration> {
     close
         .duration_since(now)
         .ok()
@@ -486,7 +487,7 @@ impl Drop for Counted {
 mod tests {
     use super::{
         budget_deadline, budgeted_sweep, entropy_seed, expand_seed, parse_close, resolve_seed,
-        room_for_another_pass, soak_span, splitmix64, within_budget, Prng,
+        room_for_another_pass, splitmix64, window_span, within_budget, Prng,
     };
     use std::ffi::OsStr;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -537,12 +538,14 @@ mod tests {
         std::env::remove_var(var);
     }
 
+    /// Without a window the whole budget stands, and the realtime clock, which
+    /// the isolated miri stage refuses to read, is never consulted.
     #[test]
     fn budget_set_yields_a_live_deadline() {
         let var = "TAIRIX_FUZZSEED_SELFTEST_BUDGET2";
         std::env::set_var(var, "3600");
         let deadline = budget_deadline(var).expect("positive budget");
-        assert!(deadline > Instant::now());
+        assert!(deadline.saturating_duration_since(Instant::now()) > Duration::from_mins(59));
         assert!(within_budget(Some(deadline)));
         std::env::remove_var(var);
     }
@@ -560,19 +563,13 @@ mod tests {
     }
 
     #[test]
-    fn without_a_window_the_budget_stands() {
-        let budget = Duration::from_secs(60);
-        assert_eq!(soak_span(budget, None, at(1_000)), Some(budget));
-    }
-
-    #[test]
     fn a_window_closing_first_cuts_the_budget_short() {
         // The defect this exists for: a harness that spent most of the window
         // waiting to be built still ran its whole budget after it, and the
         // soak outlived the window by the longest build.
-        let budget = Duration::from_secs(3_600);
+        let budget = Duration::from_hours(1);
         assert_eq!(
-            soak_span(budget, Some(at(1_010)), at(1_000)),
+            window_span(budget, at(1_010), at(1_000)),
             Some(Duration::from_secs(10))
         );
     }
@@ -580,14 +577,14 @@ mod tests {
     #[test]
     fn a_window_closing_after_the_budget_leaves_it_alone() {
         let budget = Duration::from_secs(5);
-        assert_eq!(soak_span(budget, Some(at(2_000)), at(1_000)), Some(budget));
+        assert_eq!(window_span(budget, at(2_000), at(1_000)), Some(budget));
     }
 
     #[test]
     fn a_closed_window_leaves_only_the_smoke_iteration() {
-        let budget = Duration::from_secs(3_600);
-        assert_eq!(soak_span(budget, Some(at(1_000)), at(1_000)), None);
-        assert_eq!(soak_span(budget, Some(at(999)), at(1_000)), None);
+        let budget = Duration::from_hours(1);
+        assert_eq!(window_span(budget, at(1_000), at(1_000)), None);
+        assert_eq!(window_span(budget, at(999), at(1_000)), None);
     }
 
     #[test]
