@@ -3,9 +3,10 @@
 //!
 //! A component owns one [`EventRange`] and takes every identifier it emits
 //! from it, so no two components ever give one number two meanings. The
-//! `cargo xtask event-ids` stage of `ci` reads [`OWNERS`] and fails when a
-//! crate defines an identifier outside its range, when a crate defines
-//! identifiers with no range here, or when two crates define one value.
+//! `cargo xtask event-ids` stage of `ci` reads [`OWNERS`] and [`RETIRED`] and
+//! fails when a crate defines an identifier outside its range, when a crate
+//! defines identifiers with no range here, when two crates define one value,
+//! or when one defines a value a removed event carried.
 
 use crate::EventId;
 
@@ -366,6 +367,18 @@ pub const OWNERS: &[Owner] = &[
     },
 ];
 
+/// Identifiers a removed or renumbered event carried, each never defined
+/// again: an old record still carries it, and a consumer would read it as the
+/// new event. Sorted, for the event-ids stage's binary search.
+pub const RETIRED: &[u32] = &[
+    4020, 4103, 4105, 4106, 4107, 4108, 4109, 4112, 4113, 4114, 4116, 4117, 4118, 4119, 4122, 4123,
+    4124, 4125, 4126, 4127, 4128, 4129, 4149, 4160, 4161, 4162, 4163, 4164, 4165, 4166, 4167, 4168,
+    4169, 4184, 4196, 4197, 4198, 4199, 4200, 4201, 4202, 4203, 4204, 4205, 4206, 4207, 4208, 4210,
+    4211, 4212, 4214, 4215, 4216, 4228, 4229, 4230, 4231, 4232, 4233, 4234, 4235, 4236, 4244, 4245,
+    4246, 4247, 4248, 4249, 4251, 7000, 9003, 10_010, 10_011, 21_000, 24_101, 24_201, 24_301,
+    24_601, 24_701, 24_804, 24_910,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,6 +396,19 @@ mod tests {
                 );
                 assert!(one.crates.iter().all(|c| !other.crates.contains(c)));
             }
+        }
+    }
+
+    #[test]
+    fn every_retired_identifier_is_listed_once_in_order_within_a_range() {
+        assert!(RETIRED.windows(2).all(|pair| pair[0] < pair[1]));
+        for id in RETIRED {
+            assert!(
+                OWNERS
+                    .iter()
+                    .any(|owner| owner.range.contains(EventId(*id))),
+                "{id} lies in no registered range"
+            );
         }
     }
 

@@ -60,10 +60,11 @@
 //! A plain `volume_detach` of an unavailable volume is refused: discarding
 //! the retained set is the deliberate, separately-audited **force-unmount**
 //! (`plans/DEVICES.md` D4b), never an implicit side effect. A force detach
-//! (`VolumeDetachRequest::force`) still commits a healthy volume cleanly
-//! when it can; only when nothing can be committed — the volume is
-//! unavailable, or its flush fails — does it discard the retained set,
-//! logging the deliberate data loss with its own event id.
+//! (`DetachMode::Force`, or `DetachMode::Lost` of a volume recorded lost)
+//! still commits a healthy volume cleanly when it can; only when nothing can
+//! be committed — the volume is unavailable, or its flush fails — does it
+//! discard the retained set, logging the deliberate data loss with its own
+//! event id.
 //!
 //! A plain detach is also refused while a descriptor holds one of the
 //! volume's nodes, or a bind stands within the volume. A force detach revokes
@@ -111,7 +112,8 @@ use tairix_abi::imageattach::ImageAttach;
 use tairix_abi::netattach::{AttachReply, FsserveCtl, NetworkAttach, NetworkOffer, OfferId};
 use tairix_abi::sysinfo::{MountAvailability, VolumeClass};
 use tairix_abi::volume::{
-    FormatName, VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeFsType, VolumeInfo,
+    DetachMode, FormatName, VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeFsType,
+    VolumeInfo,
 };
 use tairix_abi::{DriverError, DriverHandle, Errno, HwMatchKey, HwNode, HwResource, SeekRegion};
 use tairix_bytedev::ByteDevice;
@@ -1972,22 +1974,15 @@ impl VolumeService for RuntimeVolumeService {
             return self.detach_image(
                 wiring.audit,
                 &request.volume_id,
-                request.force,
+                request.mode,
                 Some(caller),
                 "ejected",
             );
         }
         if self.network.holds(&request.volume_id) {
-            let host = core::cell::Cell::new(None);
-            let detached = self.network.detach(wiring, request, caller, &|on, force| {
-                host.set(Some(on));
-                self.settle_image_dependents(on, force, wiring.audit)
+            return self.with_held_on(wiring, |held| {
+                self.network.detach(wiring, request, caller, held)
             });
-            // An image that entered as the share was detached is stranded with it.
-            if let Some(host) = host.get() {
-                self.retire_images_on(host);
-            }
-            return detached;
         }
         if !caller.may_mount() {
             let name = self
@@ -2003,7 +1998,7 @@ impl VolumeService for RuntimeVolumeService {
                 Errno::PermissionDenied,
             ));
         }
-        self.detach_volume(&request.volume_id, request.force, wiring.audit)
+        self.detach_volume(&request.volume_id, request.mode, wiring.audit)
     }
 
     fn read(
@@ -2123,17 +2118,23 @@ impl VolumeService for RuntimeVolumeService {
         attach: &NetworkAttach<'_>,
     ) -> Result<AttachReply, Errno> {
         let wiring = self.wiring()?;
-        self.network.attach(wiring, caller, offer, attach, &|name| {
-            self.name_reserved(name)
+        self.with_held_on(wiring, |held| {
+            self.network.attach(
+                wiring,
+                caller,
+                offer,
+                attach,
+                &|name| self.name_reserved(name),
+                held,
+            )
         })
     }
 
     fn offer_ctl(&self, server: u64, offer: OfferId, op: FsserveCtl) -> Result<(), Errno> {
         let wiring = self.wiring()?;
-        if let Some(host) = self.network.ctl(wiring, server, offer, op)? {
-            self.retire_images_on(host);
-        }
-        Ok(())
+        self.network.ctl(wiring, server, offer, op, &|gone| {
+            self.retire_images_on(gone);
+        })
     }
 
     fn attach_image(
@@ -2149,9 +2150,37 @@ impl VolumeService for RuntimeVolumeService {
 }
 
 impl RuntimeVolumeService {
-    /// Detach the volume `id`; when `force`, revoke the descriptors holding
-    /// its nodes, withdraw the binds standing within it, and discard what
-    /// cannot be committed.
+    /// Flush and commit a live volume before it detaches, through the device
+    /// at `(endpoint, window)` and, where a driver `served` it, its driver's
+    /// filesystem `fs`. A volume no driver serves has no filesystem state to
+    /// flush: what a lost driver held unpublished went with it.
+    fn commit_live(
+        &self,
+        (served, fs): (bool, Option<&mut Box<dyn KernelFs>>),
+        (endpoint, window): (u64, u64),
+        journal: &Arc<SpinLock<RetainedWrites>>,
+    ) -> Result<(), (&'static str, Errno)> {
+        let live = if served {
+            Some(fs.ok_or(("driver_missing", Errno::NotImplemented))?)
+        } else {
+            None
+        };
+        commit_for_detach(live, self.device_for(endpoint, window).as_ref(), journal)
+    }
+
+    /// `op`, given what the volumes held on a network volume need as it
+    /// leaves: the image volumes on it settled first, and retired after.
+    fn with_held_on<T>(&self, wiring: &Wiring, op: impl FnOnce(network::HeldOn<'_>) -> T) -> T {
+        op(network::HeldOn {
+            settle: &|on, force| self.settle_image_dependents(on, force, wiring.audit),
+            departed: &|gone| self.retire_images_on(gone),
+        })
+    }
+
+    /// Detach the volume `id`; when `mode` forces it, revoke the descriptors
+    /// holding its nodes, withdraw the binds standing within it, and discard
+    /// what cannot be committed. Only a volume recorded lost is forced by
+    /// [`DetachMode::Lost`]: a dirty or conflicted one keeps its retained set.
     ///
     /// # Errors
     ///
@@ -2160,7 +2189,7 @@ impl RuntimeVolumeService {
     fn detach_volume(
         &self,
         id: &[u8; 16],
-        force: bool,
+        mode: DetachMode,
         audit: &'static (dyn Sink + Sync),
     ) -> Result<(), Errno> {
         let refuse = |name: &str, cause: &'static str, errno: Errno| -> Errno {
@@ -2174,13 +2203,10 @@ impl RuntimeVolumeService {
         // so its final commit takes the disk's one client in turn with the
         // other volumes on it; one whose device is gone has nothing to commit
         // to.
-        let pin = match device {
-            Some((endpoint, window)) => Some(
-                self.pin_device(endpoint, window)
-                    .map_err(|errno| refuse(&named, "registry_full", errno))?,
-            ),
-            None => None,
-        };
+        let pin = device
+            .map(|(endpoint, window)| self.pin_device(endpoint, window))
+            .transpose()
+            .map_err(|errno| refuse(&named, "registry_full", errno))?;
         let _op = pin.as_ref().map(|pin| pin.op.lock());
         let (_claim, target) = match self.claim_for_detach(id, device) {
             DetachClaim::Held(claim, target) => (claim, target),
@@ -2198,6 +2224,7 @@ impl RuntimeVolumeService {
             availability,
             served,
         } = target;
+        let force = mode.forces(availability == Availability::UnavailableLost);
         let refused = |cause: &'static str, errno: Errno| -> Errno { refuse(&name, cause, errno) };
         // Ahead of this volume's own locks: an image volume's flush reaches
         // the file it holds on this one.
@@ -2242,29 +2269,24 @@ impl RuntimeVolumeService {
         // detach still commits a healthy volume cleanly when it can; only
         // when nothing can be committed does it discard.
         let commit_refusal = match availability {
-            Availability::Available => {
-                // A volume no driver serves has no filesystem state to flush:
-                // what a lost driver held unpublished went with it.
-                let live = if served {
-                    fs.as_deref_mut()
-                        .map(Some)
-                        .ok_or(("driver_missing", Errno::NotImplemented))
-                } else {
-                    Ok(None)
-                };
-                live.and_then(|live| {
-                    commit_for_detach(live, self.device_for(endpoint, window).as_ref(), &journal)
-                })
-                .err()
-            }
-            Availability::UnavailableDirty => {
-                Some(("volume_unavailable_dirty", Errno::DeviceFault))
-            }
-            Availability::UnavailableLost => Some(("volume_unavailable_lost", Errno::DeviceFault)),
+            Availability::Available => self
+                .commit_live((served, fs.as_deref_mut()), (endpoint, window), &journal)
+                .err(),
+            Availability::UnavailableDirty => writes_refusal(
+                "volume_unavailable_dirty",
+                MountAvailability::UnavailableDirty,
+            ),
+            Availability::UnavailableLost => writes_refusal(
+                "volume_unavailable_lost",
+                MountAvailability::UnavailableLost,
+            ),
             // A conflicted volume's device is live, but its journal still
             // holds the retained set: a plain detach would discard it
             // silently, so only the audited force is the exit.
-            Availability::RecoveryConflict => Some(("volume_recovery_conflict", Errno::NotEmpty)),
+            Availability::RecoveryConflict => writes_refusal(
+                "volume_recovery_conflict",
+                MountAvailability::RecoveryConflict,
+            ),
         };
         let discarded = match commit_refusal {
             None => None,
@@ -2302,6 +2324,28 @@ impl RuntimeVolumeService {
         audit_detach_outcome(audit, &name, Forced::of(discarded, open));
         Ok(())
     }
+}
+
+/// The refusal, audited for `cause`, that a plain detach of a volume listed
+/// as `listed` earns from its writes.
+fn writes_refusal(cause: &'static str, listed: MountAvailability) -> Option<(&'static str, Errno)> {
+    listed
+        .plain_detach_refusal()
+        .map(|(errno, _)| (cause, errno))
+}
+
+/// What a departing volume's unpublished writes need of its detach.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) enum Writes {
+    /// A driver serves the volume: it flushes first, refused without a force
+    /// where the flush fails.
+    Served,
+    /// Its driver went, and took what it held unpublished with it: there is
+    /// nothing to flush, and a plain detach goes ahead.
+    Gone,
+    /// They were lost with the volume's backing: refused without a force,
+    /// so the loss is acknowledged.
+    Lost,
 }
 
 /// What a force detach gave up beyond a plain one: the open nodes it revoked
@@ -2449,25 +2493,30 @@ struct GivenUp {
 
 /// Take the volume registered for `handle`, published as `volume_id`, out of
 /// the namespace under every one of its lanes: its holds settled — let go
-/// when `force` — and its driver asked to flush unless the volume is `lost`,
-/// then its projections, registration and identity withdrawn.
+/// when `force` — and its driver asked to flush what its `writes` still
+/// hold, then its projections, registration and identity withdrawn.
 ///
 /// # Errors
 ///
 /// `(cause, errno)` for what kept it attached: nodes held or a refused flush
-/// without `force`, a volume `lost` without `force`, or a projection that
-/// cannot leave.
+/// without `force`, writes lost without `force`, or a projection that cannot
+/// leave.
 fn take_down(
     handle: DriverHandle,
     volume_id: [u8; 16],
     force: bool,
-    lost: bool,
+    writes: Writes,
 ) -> Result<GivenUp, (&'static str, Errno)> {
     let vfs = LATE_FILESYSTEM
         .vfs()
         .map_err(|errno| ("no_mount_table", errno))?;
-    if lost && !force {
-        return Err(("volume_unavailable_lost", Errno::DeviceFault));
+    if writes == Writes::Lost && !force {
+        if let Some(refused) = writes_refusal(
+            "volume_unavailable_lost",
+            MountAvailability::UnavailableLost,
+        ) {
+            return Err(refused);
+        }
     }
     let binds = if force {
         BindsWithin::Withdraw
@@ -2493,7 +2542,7 @@ fn take_down(
         return Err(("nodes_open", Errno::Busy));
     }
     let mut unflushed = false;
-    if !lost {
+    if writes == Writes::Served {
         let flushed = lanes.as_mut().map_or(Ok(()), |lanes| lanes.first().flush());
         if let Err(err) = flushed {
             if !force {
@@ -3082,9 +3131,8 @@ impl RuntimeVolumeService {
         let Ok(wiring) = self.wiring() else {
             return;
         };
-        self.network.server_lost(server, wiring.audit, &mut |host| {
-            self.retire_images_on(host);
-        });
+        self.network
+            .server_lost(server, wiring.audit, &|gone| self.retire_images_on(gone));
         if let Some(host) = self.image_server_lost(server, wiring.audit) {
             self.retire_images_on(host);
         }

@@ -430,7 +430,8 @@ impl AddressSpace {
     /// page-table-pool exhaustion, if the walk meets an existing leaf
     /// (gigapage / megapage) it would have to shatter — the isolation
     /// test maps outside the identity-mapped gigapages so that path is
-    /// not exercised — or for a user leaf in a kernel root slot.
+    /// not exercised — for a user leaf in a kernel root slot, or for a leaf
+    /// both writable and executable.
     pub fn map_4k(
         &mut self,
         frames: &'static dyn PageTableFrames,
@@ -439,6 +440,9 @@ impl AddressSpace {
         flags: u64,
     ) -> Option<()> {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 || (paddr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return None;
+        }
+        if flags & flags::WRITE != 0 && flags & flags::EXEC != 0 {
             return None;
         }
         let i2 = vpn_index(vaddr, 2);
@@ -456,45 +460,6 @@ impl AddressSpace {
         let l0 = ensure_child(l1, vpn_index(vaddr, 1), frames)?;
         let slot = &l0[vpn_index(vaddr, 0)];
         if pte_is_leaf(slot.load(Ordering::Relaxed)) {
-            return None;
-        }
-        slot.store(
-            pte_from_phys(paddr, flags | flags::VALID | flags::ACCESSED | flags::DIRTY),
-            Ordering::Relaxed,
-        );
-        Some(())
-    }
-
-    /// Map the 1 GiB region at `paddr` to `vaddr` with a single root-level
-    /// gigapage leaf.
-    ///
-    /// `vaddr` and `paddr` must be 1 GiB-aligned. This installs one leaf
-    /// directly in the root table (no child tables), so it costs no pool
-    /// frames — the cheap way to alias a whole gigabyte of physical memory at
-    /// a high virtual address with different permissions (e.g. the `USER`
-    /// bit) than the identity map carries. Returns `None` on a misaligned
-    /// address or if the target root slot is already occupied (a leaf or a
-    /// table pointer) — it refuses to overwrite an existing mapping rather
-    /// than silently clobber it.
-    ///
-    /// **TEST-ONLY SCAFFOLDING.** This exists solely to let the (in-progress)
-    /// crt0 QEMU round-trip vertical alias the kernel's RAM at a high `BIAS`
-    /// with the `USER` bit so it can `sret` into U-mode. It is gated to test
-    /// builds and the `test-harness` feature so it is **never** compiled into
-    /// a production kernel image; remove the gate (and this note) only when a
-    /// real U-mode loader in `kernel/mem` makes it a supported primitive.
-    #[cfg(any(test, feature = "test-harness"))]
-    pub fn map_gigapage(&mut self, vaddr: u64, paddr: u64, flags: u64) -> Option<()> {
-        const GIB: u64 = 1 << 30;
-        if (vaddr & (GIB - 1)) != 0 || (paddr & (GIB - 1)) != 0 {
-            return None;
-        }
-        let i2 = vpn_index(vaddr, 2);
-        // A kernel slot is not identity address space; aliasing into one
-        // would clobber the direct physical map or the shared remap
-        // hierarchy every root points at.
-        let slot = &self.root_table()?[i2];
-        if (slot.load(Ordering::Relaxed) & flags::VALID) != 0 || is_kernel_slot(i2) {
             return None;
         }
         slot.store(
@@ -818,6 +783,18 @@ const KERNEL_WINDOW_PAGES: usize = KERNEL_WINDOW_SLOTS * ENTRIES_PER_TABLE * ENT
 /// upper-half windows begin. RAM above it is reached through the direct
 /// physical map, not by widening this.
 pub const IDENTITY_GIGAPAGES: usize = PHYSMAP_FIRST_SLOT;
+
+/// Gigabytes of identity map every root the kernel may run under carries.
+///
+/// The kernel is identity-linked, so such a root maps the kernel's image, boot
+/// heap and stack and the board's low device registers at their physical
+/// addresses. `[0, 4 GiB)` holds them on the boards this port runs on: a bound
+/// on where the hardware puts them, not a capacity, since RAM is reached
+/// through the direct physical map. A board whose kernel ends above it is
+/// refused at boot.
+pub const KERNEL_IDENTITY_GIGAPAGES: usize = 4;
+
+const _: () = assert!(KERNEL_IDENTITY_GIGAPAGES <= IDENTITY_GIGAPAGES);
 
 /// First root-table slot the direct physical map claims — the first slot of
 /// Sv39's canonical upper half.

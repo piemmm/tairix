@@ -29,7 +29,7 @@ use crate::pci_host::{Bridge, Function, HostBus, HostSegment};
 /// Stable id for the probe's DMA translation discovery: a segment or a unit
 /// the kernel cannot describe leaves the DMA of every device behind it
 /// unconfined, or unpublished.
-pub const DISCOVERY_EVENT: EventId = EventId(4103);
+pub const DISCOVERY_EVENT: EventId = EventId(4218);
 
 /// The aliases one function can carry: its node's resources bound them.
 pub type Aliases = ArrayVec<IommuStreams, HW_NODE_MAX_RESOURCES>;

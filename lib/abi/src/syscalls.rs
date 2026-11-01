@@ -2107,7 +2107,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         arg_count: 2,
         args: [
             // Non-null `UserPtr` to the encoded `VolumeDetachRequest`
-            // (the 16-byte volume identity), then its exact length.
+            // (the 16-byte volume identity and the mode byte), then its
+            // exact length.
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::Unit,

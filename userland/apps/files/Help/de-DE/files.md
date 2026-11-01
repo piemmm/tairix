@@ -45,8 +45,8 @@ daher beweist ein Name nie, welchen Computer Sie vor sich haben. Die
 Verbindung zu den Freigaben eines Computers ist auf diesem System nicht
 verfügbar, und das Öffnen eines Computers sagt dies.
 
-Namentlich aus einer Shell gestartet (oder vom Desktop aus auf einem Ordner
-geöffnet) ist er stattdessen eine gewöhnliche Anwendung: ein Fenster, und
+Aus einer Shell über seinen Pfad `/System/Components/files.app` gestartet,
+ist er stattdessen eine gewöhnliche Anwendung: ein Fenster, und
 sie endet, wenn Sie es schließen. In beiden Fällen benötigt er eine laufende
 grafische Sitzung: ohne sie ist der Fensterkanal unerreichbar, und der
 Browser meldet die Ablehnung auf dem Standardfehlerstrom und beendet sich.
@@ -117,13 +117,18 @@ Eintrags ausgegraut ist.
 
 Das Öffnen eines Datenträgerabbilds — einer `.iso`-, `.adf`- oder
 `.hdf`-Datei und dergleichen — hängt es für Sie unter `/Storage` ein,
-beschreibbar, wo die Datei es ist, und öffnet sein Fenster;
-*Schreibgeschützt einhängen* hängt es stattdessen schreibgeschützt ein. Es
-bleibt eingehängt, bis Sie es auswerfen oder Ihre Anmeldesitzung endet.
-*Auswerfen* nimmt einen Datenträger heraus, den Sie eingehängt haben, von
-seinem Symbol oder von seiner Zeile in der Ortsleiste aus, deren eigenes
-Rechtsklickmenü *Öffnen* und *Auswerfen* enthält; Ihre Fenster darauf
-wechseln zuvor nach `/Storage`.
+beschreibbar, wo sowohl die Datei als auch ihr Format es zulassen, und
+öffnet sein Fenster; *Schreibgeschützt einhängen* hängt es stattdessen
+schreibgeschützt ein. Es bleibt eingehängt, bis Sie es auswerfen oder Ihre
+Anmeldesitzung endet. *Auswerfen* nimmt einen Datenträger heraus, den Sie
+eingehängt haben, von seinem Symbol oder von seiner Zeile in der
+Orte-Leiste aus, deren eigenes Rechtsklickmenü *Öffnen* und *Auswerfen*
+enthält; Ihre Fenster darauf wechseln zuvor nach `/Storage`. Ein
+Datenträger, der weggefallen ist — weil seine Platte entfernt wurde oder
+sein Server verloren ging —, bevor alles gespeichert war, was Sie darauf
+geschrieben haben, verschwindet aus der Orte-Leiste, behält aber sein
+Symbol in `/Storage`, und was nicht gespeichert wurde, ist verloren;
+*Auswerfen* von diesem Symbol aus fragt nach, bevor es ihn aufgibt.
 
 Das Untermenü *Neu* des Rechtsklickmenüs legt einen Ordner oder ein leeres
 Dokument jeder Art an, die ein installierter Editor schreibt, und öffnet

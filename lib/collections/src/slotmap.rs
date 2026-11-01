@@ -186,6 +186,44 @@ impl<K: Key, V> SlotMap<K, V> {
             .map_err(|_| TryReserveError::AllocFailed)
     }
 
+    /// Make room for `additional` more values with storage for exactly that
+    /// many fresh slots past the vacant ones, so a holder charging for the
+    /// storage knows what it grows by.
+    ///
+    /// # Errors
+    ///
+    /// As [`try_reserve`](Self::try_reserve).
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        let fresh = additional.saturating_sub(self.vacant.len);
+        if fresh == 0 {
+            return Ok(());
+        }
+        if fresh > fresh_room(self.slots.len()) {
+            return Err(TryReserveError::CapacityOverflow);
+        }
+        self.slots
+            .try_reserve_exact(fresh)
+            .map_err(|_| TryReserveError::AllocFailed)
+    }
+
+    /// The bytes its storage holds: a slot for every value it holds, has
+    /// held, or has room for.
+    #[must_use]
+    pub fn held_bytes(&self) -> usize {
+        self.slots.capacity().saturating_mul(size_of::<Slot<V>>())
+    }
+
+    /// The bytes [`try_reserve_exact`](Self::try_reserve_exact) of
+    /// `additional` would add to what its storage holds.
+    #[must_use]
+    pub fn reserve_bytes(&self, additional: usize) -> usize {
+        let unused = self.slots.capacity() - self.slots.len();
+        additional
+            .saturating_sub(self.vacant.len)
+            .saturating_sub(unused)
+            .saturating_mul(size_of::<Slot<V>>())
+    }
+
     /// File `value`, answering the key it is filed under.
     ///
     /// # Errors

@@ -199,6 +199,49 @@ fn the_status_line_states_the_lists_length_or_how_to_fill_it() {
     assert_eq!(status_line(&player), "2 files left out");
 }
 
+/// A file's name and a tag's artist hiding a direction override are drawn in
+/// the playlist and as the one heard with that character shown, never as the
+/// names they would pass for.
+#[test]
+fn a_file_s_name_is_drawn_with_what_hides_in_it_shown() {
+    let (layout, registry) = setting();
+    let theme = registry.active();
+    let drawn = |name: &str, artist: Option<&str>| {
+        let mut player = Player::new(Saved::default(), 1, DOUBLE_CLICK);
+        let (added, _) = player.add(vec![String::from(name)], &layout, &mut damage::sink());
+        if let Some(artist) = artist {
+            let tags = tagged(&[(TagKind::Artist, artist)]);
+            player.probed(
+                added[0],
+                Some((info(60), &tags)),
+                &layout,
+                &mut damage::sink(),
+            );
+        }
+        hear(&mut player, added[0], 0, &layout);
+        let window = layout.window();
+        let mut surface = Surface::new(window.width, window.height).expect("a surface");
+        paint(
+            &mut surface,
+            &player,
+            &layout,
+            None,
+            Scale::ONE,
+            theme,
+            window,
+        );
+        surface
+    };
+    let pair = |hiding: Option<&str>, shown: Option<&str>| {
+        drawn("a\u{202e}b.flac", hiding).pixels() == drawn("a\u{fffd}b.flac", shown).pixels()
+    };
+    assert!(pair(None, None), "the file's name");
+    assert!(
+        pair(Some("Hol\u{202e}st"), Some("Hol\u{fffd}st")),
+        "the artist"
+    );
+}
+
 #[test]
 fn a_tracks_second_line_names_what_its_tags_name() {
     let (layout, _registry) = setting();

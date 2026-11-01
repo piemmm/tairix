@@ -8,7 +8,7 @@
 //! attributes needs only the file's own read/write permission or a dedicated
 //! capability the VFS enforces.
 
-use alloc::string::String;
+use tairix_inline::ArrayString;
 
 use crate::{MetadataError, KEY_MAX};
 
@@ -115,7 +115,9 @@ impl Namespace {
 /// `AttrKey` in hand is always well-formed and in-bounds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttrKey {
-    text: String,
+    /// Held inline, so parsing a key never asks the heap and a driver short
+    /// of memory still reads one.
+    text: ArrayString<{ crate::KEY_MAX }>,
     namespace: Namespace,
 }
 
@@ -149,8 +151,11 @@ impl AttrKey {
             return Err(MetadataError::MalformedKey);
         }
         let namespace = Namespace::from_name(name).ok_or(MetadataError::UnknownNamespace)?;
+        let mut held = ArrayString::new();
+        held.try_push_str(text)
+            .map_err(|_| MetadataError::KeyTooLong)?;
         Ok(AttrKey {
-            text: String::from(text),
+            text: held,
             namespace,
         })
     }
@@ -165,7 +170,7 @@ impl AttrKey {
     /// surface that shows or retypes a key needs no second decode.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.text
+        self.text.as_str()
     }
 
     /// The key's namespace.

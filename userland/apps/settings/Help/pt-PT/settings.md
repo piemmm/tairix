@@ -33,9 +33,10 @@ abandona a barra lateral, e a primeira migalha do percurso lista então as
 categorias.
 
 É lançado a partir da linha *Settings…* do menu de sistema do ambiente de
-trabalho, da Biblioteca de programas, ou pelo nome a partir de uma shell.
-Exige uma sessão gráfica em execução: sem ela o canal de janela é inalcançável
-e comunica a recusa no fluxo de erro padrão e termina.
+trabalho, ou a partir de uma shell pelo seu caminho,
+`/System/Components/settings.app`. Exige uma sessão gráfica em execução: sem
+ela o canal de janela é inalcançável e comunica a recusa no fluxo de erro
+padrão e termina.
 
 Som mostra cada saída e entrada com a sua escolha predefinida, o seu nível e o
 seu silêncio, e o que está a gravar: as suas próprias gravações pelo nome e
@@ -57,6 +58,13 @@ do processador e se a ventoinha está a funcionar. Quando *Automatic* não
 consegue ler a temperatura, a ventoinha funciona até conseguir. Tal como as
 outras definições da máquina, uma alteração espera por *Apply*, que pede uma
 conta autorizada a alterá-las.
+
+**Storage** lista cada volume montado, exceto os que outro utilizador mantém
+privados: onde está montado, o seu sistema de ficheiros, o seu dispositivo e o
+seu suporte, quão cheio está e se está em bom estado. É um relatório, não um
+controlo — montar e desmontar cabem ao gestor de ficheiros e ao comando
+`mount` — e um volume cujo formato não tem uma capacidade fixa di-lo em vez de
+mostrar uma barra. O `df` reporta os mesmos números numa shell.
 
 ## EXIT STATUS
 

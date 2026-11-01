@@ -674,7 +674,15 @@ pub const KERNEL_BOOT_DIRECT_MAP: tairix_log::EventId = tairix_log::EventId(4096
 /// Logged on every boot of a port whose protections depend on what its CPU
 /// offers, at Warn where it offers fewer than all of them. The id is part of
 /// the audit contract and may not be renumbered.
-pub const KERNEL_BOOT_PROTECTIONS: tairix_log::EventId = tairix_log::EventId(4105);
+pub const KERNEL_BOOT_PROTECTIONS: tairix_log::EventId = tairix_log::EventId(4115);
+
+/// Security-relevant boot decision: whether the limit firmware can put on an
+/// x86_64 boot CPU's basic `CPUID` leaves, which hides every feature and
+/// protection reported past them, was lifted.
+///
+/// Logged only where a limit was set, at Warn where it would not clear. The
+/// id is part of the audit contract and may not be renumbered.
+pub const KERNEL_BOOT_CPUID_LIMIT: tairix_log::EventId = tairix_log::EventId(4217);
 
 pub use kalloc::FreeListAllocator;
 

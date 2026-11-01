@@ -618,9 +618,11 @@ ordinary vacant-final-name case every create already relied on is the same
 mechanism with a one-element tail, so there is one loop rather than two.
 
 **A canonical path is one the kernel would accept back.** `Vfs` bounds the
-composed answer at `MAX_PATH_COMPONENTS` components and `FS_PATH_MAX` bytes
-(`VfsError::InvalidPath` otherwise), so a caller can feed the answer straight
-into another call without being refused for spelling.
+composed answer at `MAX_PATH_COMPONENTS` components and `FS_PATH_MAX` bytes,
+and refuses one holding a name the path grammar refuses — a link's stored
+name, or a foreign volume's (`VfsError::InvalidPath` either way) — so a
+caller can feed the answer straight into another call without being refused
+for spelling. A working directory's path keeps such a name.
 
 **The composition is total because the walk cannot leave its mount.** The
 answer is the covering mount point's path followed by the canonical

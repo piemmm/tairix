@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The assembler a consumer's tests write modules in (`assemble`). Test
+# scaffolding; no TAIRiX build enables it.
+test-support = []
+
 [lints]
 workspace = true
 
@@ -17,3 +22,5 @@ tairix-util = { path = "../util", version = "=0.0.0" }
 [dev-dependencies]
 # The shared per-run seed and budget the fuzz harness draws through.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# The assembler the fuzz harness writes one of its seeds in.
+tairix-spirv = { path = ".", features = ["test-support"] }

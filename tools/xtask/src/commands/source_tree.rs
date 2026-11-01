@@ -4,6 +4,10 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
+
+use crate::children::Children;
+use crate::output_within;
 
 /// Visit every regular file under `root` a change could carry, passing its
 /// path, its workspace-relative path and its file name: everything but the
@@ -12,14 +16,16 @@ use std::process::Command;
 ///
 /// # Errors
 ///
-/// The first directory or entry that cannot be read, prefixed with `stage`,
-/// or the first error `visit` returns.
+/// The first directory or entry that cannot be read, or a listing of what git
+/// ignores killed at its budget, each prefixed with `stage`; or the first
+/// error `visit` returns.
 pub(super) fn for_each_file(
     root: &Path,
+    children: &Children,
     stage: &str,
     mut visit: impl FnMut(&Path, &str, &str) -> Result<(), String>,
 ) -> Result<(), String> {
-    let ignored = ignored(root);
+    let ignored = ignored(root, children).map_err(|why| format!("{stage}: {why}"))?;
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
         let entries = std::fs::read_dir(&dir)
@@ -51,19 +57,29 @@ pub(super) fn for_each_file(
 /// The untracked paths git ignores under `root`, relative to it, a wholly
 /// ignored directory once. Empty where git cannot say, so the walk then scans
 /// more rather than less; a tracked file is never among them.
-fn ignored(root: &Path) -> BTreeSet<String> {
-    let listed = git_in(root, std::env::vars_os())
-        .args([
-            "ls-files",
-            "-z",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--directory",
-        ])
-        .output();
-    match listed {
-        Ok(listed) if listed.status.success() => listed
+fn ignored(root: &Path, children: &Children) -> Result<BTreeSet<String>, String> {
+    let mut listing = git_in(root, std::env::vars_os());
+    listing.args([
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+    ]);
+    listed(children, listing, children.ordinary_budget())
+}
+
+/// The NUL-separated paths `listing` reports, a directory's trailing `/`
+/// dropped, or none where it cannot say; but a listing killed at `budget` is
+/// the scan's failure, not an answer.
+fn listed(
+    children: &Children,
+    mut listing: Command,
+    budget: Duration,
+) -> Result<BTreeSet<String>, String> {
+    match output_within(children, "git ls-files --ignored", &mut listing, budget) {
+        Ok(listed) => Ok(listed
             .stdout
             .split(|&byte| byte == 0)
             .filter(|path| !path.is_empty())
@@ -72,8 +88,9 @@ fn ignored(root: &Path) -> BTreeSet<String> {
                     .trim_end_matches('/')
                     .to_owned()
             })
-            .collect(),
-        _ => BTreeSet::new(),
+            .collect()),
+        Err(failure) if failure.overran => Err(failure.message),
+        Err(_) => Ok(BTreeSet::new()),
     }
 }
 
@@ -112,7 +129,12 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
 
-    use super::{for_each_file, git_in, is_rust};
+    use std::collections::BTreeSet;
+    use std::process::Command;
+    use std::time::Duration;
+
+    use super::{for_each_file, git_in, is_rust, listed};
+    use crate::children::Children;
 
     fn git(root: &Path, args: &[&str]) {
         let status = git_in(root, std::env::vars_os())
@@ -166,7 +188,7 @@ mod tests {
         }
         git(&root, &["add", "-f", "forced.json"]);
         let mut seen = Vec::new();
-        let walked = for_each_file(&root, "test", |_, rel, _| {
+        let walked = for_each_file(&root, &Children::default(), "test", |_, rel, _| {
             seen.push(rel.to_owned());
             Ok(())
         });
@@ -174,6 +196,41 @@ mod tests {
         walked.expect("walk");
         seen.sort();
         assert_eq!(seen, [".gitignore", "forced.json", "src/lib.rs"]);
+    }
+
+    #[test]
+    fn a_listing_killed_at_its_budget_fails_and_one_that_cannot_say_lists_nothing() {
+        let children = Children::default();
+        let script = |text: &str, budget| {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", text]);
+            listed(&children, cmd, budget)
+        };
+        let budget = Duration::from_secs(60);
+        assert_eq!(
+            script(r"printf 'a\000b/\000'", budget),
+            Ok(BTreeSet::from(["a".to_owned(), "b".to_owned()]))
+        );
+        assert_eq!(
+            script("exit 128", budget),
+            Ok(BTreeSet::new()),
+            "not a repository"
+        );
+        assert_eq!(
+            listed(
+                &children,
+                Command::new("/nonexistent/xtask-unit-test"),
+                budget
+            ),
+            Ok(BTreeSet::new()),
+            "no git"
+        );
+        let overran = script(
+            crate::process::WHILE_ITS_PARENT_RUNS,
+            Duration::from_millis(200),
+        )
+        .expect_err("the scan's failure");
+        assert!(overran.contains("exceeded its 200ms timeout"), "{overran}");
     }
 
     #[test]

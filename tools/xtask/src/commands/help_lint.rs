@@ -79,7 +79,7 @@ pub fn run(ctx: &Context) -> Result<(), String> {
 
     if violations.is_empty() {
         let bundles: BTreeSet<&str> = HELP_FILES.iter().map(|row| row.bundle).collect();
-        eprintln!(
+        noteln!(
             "xtask: help-lint: {} documents across {} bundles are clean",
             HELP_FILES.len(),
             bundles.len()
@@ -87,7 +87,7 @@ pub fn run(ctx: &Context) -> Result<(), String> {
         return Ok(());
     }
     for violation in &violations {
-        eprintln!("xtask: help-lint: {violation}");
+        noteln!("xtask: help-lint: {violation}");
     }
     Err(format!("help-lint found {} violation(s)", violations.len()))
 }

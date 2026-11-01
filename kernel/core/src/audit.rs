@@ -1,103 +1,29 @@
 //! Stable audit-log event IDs for `kernel/core`.
 //!
-//! Every architecture-neutral init-time and panic-time decision taken
-//! by the kernel entry crate emits exactly one structured log record
-//! through [`tairix_log`]. The numeric identifiers are part of the
-//! audit contract with external log consumers and
-//! may not be re-used or re-numbered.
+//! The identifiers are part of the audit contract with external log
+//! consumers and may not be re-used or re-numbered; they sit in the range
+//! [`tairix_log::registry::KERNEL`] gives the kernel. Each variant's rustdoc
+//! says what its record carries, and `docs/src/architecture/kernel.md`
+//! catalogues every event's level and sink, held to [`AuditEvent`] by a test.
 //!
-//! Per the range convention established in `lib/log` (subsystems pick
-//! ranges of `1_000`), `kernel/core` owns `4_000..5_000`. Earlier
-//! subsystems already published the lower ranges:
-//!
-//! * `1_000..2_000` — `kernel/sec`
-//! * `3_000..4_000` — `kernel/ipc`
-//!
-//! # Event catalogue
-//!
-//! | ID   | Level | Name                          | Sink   | When |
-//! |-----:|-------|-------------------------------|--------|------|
-//! | 4000 | Info  | `KERNEL_BOOT_STARTED`         | audit  | `kernel_main` entered, before any subsystem init. |
-//! | 4001 | Info  | `KERNEL_PHASE_STARTED`        | log    | An init phase began. The `phase` field names it. |
-//! | 4002 | Info  | `KERNEL_PHASE_READY`          | log    | An init phase completed successfully. |
-//! | 4003 | Error | `KERNEL_PHASE_FAILED`         | audit  | An init phase failed; the kernel will halt. |
-//! | 4004 | Info  | `KERNEL_BOOT_COMPLETED`       | audit  | Every init phase finished; control passes to the scheduler. |
-//! | 4005 | Info/Warn | `KERNEL_RAM_SELF_TEST`    | log    | The early-boot RAM self-test finished; `verified` short of `usable` emits at `Warn`. |
-//! | 4006 | Info/Warn | `KERNEL_HEAP_GROWTH`      | log    | Whether the heap grows past its bootstrap arena (`growth`), with the arena's `bootstrap_bytes` and boot's `peak_bytes` of it; `failed` emits at `Warn`. |
-//! | 4010 | Error | `KERNEL_PANIC`                | audit  | The kernel panicked; the handler logged context and is about to halt. A nested bare record names its own cause and, under `first`, the one the first report was entered for. |
-//! | 4011 | Error | `KERNEL_FAULT`                | audit  | A fatal CPU exception was taken in kernel mode. The `syndrome`, `fault_addr`, `fault_pc`, and `fault_sp` fields name the port's exception syndrome, the faulting address, the faulting instruction, and the kernel stack it ran on, each `null` where the CPU gave none; the register and `frame_N` blocks are the panic dump's. A nested bare record names its own cause and, under `first`, the one the first report was entered for. |
-//! | 4012 | Error | `KERNEL_STACK_CORRUPT`        | audit  | A task's kernel stack was found corrupt as it switched back, and the kernel halted. `check` is `guard` (its guard canary disturbed) or `suspension` (its saved stack pointer off the stack); `task`, `task_sp`, `stack_base`, and `stack_top` name the task, where it was suspended, and the stack's bounds; the register and `frame_N` blocks are the dispatcher's. A nested bare record names its own cause and, under `first`, the one the first report was entered for. |
-//! | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  | The dispatcher reached a syscall handler whose backing subsystem is intentionally not yet wired in (see `KernelSyscallHandlers`). The `feature` field names which deferral was hit. |
-//! | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT` | audit | A syscall fired on a CPU with no current task, or whose current task has no capability record. The `KernelDispatchHook` emits this then signals the bin-crate callback to halt the CPU. |
-//! | 4030 | Info  | `PROCESS_SPAWNED`             | audit  | A process was spawned: its image was built and the CPU is about to enter it in user mode. The `entry` field carries the relocated entry-point VA. |
-//! | 4031 | Error | `PROCESS_SPAWN_DENIED` | audit | A spawn was refused, the `cause` field naming why: the caller holds no spawn authority, or the session placement was refused before any of the child existed. `cause=session_ending` is a child refused at admission because its session began ending while it was built: it never runs and its parent reaps it as killed, and the `task`, `proc` and `comm` fields name it. `cause=deferred_load_failed` is a child whose own load refused its bundle: the `task` field names it, `status` the reserved load-failure status it exits with, and `errno` the refusal that status classifies. |
-//! | 4032 | Error | `PROCESS_SPAWN_FAILED`        | audit  | A spawn was authorised but building the process image failed; the partially built address space is discarded. The `cause` field names the `SpawnError`. |
-//! | 4036 | Info/Warn | `PROCESS_SIGNAL_CROSS_PRINCIPAL` | audit | The `signal` syscall's cross-principal authority decision, reached only once the target is not the caller's own child: allowed (`Info`) by same-uid or `CAP_PROC_CONTROL`, denied (`Warn`) otherwise. The `caller`, `pid`, `target`, `signal`, and `rule` fields name the decision. |
-//! | 4037 | Info/Warn | `PROCESS_PRIORITY_CHANGE` | audit | A `sched_set_priority` decision that needed authority beyond the caller's own child: a cross-principal target (same-uid or `CAP_PROC_CONTROL`) or a raise toward `High` (always `CAP_PROC_CONTROL`). Allowed is `Info`, denied is `Warn`; the `caller`, `pid`, `target`, `priority`, `rule`, and `raise` fields carry the decision. An own-child lowering is the caller's standing grant and is not recorded here. |
-//! | 4038 | Info | `SESSION_MEMBER_ENDED` | audit | A process was killed because the session it belongs to ended with the process that session is anchored at. The `task`, `proc`, `comm`, and `session` fields name the process, its instance, its name, and the anchor's instance. |
-//! | 4039 | Warn | `SESSION_REAPER_UNAVAILABLE` | audit | The session reaper could not be started; each session is ended on the path its anchor's death lands on. |
-//! | 4040 | Info  | `USERS_DB_LOADED`             | audit  | `/System/Security/Users` was read off the mounted root volume and parsed; the `records` field carries the account count. |
-//! | 4041 | Error | `USERS_DB_REJECTED` | audit | The users database could not be read or failed validation; no `UsersDb` is held and every login refuses (fail closed). The `cause` field names the refusal. |
-//! | 4042 | Info | `DRIVER_STORE_SCANNED` | audit | The `/System/Drivers/` signed-driver store was enumerated for autoload candidates. The `drivers` field carries the count of bundle image paths found; `skipped` the count of entries refused fail-closed during the walk. |
-//! | 4045 | Info | `USER_ADMIN_APPLIED` | audit | A `CAP_USER_ADMIN` account-administration operation was validated, persisted, and made live. The `op`, `target`, and `caller_uid` fields name the operation, the affected account/group, and the kernel-attested caller. |
-//! | 4046 | Warn | `USER_ADMIN_REJECTED` | audit | A `CAP_USER_ADMIN` account-administration operation was refused; nothing changed (fail closed). The `op`, `target`, `caller_uid`, and `errno` fields name the operation, the affected account/group, the caller, and the refusal. |
-//! | 4050 | Info | `INPUT_DELIVERED` | audit | An input driver delivered the **first** record of its kind to the input-focus arbiter — `kind=key` for the first `key_inject` edge, `kind=pointer` for the first `pointer_inject` record, `kind=touch` for the first `touch_inject` frame. Emitted at most once per input kind over the kernel's lifetime, carries no event content or timing — it witnesses that an autoloaded driver of that class is live, never a per-event record. |
-//! | 4051 | Info | `SEAT_SWITCHED` | audit | A `CAP_SEAT_ADMIN` `seat_switch` retargeted a seat's foreground text console. The `seat` and `console` fields name the seat and the new foreground. |
-//! | 4052 | Warn | `SEAT_LEASE_REVOKED` | audit | A `CAP_SEAT_ADMIN` `seat_revoke` forcibly evicted a seat's lease holder. The `seat` and `evicted` fields name the seat and the evicted owner's task id. |
-//! | 4260 | Info | `FS_NODE_MUTATED` | audit | A capability- and permission-checked filesystem mutation succeeded (`fs_mkdir`/`fs_unlink`/`fs_rename`/`fs_set_mode`/`fs_set_owner`). The `op`, `uid`, and `path` fields name the operation, the caller's kernel-attested uid, and the target; `to` carries a rename's destination, `mode` a chmod's new mode (octal), and `owner`/`group` a chown's new ids. Paths are bounded to the log field limit. |
-//! | 4087 | Warn | `DMA_TRANSLATION_BYPASS` | audit | Discovery left a function behind a translation unit unpublished because it would not use the unit: a virtio function offering no `VIRTIO_F_ACCESS_PLATFORM`. The `address` field names the function's requester id and `unit` the unit's node. |
-//! | 4088 | Warn | `DMA_TRANSLATION_FAULT` | audit | A translation unit refused a device's access. `unit`, `stream`, `iova`, `access` and `reason` name it; `node` is the device's node where a domain owner holds the stream, and absent for a stream no owner holds; `suppressed` counts the faults the unit's budget left unrecorded since its last record. |
-//! | 4089 | Error | `DMA_TRANSLATION_STORM` | audit | A stream raised faults past its budget's storm threshold in one window: it was silenced and its `node`, where one holds it, marked `Offline`. Carries the fault's fields and `outcome`: `silenced`, or why the unit could not. |
-//! | 4091 | Warn | `DMA_QUARANTINED` | audit | A driver ended holding DMA memory its device may still master; it passed to its node's quarantine, not the allocator. The `node`, `generation` and `bytes` fields name the node, the dead driver's admission generation, and what it held. |
-//! | 4092 | Info | `DMA_QUARANTINE_RELEASED` | audit | Quarantined DMA memory returned to the allocator, scrubbed. `cause` is `reset` (a later driver for the `node` declared its device reset) or `removed` (a surprise removal retired the node); `bytes` is what was freed, and a release that freed nothing is not recorded. |
-//! | 4093 | Info | `HW_NODE_GRANTS_REVOKED` | audit | A removed hardware-tree `node`'s authority was revoked from every task holding it: `grants` revoked across `holders` tasks, whose bindings of its interrupt lines, windows onto its registers and mappings of its shared regions were torn down. `killed` counts holders whose access could not be torn down and which were killed instead; the record is Warn when it is non-zero. |
-//! | 4094 | Info/Warn/Error | `DMA_TRANSLATION_UNIT` | audit | A translation unit discovery reported was brought up, or translates nothing and strands its devices, which master no DMA. `node` is the unit's node and `outcome` is `translating` or the refusal (`unmatched`, `no_registers`, `exhausted`, `unconfirmed`, `hardware`, `refused`), either with `stopped` and `refused`: the functions behind it found mastering DMA that were stopped and that would not stop (at take-over those with no firmware window; stranded, all). `faults_unrouted` carries a `reason` when its fault interrupt could not be served. |
-//! | 4095 | Error | `DMA_TRANSLATION_UNCONFIRMED` | audit | A unit could not confirm that a translation ended — a driver's domain, a removed node's, or one carve's — so what it reached is kept for good. Carries `node` and `generation`. |
-//! | 4147 | Info/Warn | `DMA_BUS_MASTER` | audit | The kernel turned a function's bus mastering on as its DMA owner began or off as it ended: `node`, `generation`, `master` (`on`/`off`), and `outcome` (`applied`, or `refused` where a function still reports otherwise). |
-//! | 4148 | Warn | `DMA_GROUP_REFUSED` | audit | A driver's first carve was refused: another node's live owner holds the isolation group its device shares. `node`, `generation`, `group`, and the `holder` node. |
-//! | 4158 | Warn | `PORT_IO_REFUSED` | audit | A driver's port access reached ports the kernel keeps for itself (PCI configuration mechanism #1) and was refused whatever its grant. `port`, `width`, `task`. |
-//! | 4261 | Warn | `FS_MUTATION_DENIED` | audit | A filesystem mutation was refused by the secured VFS; nothing changed (fail closed). Carries the same `op`/`uid`/`path`(/`to`/`mode`/`owner`/`group`) fields as `FS_NODE_MUTATED` plus the refusal's `errno`. |
-//! | 4130 | Warn | `VOLUME_DEGRADED`   | audit | A served volume's backing block device reported itself unhealthy while still serving I/O. Emitted once on the edge into `Degraded`; the `dev` field names the block-service endpoint. |
-//! | 4131 | Warn | `VOLUME_RECOVERING` | audit | A served volume's backing block device stalled/reset and entered its bounded recovery grace window. Emitted once on the edge into `Recovering`; `dev` names the block-service endpoint. |
-//! | 4132 | Info | `VOLUME_RECOVERED`  | audit | A degraded/recovering volume returned to healthy service (the disk came back). Emitted once on the edge back to `Available`; `dev` names the block-service endpoint. |
-//! | 4262 | Info | `SYSTEM_POWER`      | audit | A `system_power` transition was admitted: every mounted volume flushed and the platform is about to be asked to stop. The `caller` and `action` fields name the kernel-attested requester and the requested transition (`power-off`/`restart`). |
-//! | 4263 | Error | `VOLUME_WRITEBACK_FAILED` | audit | The write-back flusher could not publish a volume whose batched transaction had aged out; the volume serves no further writes. `volume` names the mount handle and `error` the driver's refusal. |
-//! | 4264 | Info | `HW_NODE_REMOVED`   | audit | An owned hardware-tree node was retired by `hw_remove_node`. The `node` field names the removed node and `mode` the removal posture (`surprise` for a vanished device, `orderly` for an idle stop-if-idle retirement). |
-//! | 4265 | Warn | `HW_NODE_REMOVE_REFUSED` | audit | An orderly `hw_remove_node` was refused because a volume is still attached on a block-service endpoint the node declares; nothing was removed (fail closed, `Errno::Busy`). The `node` field names the node left in place. |
-//! | 4266 | Warn | `TASK_LATENCY_OVERRUN` | log | An interactive surface overran the frame budget it declared with `latency_watch`. The `budget_ms`/`elapsed_ms`/`blocked_ms`/`calls` fields say where the budget went, `blocked_in` names the syscall that carried the span over, `top_calls` names the syscalls the span made most (which is what a stall spent in thousands of short calls has instead of one culprit), and `pc`/`bt` carry the stalling code as offsets into the program's own load base. Debug images only. |
-//! | 4267 | Warn | `VOLUME_RESERVE_ENTERED` | audit | A mounted volume is down to its reserve: ordinary writes may be refused while the system's own writes and deletes go on into it. `volume` names the mount handle and `source` the volume. |
-//! | 4268 | Info | `VOLUME_RESERVE_LEFT` | audit | A volume that was down to its reserve has room outside it again. `volume` names the mount handle and `source` the volume. |
-//! | 4269 | Warn | `WALL_CLOCK_SET_REFUSED` | audit | A wall-clock write was refused because the stored reading came from a better source than the writer claims; the clock is untouched. `caller` names the writing process, and `attempted` and `stored` the two provenance states. |
-//!
-//! "audit" events route through the `audit_sink` channel
-//! (security-relevant decisions); "log" events
-//! route through the diagnostic `log_sink` channel. Production
-//! kernels typically wire both sinks to the same COM1 backend, so
-//! both channels are visible on the boot console; QEMU integration
-//! tests intercept the audit channel only.
-//!
-//! Adding a new event requires assigning the next free identifier in
-//! this file and updating the table in
-//! `docs/src/architecture/kernel.md`.
+//! "audit" events route through the `audit_sink` channel (security-relevant
+//! decisions), "log" events through the diagnostic `log_sink` channel.
 
 use tairix_arch_api::fatal;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 use tairix_sync::OnceCell;
 
 /// Audit event identifiers emitted by `kernel/core`.
-///
-/// The numeric values are part of the stable ABI between TAIRiX and
-/// external log consumers; see the module-level table for the meaning
-/// of each ID.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum AuditEvent {
     /// `kernel_main` entered, before any subsystem init.
     BootStarted,
-    /// An init phase began.
+    /// An init phase began; `phase` names it.
     PhaseStarted,
-    /// An init phase completed successfully.
+    /// An init phase completed successfully; `phase` names it.
     PhaseReady,
-    /// An init phase failed; the kernel will halt next.
+    /// An init phase failed, `phase` naming it and `cause` why; the kernel
+    /// halts next.
     PhaseFailed,
     /// Every init phase finished; control passes to the scheduler.
     BootCompleted,
@@ -117,6 +43,12 @@ pub enum AuditEvent {
     /// `peak_bytes`.
     KernelHeapGrowth,
     /// The kernel panicked; the handler logged context and is halting.
+    ///
+    /// `file`, `line` and `column` name the source position. A fatal entry
+    /// taken while a report is already under way writes a bare record instead
+    /// ([`tairix_arch_api::fatal::nested_fields`]), naming its own cause and,
+    /// under `first`, the one the first report was entered for; so do
+    /// [`Self::KernelFault`] and [`Self::KernelStackCorrupt`].
     Panic,
     /// A fatal CPU exception was taken in kernel mode — a same-privilege
     /// abort, page fault, or illegal instruction the kernel has no fix-up
@@ -126,23 +58,19 @@ pub enum AuditEvent {
     /// evidence and call for different triage: a panic names a source
     /// location, a fault names the hardware syndrome, the faulting address,
     /// and the faulting instruction. Neither is fabricated for the other.
+    /// `syndrome`, `fault_addr`, `fault_pc` and `fault_sp` carry them and the
+    /// kernel stack the fault ran on, each `null` where the CPU gave none; the
+    /// register and `frame_N` blocks are the panic dump's.
     KernelFault,
-    /// A task's kernel stack was found corrupt as the task switched back —
-    /// its guard canary disturbed, or its saved stack pointer off the stack —
-    /// so the kernel halts rather than run on memory that may be damaged.
-    KernelStackCorrupt,
-    /// A syscall handler's backing subsystem is intentionally not yet
-    /// wired in.
+    /// A task's kernel stack was found corrupt — its saved stack pointer off
+    /// the stack before the switch in, or its guard canary disturbed once it
+    /// switched back — so the kernel halts rather than run on memory that may
+    /// be damaged.
     ///
-    /// Emitted by `KernelSyscallHandlers` (Stage 2.7 follow-up (f3))
-    /// when a stable-ABI syscall reaches a handler whose dependency
-    /// (named IPC port registry; user-memory copy-in) has not landed.
-    /// The audit record carries a `feature` field naming the missing
-    /// piece so external consumers can correlate user-visible
-    /// `Errno::NotFound` / `Errno::NotImplemented` returns with the
-    /// kernel-side deferral. See — the spec is
-    /// stable, the impl is announced as inert.
-    SyscallFeatureUnavailable,
+    /// `check` is `suspension` or `guard`; `task`, `task_sp`, `stack_base` and
+    /// `stack_top` name the task, where it was suspended, and the stack's
+    /// bounds; the register and `frame_N` blocks are the dispatcher's.
+    KernelStackCorrupt,
     /// A syscall fired on a CPU with no identifiable caller.
     ///
     /// Emitted by `KernelDispatchHook` (Stage 2.7 follow-up (f4))
@@ -161,15 +89,20 @@ pub enum AuditEvent {
     /// Emitted by the capability-checked spawn caller
     /// ([`crate::spawn::spawn_and_enter`]) after the user address space
     /// has been materialised and immediately before the Arch HAL
-    /// `enter_user` transition (which never returns). The record carries
-    /// the relocated entry-point virtual address (security-relevant decisions are audited).
+    /// `enter_user` transition (which never returns). `entry` carries the
+    /// relocated entry-point virtual address.
     ProcessSpawned,
-    /// A spawn was refused because the caller lacks `CAP_PROC_SPAWN`.
+    /// A spawn was refused; `cause` names the refusal.
     ///
-    /// Emitted by [`crate::spawn::spawn_and_enter`] before any state is
-    /// touched: the capability check fails closed and no address space is
-    /// built (no ambient authority; capability
-    /// checks before state touches).
+    /// `cause=session_ending` is a child refused at admission because its
+    /// session began ending while it was built: it never runs, its parent
+    /// reaps it as killed, and `task`, `proc` and `comm` name it.
+    /// `cause=deferred_load_failed` is a child whose own load refused its
+    /// bundle: `task` names it, `status` the reserved load-failure status it
+    /// exits with, and `errno` the refusal that status classifies. Every other
+    /// refusal precedes the child. The boot path's
+    /// [`crate::spawn::spawn_and_enter`] records its capability refusal with
+    /// no fields.
     ProcessSpawnDenied,
     /// A spawn was authorised but building the process image failed.
     ///
@@ -177,7 +110,8 @@ pub enum AuditEvent {
     /// [`tairix_kernel_mem::build_process_image`] returns an error (a
     /// malformed image, an out-of-range segment, or frame exhaustion).
     /// The partially built address space is discarded by the caller
-    /// (fail closed).
+    /// (fail closed). `cause` names the refusal, beside `free_frames` where
+    /// the image ran out of frames.
     ProcessSpawnFailed,
     /// A loaded driver process was torn down: its scheduler task was
     /// reaped and its grants, served endpoints, IRQ bindings, capability
@@ -241,18 +175,20 @@ pub enum AuditEvent {
     /// own principal (allowed) or requires `CAP_PROC_CONTROL` (allowed if
     /// held, refused otherwise). Emitted exactly once per such decision,
     /// `Info` on either allow and `Warn` on a refusal, carrying the
-    /// caller's task id, the target's pid and task id, the requested
-    /// signal, and which rule decided it — never a capability token.
+    /// caller's task id (`caller`), the target's pid and task id (`pid`,
+    /// `target`), the requested `signal`, and the `rule` that decided it —
+    /// never a capability token.
     ProcessSignalCrossPrincipal,
     /// A `sched_set_priority` authority decision that reached beyond the
     /// caller's own child: a cross-principal target or a raise toward
     /// `High` (`plans/NEW-TASKBAR.md` T12).
     ///
     /// Emitted once per such decision, allowed (`Info`) or denied
-    /// (`Warn`). The record carries the kernel-attested caller's task id,
-    /// the target's pid and task id, the requested level's wire
-    /// discriminant, which rule decided the target, and whether the
-    /// change was a raise — never a capability token. An own-child
+    /// (`Warn`). The record carries the kernel-attested caller's task id
+    /// (`caller`), the target's pid and task id (`pid`, `target`), the
+    /// requested level's wire discriminant (`priority`), the `rule` that
+    /// decided the target, and whether the change was a `raise` — never a
+    /// capability token. An own-child
     /// lowering is the parent's standing grant and stays unrecorded,
     /// exactly as own-child signal delivery does.
     ProcessPriorityChange,
@@ -260,19 +196,22 @@ pub enum AuditEvent {
     /// process that session is anchored at died
     /// (`docs/src/architecture/sessions.md`).
     ///
-    /// Emitted once per process the end reached, carrying its task id, its
-    /// instance, its name, and the instance the session is anchored at — the
-    /// record that says why a process nobody signalled is gone.
+    /// Emitted once per process the end reached, carrying its task id
+    /// (`task`), its instance (`proc`), its name (`comm`), and the instance
+    /// the session is anchored at (`session`) — the record that says why a
+    /// process nobody signalled is gone.
     SessionMemberEnded,
     /// The session reaper could not be started, so each session is ended on
     /// the path its anchor's death lands on (`crate::session_reaper`).
     SessionReaperUnavailable,
     /// The `/System/Security/Users` database was read off the mounted
-    /// root volume and parsed (`crate::users`, `plans/PI.md` P11).
+    /// root volume and parsed (`crate::users`, `plans/PI.md` P11); `path`
+    /// names it and `records` counts its accounts.
     UsersDbLoaded,
     /// The `/System/Security/Users` database could not be read, or
     /// failed its bounded fail-closed validation; no database is held
-    /// and every login refuses.
+    /// and every login refuses. `path` names what was refused and `cause`
+    /// why.
     UsersDbRejected,
     /// The `/System/Security/Groups` group registry was read off the
     /// mounted root volume and parsed (`crate::groups`).
@@ -294,12 +233,13 @@ pub enum AuditEvent {
     /// A `CAP_USER_ADMIN` account-administration operation was applied:
     /// validated, persisted to the root volume, and made live for the
     /// next spawn/login (`crate::useradmin`, `plans/CAPABILITY_USE.md`
-    /// CU4). Carries the operation, target, and attested caller uid —
-    /// never any password material.
+    /// CU4). Carries the operation (`op`), the affected account or group
+    /// (`target`), and the attested `caller_uid` — never any password
+    /// material.
     UserAdminApplied,
     /// A `CAP_USER_ADMIN` account-administration operation was refused
-    /// and nothing changed (fail closed). Carries the operation, target,
-    /// attested caller uid, and the refusing errno.
+    /// and nothing changed (fail closed). Carries
+    /// [`Self::UserAdminApplied`]'s fields and the refusing `errno`.
     UserAdminRejected,
     /// An input driver delivered the **first** record of its kind to the
     /// seat registry (`crate::seat`, `plans/PI.md` P11 —
@@ -320,15 +260,15 @@ pub enum AuditEvent {
     /// text console (`plans/DISPLAY.md` D3).
     ///
     /// Emitted by the `seat_switch` syscall handler after the validated
-    /// retarget takes effect. Carries the seat id and the new foreground
-    /// console index — the redirect of every subsequent keystroke of an
+    /// retarget takes effect. Carries the `seat` id and the new foreground
+    /// `console` index — the redirect of every subsequent keystroke of an
     /// unowned seat is a security-relevant ownership change.
     SeatSwitched,
     /// A `CAP_SEAT_ADMIN` `seat_revoke` forcibly evicted a seat's lease
     /// holder (`plans/DISPLAY.md` D3).
     ///
     /// Emitted by the `seat_revoke` syscall handler after the eviction.
-    /// Carries the seat id and the evicted owner's task id, so every
+    /// Carries the `seat` id and the `evicted` owner's task id, so every
     /// eviction is attributable; the evicted owner's next owner-gated call
     /// fails closed with the distinct `SeatRevoked` refusal.
     SeatLeaseRevoked,
@@ -612,23 +552,35 @@ pub enum AuditEvent {
     ///
     /// `node` is the node named in the removal; `grants`, `holders` and
     /// `killed` count the grants revoked, the tasks that held them, and the
-    /// holders killed because their access could not be torn down.
+    /// holders killed because their access could not be torn down. The torn
+    /// down access is the holders' bindings of the node's interrupt lines,
+    /// windows onto its registers and mappings of its shared regions. A
+    /// non-zero `killed` records at `Warn`.
     HwNodeGrantsRevoked,
-    /// Discovery left a function behind a translation unit unpublished
-    /// because it would not use the unit.
+    /// A function behind a translation unit is denied DMA because it would
+    /// not, or could not, be confined by the unit.
     ///
-    /// Carries the function's requester id `address` and the `unit` node.
+    /// Discovery leaves the function unpublished, `address` naming its
+    /// requester id and `reason` why: `untrusted` or `unconfinable` (no
+    /// isolation group confines it), or `bypasses_unit` (a virtio function
+    /// declining `VIRTIO_F_ACCESS_PLATFORM`). A driver loaded for `node` is
+    /// refused with `reason=stranded` where its unit translates nothing or
+    /// the node's record could not be read. `unit` is the unit's node, or
+    /// `unknown`.
     DmaTranslationBypass,
     /// A translation unit refused a device's access.
     ///
     /// `unit`, `stream`, `iova`, `access` and `reason` name it; `node` is the
-    /// device's node where an owner holds the stream; `suppressed` counts the
-    /// faults left unrecorded since the unit's last record.
+    /// device's node where an owner holds the stream, absent where none does;
+    /// `suppressed` counts the faults the unit's budget left unrecorded since
+    /// its last record.
     DmaTranslationFault,
-    /// A stream stormed past its fault budget: it was silenced and its node
-    /// marked `Offline`.
+    /// A stream raised faults past its budget's storm threshold in one
+    /// window: it was silenced and its `node`, where one holds it, marked
+    /// `Offline`.
     ///
-    /// Carries the fault's fields and `outcome`.
+    /// Carries the fault's fields and `outcome`: `silenced`, or why the unit
+    /// could not silence it.
     DmaTranslationStorm,
     /// Boot brought a DMA translation unit discovery reported up, or left it
     /// translating nothing.
@@ -642,9 +594,10 @@ pub enum AuditEvent {
     /// the unit found mastering DMA that were stopped and that would not stop
     /// — as it took over, those firmware keeps no window for; stranded, all.
     DmaTranslationUnit,
-    /// A translation unit could not confirm that a translation ended, so the
-    /// device may still reach what it mapped: that memory is kept for good,
-    /// and after a domain's end the node takes no further driver's carves.
+    /// A translation unit could not confirm that a translation ended — a
+    /// driver's domain, a removed node's, or one carve's — so the device may
+    /// still reach what it mapped: that memory is kept for good, and after a
+    /// domain's end the node takes no further driver's carves.
     ///
     /// Carries the `node` and the driver's admission `generation`.
     DmaTranslationUnconfirmed,
@@ -698,8 +651,9 @@ pub enum AuditEvent {
     /// / `fs_set_owner` syscall handlers after the secured VFS applied the
     /// change under the caller's kernel-attested identity. The record names
     /// the operation (`op`), the caller's uid (`uid`), and the target path
-    /// (`path`, plus `to` for a rename) — never a capability token or
-    /// secret. Every mutation of on-disk state is a security-relevant
+    /// (`path`, plus `to` for a rename, `mode` for a chmod's new mode in
+    /// octal, `owner` and `group` for a chown's new ids) — never a
+    /// capability token or secret. Every mutation of on-disk state is a security-relevant
     /// decision, so it is auditable; the paths are bounded to the log
     /// field limit on a character boundary so the record can never fail to
     /// encode and drop, which would let a mutation escape the trail.
@@ -709,8 +663,7 @@ pub enum AuditEvent {
     /// The refusing counterpart of [`FsNodeMutated`](Self::FsNodeMutated),
     /// emitted by the same handlers when the secured VFS returns an error
     /// (a permission, capability, mount-flag, or validation refusal). The
-    /// record carries the same `op`/`uid`/`path`(/`to`) fields plus the
-    /// refusal's `errno`, so an attempt to mutate state the caller may not
+    /// record carries the same fields plus the refusal's `errno`, so an attempt to mutate state the caller may not
     /// touch is as visible as a successful one.
     FsMutationDenied,
     /// The boot-time system configuration store
@@ -825,7 +778,8 @@ pub enum AuditEvent {
     /// The `volume` field names the mount handle and `source` the volume.
     /// It is the operator's warning while the system still has runway.
     VolumeReserveEntered,
-    /// A volume that was down to its reserve has room outside it again.
+    /// A volume that was down to its reserve has room outside it again;
+    /// `volume` names the mount handle and `source` the volume.
     VolumeReserveLeft,
     /// A user-space filesystem driver answered a call with a reply the kernel
     /// refused: the call failed with a device fault, and the volume reads as
@@ -838,7 +792,9 @@ pub enum AuditEvent {
     /// the driver's endpoint and the operation.
     ServedCallStalled,
     /// A wall-clock write lost to its provenance ladder: the stored reading
-    /// came from a better source, so a weaker one cannot roll it back.
+    /// came from a better source, so a weaker one cannot roll it back and the
+    /// clock is untouched. `caller` names the writing process, and
+    /// `attempted` and `stored` the two provenance states.
     WallClockSetRefused,
     /// A principal bound a volume's subtree at a view path
     /// (`plans/NEW-NAMESPACE.md` NS-4a). The `uid` and `target` fields name
@@ -889,7 +845,6 @@ impl AuditEvent {
             Self::Panic => fatal::KERNEL_PANIC.id.0,
             Self::KernelFault => fatal::KERNEL_FAULT.id.0,
             Self::KernelStackCorrupt => fatal::KERNEL_STACK_CORRUPT.id.0,
-            Self::SyscallFeatureUnavailable => 4020,
             Self::SyscallNoCallerContext => 4021,
             Self::ProcessSpawned => 4030,
             Self::ProcessSpawnDenied => 4031,
@@ -995,7 +950,6 @@ impl AuditEvent {
             Self::Panic => fatal::KERNEL_PANIC.message,
             Self::KernelFault => fatal::KERNEL_FAULT.message,
             Self::KernelStackCorrupt => fatal::KERNEL_STACK_CORRUPT.message,
-            Self::SyscallFeatureUnavailable => "syscall feature unavailable",
             Self::SyscallNoCallerContext => "syscall has no caller context",
             Self::ProcessSpawned => "process spawned",
             Self::ProcessSpawnDenied => "process spawn denied",
@@ -1118,15 +1072,14 @@ pub(crate) fn kernel_sink() -> Option<&'static dyn Sink> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::collections::BTreeSet;
+    use alloc::vec::Vec;
+
     use super::AuditEvent;
 
-    /// Every event in the catalogue, in id order.
-    ///
-    /// One list, shared by both cases below: a variant reachable by only
-    /// one of them is a variant whose id is checked for range but not for
-    /// collision, which is how four of them came to be uncovered. Adding a
-    /// variant means adding it here — the `id` and `message` matches are
-    /// exhaustive, so the compiler already names the other two sites.
+    /// Every event, shared by every case below. The `id` and `message`
+    /// matches are exhaustive, so the compiler names those sites for a new
+    /// variant; this list is the one it cannot, so its length is asserted.
     const ALL: &[AuditEvent] = &[
         AuditEvent::BootStarted,
         AuditEvent::PhaseStarted,
@@ -1138,7 +1091,6 @@ mod tests {
         AuditEvent::Panic,
         AuditEvent::KernelFault,
         AuditEvent::KernelStackCorrupt,
-        AuditEvent::SyscallFeatureUnavailable,
         AuditEvent::SyscallNoCallerContext,
         AuditEvent::ProcessSpawned,
         AuditEvent::ProcessSpawnDenied,
@@ -1232,23 +1184,46 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 97, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 96, "a new event belongs in `ALL`");
     }
 
     #[test]
-    fn event_ids_are_in_kernel_core_range() {
+    fn event_ids_are_in_the_kernel_range() {
         for ev in ALL {
-            let id = ev.id().0;
             assert!(
-                (4_000..5_000).contains(&id),
-                "{ev:?} id {id} escapes kernel/core range"
+                tairix_log::registry::KERNEL.contains(ev.id()),
+                "{ev:?} id {} escapes the kernel's range",
+                ev.id().0
             );
         }
     }
 
+    /// The kernel page's catalogue lists exactly the events recorded here, so
+    /// neither can gain or lose one alone.
+    #[test]
+    fn the_kernel_page_catalogues_every_event() {
+        const PAGE: &str = include_str!("../../../docs/src/architecture/kernel.md");
+        let (_, section) = PAGE
+            .split_once("\n## Audit event catalogue\n")
+            .expect("the kernel page has an audit event catalogue");
+        let listed: BTreeSet<u32> = section
+            .lines()
+            .skip_while(|line| !line.starts_with('|'))
+            .take_while(|line| line.starts_with('|'))
+            .filter_map(|row| row.split('|').nth(1)?.trim().parse().ok())
+            .collect();
+        let recorded: BTreeSet<u32> = ALL.iter().map(|ev| ev.id().0).collect();
+        let missing: Vec<&u32> = recorded.difference(&listed).collect();
+        let stale: Vec<&u32> = listed.difference(&recorded).collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "the catalogue lacks {missing:?} and lists {stale:?}, which no event has"
+        );
+    }
+
     #[test]
     fn event_ids_are_unique() {
-        let ids: alloc::vec::Vec<u32> = ALL.iter().map(|ev| ev.id().0).collect();
+        let ids: Vec<u32> = ALL.iter().map(|ev| ev.id().0).collect();
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
                 assert_ne!(ids[i], ids[j], "duplicate event id");

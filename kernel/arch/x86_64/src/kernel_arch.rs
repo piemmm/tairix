@@ -365,8 +365,8 @@ impl X86_64Arch {
         }
     }
 
-    /// Drop `cpu`, which never came up, from the map: no shootdown waits on
-    /// its acknowledge, and nothing starts it again.
+    /// Drop `cpu`, which never came up or was refused, from the map: no
+    /// shootdown waits on its acknowledge, and nothing starts it again.
     #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
     fn forget_cpu(&self, cpu: CpuId) {
         if let Some(slot) = usize::try_from(cpu)
@@ -620,18 +620,12 @@ impl SecondaryBringup for X86_64Arch {
             // software-enabled, the secondary entry is installed, and
             // `target_apic_id` names a real, parked AP distinct from the
             // caller — exactly `crate::smp::start_secondary`'s contract.
-            match unsafe { crate::smp::start_secondary(target_apic_id, cpu) } {
-                Ok(()) => Ok(()),
-                Err(crate::smp::StartCpuError::CpuIdOutOfRange) => Err(SmpError::InvalidCpu),
-                Err(
-                    crate::smp::StartCpuError::NoEntryInstalled
-                    | crate::smp::StartCpuError::NoKernelRoot,
-                ) => Err(SmpError::NotReady),
-                Err(crate::smp::StartCpuError::StartTimedOut) => {
+            unsafe { crate::smp::start_secondary(target_apic_id, cpu) }.map_err(|err| {
+                if err.stops_cpu() {
                     self.forget_cpu(cpu);
-                    Err(SmpError::StartRejected(0))
                 }
-            }
+                err.into()
+            })
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {

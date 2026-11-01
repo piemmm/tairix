@@ -44,11 +44,12 @@ computer, quindi un nome non prova mai quale computer state guardando. La
 connessione alle condivisioni di un computer non è disponibile su questo
 sistema, e aprirne uno lo dice.
 
-Avviato per nome da una shell (o aperto su una cartella dal desktop) è
-invece una normale applicazione: una finestra, che termina quando la
-chiudete. In ogni caso richiede una sessione grafica attiva: senza, il
-canale delle finestre è irraggiungibile, e il browser segnala il rifiuto
-sullo standard error e termina.
+Avviato da una shell tramite il suo percorso,
+`/System/Components/files.app`, è invece una normale applicazione: una
+finestra, e termina quando la chiudete. In ogni caso richiede una
+sessione grafica attiva: senza, il canale delle finestre è
+irraggiungibile, e il browser segnala il rifiuto sullo standard error e
+termina.
 
 La finestra si comanda da tastiera: `Giù` e `Su` spostano la selezione,
 `Invio` apre la directory selezionata e `Backspace` risale alla directory
@@ -109,12 +110,17 @@ Seguono *Nuovo*, poi *Seleziona tutto* e *Annulla selezione*, e infine
 il sottomenu della voce è in grigio.
 
 Aprire un'immagine disco — un file `.iso`, `.adf`, `.hdf` e simili — la
-monta per voi in `/Storage`, scrivibile dove lo è il file, e ne apre la
-finestra; *Monta in sola lettura* la monta invece in sola lettura. Resta
-montata finché non la espellete o non termina la vostra sessione. *Espelli*
-toglie un volume che avete montato, dalla sua icona o dalla sua riga nella
-barra dei luoghi, il cui menu contestuale contiene *Apri* ed *Espelli*; le
-vostre finestre su di esso passano prima a `/Storage`.
+monta per voi in `/Storage`, scrivibile dove lo consentono sia il file
+sia il suo formato, e ne apre la finestra; *Monta in sola lettura* la
+monta invece in sola lettura. Resta montata finché non la espellete o non
+termina la vostra sessione di accesso. *Espelli* toglie un volume che
+avete montato, dalla sua icona o dalla sua riga nella barra dei luoghi, il
+cui menu contestuale contiene *Apri* ed *Espelli*; le vostre finestre su
+di esso passano prima a `/Storage`. Un volume sparito — rimosso il suo
+disco, o perso il suo server — prima che fosse salvato tutto ciò che
+avevate scritto su di esso viene tolto dalla barra ma conserva la sua
+icona in `/Storage`, e ciò che non era stato salvato va perso; *Espelli*
+su quell'icona chiede conferma prima di lasciarlo andare.
 
 Il sottomenu *Nuovo* del menu contestuale crea una cartella, o un documento
 vuoto di ogni tipo che un editor installato sa scrivere, e ne apre il nome

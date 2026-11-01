@@ -6,9 +6,10 @@
 //! mounted from — out of service: the kernel flushes the
 //! filesystem and the device, retracts the mount, and withdraws the
 //! volume's durable `id::` root. A volume whose serving device vanished
-//! with uncommitted writes (*unavailable-dirty*/*unavailable-lost*, the
-//! surprise-removal states the mount listing marks) refuses a plain
-//! detach — its retained data is held for verified re-insert.
+//! with uncommitted writes refuses a plain detach: *unavailable-dirty* holds
+//! them for a verified re-insert, *unavailable-lost* could not keep them, so
+//! the loss is acknowledged rather than passed over, and a volume put back
+//! that could not be shown unchanged (*recovery-conflict*) still holds them.
 //! `unmount --force NAME` is the deliberate exit: the kernel discards
 //! the retained set, retracts the volume, and logs the data loss with
 //! its own audit event.
@@ -19,7 +20,9 @@
 //!   through the ungated `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries
 //!   (the shared `lib/procinfo` namespace `mount` and `df` read too), whose
 //!   records carry each mount's volume identity and availability; a path is
-//!   canonicalised first, as util-linux canonicalises a mount point.
+//!   matched against the mount points as spelled, as util-linux's `umount`
+//!   matches one, and canonicalised only where that names none, so a volume
+//!   that no longer answers is still named by where it is mounted.
 //! * **Detaching** is the kernel's decision: its `volume_detach` path lets
 //!   the user who attached a disk image or a network share detach it,
 //!   requires `CAP_FS_MOUNT` for every other volume, and re-validates
@@ -34,9 +37,10 @@
 //! name matching no mount, or a mount with no detachable volume identity
 //! (the boot volumes, the in-RAM bindings), is a typed error with its reason
 //! on standard error — never a guessed detach. A refused detach surfaces the
-//! kernel's exact `Errno`; when the volume is unavailable the tool adds the
-//! `--force` consequence to the diagnostic and emits an fd-3 `suggestion`
-//! record (additive, ignorable). There is no panic.
+//! kernel's exact `Errno`; only for the one refusal a vanished or conflicted
+//! volume's writes earn does the tool add the `--force` consequence to the
+//! diagnostic and emit an fd-3 `suggestion` record (additive, ignorable).
+//! There is no panic.
 //!
 //! # Module map
 //!

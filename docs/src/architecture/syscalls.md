@@ -134,7 +134,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  78 | `pointer_inject` | `u64 seat`, `user_ptr` (record), `len`, `u64 at_ns` | `u64` (bytes) | `CAP_INPUT_INJECT` | no |
 |  79 | `pointer_read` | `u64 seat`, `user_ptr` (buf), `len`     | `u64` (bytes) | `CAP_INPUT_READ` | no    |
 |  80 | `volume_attach` | `user_ptr` (request), `len`            | `errno`       | `CAP_FS_MOUNT`  | yes   |
-|  81 | `volume_detach` | `user_ptr` (request), `len`            | `errno`       | — (in-service: `CAP_FS_MOUNT`, or a network volume's owner) | yes |
+|  81 | `volume_detach` | `user_ptr` (request), `len`            | `errno`       | — (in-service: `CAP_FS_MOUNT`, or a network or disk-image volume's owner) | yes |
 |  82 | `shm_grant`    | `Handle` (region), `IpcEndpoint`        | `u64` (handle) | `CAP_SHM`      | yes   |
 |  83 | `call_peer_seat` | `IpcEndpoint`, `Handle` (ticket), `u64 seat` | `u64` (generation) | —     | no    |
 |  84 | `fs_attr_get`  | `u32 fd`, `user_ptr` (key), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
@@ -2810,17 +2810,8 @@ registered address space, fails closed with the same `BadAddress`
 `ipc_send` uses, never an oracle (`AGENTS.md` §19.1). On success it
 returns the number of payload bytes copied.
 
-The deferred-feature branches return a stable `Errno` and emit exactly
-one extra audit record — `SYSCALL_FEATURE_UNAVAILABLE` (id 4020, see
-`kernel/core::audit`) — so an external consumer can tell apart
-"handler rejected because the call failed" from "handler rejected
-because the backing subsystem is intentionally inert" (`AGENTS.md`
-§15.1 — announce the deferral, never stub). With `random_get` now wired
-(increment D.4), **no handler emits it**: every consumer of the
-user-memory copy path runs its real backing subsystem. The id stays
-reserved in `kernel/core::audit` for a future deferral. The dispatcher's
-standard `SYSCALL_HANDLER_REJECTED`
-record is *also* emitted for syscalls whose `SyscallSpec::audit == true`
+A rejected call to a syscall whose `SyscallSpec::audit == true` gets the
+dispatcher's standard `SYSCALL_HANDLER_REJECTED` record
 (`ipc_send`, `cap_delegate`); `cap_delegate` additionally records the
 delegate decision itself through `CapTable` (`TASK_CAPABILITIES_DELEGATED`
 on success, `TASK_CAPABILITIES_DELEGATE_WIDEN` on a rejected widening,

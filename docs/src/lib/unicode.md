@@ -32,7 +32,7 @@ a character or a string.
   the Japanese, Korean and Chinese writing systems, Hiragana and Katakana with
   Japanese, Hangul with Korean, Bopomofo with Chinese) and judged against UAX
   #31's Recommended Scripts. `MinimallyRestrictive` — Latin with Cyrillic or
-  Greek, among other mixtures — is what `utf8::mixes_scripts` reports. Levels 5
+  Greek, among other mixtures — is what the file manager's network view marks (`lib/browse`'s `NetworkEndpoint::mixes_scripts`). Levels 5
   and 6 coincide, as no identifier profile applies to a name that is shown
   rather than parsed.
 

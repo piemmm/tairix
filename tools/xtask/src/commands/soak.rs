@@ -1,12 +1,14 @@
 //! How long a soaking job runs: the one budget the fuzz, proptest, fssoak and
 //! rngsoak orchestrators and the repeated test matrix parse, hand their
-//! harnesses, and bound their children by.
+//! harnesses, and bound their children by, and the one job each harness soaks
+//! in ([`job`]).
 //!
 //! A budget is either a span each job gets from the moment its own run begins
-//! (`--quick`, `--soak`, `--secs N`), or the close of a window every job
-//! shares (`--until T`). The window is what gives `tools/ci/soak.sh --window`
-//! a fixed length: whatever a job spends building, or queued behind the build
-//! lock, comes out of the window rather than being added after it.
+//! (`--quick`, `--soak`, `--secs N`), or the close of a window (`--until T`):
+//! whatever a job spends building, or queued behind the build lock, comes out
+//! of the window rather than being added after it. One invocation soaks one
+//! target to a window's close ([`one_target_per_window`]);
+//! `tools/ci/soak.sh --window` hands every target a process of its own.
 
 use std::ffi::OsString;
 use std::process::Command;
@@ -15,7 +17,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tairix_fuzzseed::SOAK_UNTIL_ENV;
 
-use crate::DEFAULT_COMMAND_TIMEOUT;
+use crate::commands::parallel::Job;
+use crate::Context;
 
 /// What `--quick` gives each job: the per-pull-request floor.
 pub(crate) const QUICK: Duration = Duration::from_secs(5);
@@ -61,8 +64,8 @@ pub(crate) enum Budget {
     /// This long after the job's own run begins, so each job gets all of it
     /// however long it waited to be built.
     For(Duration),
-    /// At the close of a window every job shares, so each is finished by then
-    /// whatever its build cost.
+    /// At the close of a window: a harness stops soaking there however long
+    /// its build took, and one built after it makes its one smoke iteration.
     Until(SystemTime),
 }
 
@@ -89,7 +92,7 @@ impl Budget {
     /// the window's close beside it so a harness that waited to be built still
     /// stops there. A span clears any close the environment carries, which
     /// would otherwise cut it short.
-    pub(crate) fn export(self, cmd: &mut Command, budget_env: &str) {
+    fn export(self, cmd: &mut Command, budget_env: &str) {
         cmd.env(budget_env, self.left().as_secs().to_string());
         match self {
             Self::For(_) => cmd.env_remove(SOAK_UNTIL_ENV),
@@ -116,17 +119,80 @@ pub(crate) fn describe(budget: Option<Budget>) -> String {
 }
 
 /// How long a job's child may run before it is killed as hung: what is left
-/// of its budget and an ordinary step's allowance past it, or the allowance
-/// alone for one smoke iteration.
+/// of its budget and `allowance` past it, or the allowance alone for one smoke
+/// iteration. The allowance is an ordinary step's, which the operator's floor
+/// (`TAIRIX_XTASK_TIMEOUT_SECS`) raises, and it covers the child's own build
+/// and its wait behind the build lock.
 ///
 /// A soaking child is doing what it was asked right up to the end of its
 /// budget, so a deadline any shorter kills working soaks and reports them as
 /// hangs.
+fn child_deadline(budget: Option<Budget>, allowance: Duration) -> Duration {
+    budget.map_or(allowance, |budget| budget.left().saturating_add(allowance))
+}
+
+/// One soak harness: the test binary a job runs and the variable its budget
+/// reaches it through.
+pub(crate) struct Harness<'a> {
+    /// The package the test binary belongs to.
+    pub(crate) package: &'a str,
+    /// The integration-test binary.
+    pub(crate) test: &'a str,
+    /// The binary's own arguments ahead of `--nocapture`, such as
+    /// `--exact NAME`.
+    pub(crate) filter: &'a [&'a str],
+    /// The variable the budget is exported through.
+    pub(crate) budget_env: &'a str,
+}
+
+/// The [`Job`] that soaks `harness` for `budget`, with `env` set, killed as
+/// hung an ordinary step's allowance after its budget ([`child_deadline`]).
 #[must_use]
-pub(crate) fn child_deadline(budget: Option<Budget>) -> Duration {
-    budget.map_or(DEFAULT_COMMAND_TIMEOUT, |budget| {
-        budget.left().saturating_add(DEFAULT_COMMAND_TIMEOUT)
-    })
+pub(crate) fn job(
+    ctx: &Context,
+    label: String,
+    harness: &Harness<'_>,
+    budget: Option<Budget>,
+    env: &[(&str, String)],
+) -> Job {
+    let mut cmd = ctx.cargo();
+    cmd.args([
+        "test",
+        "-p",
+        harness.package,
+        "--test",
+        harness.test,
+        "--locked",
+        "--",
+    ]);
+    cmd.args(harness.filter);
+    cmd.arg("--nocapture");
+    if let Some(budget) = budget {
+        budget.export(&mut cmd, harness.budget_env);
+    }
+    cmd.envs(env.iter().map(|(key, value)| (key, value)));
+    Job::new(label, cmd).with_budget(child_deadline(budget, ctx.children.ordinary_budget()))
+}
+
+/// Refuse a window over more than one target: one invocation starts its
+/// targets in turn or as slots free, so a later one reaches the window shut,
+/// makes its one smoke iteration and passes.
+///
+/// # Errors
+///
+/// A `--until` budget over `targets` above one, naming the remedy.
+pub(crate) fn one_target_per_window(
+    cmd: &str,
+    budget: Option<Budget>,
+    targets: usize,
+) -> Result<(), String> {
+    match budget {
+        Some(Budget::Until(_)) if targets > 1 => Err(format!(
+            "{cmd}: `--until` soaks one target to the window's close, not {targets}; \
+             name it with `--target`, or run `tools/ci/soak.sh --window`"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The budget flags of one invocation, gathered as its parser meets them.
@@ -255,11 +321,18 @@ fn parse_until(cmd: &str, value: Option<&OsString>) -> Result<SystemTime, String
 
 #[cfg(test)]
 mod tests {
-    use super::{child_deadline, describe, Budget, Flags, Mode, NIGHTLY, QUICK};
-    use crate::DEFAULT_COMMAND_TIMEOUT;
+    use super::{
+        child_deadline, describe, job, one_target_per_window, Budget, Flags, Harness, Mode,
+        NIGHTLY, QUICK,
+    };
+    use crate::children::Children;
+    use crate::commands::parallel;
+    use crate::{Context, DEFAULT_COMMAND_TIMEOUT};
+    use std::collections::BTreeSet;
     use std::ffi::OsString;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tairix_fuzzseed::SOAK_UNTIL_ENV;
 
@@ -361,30 +434,77 @@ mod tests {
 
     #[test]
     fn a_soaking_child_outlives_its_budget_by_an_ordinary_step() {
-        assert_eq!(child_deadline(None), DEFAULT_COMMAND_TIMEOUT);
-        for span in [QUICK, Duration::from_hours(7), NIGHTLY] {
+        for allowance in [DEFAULT_COMMAND_TIMEOUT, Duration::from_hours(2)] {
+            assert_eq!(child_deadline(None, allowance), allowance);
+            for span in [QUICK, Duration::from_hours(7), NIGHTLY] {
+                assert_eq!(
+                    child_deadline(Some(Budget::For(span)), allowance),
+                    span + allowance
+                );
+            }
             assert_eq!(
-                child_deadline(Some(Budget::For(span))),
-                span + DEFAULT_COMMAND_TIMEOUT
+                child_deadline(Some(Budget::For(Duration::MAX)), allowance),
+                Duration::MAX
             );
         }
-        assert_eq!(
-            child_deadline(Some(Budget::For(Duration::MAX))),
-            Duration::MAX
-        );
     }
 
     #[test]
     fn a_windowed_child_is_killed_an_ordinary_step_after_the_close() {
         // A child that sat behind the build lock for most of the window is
         // still given only until the close, not a whole budget after it.
-        let deadline = child_deadline(Some(Budget::Until(SystemTime::now() + HOUR)));
-        assert!(deadline <= HOUR + DEFAULT_COMMAND_TIMEOUT);
-        assert!(deadline > MINUTE_SHORT_OF_AN_HOUR + DEFAULT_COMMAND_TIMEOUT);
+        let allowance = DEFAULT_COMMAND_TIMEOUT;
+        let deadline = child_deadline(Some(Budget::Until(SystemTime::now() + HOUR)), allowance);
+        assert!(deadline <= HOUR + allowance);
+        assert!(deadline > MINUTE_SHORT_OF_AN_HOUR + allowance);
         assert_eq!(
-            child_deadline(Some(Budget::Until(at(1)))),
-            DEFAULT_COMMAND_TIMEOUT
+            child_deadline(Some(Budget::Until(at(1))), allowance),
+            allowance
         );
+    }
+
+    /// The operator's floor reaches a soaking child: a soak's allowance past
+    /// its budget is the raised ordinary step, so a slow host's floor is not
+    /// lost on the soaks it most applies to.
+    #[test]
+    fn a_soaking_child_takes_the_operators_floor_as_its_allowance() {
+        let floor = Duration::from_hours(2);
+        let ctx = Context {
+            workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            cargo: OsString::from("true"),
+            children: Arc::new(Children::new(Some(floor))),
+        };
+        let harness = Harness {
+            package: "soaked",
+            test: "soaked",
+            filter: &[],
+            budget_env: "TAIRIX_SOAK_TEST_BUDGET",
+        };
+        let soaked = job(
+            &ctx,
+            "soaked".to_string(),
+            &harness,
+            Some(Budget::For(NIGHTLY)),
+            &[],
+        );
+        let (outcome, log) = parallel::run_recorded(vec![soaked], 1, &ctx.children);
+        assert_eq!(outcome, Ok(()), "{log}");
+        let expected = (NIGHTLY + floor).as_secs();
+        assert!(
+            log.contains(&format!("(timeout {expected}s)")),
+            "a {NIGHTLY:?} soak under a {floor:?} floor is given {expected} s: {log}"
+        );
+    }
+
+    #[test]
+    fn a_window_soaks_one_target_and_a_span_any_number() {
+        let window = Some(Budget::Until(SystemTime::now() + HOUR));
+        assert_eq!(one_target_per_window("soak-test", window, 1), Ok(()));
+        let refused = one_target_per_window("soak-test", window, 2);
+        assert!(refused.is_err_and(|why| why.contains("--target")));
+        for budget in [None, Some(Budget::For(QUICK))] {
+            assert_eq!(one_target_per_window("soak-test", budget, 130), Ok(()));
+        }
     }
 
     fn exported(budget: Budget) -> Vec<(String, Option<String>)> {
@@ -430,35 +550,150 @@ mod tests {
         );
     }
 
+    /// A file under the workspace root.
+    fn workspace_file(path: &str) -> String {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("xtask sits two levels below the workspace root");
+        std::fs::read_to_string(root.join(path)).unwrap_or_else(|_| panic!("{path} is readable"))
+    }
+
+    /// The scheduled window `tools/ci/soak.sh` defines, once.
+    fn scheduled_window() -> Duration {
+        let script = workspace_file("tools/ci/soak.sh");
+        let mut values = script
+            .lines()
+            .filter_map(|line| line.strip_prefix("scheduled_window="))
+            .map(|value| value.parse::<u64>().expect("whole seconds"));
+        let window = values.next().expect("soak.sh defines the scheduled window");
+        assert!(values.next().is_none(), "soak.sh defines it once");
+        Duration::from_secs(window)
+    }
+
     /// The nightly workflow's job timeout is only a backstop: it has to outlast
     /// the window and the ordinary step a wedged job is given past its close,
     /// or GitHub cancels the job before xtask can kill the wedged one and name
     /// it — the report a soak exists to produce.
     #[test]
     fn the_nightly_workflow_outlasts_its_window_and_the_wind_down() {
-        let workflow = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .expect("xtask sits two levels below the workspace root")
-            .join(".github/workflows/soak.yml");
-        let yaml = std::fs::read_to_string(&workflow).expect("soak.yml is readable");
-        let setting = |key: &str| -> u64 {
-            let mut values = yaml
-                .lines()
-                .filter_map(|line| line.trim().strip_prefix(key))
-                .map(|value| value.trim().parse::<u64>().expect("a whole number"));
-            let value = values
-                .next()
-                .unwrap_or_else(|| panic!("soak.yml sets `{key}`"));
-            assert!(values.next().is_none(), "soak.yml sets `{key}` once");
-            value
-        };
-        let window = Duration::from_secs(setting("TAIRIX_SOAK_WINDOW_SECS:"));
-        let timeout = Duration::from_secs(setting("timeout-minutes:") * 60);
+        let yaml = workspace_file(".github/workflows/soak.yml");
+        let mut timeouts = yaml
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("timeout-minutes:"))
+            .map(|value| value.trim().parse::<u64>().expect("a whole number"));
+        let timeout = Duration::from_secs(timeouts.next().expect("soak.yml sets a timeout") * 60);
+        assert!(timeouts.next().is_none(), "soak.yml sets one timeout");
+        assert!(yaml.contains("tools/ci/soak.sh \"$KIND\" --scheduled"));
+        let window = scheduled_window();
         assert!(
             timeout > window + DEFAULT_COMMAND_TIMEOUT,
             "a {timeout:?} timeout cannot cover a {window:?} window and the \
              {DEFAULT_COMMAND_TIMEOUT:?} a wedged job is given past its close"
         );
+    }
+
+    /// The soak lines of the three scheduler samples, and their gate's.
+    fn sample_lines() -> [(&'static str, String, String); 3] {
+        let systemd = |unit: &str| {
+            workspace_file(&format!("tools/ci/systemd/{unit}"))
+                .lines()
+                .find_map(|line| line.strip_prefix("ExecStart=").map(str::to_string))
+                .unwrap_or_else(|| panic!("{unit} runs something"))
+        };
+        let launchd = |agent: &str| {
+            let plist = workspace_file(&format!("tools/ci/launchd/{agent}"));
+            let (_, arguments) = plist
+                .split_once("<key>ProgramArguments</key>")
+                .unwrap_or_else(|| panic!("{agent} runs something"));
+            let (arguments, _) = arguments.split_once("</array>").expect("its arguments end");
+            arguments
+                .split("<string>")
+                .skip(1)
+                .filter_map(|tail| tail.split_once("</string>"))
+                .map(|(argument, _)| argument)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let crontab = workspace_file("tools/ci/crontab.sample");
+        let setting = |key: &str| {
+            crontab
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .unwrap_or_else(|| panic!("crontab.sample sets {key}"))
+                .to_string()
+        };
+        let job = |script: &str| {
+            crontab
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .find(|line| line.contains(script))
+                .unwrap_or_else(|| panic!("crontab.sample runs {script}"))
+                .replace("$SOAK_REPO", &setting("SOAK_REPO="))
+                .replace("$REPO", &setting("REPO="))
+        };
+        [
+            (
+                "systemd",
+                systemd("tairix-soak.service"),
+                systemd("tairix-ci.service"),
+            ),
+            (
+                "launchd",
+                launchd("com.tairix.soak.plist.sample"),
+                launchd("com.tairix.ci.plist.sample"),
+            ),
+            ("cron", job("tools/ci/soak.sh"), job("ci-run.sh ci")),
+        ]
+    }
+
+    /// Every standalone scheduler runs the scheduled window, which ends inside
+    /// the day the next run starts.
+    #[test]
+    fn the_daily_schedulers_run_the_scheduled_window() {
+        for (scheduler, soak, _) in sample_lines() {
+            assert!(
+                soak.contains("tools/ci/soak.sh all --scheduled"),
+                "{scheduler}: {soak}"
+            );
+        }
+        assert!(scheduled_window() + DEFAULT_COMMAND_TIMEOUT < Duration::from_hours(24));
+    }
+
+    /// A scheduled soak runs from a checkout of its own: the gate resets its
+    /// checkout every 30 minutes, which would change the tree under the soak.
+    #[test]
+    fn the_scheduled_soak_runs_from_a_checkout_of_its_own() {
+        for (scheduler, soak, gate) in sample_lines() {
+            let checkout = |line: &str| {
+                let (path, _) = line
+                    .split_once("/tools/ci/")
+                    .unwrap_or_else(|| panic!("{scheduler}: {line} runs a CI script"));
+                path.split_whitespace().last().unwrap_or(path).to_string()
+            };
+            assert_ne!(checkout(&soak), checkout(&gate), "{scheduler}");
+        }
+    }
+
+    /// The nightly workflow's dispatch offers every kind `soak.sh` takes.
+    #[test]
+    fn the_dispatch_offers_every_kind_soak_sh_takes() {
+        let script = workspace_file("tools/ci/soak.sh");
+        let kinds: BTreeSet<&str> = script
+            .lines()
+            .filter_map(|line| line.trim().strip_suffix(") kind=\"$1\" ;;"))
+            .flat_map(|arm| arm.split('|').map(str::trim))
+            .collect();
+        let yaml = workspace_file(".github/workflows/soak.yml");
+        let offered: BTreeSet<&str> = yaml
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("options: ["))
+            .and_then(|options| options.strip_suffix(']'))
+            .expect("the dispatch offers kinds")
+            .split(',')
+            .map(str::trim)
+            .collect();
+        assert!(!kinds.is_empty());
+        assert_eq!(offered, kinds);
     }
 }

@@ -13,7 +13,7 @@ use super::{
 };
 use crate::netattach::{AttachReply, Presentation};
 use crate::sysinfo::MOUNT_TARGET_MAX;
-use crate::volume::{VolumeFsType, VOLUME_NAME_MAX};
+use crate::volume::{VolumeFsType, VolumeFsTypes, VOLUME_NAME_MAX};
 use crate::Errno;
 
 fn attach<'a>(name: Option<&'a str>, target: Option<&'a str>) -> ImageAttach<'a> {
@@ -25,6 +25,11 @@ fn attach<'a>(name: Option<&'a str>, target: Option<&'a str>) -> ImageAttach<'a>
         expects: None,
         adopt: false,
     }
+}
+
+/// The set holding only `fstype`.
+fn only(fstype: VolumeFsType) -> Option<VolumeFsTypes> {
+    VolumeFsTypes::of([fstype])
 }
 
 fn encoded(attach: &ImageAttach<'_>) -> Vec<u8> {
@@ -47,7 +52,7 @@ fn every_attach_round_trips_and_the_largest_fits_its_bound() {
         attach(Some("workbench"), None),
         ImageAttach {
             access: ImageAccess::ReadOnly,
-            expects: Some(VolumeFsType::Affs),
+            expects: only(VolumeFsType::Affs),
             ..attach(None, Some("/Users/a/disk"))
         },
         ImageAttach {
@@ -56,7 +61,7 @@ fn every_attach_round_trips_and_the_largest_fits_its_bound() {
         },
         ImageAttach {
             presentation: Presentation::Shared,
-            expects: Some(VolumeFsType::ARXFS),
+            expects: VolumeFsTypes::of([VolumeFsType::Udf, VolumeFsType::Iso9660]),
             ..attach(Some("iso"), None)
         },
         ImageAttach {
@@ -78,6 +83,24 @@ fn every_attach_round_trips_and_the_largest_fits_its_bound() {
         assert_eq!(ImageAttach::decode(&bytes), Ok(one));
     }
     assert_eq!(encoded(&attaches[5]).len(), IMAGE_ATTACH_MAX);
+}
+
+#[test]
+fn an_access_accepts_only_a_volume_as_writable_as_it_asks() {
+    for (access, read_only, accepted) in [
+        (ImageAccess::ReadOnly, true, true),
+        (ImageAccess::ReadOnly, false, false),
+        (ImageAccess::WritableWherePossible, true, true),
+        (ImageAccess::WritableWherePossible, false, true),
+        (ImageAccess::Writable, true, false),
+        (ImageAccess::Writable, false, true),
+    ] {
+        assert_eq!(
+            access.accepts(read_only),
+            accepted,
+            "{access:?} {read_only}"
+        );
+    }
 }
 
 #[test]
@@ -113,11 +136,11 @@ type Mangling = (&'static str, fn(&mut Vec<u8>), Errno);
 #[test]
 fn an_attach_frame_out_of_shape_is_refused() {
     let good = encoded(&ImageAttach {
-        expects: Some(VolumeFsType::Iso9660),
+        expects: only(VolumeFsType::Iso9660),
         ..attach(Some("disc"), Some("/Users/a/disc"))
     });
     assert!(ImageAttach::decode(&good).is_ok());
-    let cases: [Mangling; 11] = [
+    let cases: [Mangling; 13] = [
         ("version", |b| b[0] = 2, Errno::AbiVersionUnsupported),
         ("presentation kind", |b| b[2] = 9, Errno::OutOfRange),
         (
@@ -131,7 +154,12 @@ fn an_attach_frame_out_of_shape_is_refused() {
             |b| b[3] |= 0x01 | 0x04,
             Errno::OutOfRange,
         ),
-        ("unknown filesystem", |b| b[17] = 0xEE, Errno::OutOfRange),
+        ("unknown filesystem", |b| b[20] |= 0x80, Errno::OutOfRange),
+        (
+            "a claim naming no filesystem",
+            |b| b[20..24].fill(0),
+            Errno::OutOfRange,
+        ),
         (
             "filesystem with no claim",
             |b| b[3] &= !0x02,
@@ -147,10 +175,11 @@ fn an_attach_frame_out_of_shape_is_refused() {
             |b| b[18] = 1,
             Errno::LengthOutOfRange,
         ),
-        ("name not UTF-8", |b| b[20] = 0xFF, Errno::OutOfRange),
+        ("nonzero pad", |b| b[17] = 1, Errno::OutOfRange),
+        ("name not UTF-8", |b| b[24] = 0xFF, Errno::OutOfRange),
         (
             "frame cut short",
-            |b| b.truncate(19),
+            |b| b.truncate(23),
             Errno::LengthOutOfRange,
         ),
     ];
@@ -281,12 +310,31 @@ fn an_image_attach_is_the_network_attach_frame_with_its_own_version_and_claim() 
     assert_eq!(image_bytes.len(), len);
     assert_eq!(image_bytes[2..], out[2..len], "one layout past the version");
     let claimed = encoded(&ImageAttach {
-        expects: Some(VolumeFsType::Affs),
+        expects: only(VolumeFsType::Affs),
         ..image
     });
     assert_eq!(
-        claimed[17],
-        VolumeFsType::Affs.as_u8(),
-        "the frame's own byte"
+        u32::from_le_bytes([claimed[20], claimed[21], claimed[22], claimed[23]]),
+        1 << VolumeFsType::Affs.as_u8(),
+        "the frame's own word"
+    );
+}
+
+#[test]
+fn an_expected_set_round_trips_and_unknown_bits_are_refused() {
+    let disc = VolumeFsTypes::of([VolumeFsType::Udf, VolumeFsType::Iso9660]).expect("a set");
+    assert!(disc.contains(VolumeFsType::Udf) && disc.contains(VolumeFsType::Iso9660));
+    assert!(!disc.contains(VolumeFsType::Affs));
+    assert_eq!(VolumeFsTypes::from_bits(disc.bits()), Ok(disc));
+    let every = VolumeFsTypes::of(VolumeFsType::ALL).expect("a set");
+    assert!(VolumeFsType::ALL
+        .into_iter()
+        .all(|fstype| every.contains(fstype)));
+    assert_eq!(VolumeFsTypes::of([]), None, "an empty set is no claim");
+    assert_eq!(VolumeFsTypes::from_bits(0), Err(Errno::OutOfRange));
+    assert_eq!(
+        VolumeFsTypes::from_bits(every.bits() | 1 << VolumeFsType::ALL.len()),
+        Err(Errno::OutOfRange),
+        "a bit naming no filesystem"
     );
 }

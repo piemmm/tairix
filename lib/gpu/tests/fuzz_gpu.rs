@@ -26,7 +26,7 @@ use tairix_abi::Duration64;
 use tairix_fuzzseed::Prng;
 use tairix_gpu::{
     AllocationDesc, BufferDesc, BufferUsage, CommandBuffer, ContextDesc, CopyRegion, Device, Error,
-    Submission, SubmitError, MAX_UPDATE_BYTES,
+    NoThreads, SoftwareDesc, Submission, SubmitError, DEFAULT_SUBGROUP_SIZE, MAX_UPDATE_BYTES,
 };
 
 /// Rounds per sweep. Miri interprets every operation, so it drives a handful.
@@ -130,6 +130,9 @@ fn spans(src: &Shape, dst: &Shape, regions: &[CopyRegion]) -> Result<Vec<(u64, u
     for region in regions {
         let from = within(src, region.src_offset, region.size)?;
         let to = within(dst, region.dst_offset, region.size)?;
+        if region.src_offset % 4 != 0 || region.dst_offset % 4 != 0 || region.size % 4 != 0 {
+            return Err(Error::Misaligned);
+        }
         spans.push((from, to, region.size));
     }
     let meets = |a: u64, a_len: u64, b: u64, b_len: u64| a < b + b_len && b < a + a_len;
@@ -241,9 +244,9 @@ fn draw_command(rng: &mut Prng, shapes: &[Shape]) -> Recorded {
             let count = 1 + rng.below(4);
             let regions = (0..count)
                 .map(|_| CopyRegion {
-                    src_offset: draw_extent(rng, shapes[src].size),
-                    dst_offset: draw_extent(rng, limit),
-                    size: draw_extent(rng, limit.min(shapes[src].size) / 2),
+                    src_offset: draw_word_extent(rng, shapes[src].size),
+                    dst_offset: draw_word_extent(rng, limit),
+                    size: draw_word_extent(rng, limit.min(shapes[src].size) / 2),
                 })
                 .collect();
             Recorded::Copy { src, dst, regions }
@@ -281,8 +284,14 @@ struct Round {
 
 impl Round {
     fn new(rng: &mut Prng) -> Self {
-        let clock: Arc<dyn MonotonicClock + Send + Sync> = Arc::new(Still);
-        let device = Device::software(64 << 20, clock).expect("a software device");
+        let device = Device::software(&SoftwareDesc {
+            memory_bytes: 64 << 20,
+            clock: Arc::new(Still),
+            runner: Arc::new(tairix_parallel::Serial),
+            threads: &NoThreads,
+            subgroup_size: DEFAULT_SUBGROUP_SIZE,
+        })
+        .expect("a software device");
         let context = device
             .create_context(&ContextDesc::default())
             .expect("a context");

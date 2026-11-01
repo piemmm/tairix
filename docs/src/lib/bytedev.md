@@ -2,7 +2,8 @@
 
 Byte-addressed I/O over a `tairix_abi::driver::block::Block` device: the one
 reader the block-backed filesystem drivers that address their structures in
-bytes or in a block size of their own (ext4, FAT32, ADFS, ISO 9660, UDF), the
+bytes or in a block size of their own (ext4, FAT32, ADFS, AmigaDOS, ISO 9660,
+UDF), the
 volume probe (`lib/fsprobe`), the volume manager, the RAID driver and the
 kernel's volume service read through. ARXFS, whose block is the device's,
 addresses the device directly.

@@ -140,6 +140,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/gpu submission model (copies, fills and updates over buffers sharing allocations, ranges inside, across and past what they name) on the software device against a byte-array reference",
     },
     Target {
+        package: "tairix-gpu",
+        test: "fuzz_shader",
+        description: "lib/gpu shader interpreter over generated compute modules (arithmetic of every kind, vectors, selections and data-dependent loops with early breaks, calls, barriers, subgroup operations, memory reached past every object) and their admitted mutants: total, never faulting, writing nothing outside its range, the same bytes on one core and several",
+    },
+    Target {
         package: "tairix-spirv",
         test: "fuzz_spirv",
         description: "lib/spirv decoder and validator over mutated shader modules (bits, boundary words, insertions, deletions, truncations, either byte order): both total, refusals within the module, accepted modules re-encoding exactly, validation deterministic, admitted entry points agreeing with their own layout",
@@ -802,7 +807,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
                 return Err(format!(
                     "fuzz: unexpected argument {other:?}; usage: \
                      cargo xtask fuzz [--once | --quick | --soak] [--target NAME] \
-                     [--secs N | --until T] [--seed N] [--list]"
+                     [--secs N | --until T (with --target)] [--seed N] [--list]"
                 ));
             }
         }
@@ -819,29 +824,34 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
 /// Resolve the harnesses an [`Options`] selects, preserving registry order.
 ///
 /// # Errors
-/// Returns an error if `--target` names a harness that is not registered.
+/// Returns an error if `--target` names a harness that is not registered, or
+/// a window would soak more than one ([`soak::one_target_per_window`]).
 pub fn selected(opts: &Options) -> Result<Vec<Target>, String> {
-    let Some(name) = opts.only.as_deref() else {
-        return Ok(TARGETS.to_vec());
+    let targets = match opts.only.as_deref() {
+        None => TARGETS.to_vec(),
+        Some(name) => match TARGETS.iter().find(|t| t.test == name) {
+            Some(t) => vec![*t],
+            None => {
+                return Err(format!(
+                    "fuzz: unknown target `{name}`; known targets: {}",
+                    TARGETS
+                        .iter()
+                        .map(|t| t.test)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            }
+        },
     };
-    match TARGETS.iter().find(|t| t.test == name) {
-        Some(t) => Ok(vec![*t]),
-        None => Err(format!(
-            "fuzz: unknown target `{name}`; known targets: {}",
-            TARGETS
-                .iter()
-                .map(|t| t.test)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    }
+    soak::one_target_per_window("fuzz", opts.budget, targets.len())?;
+    Ok(targets)
 }
 
 /// Run the selected harnesses for their budget.
 pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
     if opts.list {
         for t in TARGETS {
-            println!("{:<24} {}  [{}]", t.test, t.description, t.package);
+            outln!("{:<24} {}  [{}]", t.test, t.description, t.package)?;
         }
         return Ok(());
     }
@@ -857,7 +867,7 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
         .map(|(i, t)| job_for(ctx, t, opts.budget, opts.seed, i))
         .collect();
     let concurrency = parallel::default_concurrency(jobs.len());
-    parallel::run(jobs, concurrency)
+    parallel::run(&ctx.children, jobs, concurrency)
 }
 
 /// Build the `cargo test` [`Job`] that runs one fuzz harness.
@@ -877,35 +887,27 @@ pub(crate) fn job_for(
     seed: Option<u64>,
     index: usize,
 ) -> Job {
-    let mut cmd = ctx.cargo();
-    // `--test <name>` runs exactly that integration harness; `--exact`
-    // is unnecessary because the test binary contains only fuzz fns.
-    cmd.args([
-        "test",
-        "-p",
-        target.package,
-        "--test",
-        target.test,
-        "--locked",
-        "--",
-        "--nocapture",
-    ]);
-    // A budget turns the harness into a soak loop; without one the harness
-    // runs its single smoke iteration.
-    if let Some(budget) = budget {
-        budget.export(&mut cmd, tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    }
-    // Each harness reads this seed instead of its built-in constant, so a fresh
-    // seed (the default) makes every run explore new inputs while an explicit
-    // seed reproduces a logged crash exactly.
+    // The harness reads this seed instead of its built-in constant, so a fresh
+    // seed explores new inputs while an explicit one reproduces a logged crash.
     let job_seed = seed::job_seed(seed, index);
-    cmd.env(seed::FUZZ_SEED_ENV, job_seed.to_string());
     let label = format!(
         "fuzz {} ({}, seed {job_seed})",
         target.test,
         soak::describe(budget)
     );
-    Job::new(label, cmd).with_budget(soak::child_deadline(budget))
+    let harness = soak::Harness {
+        package: target.package,
+        test: target.test,
+        filter: &[],
+        budget_env: tairix_fuzzseed::FUZZ_BUDGET_ENV,
+    };
+    soak::job(
+        ctx,
+        label,
+        &harness,
+        budget,
+        &[(seed::FUZZ_SEED_ENV, job_seed.to_string())],
+    )
 }
 
 #[cfg(test)]
@@ -941,13 +943,28 @@ mod tests {
     }
 
     #[test]
-    fn until_runs_every_harness_to_the_window_close() {
+    fn until_names_the_window_close() {
         let opts = parse(&argv(&["--soak", "--until", "1700000000"])).expect("until parses");
         assert_eq!(
             opts.budget,
             Some(Budget::Until(
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000)
             ))
+        );
+    }
+
+    /// A window over the registry is refused, so no target queues past the
+    /// close to make one smoke iteration and pass; one named target soaks.
+    #[test]
+    fn a_window_over_the_registry_is_refused() {
+        let opts = parse(&argv(&["--until", "1700000000"])).expect("until parses");
+        assert!(selected(&opts).is_err_and(|why| why.contains("--target")));
+        let opts = parse(&argv(&["--until", "1700000000", "--target", "fuzz_decode"]))
+            .expect("until with a target parses");
+        let selected = selected(&opts).expect("one target soaks to the close");
+        assert_eq!(
+            selected.iter().map(|t| t.test).collect::<Vec<_>>(),
+            ["fuzz_decode"]
         );
     }
 

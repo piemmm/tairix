@@ -38,14 +38,14 @@ pub struct Probes {
     /// Folders asked about and not yet taken by a worker, each with whether
     /// a pass asked about it since the last [`sweep`](Self::sweep).
     wanted: BTreeMap<Vec<String>, bool>,
-    /// The batch a worker is reading. One batch is in flight at a time, so a
-    /// re-ask during it records no second probe.
+    /// The folders the batches in flight are reading, so a re-ask during one
+    /// records no second probe.
     probing: BTreeSet<Vec<String>>,
     /// Each answer is served once: the entry latches it, so a later ask is a
     /// fresh question. A refusal is an answer too.
     answers: BTreeMap<Vec<String>, Held>,
-    /// Folders that changed while being read: the batch in flight describes
-    /// them as they were.
+    /// Folders that changed while being read: the batch reading each
+    /// describes it as it was.
     superseded: BTreeSet<Vec<String>>,
     /// A batch has been delivered since the embedder last asked.
     landed: bool,
@@ -102,10 +102,16 @@ impl Probes {
         (Ok(Probe::Pending), !self.awaiting_sweep)
     }
 
-    /// Whether a worker would be handed a batch now.
+    /// Whether a folder waits for a worker to take it in a batch: one asked
+    /// again while a batch still reads it waits for that batch to land.
     #[must_use]
     pub fn has_work(&self) -> bool {
-        !self.stopping && !self.awaiting_sweep && !self.wanted.is_empty() && self.probing.is_empty()
+        !self.stopping
+            && !self.awaiting_sweep
+            && self
+                .wanted
+                .keys()
+                .any(|folder| !self.probing.contains(folder))
     }
 
     /// Drop every wanted folder no pass asked about since the last sweep,
@@ -164,38 +170,70 @@ impl Probes {
     }
 
     /// Take every outstanding probe as one batch, or `None` when there is
-    /// nothing to take or a batch is already in flight.
+    /// nothing to take.
     ///
     /// A batch because the answers are drawn together: a screenful answered
     /// one wake at a time would be a screenful of repaints.
     pub fn next_batch(&mut self) -> Option<Vec<Vec<String>>> {
+        self.next_batch_by(|_| Some(())).map(|((), batch)| batch)
+    }
+
+    /// Take the outstanding probes of one share as a batch, and the share: the
+    /// share `share` names for the first folder it admits, and every other
+    /// folder it names the same. A folder it admits to no share waits, as does
+    /// one a batch still reads, so no folder is in two batches at once.
+    ///
+    /// What a worker takes when its workers each serve their own share of the
+    /// folders, so one share's batch in flight holds no other's back.
+    pub fn next_batch_by<K: PartialEq>(
+        &mut self,
+        mut share: impl FnMut(&[String]) -> Option<K>,
+    ) -> Option<(K, Vec<Vec<String>>)> {
         if !self.has_work() {
             return None;
         }
-        let batch: BTreeSet<Vec<String>> = core::mem::take(&mut self.wanted).into_keys().collect();
-        self.probing.clone_from(&batch);
-        Some(batch.into_iter().collect())
+        let mut taken: Option<K> = None;
+        let mut batch = Vec::new();
+        let probing = &self.probing;
+        self.wanted.retain(|folder, _| {
+            if probing.contains(folder) {
+                return true;
+            }
+            let Some(key) = share(folder) else {
+                return true;
+            };
+            if taken.as_ref().is_some_and(|held| *held != key) {
+                return true;
+            }
+            taken.get_or_insert(key);
+            batch.push(folder.clone());
+            false
+        });
+        let taken = taken?;
+        self.probing.extend(batch.iter().cloned());
+        Some((taken, batch))
     }
 
-    /// Record the batch in flight's answers, answering whether any is worth a
-    /// repaint. An answer for a folder that changed while it was read is
-    /// dropped: that folder is asked afresh.
+    /// Record a batch's answers, answering whether any is worth a repaint.
+    /// Each settles its own folder alone, so batches in flight side by side
+    /// leave each other's folders being read. An answer for a folder that
+    /// changed while it was read is dropped: that folder is asked afresh.
     pub fn deliver(&mut self, answers: Vec<(Vec<String>, Result<Probe, Errno>)>) -> bool {
-        self.probing.clear();
-        let superseded = core::mem::take(&mut self.superseded);
-        if self.stopping {
-            return false;
-        }
         let mut fresh = false;
         for (path, answer) in answers {
-            if !superseded.contains(&path) {
-                let held = Held {
-                    answer,
-                    offered: false,
-                };
-                self.answers.insert(path, held);
-                fresh = true;
+            self.probing.remove(&path);
+            if self.superseded.remove(&path) || self.stopping {
+                continue;
             }
+            let held = Held {
+                answer,
+                offered: false,
+            };
+            self.answers.insert(path, held);
+            fresh = true;
+        }
+        if self.stopping {
+            return false;
         }
         // Only a delivery worth drawing wakes the loop that sweeps, so only one
         // holds the next batch for it.

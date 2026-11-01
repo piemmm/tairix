@@ -740,8 +740,8 @@ fn build_cpu_topology_and_arch(
         if let Ok(fdt) = unsafe { Fdt::from_ptr(dtb as *const u8) } {
             arch.classify_from_fdt(&fdt);
             // The firmware boot seed is the only usable entropy source on an
-            // emulated cortex-a72 (no `FEAT_RNG`, deterministic cycle
-            // counter), so without it the CSPRNG would never seed. Input
+            // emulated core without `FEAT_RNG` (its cycle counter is
+            // deterministic), so without it the CSPRNG would never seed. Input
             // material only, XOR-mixed and DRBG-conditioned kernel-side.
             if let Some(seed) = fdt.chosen_rng_seed() {
                 tairix_kernel_core::random::capture_boot_entropy_seed(seed);
@@ -1039,7 +1039,7 @@ fn build_arch_handle(cpu_mpidrs: &[u64], counter_hz: u64) -> Aarch64Arch {
 /// boot heap parks fail-closed: without stacks no secondary may ever be
 /// started.
 fn leak_zeroed_secondary_stacks(count: usize) -> &'static [smp::SecondaryStack] {
-    // Reserving as `Vec<SecondaryStack>` makes the block's 16-byte stack
+    // Reserving as `Vec<SecondaryStack>` makes the slots' writeback-granule
     // alignment a property of the allocation itself rather than of a
     // byte-pointer cast, and keeps the out-of-memory path a value.
     let mut stacks: Vec<smp::SecondaryStack> = Vec::new();
@@ -1052,10 +1052,10 @@ fn leak_zeroed_secondary_stacks(count: usize) -> &'static [smp::SecondaryStack] 
     let spare_start = spare.as_mut_ptr().cast::<u8>();
     // SAFETY: `spare_start`/`spare_bytes` describe exactly `stacks`' own
     // uninitialised capacity, which the reservation above made at least
-    // `count` slots long; all-zero is a valid `SecondaryStack` (a plain byte
-    // array), so writing zeros over it initialises every slot `set_len`
-    // then exposes. Zeroing in place never materialises a 64 KiB value on
-    // the boot stack, whose budget that would blow.
+    // `count` slots long; all-zero is a valid `SecondaryStack` (two zero
+    // words and a byte array), so writing zeros over it initialises every
+    // slot `set_len` then exposes. Zeroing in place never materialises a
+    // 64 KiB value on the boot stack, whose budget that would blow.
     unsafe {
         core::ptr::write_bytes(spare_start, 0, spare_bytes);
         stacks.set_len(count);

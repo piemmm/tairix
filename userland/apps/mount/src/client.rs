@@ -6,7 +6,7 @@ use alloc::string::String;
 
 use tairix_abi::imageattach::{ImageAccess, ImageAttach, ImageAttachReply};
 use tairix_abi::netattach::Presentation;
-use tairix_abi::sysinfo::MountRecord;
+use tairix_abi::sysinfo::{MountRecord, MOUNT_TARGET_MAX};
 use tairix_abi::volume::is_binding_path;
 use tairix_abi::{Errno, STORAGE_CATALOG};
 use tairix_help::{own_short_help, HelpSource};
@@ -89,16 +89,23 @@ fn mount(
     err: &dyn Stream,
 ) -> Result<(), MountError> {
     // Every directory is resolved as util-linux canonicalises a mount point,
-    // so a refusal of it is named as its own and never the image's.
-    let refused_target = |errno| MountError::Target {
-        target: request.target.clone().unwrap_or_default(),
+    // so a refusal of it is named as its own, as resolved, and never the image's.
+    let refused_target = |target: &str, errno| MountError::Target {
+        target: String::from(target),
         errno,
     };
     let target = match &request.target {
         Some(asked) => {
-            let resolved = mounter.absolute(asked).map_err(refused_target)?;
+            let resolved = mounter
+                .absolute(asked)
+                .map_err(|errno| refused_target(asked, errno))?;
             if !is_binding_path(&resolved) {
-                return Err(refused_target(Errno::LengthOutOfRange));
+                let errno = if resolved.len() > MOUNT_TARGET_MAX {
+                    Errno::LengthOutOfRange
+                } else {
+                    Errno::OutOfRange
+                };
+                return Err(refused_target(&resolved, errno));
             }
             Some(resolved)
         }
@@ -135,7 +142,9 @@ fn mount(
                 why,
             })
         }
-        Ok(ImageAttachReply::TargetRefused(errno)) => return Err(refused_target(errno)),
+        Ok(ImageAttachReply::TargetRefused(errno)) => {
+            return Err(refused_target(target.as_deref().unwrap_or_default(), errno))
+        }
         Ok(ImageAttachReply::NameRefused(errno)) => {
             return Err(match request.name.as_deref() {
                 // The kernel's naming policy keeps it for the volumes it names.
@@ -200,7 +209,7 @@ mod tests {
         MountAvailability, MountRecord, MountVolumeState, PageRequest, SysinfoQueryId,
         SysinfoRequestHeader, ViewBindingRecord, MOUNT_TARGET_MAX,
     };
-    use tairix_abi::volume::VolumeFsType;
+    use tairix_abi::volume::{VolumeFsType, VolumeFsTypes};
     use tairix_abi::Errno;
     use tairix_help::{HelpSource, SourceError};
     use tairix_procinfo::Transport;
@@ -316,7 +325,7 @@ mod tests {
         presentation: Presentation,
         access: ImageAccess,
         target: Option<String>,
-        expects: Option<VolumeFsType>,
+        expects: Option<VolumeFsTypes>,
         adopt: bool,
     }
 
@@ -362,6 +371,10 @@ mod tests {
         fn absolute(&self, path: &str) -> Result<String, Errno> {
             if path.rsplit('/').next() == Some("missing") {
                 return Err(Errno::NotFound);
+            }
+            if path == "lnk" {
+                // A link whose stored target holds a tab.
+                return Ok(String::from("/Users/ada/Home/new\tdir"));
             }
             Ok(if path.starts_with('/') {
                 String::from(path)
@@ -545,7 +558,7 @@ mod tests {
                 presentation: Presentation::Private,
                 access: ImageAccess::WritableWherePossible,
                 target: None,
-                expects: Some(VolumeFsType::Affs),
+                expects: VolumeFsTypes::of([VolumeFsType::Affs]),
                 // An image mounted already is reported, never taken up for
                 // this session too.
                 adopt: false,
@@ -603,14 +616,34 @@ mod tests {
         assert!(mounter.asked.borrow().is_empty(), "nothing was attached");
         let refusing = MemMounter::answering(Ok(ImageAttachReply::TargetRefused(Errno::NotEmpty)));
         let (outcome, _, err) = ran(&["wb.adf", "full"], &refusing, &fixture);
-        assert_eq!(outcome, target("full", Errno::NotEmpty));
+        assert_eq!(
+            outcome,
+            target("/Users/ada/Home/full", Errno::NotEmpty),
+            "named as resolved, as util-linux names a mount point"
+        );
         assert!(err.is_empty(), "the caller reports it once");
         let failure = outcome.expect_err("refused");
         assert_eq!(failure.status(), 32);
         assert_eq!(
             failure.to_string(),
-            alloc::format!("full: {}.", Errno::NotEmpty)
+            alloc::format!("/Users/ada/Home/full: {}.", Errno::NotEmpty)
         );
+    }
+
+    /// A directory that resolves to a spelling no binding is listed with,
+    /// though within the bound, is out of range, never too long.
+    #[test]
+    fn a_target_holding_a_control_character_is_refused_out_of_range() {
+        let fixture = Fixture::empty();
+        let mounter = MemMounter::attaching("workbench");
+        assert_eq!(
+            ran(&["wb.adf", "lnk"], &mounter, &fixture).0,
+            Err(MountError::Target {
+                target: String::from("/Users/ada/Home/new\tdir"),
+                errno: Errno::OutOfRange,
+            })
+        );
+        assert!(mounter.asked.borrow().is_empty(), "nothing was attached");
     }
 
     /// A name the kernel's naming policy keeps for the volumes it names is a
@@ -787,7 +820,7 @@ mod tests {
             for switch in [
                 "`-r, --read-only`",
                 "`-w, --rw, --read-write`",
-                "`-t, --types <type>`",
+                "`-t, --types <list>`",
                 "`-o, --options <list>`",
                 "`-v, --verbose`",
                 "`-l, --show-labels`",

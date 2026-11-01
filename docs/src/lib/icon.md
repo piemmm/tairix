@@ -296,7 +296,9 @@ a draw needs* and *producing it*:
   key it has just recorded, and `Resolved::Done` once a producer has delivered
   it. Nothing is retained meanwhile, the draw falls to the tier below — for the
   last tier, the built-in picture — and the same lookup serves the artwork once
-  the pixels land.
+  the pixels land. `collect` and `want` say too whether the call recorded the
+  decode, the one ask a producer is owed a wake for, so a screenful of tiles
+  still pending wakes nobody on every paint.
 - Both produce the decode through `render_artwork`, so where it ran cannot
   change what it produced.
 - **A process is pictured from the name the kernel attested it.**
@@ -328,9 +330,17 @@ a draw needs* and *producing it*:
   `ArtworkDesk::deliver` answers a `Delivered` carrying two independent facts:
   `kept()`, whether the answer was recorded, and `wake()`, whether the
   embedder's loop is owed a nudge now. A wake falls due once something has
-  landed *and* the queue has drained, so a surface wanting thirty icons costs
-  one repaint rather than thirty and they appear together; a lone icon empties
-  the queue at once and still lands immediately. The debt outlives the delivery
+  landed *and* the queue has drained of icons still wanted, so a surface wanting
+  thirty icons costs one repaint rather than thirty and they appear together; a
+  lone icon empties the queue at once and still lands immediately. A producer
+  serving one share of the work — the file manager's reader of one volume —
+  takes and delivers through `next_job_where`, `next_thumbnail_where` and
+  `deliver_where`, and its batch drains when its own share does, so a share
+  whose producer is held up on a slow device holds no other share's wake back.
+  The decodes waiting are kept apart by share, each given its share by the
+  embedder's `route` the first time a producer looks and again only after
+  `reroute`, so a take or a delivery looks at its own share's decodes alone,
+  and across the shares a producer admits the first asked goes first. The debt outlives the delivery
   that incurred it, which is why the two facts cannot be one flag: a job the
   desk had already answered, handed back after its batch drained, keeps nothing
   yet still owes the wake that would show the earlier answers. Holding the rule
@@ -371,8 +381,8 @@ The desk holds no lock, thread, or syscall, so its whole policy is host-tested.
 Two embedders drive it over the same rules, and both do it the same way: each
 parks a worker thread on the desk behind the runtime's futex mutex and is woken
 back through the wait-set it already parks in — the desktop session on its own
-icon-decoder thread, the file manager on the one reader thread its directory
-listings, folder cues, and program-store walks also share
+icon-decoder thread, the file manager on the reader serving the volume each
+decode reads from
 (`plans/FIX-DESKTOP.md` DESK-8/DESK-11/DESK-12, `plans/NEW-FILEMANAGER.md`).
 The lock carries only the desk: the decode cache stays on the paint side,
 because a picture is handed out as a borrow into it and a borrow cannot outlive
@@ -429,8 +439,11 @@ those pixels away.
 `ThumbnailStore` keeps decoded thumbnails across runs in one blob of an
 application's own bulk store (`plans/FILES-INTERACTION.md` FI25; the file
 manager is its consumer, through its `ArtworkRasteriser::thumbnail`).
-`ThumbnailStore::serve(reading, document, decode)` answers the stored picture
-of the open document's version, or decodes and keeps it.
+`serve_thumbnail(store, reading, document, decode)` answers the stored picture
+of the open document's version, or decodes and keeps it, reaching the store
+through `StoreAccess` for one lookup before the decode and one insert after it,
+never across it: a store several decoders share is held by none of them while
+it reads a document.
 
 - **Exact or not at all.** A `StoreKey` is (volume, inode, content generation,
   reading), built only from a stamp naming an identity and a non-zero

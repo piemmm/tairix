@@ -576,7 +576,9 @@ pub struct Acting<'a> {
 pub struct NodeHandle {
     /// The pin.
     pub node: NodeRef,
-    /// The projection the node was opened through.
+    /// The projection the node is held through: the one it was opened
+    /// through, unless a kernel hold keeps it through its volume's own
+    /// ([`crate::fs::MountTable::kept_through`]).
     pub projection: Arc<Projection>,
     /// Whose identity its byte operations run under.
     pub authority: Authority,

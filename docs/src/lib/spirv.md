@@ -105,7 +105,7 @@ the fixed bounds.
 | logical addressing, the `GLSL450` memory model, an entry point, and every instruction in its section and place | `AddressingModel`, `MemoryModel`, `NoEntryPoint`, `Layout`, `NotAdmitted` |
 | every id defined, of the sort its operand names, local to its own function, and dominating its uses | `Undefined`, `ForwardReference`, `OtherFunction`, `WrongKind`, `NotDominated` |
 | types well formed; a non-aggregate type declared once; array lengths constant; a run-time array only as the last member of a storage buffer; each width only with its capability | `Type`, `DuplicateType`, `ArrayLength`, `RuntimeArray`, `Contents` |
-| constants and specialization operations typed | `Constant`, `SpecConstantOp` |
+| constants and specialization operations typed; a narrow constant's literal, and a switch case's on a narrow selector, written as its type holds it — sign-extended where signed, zero-extended where not | `Constant`, `SpecConstantOp`, `OperandValue` |
 | decorations only on what they may decorate, each once, none conflicting; buffers laid out by the Vulkan environment's extended alignment (uniform buffers) or base alignment (storage buffers, push constants) | `DecorationTarget`, `DuplicateDecoration`, `ConflictingDecorations`, `ExplicitLayout` |
 | variables in admitted storage classes, of types those allow; pointers logical; each access to memory that may be accessed that way | `StorageClass`, `VariableType`, `Initializer`, `LogicalPointer`, `AccessChain`, `NotWritable`, `NotReadable`, `OpaqueUse` |
 | every operand and result typed as the specification gives; scopes, memory semantics and image operands admitted | `OperandType`, `ResultType`, `OperandValue`, `Semantics`, `ImageOperands` |
@@ -149,16 +149,25 @@ therefore known, and held to its declarations, through any depth of calls.
 - the resource bindings its call tree statically uses, each as a set, binding,
   `BindingKind`, descriptor count and `Access`;
 - the bytes of push constants it reads;
-- the locations its user-defined inputs and outputs occupy (`Varying`).
+- the locations its user-defined inputs and outputs occupy (`Varying`);
+- the module-scope variables its call tree names (`EntryPoint::globals`), so a
+  consumer lowering one entry point of a module of several leaves the others'
+  variables alone.
+
+`Admitted::held_bytes` states the host memory an admitted module keeps — its
+words, its instruction and operand tables, and every table the validator kept
+— so a device charges the module to whoever made it.
 
 `EntryPoint::agree` decides a pipeline layout against it. Every binding must be
 present, with:
 - the same kind and shape (a storage image of unknown format takes any);
 - at least as many descriptors as the entry point uses;
-- the access it uses.
+- the access it uses;
+- the entry point's stage among the `Stages` that may see it.
 
-The layout must also have room for its push constants. The answer is the first
-`Disagreement` in ascending binding order.
+The layout must also have room for its push constants, and let the entry
+point's stage see them. The answer is the first `Disagreement` in ascending
+binding order.
 
 A built-in block may declare `ClipDistance` and `CullDistance` members without
 their capabilities, as glslang's `gl_PerVertex` does. Such a member is latent:
@@ -173,6 +182,53 @@ point run once for each of the at most 64. Each function's tables are reused
 for the next. It does not claim termination: an admitted module
 may loop forever, and the submission deadline contains it (`plans/GPU.md`
 GP2).
+
+## The lowering view
+
+A backend lowers from what the validator resolved, never from a reading of its
+own (`plans/SHADER.md` SH8): two readings of one module could disagree.
+
+**Types.** `Admitted::type_id` answers the `TypeId` an id declares, and
+`result_type` an instruction's. `ty` answers what a type is, as a `Type`: its
+scalars, its components, an image's operands (`ImageType`), an array's length,
+a pointer's storage class. `member` answers a structure member as a buffer lays
+it out (`Member`: its type, `Offset`, `MatrixStride`, majorness and built-in),
+`parameter` a function type's parameter, and `array_stride` an array's
+`ArrayStride`. `decoration` reads any other decoration, answering zero for
+one that carries no literal. A member's decorations are found in one search
+and read in one pass; every other lookup is a binary search over what the
+module declares.
+
+**Specialization.** `Admitted::specialize` takes the `SpecValue`s a pipeline
+gives its specialization constants, by `SpecId`, and answers `Specialized`:
+every constant of the module evaluated, and each compute entry point's
+workgroup size. `constant` finds the `ConstantId` an id names, and `value`
+answers it as a `Constant`: a scalar's bits zero-extended from its width, a
+composite's constituents, or `Null`. A composite holds its constituents by
+reference, so one shared by many is held once, and `OpConstantNull` and
+`OpUndef` are zero.
+
+Every operation is total over every bit pattern:
+
+| Operation | Answers |
+|---|---|
+| a division or remainder by zero | zero |
+| the most negative value divided by minus one | itself |
+| a shift by the width or more | zero |
+| a shuffle component of `0xFFFFFFFF` | zero |
+| `QuantizeToF16` of what is too small for a normal half | zero of its sign |
+| `QuantizeToF16` of what is too large for a half | infinity of its sign |
+| an `FConvert` of a `NaN` | its width's one quiet `NaN` |
+
+A value for a `SpecId` no specialization constant carries, two for one id, one
+wider than its constant's type (a Boolean's anything but one or zero), and a
+workgroup size with a zero component are refused with a `SpecError`. Every
+constant and constituent evaluation keeps counts against `MAX_SPECIALIZED` — a
+null composite's spelled out where an insertion changes one among them — and
+nothing is listed on the way: an insertion builds its deepest level first, and
+an operation reads its operands' components where they are kept. Past the bound
+it is refused with `SpecError::Budget`, so a module of a few hundred bytes
+cannot make it hold or walk more.
 
 ## Encoding
 
@@ -189,6 +245,20 @@ holding a nul, an instruction past its word count, and a module past
 decoded before anything relies on it, so there is one judge of what a module
 may hold, and a builder's mistake is a refusal at build time.
 
+## The test assembler
+
+`assemble` (the `test-support` feature, which only tests enable) turns SPIR-V
+assembly text into a module, so a test reads as the shader it is: one
+instruction a line, `%name` ids assigned on first sight, and every other
+operand read as the kind the grammar gives its position — an enumerant by its
+grammar name with the parameters it takes, a set of bits joined by `|`, a
+number as wide as its constant's type or its switch's selector (a point or an
+exponent makes it a float), an extended instruction by its `GLSL.std.450`
+name. The names come from tables `cargo xtask spirv` generates beside the
+grammar, compiled only into `test-support` builds. `admit` assembles and
+validates. `lib/spirv`'s own tests and `lib/gpu`'s write their modules this
+way.
+
 ## Tests
 
 - The decoder's tests build a compute shader through the encoder using every
@@ -196,7 +266,7 @@ may hold, and a builder's mistake is a refusal at build time.
   one, constants of each width, a nested operation, an extended instruction,
   switches on 32- and 64-bit selectors — and replace one instruction at a time
   to exercise each refusal from a module that is otherwise valid.
-- The validator's tests assemble modules from text (`src/validate/assemble.rs`).
+- The validator's tests assemble modules from text with the test assembler.
   Admitted whole: a vertex, a fragment and a compute shader, and the
   control-flow shapes front ends emit. Refused, each from a module otherwise
   admitted: every rule, and every exit from or entry into a construct the rules
@@ -217,11 +287,19 @@ may hold, and a builder's mistake is a refusal at build time.
   byte order. It holds the validator total and deterministic over every
   accepted module, with its refusals within the module. Each admitted entry
   point must agree with a layout of its own bindings, and be refused by one
-  missing the first of them.
+  missing the first of them. Every admitted module must specialize
+  deterministically with its defaults and with fixed values, never answering
+  `Malformed`, and its view must answer every type it declares. One seed,
+  written with the test assembler, holds specialization constants that every
+  family of specialization operation reaches, and a specialized workgroup
+  size.
 - `cargo xtask miri` interprets the crate's tests, dealt across the host's
   cores, and the harness. It leaves out eight whose extent is their assertion
   and costs minutes to hours interpreted: the bounds on nesting, call depth,
   bindings, globals, locals, and members and cases, a hundred thousand
-  selections, and a ladder as deep as nesting goes. The ordinary matrix runs
-  those in full. The crate forbids `unsafe`; loom has nothing to model, since
-  nothing here is shared between threads.
+  selections, and a ladder as deep as nesting goes. It leaves out the
+  `specialize_memory` binary too, whose peak and allocation measurements are
+  taken at a size that is their assertion. The ordinary matrix runs those in
+  full.
+  The crate forbids `unsafe`; loom has nothing to model, since nothing here is
+  shared between threads.

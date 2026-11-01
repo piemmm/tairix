@@ -20,9 +20,10 @@ rt = ["dep:tairix-abi", "dep:tairix-cmdres", "dep:tairix-rt"]
 
 # The one help-tree lint (plans/APPS.md §8.1): completeness, required-locale
 # coverage, cross-locale OPTIONS switch-key drift, structural bounds, and the
-# content-policy screen over a set of discovered Help/ trees. Enabled only by
-# host-side consumers (`cargo xtask help-lint`, the `tools/syshelp` aggregator
-# tests); never linked into a TAIRiX program.
+# content-policy screen over a set of discovered Help/ trees, and the reader of
+# one switch's OPTIONS entry. Enabled only by host-side consumers (`cargo xtask
+# help-lint`, the `tools/syshelp` aggregator tests, and the per-app help tests
+# that read an OPTIONS entry); never linked into a TAIRiX program.
 lint = []
 
 [dependencies]

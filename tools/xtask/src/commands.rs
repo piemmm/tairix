@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tairix_itest_harness::pie::PieArch;
 use tairix_procinfo::display::format_bytes;
 
-use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
+use crate::{elapsed_line, output_or_reason, Context, LONG_BUILD_COMMAND_TIMEOUT};
 
 mod abi_check;
 mod artsheet;
@@ -41,7 +41,7 @@ mod loom;
 mod miri;
 mod model_check;
 mod netpeer;
-mod parallel;
+pub(crate) mod parallel;
 mod pie_build;
 mod proptest;
 mod prune;
@@ -303,7 +303,7 @@ impl Command {
                 "Soak the random generators through the statistical battery for a budget."
             }
             Command::Loom => {
-                "Model-check the sync primitives over every thread interleaving."
+                "Model-check the enrolled concurrent protocols over every thread interleaving."
             }
             Command::Miri => {
                 "Interpret the crates with a hand-written unsafe core under the UB oracle."
@@ -467,7 +467,7 @@ fn run_clean(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     ctx.run("clean", cmd)?;
 
     let after = dir_size(&target_dir);
-    eprintln!(
+    noteln!(
         "xtask: [clean] reclaimed {} ({} -> {} in {})",
         format_bytes(before.saturating_sub(after)),
         format_bytes(before),
@@ -487,7 +487,7 @@ fn run_clean(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 fn prune_before_build(ctx: &Context) {
     let reclaimed = prune::prune(ctx);
     if reclaimed.dirs > 0 {
-        eprintln!(
+        noteln!(
             "xtask: [prune] reclaimed {} of superseded build-script output ({} {})",
             format_bytes(reclaimed.bytes),
             reclaimed.dirs,
@@ -826,7 +826,7 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     }
 
     if opts.budget.is_repeated() {
-        eprintln!("xtask: [test] {}", opts.budget.describe());
+        noteln!("xtask: [test] {}", opts.budget.describe());
     }
     // A pass is the *whole* matrix: host, then QEMU, then wasm. Looping here
     // (rather than inside each stage) means a duration budget covers the
@@ -837,8 +837,7 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         // skipped (and a `--only` run is never a substitute for the full
         // matrix).
         if opts.only.is_none() {
-            let mut cmd = ctx.cargo();
-            cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
+            let mut cmd = host_test_command(ctx);
             cmd.args(&opts.forward);
             let order = opts.order.seed(pass);
             if let Some(order) = order {
@@ -1064,11 +1063,8 @@ fn run_docs_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
     ctx.run("docs-check (rustdoc)", doc)?;
 
     // mdBook build. The book lives in `docs/`.
-    if !mdbook_available() {
-        return Err(
-            "mdbook is not on PATH; install it with `cargo install --locked mdbook`".to_string(),
-        );
-    }
+    probe_version(ctx, "mdbook")
+        .map_err(|why| format!("{why}; install mdbook with `cargo install --locked mdbook`"))?;
     let mut book = std::process::Command::new("mdbook");
     book.current_dir(ctx.workspace_root.join("docs"));
     book.args(["build"]);
@@ -1077,7 +1073,7 @@ fn run_docs_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
     // In-tree relative-link checker; see `commands/linkcheck.rs` for the
     // rationale for owning this rather than delegating to a preprocessor.
     let book_src = ctx.workspace_root.join("docs/src");
-    eprintln!("xtask: [docs-check (linkcheck)] {}", book_src.display());
+    noteln!("xtask: [docs-check (linkcheck)] {}", book_src.display());
     linkcheck::run(&book_src)?;
     Ok(())
 }
@@ -1091,7 +1087,7 @@ fn run_abi_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
     // `tools/xtask/src/commands/abi_check.rs`).
     let syscalls = ctx.workspace_root.join(abi_check::DEFAULT_SYSCALLS_PATH);
     let table = ctx.workspace_root.join(abi_check::DEFAULT_TABLE_PATH);
-    eprintln!(
+    noteln!(
         "xtask: [abi-check] {} ↔ {}",
         relative(&ctx.workspace_root, &syscalls),
         relative(&ctx.workspace_root, &table),
@@ -1117,13 +1113,13 @@ fn run_c_header(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     }
     let include_dir = ctx.workspace_root.join(c_header::DEFAULT_INCLUDE_DIR);
     if write {
-        eprintln!(
+        noteln!(
             "xtask: [c-header --write] {}",
             relative(&ctx.workspace_root, &include_dir)
         );
         c_header::write(&ctx.workspace_root, &include_dir)
     } else {
-        eprintln!(
+        noteln!(
             "xtask: [c-header] {}",
             relative(&ctx.workspace_root, &include_dir)
         );
@@ -1148,13 +1144,13 @@ fn run_font_atlas(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         }
     }
     if write {
-        eprintln!(
+        noteln!(
             "xtask: [font-atlas --write] {}",
             font_atlas::DEFAULT_ATLAS_RS_PATH
         );
         font_atlas::write(&ctx.workspace_root)
     } else {
-        eprintln!("xtask: [font-atlas] {}", font_atlas::DEFAULT_ATLAS_RS_PATH);
+        noteln!("xtask: [font-atlas] {}", font_atlas::DEFAULT_ATLAS_RS_PATH);
         font_atlas::check_sync(&ctx.workspace_root)
     }
 }
@@ -1180,10 +1176,10 @@ fn run_artsheet(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         }
     }
     if write {
-        eprintln!("xtask: [artsheet --write] {}", artsheet::LEDGER_PATH);
+        noteln!("xtask: [artsheet --write] {}", artsheet::LEDGER_PATH);
         artsheet::write(&ctx.workspace_root)?;
     } else {
-        eprintln!("xtask: [artsheet] {}", artsheet::LEDGER_PATH);
+        noteln!("xtask: [artsheet] {}", artsheet::LEDGER_PATH);
         artsheet::check(&ctx.workspace_root)?;
     }
     if sheets {
@@ -1196,29 +1192,29 @@ fn run_deps_check(ctx: &Context) -> Result<(), String> {
     // walk the workspace dependency graph and reject any
     // layering violation, concrete-scheduler naming outside the sanctioned
     // crates, or a non-GUI crate reaching the optional desktop.
-    eprintln!("xtask: [deps-check] {}", ctx.workspace_root.display());
+    noteln!("xtask: [deps-check] {}", ctx.workspace_root.display());
     deps_check::run(&ctx.workspace_root)
 }
 
 fn run_cfg_check(ctx: &Context) -> Result<(), String> {
     // reject target-conditional compilation outside the
     // architecture ports and the build glue.
-    eprintln!("xtask: [cfg-check] {}", ctx.workspace_root.display());
-    cfg_check::run(&ctx.workspace_root)
+    noteln!("xtask: [cfg-check] {}", ctx.workspace_root.display());
+    cfg_check::run(&ctx.workspace_root, &ctx.children)
 }
 
 fn run_board_check(ctx: &Context) -> Result<(), String> {
-    eprintln!("xtask: [board-check] {}", ctx.workspace_root.display());
-    board_check::run(&ctx.workspace_root)
+    noteln!("xtask: [board-check] {}", ctx.workspace_root.display());
+    board_check::run(&ctx.workspace_root, &ctx.children)
 }
 
 fn run_event_ids(ctx: &Context) -> Result<(), String> {
-    eprintln!("xtask: [event-ids] {}", ctx.workspace_root.display());
+    noteln!("xtask: [event-ids] {}", ctx.workspace_root.display());
     event_ids::run(&ctx.workspace_root)
 }
 
 fn run_driver_exits(ctx: &Context) -> Result<(), String> {
-    eprintln!("xtask: [driver-exits] {}", ctx.workspace_root.display());
+    noteln!("xtask: [driver-exits] {}", ctx.workspace_root.display());
     driver_exits::run(&ctx.workspace_root)
 }
 
@@ -1226,12 +1222,9 @@ fn run_coverage(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // `cargo-llvm-cov` is a cargo subcommand: its binary rejects a bare
     // `--version` and is only reachable as `cargo llvm-cov`. Probe it the
     // same way it is invoked below so the availability check matches reality.
-    if !cargo_subcommand_available(ctx, "llvm-cov") {
-        return Err(
-            "cargo-llvm-cov is not installed; run `cargo install cargo-llvm-cov --locked`"
-                .to_string(),
-        );
-    }
+    cargo_subcommand_available(ctx, "llvm-cov").map_err(|why| {
+        format!("{why}; install cargo-llvm-cov with `cargo install cargo-llvm-cov --locked`")
+    })?;
     let mut cmd = ctx.cargo();
     cmd.args(["llvm-cov", "--workspace", "--locked", "--summary-only"]);
     cmd.args(args);
@@ -1279,25 +1272,25 @@ fn run_supply_chain(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             ));
         }
     }
-    eprintln!("xtask: [supply-chain] {}", ctx.workspace_root.display());
+    noteln!("xtask: [supply-chain] {}", ctx.workspace_root.display());
     supply_chain::run(&ctx.workspace_root, write_pins)
 }
 
 fn run_fuzz(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let opts = fuzz::parse(args)?;
-    eprintln!("xtask: [fuzz] {}", ctx.workspace_root.display());
+    noteln!("xtask: [fuzz] {}", ctx.workspace_root.display());
     fuzz::run(ctx, &opts)
 }
 
 fn run_proptest(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let opts = proptest::parse(args)?;
-    eprintln!("xtask: [proptest] {}", ctx.workspace_root.display());
+    noteln!("xtask: [proptest] {}", ctx.workspace_root.display());
     proptest::run(ctx, &opts)
 }
 
 fn run_fssoak(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let opts = fssoak::parse(args)?;
-    eprintln!("xtask: [fssoak] {}", ctx.workspace_root.display());
+    noteln!("xtask: [fssoak] {}", ctx.workspace_root.display());
     fssoak::run(ctx, &opts)
 }
 
@@ -1305,7 +1298,7 @@ fn run_rngsoak(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // `ci` gets its coverage from the harness's own fixed-seed smoke pass in
     // the host test phase.
     let opts = rngsoak::parse(args)?;
-    eprintln!("xtask: [rngsoak] {}", ctx.workspace_root.display());
+    noteln!("xtask: [rngsoak] {}", ctx.workspace_root.display());
     rngsoak::run(ctx, &opts)
 }
 
@@ -1316,7 +1309,7 @@ fn run_model_check(args: &[OsString]) -> Result<(), String> {
     // `docs/src/security/model/capability_ipc.md`. Fails closed on any
     // reachable state or transition that violates an invariant.
     let opts = model_check::parse(args)?;
-    eprintln!("xtask: [model-check] exhaustive capability + IPC state machine");
+    noteln!("xtask: [model-check] exhaustive capability + IPC state machine");
     model_check::run(&opts)
 }
 
@@ -1326,31 +1319,31 @@ fn run_bench(args: &[OsString]) -> Result<(), String> {
     // evidence for a completion report and deliberately not a `ci` gate; the
     // families and the budget live in `commands/bench.rs`.
     let opts = bench::parse(args)?;
-    eprintln!("xtask: [bench] raster and compositor families");
+    noteln!("xtask: [bench] raster and compositor families");
     bench::run(&opts)
 }
 
 fn run_spec_review(ctx: &Context) -> Result<(), String> {
     // fail closed if any unreviewed AI-drafted artefact marker
     // reaches the tree. The scanner lives in `commands/spec_review.rs`.
-    eprintln!("xtask: [spec-review] {}", ctx.workspace_root.display());
-    spec_review::run(&ctx.workspace_root)
+    noteln!("xtask: [spec-review] {}", ctx.workspace_root.display());
+    spec_review::run(&ctx.workspace_root, &ctx.children)
 }
 
 fn run_source_text(ctx: &Context) -> Result<(), String> {
-    eprintln!("xtask: [source-text] {}", ctx.workspace_root.display());
-    source_text::run(&ctx.workspace_root)
+    noteln!("xtask: [source-text] {}", ctx.workspace_root.display());
+    source_text::run(&ctx.workspace_root, &ctx.children)
 }
 
 fn run_charter_cite(ctx: &Context) -> Result<(), String> {
     // A comment carries the reason, not a pointer to the rule. The scanner
     // lives in `commands/charter_cite.rs`.
-    eprintln!("xtask: [charter-cite] {}", ctx.workspace_root.display());
-    charter_cite::run(&ctx.workspace_root)
+    noteln!("xtask: [charter-cite] {}", ctx.workspace_root.display());
+    charter_cite::run(&ctx.workspace_root, &ctx.children)
 }
 
-/// Time one pipeline stage, reporting its wall clock in the shape
-/// [`Context::run_with_timeout`] uses for a single command.
+/// Time one pipeline stage, reporting its wall clock in every step's
+/// [`elapsed_line`] shape.
 ///
 /// A stage that fans out into concurrent jobs reports only per-job lines, so
 /// its own cost never reaches the log — and a stage whose cost cannot be
@@ -1360,38 +1353,121 @@ fn run_charter_cite(ctx: &Context) -> Result<(), String> {
 fn stage(label: &str, run: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     let started = Instant::now();
     let outcome = run();
-    eprintln!(
-        "xtask: [stage: {label}] {} in {:?}",
-        if outcome.is_ok() { "done" } else { "FAILED" },
-        started.elapsed()
-    );
+    crate::note(&elapsed_line(
+        &format!("stage: {label}"),
+        outcome.is_ok(),
+        started.elapsed(),
+    ));
     outcome
 }
 
-/// One pipeline stage: the label it reports under and the step it runs.
-type CiStage<'a> = (&'a str, &'a dyn Fn() -> Result<(), String>);
+/// One stage of `ci`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CiStage {
+    /// The first and cheapest gate. It streams `cargo fmt` output, so it runs
+    /// alone rather than with the static gates.
+    FmtCheck,
+    /// [`STATIC_GATES`], run at once: none compiles, so their wall-clock costs
+    /// overlap instead of summing, and they still gate every compiling stage.
+    StaticGates,
+    /// `cargo deny check` reads `Cargo.lock` and the advisory database and
+    /// compiles nothing; it streams its output, so it runs alone.
+    Deny,
+    /// One iteration of each stateful capability model with a fresh logged
+    /// seed. The wall-clock coverage is `proptest --soak`, outside `ci`.
+    Proptest,
+    /// `lib/crypto`'s tests under release optimisation, which can break
+    /// constant time where the debug profile the matrix uses cannot.
+    CryptoConstantTime,
+    /// One iteration of each fuzz harness with a fresh logged seed. The
+    /// wall-clock coverage is `fuzz --soak`, outside `ci`.
+    Fuzz,
+    /// The interleaving oracle: the matrix runs whichever ordering the host
+    /// scheduler picked, and only the model checker covers the rest.
+    Loom,
+    /// Only a doc build, so a broken link or a denied rustdoc warning surfaces
+    /// before any compile-heavy stage.
+    DocsCheck,
+    /// Every delivered image profile is built, so an image-breaking change
+    /// cannot land green. It needs the pinned Pi firmware blobs, staged
+    /// (`--firmware`, `$TAIRIX_PI_FIRMWARE`) or fetched by `curl`.
+    Image,
+    /// Every target, warnings denied.
+    Clippy,
+    /// The whole test matrix once, the host passes in a freshly seeded order so
+    /// an order-dependent suite fails. The QEMU tests need QEMU for every
+    /// Tier-1 target (`docs/src/platform/x86_64.md`); the repetition lives in
+    /// the soaks.
+    Test,
+    /// The undefined-behaviour oracle over the crates with a hand-written
+    /// `unsafe` core. With the matrix it is the dearest stage, so it closes
+    /// the pipeline.
+    Miri,
+}
 
-/// Every stage `run_ci` runs, in order.
-///
-/// Declared separately from the calls so a stage cannot go missing unnoticed:
-/// [`run_ci`] records each label it runs and refuses to report success unless
-/// the record matches this roster exactly. A reordering that dropped the UB
-/// oracle once left the pipeline green with nothing interpreting any
-/// `unsafe` at all.
-const CI_STAGES: &[&str] = &[
-    "fmt --check",
-    "static gates",
-    "deny",
-    "proptest --once",
-    "crypto-constant-time",
-    "fuzz --once",
-    "loom",
-    "docs-check",
-    "image",
-    "clippy",
-    "test --qemu",
-    "miri",
+/// Every stage `ci` runs, in order: each is cheaper than the next by measured
+/// wall clock (`grep 'stage:'` over a run's log), so a failing PR fails as
+/// early as its cost allows.
+const CI_STAGES: [CiStage; 12] = [
+    CiStage::FmtCheck,
+    CiStage::StaticGates,
+    CiStage::Deny,
+    CiStage::Proptest,
+    CiStage::CryptoConstantTime,
+    CiStage::Fuzz,
+    CiStage::Loom,
+    CiStage::DocsCheck,
+    CiStage::Image,
+    CiStage::Clippy,
+    CiStage::Test,
+    CiStage::Miri,
 ];
+
+impl CiStage {
+    /// The label the stage reports under.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::FmtCheck => "fmt --check",
+            Self::StaticGates => "static gates",
+            Self::Deny => "deny",
+            Self::Proptest => "proptest --once",
+            Self::CryptoConstantTime => "crypto-constant-time",
+            Self::Fuzz => "fuzz --once",
+            Self::Loom => "loom",
+            Self::DocsCheck => "docs-check",
+            Self::Image => "image",
+            Self::Clippy => "clippy",
+            Self::Test => "test --qemu",
+            Self::Miri => "miri",
+        }
+    }
+
+    fn run(self, ctx: &Context) -> Result<(), String> {
+        match self {
+            Self::FmtCheck => run_fmt(ctx, &[]),
+            Self::StaticGates => run_static_gates(ctx),
+            Self::Deny => run_deny(ctx),
+            Self::Proptest => run_proptest(ctx, &[OsString::from("--once")]),
+            Self::CryptoConstantTime => run_crypto_constant_time(ctx),
+            Self::Fuzz => run_fuzz(ctx, &[OsString::from("--once")]),
+            Self::Loom => loom::run(ctx, &[]),
+            Self::DocsCheck => run_docs_check(ctx, &[]),
+            Self::Image => run_image_gate(ctx),
+            Self::Clippy => run_clippy(ctx, &[]),
+            Self::Test => run_test(ctx, &CI_TEST_ARGS.map(OsString::from)),
+            Self::Miri => miri::run(ctx, &[]),
+        }
+    }
+
+    /// Whether `ci-long` repeats the stage in its flake hunt: it executes test
+    /// cases, whose result a repeat can change.
+    const fn flake_hunted(self) -> bool {
+        matches!(
+            self,
+            Self::Proptest | Self::CryptoConstantTime | Self::Fuzz | Self::Test
+        )
+    }
+}
 
 /// The `test` arguments `ci` passes: the QEMU matrix, in a fresh order, and
 /// no scene tier.
@@ -1401,206 +1477,99 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // Every compiling stage signs or derives an anchor from the key set, so a
     // machine without one fails here rather than a stage in.
     ctx.signing_keys()?;
-    // The pipeline order is deliberate and evidence-based: every stage is
-    // cheaper than the one after it, so a failing PR fails as early as its
-    // cost allows. Ordering is against measured wall clock (`grep 'stage:'`
-    // over a run's log), never a guess about which gate "usually" trips —
-    // when a cheap stage sits behind an expensive one, every failure of it
-    // pays the expensive one first for nothing.
-    //
-    // The test phase opts in to `--qemu`
-    // so the Stage-2 QEMU integration tests run as part of every PR; CI hosts
-    // therefore need QEMU for every Tier-1 target, documented under
-    // `docs/src/platform/x86_64.md`. The closing image gate additionally
-    // needs the pinned Pi firmware blobs: an operator-staged directory
-    // (`--firmware`/`$TAIRIX_PI_FIRMWARE`) or `curl` to populate the
-    // checksummed cache (`docs/src/install/raspberry_pi.md`).
-    // `fmt --check` is the very first, cheapest gate and streams `cargo fmt`
-    // output live, so it stays a sequential fail-fast step rather than joining
-    // the concurrent group below.
-    // The pipeline is driven from this table, and its labels are checked
-    // against `CI_STAGES` before a single stage runs: a stage dropped while
-    // reordering cannot leave the gate green with nothing having run it.
-    let pipeline: [CiStage<'_>; CI_STAGES.len()] = [
-        ("fmt --check", &|| run_fmt(ctx, &[])),
-        // The deterministic, non-compiling gates run concurrently as one group:
-        // they still gate every compile-heavy stage below (fail-fast preserved),
-        // and their wall-clock costs overlap instead of summing.
-        ("static gates", &|| run_static_gates(ctx)),
-        // `cargo deny check` reads `Cargo.lock` and the advisory database and
-        // compiles nothing, so it is a static gate in all but its streaming
-        // output — which is why it runs sequentially rather than joining the
-        // concurrent group above. At a measured second it belongs beside them.
-        ("deny", &|| run_deny(ctx)),
-        // Bronze: the per-PR stateful-model gate, one iteration with a fresh
-        // logged seed. Seconds, and fails closed on a counterexample, hang, or
-        // invariant failure; the wall-clock coverage is `cargo xtask proptest
-        // --soak`, outside `ci`. (Silver's exhaustive model check is already in
-        // the concurrent static-gate group above.)
-        ("proptest --once", &|| {
-            run_proptest(ctx, &[OsString::from("--once")])
-        }),
-        // `lib/crypto`'s unit tests re-run under release optimisation: the
-        // constant-time guarantee is one the optimiser can break, so the debug
-        // profile the main test phase uses does not cover it.
-        ("crypto-constant-time", &|| run_crypto_constant_time(ctx)),
-        // The per-PR fuzz gate: each in-tree harness for one iteration with a
-        // fresh logged seed. The wall-clock coverage is `cargo xtask fuzz
-        // --soak`, run outside `ci`.
-        ("fuzz --once", &|| {
-            run_fuzz(ctx, &[OsString::from("--once")])
-        }),
-        // The interleaving oracle over the synchronisation primitives. The test
-        // matrix runs whichever ordering the host scheduler happened to pick;
-        // only the model checker covers the ones it did not.
-        ("loom", &|| loom::run(ctx, &[])),
-        // docs-check needs only a doc build, never the multi-target test matrix,
-        // and a broken intra-doc link or a denied rustdoc warning is cheap to
-        // surface.
-        ("docs-check", &|| run_docs_check(ctx, &[])),
-        // Every shippable image profile is built on every PR, so an
-        // image-breaking change (kernel link, firmware manifest, root-volume
-        // layout, profile seeding) can never land green. The gate only proves the
-        // image *builds* — it ships nothing — so there is no untested-artefact
-        // risk to weigh against its cost, and at a quarter of the test matrix's
-        // wall clock it belongs ahead of it rather than behind.
-        ("image", &|| run_image_gate(ctx)),
-        ("clippy", &|| run_clippy(ctx, &[])),
-        // The whole test matrix, exactly once — on a developer machine and a CI
-        // runner alike. The flake-hunting repetition lives in the time-limited
-        // soaks (`tools/ci/soak.sh`, `cargo xtask test --soak`), never in `ci`.
-        // The host pass runs in a freshly-seeded order (`--shuffle`) so an
-        // order-dependent suite fails the gate rather than passing on the
-        // harness's alphabetical accident; the seed is in the step's label.
-        ("test --qemu", &|| {
-            run_test(ctx, &CI_TEST_ARGS.map(OsString::from))
-        }),
-        // The undefined-behaviour oracle over the crates with a hand-written
-        // `unsafe` core. A green test suite says what the code computes; only an
-        // interpreter says whether a raw pointer stayed in bounds. It finds the
-        // class of defect the matrix structurally cannot. It closes the
-        // compile-heavy tail alongside the test matrix: both are dearer than
-        // every stage above them, so neither can be placed higher without
-        // making cheaper failures wait out an interpreter or a QEMU guest.
-        ("miri", &|| miri::run(ctx, &[])),
-    ];
-    let labels: Vec<&str> = pipeline.iter().map(|(label, _)| *label).collect();
-    if labels != CI_STAGES {
-        return Err(format!(
-            "ci pipeline is {labels:?}, not the declared {CI_STAGES:?}"
-        ));
-    }
-    for (label, step) in pipeline {
-        stage(label, step)?;
+    for ci_stage in CI_STAGES {
+        stage(ci_stage.label(), || ci_stage.run(ctx))?;
     }
     Ok(())
 }
 
-/// Run the deterministic, non-compiling gates concurrently, failing closed.
-///
-/// Every gate here is a read-only source/metadata scan or an in-xtask
-/// cross-check: none compiles the workspace or writes to the cargo build
-/// directory, so they share no mutable state and are safe to run at once.
-/// Driving them through the shared bounded-concurrency runner
-/// ([`parallel::run`]) overlaps their wall-clock costs instead of paying their
-/// sum. Because the whole group runs *before* the compile-heavy phases, a
-/// non-conforming tree still fails fast — and now reports *every* cheap
-/// failure together rather than only the first ([`parallel::run`] runs all
-/// jobs to completion and names each failure).
-///
-/// `fmt` (streams `cargo fmt` output) and `deny` (streams `cargo deny` output)
-/// are deliberately *not* here: they run sequentially so their live output is
-/// never interleaved with a concurrent job's.
-///
-/// This is the single definition of the cheap-gate set; both [`run_ci`] and
-/// [`run_ci_long`] call it rather than re-listing the gates.
+/// A gate [`STATIC_GATES`] lists.
+type StaticGate = fn(&Context) -> Result<(), String>;
+
+/// The deterministic, non-compiling gates [`CiStage::StaticGates`] runs at
+/// once: each a read-only source or metadata scan or an in-xtask cross-check,
+/// so they share no mutable state.
+const STATIC_GATES: &[(&str, StaticGate)] = &[
+    // A workspace dependency-graph walk and a source scan.
+    ("deps-check", run_deps_check),
+    ("cfg-check", run_cfg_check),
+    // Generic code names no board, SoC or board part.
+    ("board-check", run_board_check),
+    // Every crate's ids from its registered range, none defined twice.
+    ("event-ids", run_event_ids),
+    // Every driver ends through the one exit vocabulary.
+    ("driver-exits", run_driver_exits),
+    // The command apps' discovered `Help/` trees (plans/APPS.md §8.1).
+    ("help-lint", help_lint::run),
+    // No unreviewed AI-drafted artefact marker reached the tree.
+    ("spec-review", run_spec_review),
+    // No comment cites a charter section number in place of the reason.
+    ("charter-cite", run_charter_cite),
+    // No control byte in source text, which tools then misread as binary.
+    ("source-text", run_source_text),
+    // The source-hash allow-list against `Cargo.lock`, and the advisory SLA.
+    ("supply-chain", |c| run_supply_chain(c, &[])),
+    // The syscall table and the C header against the `lib/abi` compiled into
+    // xtask itself.
+    ("abi-check", |c| run_abi_check(c, &[])),
+    ("c-header", |c| run_c_header(c, &[])),
+    // The generated tables, each regenerated in-process from its pinned
+    // source and compared byte for byte, with no build and no network.
+    ("font-atlas", |c| run_font_atlas(c, &[])),
+    ("devids", |c| devids::run(c, &[])),
+    ("unicode", |c| unicode::run(c, &[])),
+    ("spirv", |c| spirv::run(c, &[])),
+    // The shipped figure art against its bounds and the committed ledger
+    // (plans/FIGURE.md FG5).
+    ("artsheet", |c| run_artsheet(c, &[])),
+    // Exhaustively model-check the capability + IPC state machine.
+    ("model-check", |_| run_model_check(&[])),
+];
+
+/// Run [`STATIC_GATES`] concurrently, failing closed: every gate runs to
+/// completion and each failure is named, so a non-conforming tree reports
+/// every cheap failure together.
 fn run_static_gates(ctx: &Context) -> Result<(), String> {
-    let jobs = vec![
-        // Modularity gates: a workspace dependency-graph walk and a source
-        // scan, no compilation (plans/APPS.md §8.1 for help-lint).
-        static_gate("deps-check", ctx, run_deps_check),
-        static_gate("cfg-check", ctx, run_cfg_check),
-        // Generic code names no board, SoC or board part; a source scan.
-        static_gate("board-check", ctx, run_board_check),
-        // One event id, one meaning: every crate's ids from its registered
-        // range, no value defined by two crates; a source scan.
-        static_gate("event-ids", ctx, run_event_ids),
-        // Every driver ends through the one exit vocabulary; a source scan.
-        static_gate("driver-exits", ctx, run_driver_exits),
-        static_gate("help-lint", ctx, help_lint::run),
-        // Reject any unreviewed AI-drafted artefact marker that reached the
-        // tree; a source scan, fails closed.
-        static_gate("spec-review", ctx, run_spec_review),
-        // Reject a comment or package description that cites a charter section
-        // number in place of the reason; a source scan, fails closed.
-        static_gate("charter-cite", ctx, run_charter_cite),
-        // Reject a control byte in source text, which tools then misread as
-        // binary; a source scan, fails closed.
-        static_gate("source-text", ctx, run_source_text),
-        // Supply-chain integrity: the source-hash allow-list against
-        // `Cargo.lock` and the advisory SLA, fails closed on drift.
-        static_gate("supply-chain", ctx, |c| run_supply_chain(c, &[])),
-        // The syscall-ABI cross-check and the generated C-header drift guard:
-        // both compare against the `lib/abi` source of truth compiled into
-        // xtask itself, so neither needs a workspace build.
-        static_gate("abi-check", ctx, |c| run_abi_check(c, &[])),
-        static_gate("c-header", ctx, |c| run_c_header(c, &[])),
-        // The generated glyph-atlas drift guard: regenerates from the
-        // committed face in-process and compares byte-for-byte, no
-        // workspace build.
-        static_gate("font-atlas", ctx, |c| run_font_atlas(c, &[])),
-        // The figure art gate: the shipped rig, clips and palette measured
-        // against their bounds and the committed ledger, in-process with no
-        // workspace build (plans/FIGURE.md FG5).
-        static_gate("artsheet", ctx, |c| run_artsheet(c, &[])),
-        // The vetted PCI/USB ID-database drift guard: recompiles the
-        // committed snapshots in-process and compares byte-for-byte with
-        // the committed tables, no workspace build and no network.
-        static_gate("devids", ctx, |c| devids::run(c, &[])),
-        // The Unicode property tables' drift guard: regenerates from the
-        // pinned UCD snapshot in-process, no workspace build and no network.
-        static_gate("unicode", ctx, |c| unicode::run(c, &[])),
-        // The SPIR-V grammar tables' drift guard: regenerates from the pinned
-        // Khronos grammar in-process, no workspace build and no network.
-        static_gate("spirv", ctx, |c| spirv::run(c, &[])),
-        // Silver: exhaustively model-check the capability + IPC state machine.
-        // Exhaustive (not budgeted) and fast; a reachable invariant violation
-        // fails closed.
-        static_gate("model-check", ctx, |_| run_model_check(&[])),
-    ];
+    let jobs: Vec<parallel::Job> = STATIC_GATES
+        .iter()
+        .map(|&(label, gate)| static_gate(label, ctx, gate))
+        .collect();
     let budget = parallel::default_concurrency(jobs.len());
-    parallel::run(jobs, budget)
+    parallel::run(&ctx.children, jobs, budget)
 }
 
 /// Wrap one deterministic gate as a concurrency [`parallel::Job`], handing the
 /// worker its own owned [`Context`] so the closure is `'static`.
-fn static_gate(
-    label: &str,
-    ctx: &Context,
-    run: impl FnOnce(&Context) -> Result<(), String> + Send + 'static,
-) -> parallel::Job {
+fn static_gate(label: &str, ctx: &Context, gate: StaticGate) -> parallel::Job {
     let ctx = ctx.clone();
-    parallel::Job::closure(label.to_string(), 1, move || run(&ctx))
+    parallel::Job::closure(label.to_string(), 1, move || gate(&ctx))
 }
 
-/// The long-runner flake hunt: the same checks as [`run_ci`], but every
-/// test-executing stage is run [`ci_long::REPS`] times sequentially and then
-/// [`ci_long::REPS`] times concurrently, per test, before the next test.
+/// One step of `ci-long`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LongStep {
+    /// A `ci` stage whose result cannot change between runs, run once.
+    Once(CiStage),
+    /// The flake hunt over the stages [`CiStage::flake_hunted`] names.
+    FlakeHunt,
+}
+
+/// `ci-long`'s steps: every `ci` stage the hunt does not repeat, once and in
+/// `ci`'s order, then the hunt, the dearest step, last.
+fn ci_long_plan() -> impl Iterator<Item = LongStep> {
+    CI_STAGES
+        .into_iter()
+        .filter(|ci_stage| !ci_stage.flake_hunted())
+        .map(LongStep::Once)
+        .chain(std::iter::once(LongStep::FlakeHunt))
+}
+
+/// The long-runner flake hunt: `ci`'s stages, but every one that executes test
+/// cases is run [`ci_long::REPS`] times sequentially and then
+/// [`ci_long::REPS`] times concurrently, per test ([`ci_long_plan`]).
 ///
-/// The deterministic gates (`fmt`, `clippy`, the modularity checks,
-/// `help-lint`, `docs-check`, `cargo deny`, `supply-chain`, `model-check`,
-/// `spec-review`, `abi-check`, `c-header`, `miri`, and the image gate) are
-/// pass/fail checks whose
-/// result cannot change between runs, so they run once, exactly as in `ci`.
-/// The repeated stages — the host test matrix, the release crypto
-/// constant-time tests, the QEMU integration tests, the fuzz harnesses, and
-/// the proptest models — are driven by [`ci_long::flake_hunt`], which is why
-/// `run_test`/`run_crypto_constant_time`/`run_fuzz`/`run_proptest` are not
-/// called separately here.
-///
-/// `--dry-run` prints the planned test set and repetition counts without
-/// running anything, so an operator can gauge a run's shape before committing
-/// a long-runner to it.
+/// `--dry-run` prints the plan without running anything, so an operator can
+/// gauge a run's shape before committing a long-runner to it.
 fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     if let Some(bad) = args.iter().find(|a| *a != "--dry-run") {
         return Err(format!(
@@ -1611,39 +1580,22 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     if args.iter().any(|a| a == "--dry-run") {
         return ci_long::print_plan(ctx);
     }
-
-    // Deterministic gates first, once, so a non-conforming tree fails fast
-    // before the long repeated-test phase (mirrors `run_ci`'s cheapest-first
-    // ordering: `fmt`, then the concurrent static-gate group, then docs-check,
-    // then clippy).
-    run_fmt(ctx, &[])?;
-    // The same concurrent cheap-gate group `run_ci` uses — one definition,
-    // no re-listing.
-    run_static_gates(ctx)?;
-    // docs-check needs only a doc build (never the QEMU matrix) and is the
-    // gate most often tripped first, so it runs ahead of clippy and the long
-    // flake-hunt phase, exactly as in `run_ci`.
-    run_docs_check(ctx, &[])?;
-    run_clippy(ctx, &[])?;
-
-    // Build every QEMU enrolment once so the repeated runs re-execute the
-    // binaries rather than rebuilding them each pass.
-    qemu_tests::build_all(ctx, None)?;
-
-    // The flake hunt: host tests, QEMU integration tests, fuzz harnesses, and
-    // proptest models, each run REPS× sequentially then REPS× concurrently.
-    // This subsumes `ci`'s single-pass test, crypto-constant-time, fuzz, and
-    // proptest stages.
-    ci_long::flake_hunt(ci_long::all_units(ctx, ci_long::REPS)?, ci_long::REPS)?;
-
-    // The undefined-behaviour oracle is a deterministic gate, not a flake
-    // candidate, so it runs once here exactly as in `ci`.
-    miri::run(ctx, &[])?;
-
-    // `cargo deny` streams its own summary, so it stays sequential (not in the
-    // concurrent group), once, after the flake hunt.
-    run_deny(ctx)?;
-    run_image_gate(ctx)?;
+    ctx.signing_keys()?;
+    for step in ci_long_plan() {
+        match step {
+            LongStep::Once(ci_stage) => stage(ci_stage.label(), || ci_stage.run(ctx))?,
+            LongStep::FlakeHunt => stage("flake hunt", || {
+                // Every QEMU enrolment is built once, so the repeated runs
+                // re-execute the binaries rather than rebuilding them.
+                qemu_tests::build_all(ctx, None)?;
+                ci_long::flake_hunt(
+                    ci_long::all_units(ctx, ci_long::REPS)?,
+                    ci_long::REPS,
+                    |jobs, budget| parallel::run(&ctx.children, jobs, budget),
+                )
+            })?,
+        }
+    }
     Ok(())
 }
 
@@ -1652,7 +1604,7 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 /// delivered so far; new platforms join this gate as they land.
 fn run_image_gate(ctx: &Context) -> Result<(), String> {
     for profile in ["debug", "installer"] {
-        eprintln!("xtask: [ci] image aarch64-rpi profile {profile}");
+        noteln!("xtask: [ci] image aarch64-rpi profile {profile}");
         run_image(
             ctx,
             &[
@@ -1672,17 +1624,30 @@ fn run_image_gate(ctx: &Context) -> Result<(), String> {
 /// the `constant_time` module's full-traversal assertions, rather than at
 /// the debug optimisation level the main test phase uses.
 fn run_crypto_constant_time(ctx: &Context) -> Result<(), String> {
+    ctx.run(
+        "crypto-constant-time (release)",
+        crypto_constant_time_command(ctx),
+    )
+}
+
+/// The `crypto-constant-time` command, which `ci-long`'s hunt repeats.
+fn crypto_constant_time_command(ctx: &Context) -> std::process::Command {
     let mut cmd = ctx.cargo();
     cmd.args(["test", "--release", "--locked", "-p", "tairix-crypto"]);
-    ctx.run("crypto-constant-time (release)", cmd)
+    cmd
+}
+
+/// The workspace host test pass, which `ci-long`'s hunt repeats.
+fn host_test_command(ctx: &Context) -> std::process::Command {
+    let mut cmd = ctx.cargo();
+    cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
+    cmd
 }
 
 fn run_deny(ctx: &Context) -> Result<(), String> {
-    if !cargo_subcommand_available(ctx, "deny") {
-        return Err(
-            "cargo-deny is not installed; run `cargo install cargo-deny --locked`".to_string(),
-        );
-    }
+    cargo_subcommand_available(ctx, "deny").map_err(|why| {
+        format!("{why}; install cargo-deny with `cargo install cargo-deny --locked`")
+    })?;
     let mut cmd = ctx.cargo();
     cmd.args(["deny", "--all-features", "check"]);
     ctx.run("deny", cmd)
@@ -1787,6 +1752,7 @@ fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
 /// stops reporting it. A blob that still mismatches after its fetch is
 /// deleted and the build fails closed.
 fn fetch_missing_firmware(
+    ctx: &Context,
     manifest: &tairix_mkimage::firmware::FirmwareManifest,
     cache: &Path,
 ) -> Result<(), String> {
@@ -1806,25 +1772,21 @@ fn fetch_missing_firmware(
                 .map_err(|e| format!("image: cannot create {}: {e}", parent.display()))?;
         }
         let part = cache.join(format!("{}.part", entry.name));
-        eprintln!("xtask: [image] fetching pinned firmware blob {url}");
-        let status = std::process::Command::new("curl")
-            .args(["--fail", "--silent", "--show-error", "--location"])
+        let mut curl = std::process::Command::new("curl");
+        curl.args(["--fail", "--silent", "--show-error", "--location"])
             .args(["--proto", "=https", "--max-redirs", "4"])
             .arg("--output")
             .arg(&part)
-            .arg(&url)
-            .status()
-            .map_err(|e| {
+            .arg(&url);
+        ctx.run(&format!("image: fetching pinned firmware blob {url}"), curl)
+            .map_err(|why| {
+                let _ = std::fs::remove_file(&part);
                 format!(
-                    "image: cannot run curl to fetch {url}: {e}; install curl \
-                     or stage the blobs per tools/mkimage/firmware.lock and \
-                     pass --firmware <dir> (or set ${PI_FIRMWARE_ENV})"
+                    "{why}; to build without fetching, stage the blobs per \
+                     tools/mkimage/firmware.lock and pass --firmware <dir> (or set \
+                     ${PI_FIRMWARE_ENV})"
                 )
             })?;
-        if !status.success() {
-            let _ = std::fs::remove_file(&part);
-            return Err(format!("image: fetching {url} failed ({status})"));
-        }
         std::fs::rename(&part, cache.join(&entry.name))
             .map_err(|e| format!("image: cannot stage {}: {e}", entry.name))?;
     }
@@ -2200,7 +2162,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
         dir
     } else {
         let cache = ctx.target_dir().join("pi-firmware");
-        fetch_missing_firmware(&manifest, &cache)?;
+        fetch_missing_firmware(ctx, &manifest, &cache)?;
         cache
     };
     let firmware = manifest
@@ -2261,7 +2223,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     tairix_mkimage::replace_file(&out, &built.image)
         .map_err(|e| format!("image: cannot write {}: {e}", out.display()))?;
     let root = place_root_key(&out, built.unlock.as_ref())?;
-    eprintln!(
+    noteln!(
         "xtask: [image] wrote {} profile {} ({} bytes); {root}",
         out.display(),
         profile.label(),
@@ -2450,7 +2412,7 @@ fn run_run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             String::from_utf8_lossy(tairix_mkimage::DEBUG_PASSPHRASE)
         ),
     };
-    eprintln!(
+    noteln!(
         "xtask: [run] booting {} ({}) on qemu-system-aarch64 -M virt with {} \
          CPUs and {} MiB of RAM; this terminal is the guest serial console \
          ({unlock})",
@@ -2459,37 +2421,42 @@ fn run_run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         spec.cpus,
         spec.ram_mib(),
     );
-    let status = tairix_qemu::Runner::run_interactive(&spec).map_err(|e| format!("run: {e}"))?;
+    let status = tairix_qemu::Runner::run_interactive(&spec, &*ctx.children)
+        .map_err(|e| format!("run: {e}"))?;
     if status != 0 {
         return Err(format!("run: QEMU exited with status {status}"));
     }
     Ok(())
 }
 
-fn mdbook_available() -> bool {
-    tool_available("mdbook")
+/// Probe for `program` on `PATH` through its `--version`, answering why it
+/// is not there where it is not.
+pub(crate) fn probe_version(ctx: &Context, program: &str) -> Result<(), String> {
+    let mut probe = std::process::Command::new(program);
+    probe.arg("--version");
+    output_or_reason(
+        &ctx.children,
+        &format!("{program} --version"),
+        &mut probe,
+        ctx.children.ordinary_budget(),
+    )
+    .map(drop)
 }
 
-fn tool_available(name: &str) -> bool {
-    std::process::Command::new(name)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-/// Probe for a cargo subcommand (`cargo <sub>`). Unlike a plain binary, a
-/// cargo-subcommand executable expects its subcommand name as the first
-/// argument, so it must be reached through `cargo` rather than invoked
-/// directly with `--version`.
-pub(crate) fn cargo_subcommand_available(ctx: &Context, sub: &str) -> bool {
-    ctx.cargo()
-        .args([sub, "--version"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+/// Probe for a cargo subcommand (`cargo <sub>`), answering why it is not
+/// there where it is not. Unlike a plain binary, a cargo-subcommand
+/// executable expects its subcommand name as the first argument, so it must
+/// be reached through `cargo` rather than invoked directly with `--version`.
+pub(crate) fn cargo_subcommand_available(ctx: &Context, sub: &str) -> Result<(), String> {
+    let mut probe = ctx.cargo();
+    probe.args([sub, "--version"]);
+    output_or_reason(
+        &ctx.children,
+        &format!("cargo {sub} --version"),
+        &mut probe,
+        ctx.children.ordinary_budget(),
+    )
+    .map(drop)
 }
 
 fn relative(base: &Path, path: &Path) -> String {
@@ -2502,14 +2469,15 @@ fn relative(base: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_subcommand_available, dir_size, host_clippy, host_order_args, image_drivers,
-        kernel_build_profile, kernel_diag_feature_args, parse_image_args, parse_run_args,
-        parse_test_options, run_session_spec, Command, HostLane, PassOrder, Path, RunBudget,
-        RunMachine, CI_STAGES, CI_TEST_ARGS, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS,
-        PLATFORM_IMAGE_DRIVER_STORE,
+        cargo_subcommand_available, ci_long_plan, dir_size, host_clippy, host_order_args,
+        image_drivers, kernel_build_profile, kernel_diag_feature_args, parse_image_args,
+        parse_run_args, parse_test_options, run_session_spec, CiStage, Command, HostLane, LongStep,
+        PassOrder, Path, RunBudget, RunMachine, CI_STAGES, CI_TEST_ARGS, DEFAULT_RUN_CPUS,
+        DOCS_RUSTDOCFLAGS, PLATFORM_IMAGE_DRIVER_STORE, STATIC_GATES,
     };
     use crate::commands::soak::{Budget, NIGHTLY};
     use crate::Context;
+    use std::collections::BTreeSet;
     use std::ffi::OsString;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -2540,30 +2508,117 @@ mod tests {
         );
     }
 
-    /// Both oracles must be in the pipeline, and each stage named once.
+    /// Both oracles are in the pipeline, each stage once, the dearest last.
     ///
     /// A reordering once dropped the `miri` call while keeping its comment,
-    /// so `ci` passed with nothing interpreting any `unsafe`; `run_ci` now
-    /// refuses to start unless its table matches this roster, and the roster
-    /// itself is held to naming the oracles.
+    /// so `ci` passed with nothing interpreting any `unsafe`.
     #[test]
     fn the_pipeline_roster_names_both_oracles_exactly_once() {
-        for oracle in ["miri", "loom"] {
+        for oracle in [CiStage::Miri, CiStage::Loom] {
             assert_eq!(
                 CI_STAGES.iter().filter(|s| **s == oracle).count(),
                 1,
-                "{oracle} must appear in the pipeline exactly once"
+                "{oracle:?} must appear in the pipeline exactly once"
             );
         }
-        let mut seen = CI_STAGES.to_vec();
-        seen.sort_unstable();
-        seen.dedup();
-        assert_eq!(seen.len(), CI_STAGES.len(), "a stage is named twice");
+        let mut labels: Vec<&str> = CI_STAGES.iter().map(|s| s.label()).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), CI_STAGES.len(), "a stage is named twice");
         assert_eq!(
             CI_STAGES.last(),
-            Some(&"miri"),
+            Some(&CiStage::Miri),
             "the most expensive stage runs last"
         );
+    }
+
+    /// The backticked spans of `text` that are `ci` stage labels, in order.
+    fn stage_spans(text: &str) -> Vec<&str> {
+        text.split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|span| CI_STAGES.iter().any(|s| s.label() == *span))
+            .collect()
+    }
+
+    /// The crate docs' `ci` bullet names every stage, each once, in the order
+    /// the pipeline runs them.
+    #[test]
+    fn the_crate_docs_name_every_ci_stage_in_order() {
+        const MAIN: &str = include_str!("main.rs");
+        let (_, rest) = MAIN
+            .split_once("//! - `ci` ")
+            .expect("main.rs documents `ci`");
+        let bullet = rest
+            .split_once("\n//! - `")
+            .map_or(rest, |(bullet, _)| bullet);
+        let labels: Vec<&str> = CI_STAGES.iter().map(|s| s.label()).collect();
+        assert_eq!(stage_spans(bullet), labels);
+    }
+
+    /// The contributing page describes every `ci` stage and static gate, and
+    /// nothing `ci` does not run.
+    #[test]
+    fn the_contributing_page_describes_every_ci_stage_and_gate() {
+        const PAGE: &str = include_str!("../../../docs/src/contributing.md");
+        let (_, rest) = PAGE
+            .split_once("\n## What `cargo xtask ci` runs\n")
+            .expect("the page describes what ci runs");
+        let section = rest
+            .split_once("\n## ")
+            .map_or(rest, |(section, _)| section);
+        let described: BTreeSet<&str> = section
+            .lines()
+            .filter(|line| line.starts_with('|'))
+            .filter_map(|row| row.split('`').nth(1))
+            .collect();
+        let run: BTreeSet<&str> = CI_STAGES
+            .iter()
+            .filter(|s| **s != CiStage::StaticGates)
+            .map(|s| s.label())
+            .chain(STATIC_GATES.iter().map(|(label, _)| *label))
+            .collect();
+        let missing: Vec<&&str> = run.difference(&described).collect();
+        let extra: Vec<&&str> = described.difference(&run).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "the table lacks {missing:?} and describes {extra:?}, which ci does not run"
+        );
+    }
+
+    /// `ci-long` runs every `ci` stage: each the hunt does not repeat, once, and
+    /// the hunt last.
+    #[test]
+    fn ci_long_runs_every_ci_stage() {
+        let plan: Vec<LongStep> = ci_long_plan().collect();
+        for ci_stage in CI_STAGES {
+            let once = plan
+                .iter()
+                .filter(|step| **step == LongStep::Once(ci_stage))
+                .count();
+            assert_eq!(once, usize::from(!ci_stage.flake_hunted()), "{ci_stage:?}");
+        }
+        assert_eq!(
+            plan.iter()
+                .filter(|step| **step == LongStep::FlakeHunt)
+                .count(),
+            1
+        );
+        assert_eq!(plan.last(), Some(&LongStep::FlakeHunt));
+        assert!(plan.contains(&LongStep::Once(CiStage::Loom)));
+    }
+
+    /// The crate docs list exactly the subcommands xtask has.
+    #[test]
+    fn the_crate_docs_list_every_subcommand() {
+        const MAIN: &str = include_str!("main.rs");
+        let listed: BTreeSet<&str> = MAIN
+            .lines()
+            .filter_map(|line| line.strip_prefix("//! - `")?.split_once('`'))
+            .map(|(name, _)| name)
+            .collect();
+        let commands: BTreeSet<&str> = Command::ALL.iter().map(|c| c.name()).collect();
+        assert_eq!(listed, commands);
     }
 
     /// `clean` is a first-class, parseable subcommand listed in the closed
@@ -2866,11 +2921,13 @@ mod tests {
     /// errors out, so the probe routes through `cargo <sub>` instead.
     #[test]
     fn cargo_subcommand_probe_fails_closed_for_unknown_subcommand() {
-        let ctx = Context::discover().expect("workspace context");
-        assert!(!cargo_subcommand_available(
-            &ctx,
-            "definitely-not-a-real-cargo-subcommand"
-        ));
+        let ctx = Context::discover(None).expect("workspace context");
+        let absent = cargo_subcommand_available(&ctx, "definitely-not-a-real-cargo-subcommand")
+            .expect_err("reported absent");
+        assert!(
+            absent.contains("cargo definitely-not-a-real-cargo-subcommand --version failed with"),
+            "naming the probe: {absent}"
+        );
     }
 
     #[test]
@@ -2915,7 +2972,7 @@ mod tests {
     /// included: a lane's gated code builds in no other host configuration.
     #[test]
     fn host_clippy_lints_the_workspace_then_every_lane() {
-        let ctx = Context::discover().expect("workspace context");
+        let ctx = Context::discover(None).expect("workspace context");
         let passes = host_clippy(&ctx, &[]).expect("the passes");
         assert_eq!(passes.len(), 1 + HostLane::ALL.len());
         for lane in HostLane::ALL {
@@ -2941,7 +2998,7 @@ mod tests {
     /// the whole workspace or build nothing gated.
     #[test]
     fn every_host_lane_selects_its_packages_with_their_features() {
-        let ctx = Context::discover().expect("workspace context");
+        let ctx = Context::discover(None).expect("workspace context");
         for lane in HostLane::ALL {
             let cmd = lane.cargo(&ctx, "clippy").expect("the lane's packages");
             let args: Vec<String> = cmd

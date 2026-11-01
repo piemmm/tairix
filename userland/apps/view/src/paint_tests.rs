@@ -300,6 +300,17 @@ fn a_still_picture_states_no_frame_count_and_no_repeat() {
     assert!(!labels.iter().any(|label| label == "Repeats"));
 }
 
+/// The panel and the status line name the document with what hides in its
+/// name shown, so a direction override cannot make it read as another.
+#[test]
+fn the_name_is_shown_with_what_hides_in_it() {
+    let (view, _layout, _registry) = drawn(still(40, 30), "a\u{202e}b.png", 1_024);
+    assert!(facts(&view)
+        .iter()
+        .any(|fact| fact.label() == "Name" && fact.value() == "a\u{fffd}b.png"));
+    assert!(summary(&view).starts_with("a\u{fffd}b.png — "));
+}
+
 #[test]
 fn a_viewer_with_nothing_open_states_that_rather_than_inventing_facts() {
     let view = View::new(false);

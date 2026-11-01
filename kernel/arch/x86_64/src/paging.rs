@@ -10,9 +10,11 @@
 //! The kernel's own root has no user half and maps nothing physical as
 //! itself: the boot CPU moves onto it before the kernel proper runs
 //! (`enter_kernel_root`), and an application processor joins it before its
-//! entry does anything else (`join_kernel_root`). The one identity mapping
-//! left is the page an application processor starts executing at, in a root
-//! only a starting processor loads.
+//! entry does anything else (`join_kernel_root`), each once it has lifted the
+//! limit firmware can put on its `CPUID` leaves ([`crate::cpuid`]), so the
+//! protections it is held to are read from what it really offers. The one
+//! identity mapping left is the page an application processor starts
+//! executing at, in a root only a starting processor loads.
 //!
 //! The walk ([`tairix_arch_api::mmu::AddressSpace`]) recovers each level
 //! through the frame source that drew it, so it runs on the host too; only a
@@ -139,20 +141,31 @@ pub const fn physmap_virt(phys: u64) -> u64 {
     PHYSMAP_VMA_BASE.wrapping_add(phys)
 }
 
+/// Whether a direct map of `extent` bytes holds all of physical
+/// `[phys, phys + len)`.
+fn holds_within(extent: u64, phys: u64, len: u64) -> bool {
+    phys.checked_add(len).is_some_and(|end| end <= extent)
+}
+
 /// Whether the live direct map holds all of physical `[phys, phys + len)`.
 fn physmap_holds(phys: u64, len: u64) -> bool {
-    phys.checked_add(len)
-        .is_some_and(|end| end <= physmap_bytes())
+    holds_within(physmap_bytes(), phys, len)
 }
 
 /// The direct-map address of physical `[phys, phys + len)`, or [`None`] for
 /// an empty span or one the live map does not wholly hold.
-#[must_use]
-pub fn physmap_span(phys: u64, len: u64) -> Option<NonNull<u8>> {
+fn physmap_address(phys: u64, len: u64) -> Option<usize> {
     if len == 0 || !physmap_holds(phys, len) {
         return None;
     }
-    let virt = usize::try_from(physmap_virt(phys)).ok()?;
+    usize::try_from(physmap_virt(phys)).ok()
+}
+
+/// A pointer to physical `[phys, phys + len)` through the direct map, or
+/// [`None`] for an empty span or one the live map does not wholly hold.
+#[must_use]
+pub fn physmap_span(phys: u64, len: u64) -> Option<NonNull<u8>> {
+    let virt = physmap_address(phys, len)?;
     NonNull::new(core::ptr::with_exposed_provenance_mut(virt))
 }
 
@@ -182,7 +195,7 @@ pub fn write_back(phys: u64, len: usize, line: u64) -> bool {
     let Ok(len) = u64::try_from(len) else {
         return false;
     };
-    if !physmap_holds(phys, len) || !line.is_power_of_two() {
+    if !line.is_power_of_two() || !physmap_holds(phys, len) {
         return false;
     }
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -219,12 +232,7 @@ pub fn write_back(phys: u64, len: usize, line: u64) -> bool {
 pub fn gigapages_supported() -> bool {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        // Leaf `0x8000_0000` reports the highest extended leaf, so the
-        // feature leaf is read only once the part admits to having it.
-        if core::arch::x86_64::__cpuid(0x8000_0000).eax < 0x8000_0001 {
-            return false;
-        }
-        core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 26) != 0
+        crate::cpuid::leaf(0x8000_0001, 0).is_some_and(|leaf| leaf.edx & (1 << 26) != 0)
     }
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {
@@ -295,8 +303,9 @@ pub mod flags {
     /// Page Size (1 for huge pages at PD or PDPT level).
     pub const HUGE: u64 = 1 << 7;
     /// No-Execute (bit 63): an instruction fetch from the page faults.
-    /// Both trampolines set `IA32_EFER.NXE` before paging is on, so every
-    /// CPU honours it from its first instruction.
+    /// Both trampolines set `IA32_EFER.NXE` before paging is on, and no CPU
+    /// without it runs the kernel, so every CPU honours it from its first
+    /// instruction.
     pub const NO_EXECUTE: u64 = 1 << 63;
     /// One of the bits a leaf leaves to software, marking a DMA buffer
     /// ([`PageFlags::DMA`](tairix_arch_api::mmu::PageFlags::DMA)).
@@ -306,7 +315,7 @@ pub mod flags {
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
 mod kernel_root;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub(crate) use kernel_root::{enter_kernel_root, join_kernel_root, startup_root};
+pub(crate) use kernel_root::{enter_kernel_root, join_kernel_root, startup_root, Refusal};
 
 /// What the kernel may do with a page it maps for itself: never more than
 /// one of writing and executing, and nothing for ring 3.
@@ -366,6 +375,22 @@ impl LeafPolicy {
             bits |= flags::NO_EXECUTE;
         }
         bits | self.attrs
+    }
+
+    /// Why no 4 KiB leaf of this policy may map `paddr` at `vaddr`: an
+    /// unaligned page, a leaf both writable and executable, or a user leaf in
+    /// a kernel-half slot. `None` where it may.
+    fn refusal(self, vaddr: u64, paddr: u64) -> Option<MapError> {
+        if vaddr & (PAGE_SIZE as u64 - 1) != 0 || paddr & (PAGE_SIZE as u64 - 1) != 0 {
+            return Some(MapError::Misaligned);
+        }
+        // A user leaf in a kernel-half slot would hand ring 3 the direct
+        // physical map, the kernel heap's remap window, or the kernel image.
+        let kernel_half = is_kernel_half_slot(((vaddr >> 39) & 0x1FF) as usize);
+        if (self.writable && !self.no_execute) || (self.user && kernel_half) {
+            return Some(MapError::InvalidFlags);
+        }
+        None
     }
 }
 
@@ -608,31 +633,6 @@ impl AddressSpace {
         (unsafe { &*pt })[i1] & flags::PRESENT != 0
     }
 
-    /// Map `paddr` at `vaddr` with a 4 KiB page granularity.
-    ///
-    /// `vaddr` and `paddr` must be 4 KiB-aligned. Returns `None` on
-    /// page-table-pool exhaustion or if the walk meets an existing huge
-    /// page.
-    pub fn map_4k(
-        &mut self,
-        frames: &'static dyn PageTableFrames,
-        vaddr: u64,
-        paddr: u64,
-        writable: bool,
-    ) -> Option<()> {
-        self.map_4k_inner(
-            frames,
-            vaddr,
-            paddr,
-            LeafPolicy {
-                writable,
-                user: false,
-                no_execute: false,
-                attrs: 0,
-            },
-        )
-    }
-
     /// Map `paddr` at `vaddr` (4 KiB granularity) **user-accessible** with
     /// explicit W^X leaf permissions: `writable` selects [`flags::WRITABLE`]
     /// and `executable` selects whether the page is instruction-fetchable.
@@ -642,8 +642,9 @@ impl AddressSpace {
     /// process image's `RW`/`R` segments and its stack need (a code segment
     /// is mapped `executable = true`, `writable = false`, i.e. `RX`).
     ///
-    /// `vaddr` and `paddr` must be 4 KiB-aligned. Returns `None` on
-    /// page-table-pool exhaustion or if the walk hits an existing huge page.
+    /// `vaddr` and `paddr` must be 4 KiB-aligned. Returns `None` for a page
+    /// both writable and executable, on page-table-pool exhaustion, or if
+    /// the walk hits an existing huge page.
     pub fn map_4k_user_wx(
         &mut self,
         frames: &'static dyn PageTableFrames,
@@ -663,10 +664,12 @@ impl AddressSpace {
                 attrs: 0,
             },
         )
+        .ok()
     }
 
-    /// Shared 4 KiB mapping walk for [`Self::map_4k`] and
-    /// [`Self::map_4k_user_wx`] (one definition).
+    /// The one 4 KiB mapping walk, shared by [`Self::map_4k_user_wx`] and
+    /// the HAL's `map_page`. It refuses a leaf both writable and executable
+    /// and a user leaf in a kernel-half slot before drawing any table.
     ///
     /// When `leaf.user` is set, [`flags::USER`] is OR-ed into the leaf and
     /// into each intermediate entry on the walk; a kernel mapping leaves
@@ -677,10 +680,10 @@ impl AddressSpace {
         vaddr: u64,
         paddr: u64,
         leaf: LeafPolicy,
-    ) -> Option<()> {
-        assert_eq!(vaddr & 0xFFF, 0, "vaddr must be page-aligned");
-        assert_eq!(paddr & 0xFFF, 0, "paddr must be page-aligned");
-
+    ) -> Result<(), MapError> {
+        if let Some(refused) = leaf.refusal(vaddr, paddr) {
+            return Err(refused);
+        }
         let flags_ = leaf.pte_flags();
 
         let i4 = ((vaddr >> 39) & 0x1FF) as usize;
@@ -688,37 +691,28 @@ impl AddressSpace {
         let i2 = ((vaddr >> 21) & 0x1FF) as usize;
         let i1 = ((vaddr >> 12) & 0x1FF) as usize;
 
-        // A user leaf in a kernel-half slot would hand ring 3 the direct
-        // physical map, the kernel heap's remap window, or the kernel
-        // image. The window allocators already bound every user address
-        // below the half, so this is the fail-closed floor under them
-        // rather than the only check.
-        if leaf.user && is_kernel_half_slot(i4) {
-            return None;
-        }
-
         // SAFETY: `pml4_phys` names this space's live PML4, drawn from
         // `self.frames`; `&mut self` makes the exclusive borrow sound.
-        let pml4 = unsafe { &mut *self.root_table()? };
-        let pdpt = ensure_child(pml4, i4, frames)?;
+        let pml4 = unsafe { &mut *self.root_table().ok_or(MapError::PoolExhausted)? };
+        let pdpt = ensure_child(pml4, i4, frames).ok_or(MapError::PoolExhausted)?;
         if leaf.user {
             pml4[i4] |= flags::USER;
         }
-        let pd = ensure_child(pdpt, i3, frames)?;
+        let pd = ensure_child(pdpt, i3, frames).ok_or(MapError::PoolExhausted)?;
         if leaf.user {
             pdpt[i3] |= flags::USER;
         }
 
         // A huge leaf here is a live mapping the walk must not shatter.
         if (pd[i2] & flags::HUGE) != 0 {
-            return None;
+            return Err(MapError::AlreadyMapped);
         }
-        let pt = ensure_child(pd, i2, frames)?;
+        let pt = ensure_child(pd, i2, frames).ok_or(MapError::PoolExhausted)?;
         if leaf.user {
             pd[i2] |= flags::USER;
         }
         pt[i1] = paddr | flags_;
-        Some(())
+        Ok(())
     }
 
     /// Switch the active page table to this address space.
@@ -739,7 +733,7 @@ impl AddressSpace {
             core::arch::asm!(
                 "mov cr3, {p}",
                 p = in(reg) self.pml4_phys,
-                options(nostack, preserves_flags),
+                options(nostack),
             );
         }
     }
@@ -810,7 +804,8 @@ const _: () = assert!(
 /// `tables` is the physical base of [`physmap_table_frames`] contiguous
 /// page-aligned frames — the further spans' PDPTs first, then the page
 /// directories a part without 1 GiB pages needs. They are written through
-/// the floor, so the run must lie inside it.
+/// the floor, so the run must lie inside it. The run is reserved, never
+/// zeroed, so each of its tables is written whole.
 ///
 /// Returns `false`, having changed nothing, for a `gib` that is not a
 /// widening ([`BOOT_PHYSMAP_GIB`] or less), exceeds [`MAX_PHYSMAP_GIB`],
@@ -837,7 +832,7 @@ pub unsafe fn install_boot_physmap(gib: usize, tables: u64) -> bool {
     if gib <= BOOT_PHYSMAP_GIB || gib > MAX_PHYSMAP_GIB {
         return false;
     }
-    // One widening per boot: a second would rewrite the trampoline's table
+    // One widening per boot: a second would rewrite the first span's table
     // under roots already built from the published map.
     if physmap_gigapages() != PHYSMAP_FLOOR_GIB {
         return false;
@@ -912,19 +907,8 @@ pub unsafe fn install_boot_physmap(gib: usize, tables: u64) -> bool {
         let Some(pdpt) = (unsafe { mapped_table(pdpt_phys) }) else {
             return false;
         };
-        let first_gib = span * ENTRIES_PER_TABLE;
-        // The first span already maps the floor; leave those entries
-        // exactly as they are, since live translations use them.
-        let from = if span == 0 { PHYSMAP_FLOOR_GIB } else { 0 };
-        for (slot, pte) in pdpt.iter_mut().enumerate().skip(from) {
-            let slot_gib = first_gib + slot;
-            if slot_gib >= gib {
-                break;
-            }
-            let Some(entry) = entry_for(slot_gib) else {
-                return false;
-            };
-            *pte = entry;
+        if fill_physmap_span(pdpt, span, PHYSMAP_FLOOR_GIB, gib, &entry_for).is_none() {
+            return false;
         }
     }
 
@@ -935,6 +919,33 @@ pub unsafe fn install_boot_physmap(gib: usize, tables: u64) -> bool {
 
     invalidate_all_local();
     true
+}
+
+/// Write the direct map's `span`th PDPT for a map of `gib` gigabytes: from
+/// `floor_gib` up, each gigabyte below `gib` gets `entry_for`'s entry and each
+/// at or above it none, whatever the frame held. The floor's entries, which
+/// live translations use, are left as they are. `None` where `entry_for`
+/// refuses a gigabyte, the table part-written.
+#[cfg(any(all(target_arch = "x86_64", target_os = "none"), test))]
+fn fill_physmap_span(
+    pdpt: &mut [u64; ENTRIES_PER_TABLE],
+    span: usize,
+    floor_gib: usize,
+    gib: usize,
+    mut entry_for: impl FnMut(usize) -> Option<u64>,
+) -> Option<()> {
+    let first_gib = span * ENTRIES_PER_TABLE;
+    for (slot, pte) in pdpt.iter_mut().enumerate() {
+        let slot_gib = first_gib + slot;
+        if slot_gib >= floor_gib {
+            *pte = if slot_gib < gib {
+                entry_for(slot_gib)?
+            } else {
+                0
+            };
+        }
+    }
+    Some(())
 }
 
 /// Record `entries` as the direct map's shared PML4 entries and `gib` as
@@ -1024,7 +1035,7 @@ pub(crate) fn invalidate_all_local() {
             "mov {t}, cr3",
             "mov cr3, {t}",
             t = out(reg) _,
-            options(nostack, preserves_flags),
+            options(nostack),
         );
     }
 }
@@ -1127,10 +1138,10 @@ unsafe fn mapped_table(phys: u64) -> Option<&'static mut [u64; ENTRIES_PER_TABLE
     if phys == 0 || !phys.is_multiple_of(PAGE_SIZE as u64) {
         return None;
     }
-    physmap_span(phys, PAGE_SIZE as u64)?;
+    let table = physmap_address(phys, PAGE_SIZE as u64)?;
     // SAFETY: the direct map holds the whole page, never torn down, and the
     // caller vouches that nothing else reaches the table.
-    Some(unsafe { &mut *(physmap_virt(phys) as *mut [u64; ENTRIES_PER_TABLE]) })
+    Some(unsafe { &mut *core::ptr::with_exposed_provenance_mut(table) })
 }
 
 /// The kernel root, which every CPU runs kernel threads and the dispatcher
@@ -1272,10 +1283,10 @@ fn active_root_phys() -> u64 {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
         let cr3: u64;
-        // SAFETY: reading `CR3` observes the active root without side
-        // effects; no Rust spelling exists for the control register.
+        // SAFETY: reading `CR3` observes the active root and touches no
+        // memory; no Rust spelling exists for the control register.
         unsafe {
-            core::arch::asm!("mov {v}, cr3", v = out(reg) cr3, options(nostack, preserves_flags, nomem));
+            core::arch::asm!("mov {v}, cr3", v = out(reg) cr3, options(nostack, nomem));
         }
         cr3 & !CR3_PCID
     }
@@ -1321,7 +1332,7 @@ pub unsafe fn activate_user_root(root_phys: u64, tag: AddressTag) {
         core::arch::asm!(
             "mov cr3, {value}",
             value = in(reg) value,
-            options(nostack, preserves_flags),
+            options(nostack),
         );
     }
 }
@@ -1342,11 +1353,21 @@ pub unsafe fn activate_user_root(root_phys: u64, tag: AddressTag) {
 
 impl MmuAddressSpace for AddressSpace {
     fn map_page(&mut self, vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), MapError> {
-        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 || (paddr & (PAGE_SIZE as u64 - 1)) != 0 {
-            return Err(MapError::Misaligned);
+        let mut attrs = 0;
+        if flags.contains(PageFlags::DEVICE) {
+            attrs |= flags::CACHE_DISABLE | flags::WRITE_THROUGH;
         }
-        if flags.is_write_exec() {
-            return Err(MapError::InvalidFlags);
+        if flags.contains(PageFlags::DMA) {
+            attrs |= flags::SW_DMA;
+        }
+        let leaf = LeafPolicy {
+            writable: flags.contains(PageFlags::WRITE),
+            user: flags.contains(PageFlags::USER),
+            no_execute: !flags.contains(PageFlags::EXEC),
+            attrs,
+        };
+        if let Some(refused) = leaf.refusal(vaddr, paddr) {
+            return Err(refused);
         }
         // Every x86 DMA master snoops; RAM mapped uncached beside the direct
         // map's write-back alias would be a mismatched memory type.
@@ -1357,30 +1378,7 @@ impl MmuAddressSpace for AddressSpace {
             return Err(MapError::AlreadyMapped);
         }
         let frames = self.frames;
-        let writable = flags.contains(PageFlags::WRITE);
-        let user = flags.contains(PageFlags::USER);
-        let executable = flags.contains(PageFlags::EXEC);
-        let mut attrs = 0;
-        if flags.contains(PageFlags::DEVICE) {
-            attrs |= flags::CACHE_DISABLE | flags::WRITE_THROUGH;
-        }
-        if flags.contains(PageFlags::DMA) {
-            attrs |= flags::SW_DMA;
-        }
-        let result = self.map_4k_inner(
-            frames,
-            vaddr,
-            paddr,
-            LeafPolicy {
-                writable,
-                user,
-                no_execute: !executable,
-                attrs,
-            },
-        );
-        // Alignment and prior-mapping are ruled out, so the only remaining
-        // failure is frame-source exhaustion.
-        result.ok_or(MapError::PoolExhausted)
+        self.map_4k_inner(frames, vaddr, paddr, leaf)
     }
 
     fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
@@ -1742,32 +1740,78 @@ mod tests {
     const FINE_VA: u64 = 480u64 << 30;
     const FINE_PA: u64 = 0x4123_4000;
 
+    /// A carved PDPT is reserved, not zeroed: the span fill must clear what
+    /// the frame held past the map, and leave the floor as live roots use it.
+    #[test]
+    fn a_span_fill_clears_what_its_frame_held_past_the_map() {
+        const RESIDUE: u64 = 0x0000_00AB_C000_0083;
+        let leaf =
+            |gib: usize| Some(((gib as u64) << 30) | KernelAccess::Write.leaf() | flags::HUGE);
+
+        let mut further = [RESIDUE; ENTRIES_PER_TABLE];
+        assert_eq!(
+            fill_physmap_span(&mut further, 1, BOOT_PHYSMAP_GIB, 512 + 88, leaf),
+            Some(())
+        );
+        for (slot, entry) in further.iter().enumerate() {
+            let expected = if slot < 88 {
+                leaf(512 + slot).unwrap_or(0)
+            } else {
+                0
+            };
+            assert_eq!(*entry, expected, "span 1, slot {slot}");
+        }
+
+        let mut first = [RESIDUE; ENTRIES_PER_TABLE];
+        assert_eq!(
+            fill_physmap_span(&mut first, 0, BOOT_PHYSMAP_GIB, 100, leaf),
+            Some(())
+        );
+        for (slot, entry) in first.iter().enumerate() {
+            let expected = match slot {
+                0..BOOT_PHYSMAP_GIB => RESIDUE,
+                BOOT_PHYSMAP_GIB..100 => leaf(slot).unwrap_or(0),
+                _ => 0,
+            };
+            assert_eq!(*entry, expected, "span 0, slot {slot}");
+        }
+    }
+
+    #[test]
+    fn a_span_fill_fails_where_a_gigabyte_has_no_entry() {
+        let mut table = [0; ENTRIES_PER_TABLE];
+        assert_eq!(
+            fill_physmap_span(&mut table, 1, BOOT_PHYSMAP_GIB, 513, |_| None),
+            None
+        );
+    }
+
+    /// Each refusal holds whatever extent a sibling test has published.
     #[test]
     fn write_back_refuses_what_the_direct_map_cannot_reach() {
         assert!(!write_back(0, 0x1000, 48), "a line size no cache has");
         assert!(!write_back(u64::MAX - 8, 0x1000, 64), "a range that wraps");
         assert!(
-            !write_back(physmap_bytes(), 1, 64),
-            "the host carries no direct map at all"
+            !write_back((MAX_PHYSMAP_GIB as u64) << 30, 1, 64),
+            "past the widest map the slots can hold"
         );
     }
 
-    /// A span is reached only whole and only inside the live map. The extent
-    /// is process-global, so the reachable case is checked against whatever
-    /// it is when the test runs.
+    /// A span is reached only whole and only inside the map. The extent is
+    /// handed in, because the live one is process-global and a sibling test
+    /// publishes it.
     #[test]
     fn a_direct_map_span_is_refused_unless_the_map_holds_it_whole() {
+        const EXTENT: u64 = BOOT_PHYSMAP_END;
         assert!(physmap_span(0x1000, 0).is_none(), "an empty span");
         assert!(
-            !physmap_holds(u64::MAX - 0xFFF, 0x2000),
+            !holds_within(EXTENT, u64::MAX - 0xFFF, 0x2000),
             "a span that wraps"
         );
-        let top = physmap_bytes();
-        assert!(!physmap_holds(top, 1), "past the map's extent");
-        if let Some(last) = top.checked_sub(1) {
-            assert!(!physmap_holds(last, 2), "straddling its end");
-            assert!(physmap_holds(last, 1), "its last byte");
-        }
+        assert!(!holds_within(EXTENT, EXTENT, 1), "past the map's extent");
+        assert!(!holds_within(EXTENT, EXTENT - 1, 2), "straddling its end");
+        assert!(holds_within(EXTENT, EXTENT - 1, 1), "its last byte");
+        assert!(!holds_within(0, 0, 1), "a map of nothing");
     }
 
     #[test]
@@ -1789,6 +1833,50 @@ mod tests {
     fn passes_frames_conformance() {
         static POOL: PageTablePool = PageTablePool::new();
         tairix_arch_api::frames::conformance::run_all(&POOL, POOL_TABLES);
+    }
+
+    /// No entry point to the walk builds a leaf both writable and
+    /// executable, and a refused policy draws no table.
+    #[test]
+    fn no_entry_point_maps_a_page_writable_and_executable() {
+        static POOL: PageTablePool = PageTablePool::new();
+        let mut space = AddressSpace::new_process_root(&POOL).expect("a root");
+        let drawn = POOL.used.load(Ordering::Relaxed);
+        assert_eq!(
+            space.map_4k_user_wx(&POOL, FINE_VA, FINE_PA, true, true),
+            None,
+            "a user page"
+        );
+        let kernel = LeafPolicy {
+            writable: true,
+            user: false,
+            no_execute: false,
+            attrs: 0,
+        };
+        assert_eq!(
+            space.map_4k_inner(&POOL, FINE_VA, FINE_PA, kernel),
+            Err(MapError::InvalidFlags),
+            "a kernel page"
+        );
+        assert_eq!(POOL.used.load(Ordering::Relaxed), drawn, "no table drawn");
+        assert!(mmu::AddressSpace::translate(&space, FINE_VA).is_none());
+    }
+
+    /// A user leaf in the kernel half is a refused policy, not a pool that
+    /// ran dry.
+    #[test]
+    fn a_user_page_in_the_kernel_half_is_refused_as_invalid() {
+        static POOL: PageTablePool = PageTablePool::new();
+        let mut space = AddressSpace::new_process_root(&POOL).expect("a root");
+        assert_eq!(
+            mmu::AddressSpace::map_page(
+                &mut space,
+                canonical_slot_base(PHYSMAP_PML4_FIRST_SLOT),
+                FINE_PA,
+                PageFlags::READ | PageFlags::USER,
+            ),
+            Err(MapError::InvalidFlags)
+        );
     }
 
     #[test]
@@ -2160,7 +2248,9 @@ mod tests {
     /// process-global: a second caller is refused by design. Every other test
     /// here is insensitive to them — a root's kernel-half slots name tables
     /// this pool owns and the reclaim walk drops them before it descends, so
-    /// neither the pool accounting nor a walk of the user half changes.
+    /// neither the pool accounting nor a walk of the user half changes. It is
+    /// also where the direct map's span and write-back checks read the live
+    /// extent.
     #[test]
     fn every_root_installs_the_published_kernel_half() {
         static POOL: PageTablePool = PageTablePool::new();
@@ -2199,6 +2289,18 @@ mod tests {
             !rights.contains(PageFlags::EXEC),
             "nothing runs from the direct map"
         );
+        let top = physmap_bytes();
+        assert_eq!(
+            physmap_address(probe, PAGE_SIZE as u64),
+            usize::try_from(physmap_virt(probe)).ok(),
+            "a page inside the live map"
+        );
+        assert!(
+            physmap_address(top - 1, 2).is_none(),
+            "straddling the live map's end"
+        );
+        assert!(physmap_address(top, 1).is_none(), "past the live map's end");
+        assert!(write_back(probe, 64, 64), "a line inside the live map");
         // Past the published extent nothing is mapped, so a frame the map
         // does not cover faults rather than reading a neighbour's.
         assert!(

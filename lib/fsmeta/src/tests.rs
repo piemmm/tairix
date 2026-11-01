@@ -13,7 +13,27 @@ use crate::{
     AttrFlags, AttrSet, MetadataError, ATTRS_PER_INODE, KEY_MAX, TOTAL_ATTR_BYTES, VALUE_MAX,
 };
 
+/// Every request this binary makes, metered per thread, so a test can hold a
+/// call to the allocations it makes.
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
 // --- key grammar ---------------------------------------------------------
+
+/// A key is held inline, so a driver short of memory still reads one: the
+/// parse asks the heap for nothing, and the longest key fits.
+#[test]
+fn parsing_a_key_allocates_nothing() {
+    let longest = alloc::format!("user.{}", "k".repeat(KEY_MAX - "user.".len()));
+    let (parsed, metering) = tairix_fuzzseed::meter::metered(|| {
+        (
+            AttrKey::parse(b"amiga.comment").is_ok(),
+            AttrKey::parse(longest.as_bytes()).map(|key| key.as_str().len()),
+        )
+    });
+    assert_eq!(parsed, (true, Ok(KEY_MAX)));
+    assert_eq!(metering.allocations, 0);
+}
 
 /// A combining mark past its sequence's limits — a doubled accent — is
 /// escaped as a hidden character is, so two values never look alike, and a

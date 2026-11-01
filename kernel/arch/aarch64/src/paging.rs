@@ -979,10 +979,11 @@ impl Regime {
 /// the next access depends on it: `dsb ishst` orders the store for the
 /// walker, `isb` discards any fetch-ahead made under the old tables.
 ///
-/// Used by the kernel root's set-once invalid→valid updates, which need no
-/// TLB invalidation (a walker never caches an invalid entry), to order a
-/// child table's contents ahead of the descriptor that publishes them. It
-/// is no substitute for the TLB maintenance a *withdrawn* translation
+/// For a store that makes valid an entry no TLB can hold — an invalid entry,
+/// or one whose Access flag faults — which therefore needs no invalidation:
+/// the kernel root's set-once updates, ordering a child table's contents
+/// ahead of the descriptor that publishes them, and the Access-flag fix-up.
+/// It is no substitute for the TLB maintenance a *withdrawn* translation
 /// needs. Host builds walk no hardware tables, so this is a no-op there.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn publish_table_update() {
@@ -1949,17 +1950,17 @@ impl MmuAddressSpace for AddressSpace {
     fn access_tracking(&self) -> AccessTracking {
         // The per-page referenced bit the cold-page scanner
         // (`kernel/mem::coldscan`) needs is the Access Flag (AF, bit 10).
-        // aarch64 manages AF in software: cortex-a57/a72 (the boards and
-        // the default QEMU CPU) lack the ARMv8.1 HAFDBS hardware-update
-        // feature, so the architecture raises an Access-Flag fault when a
-        // valid leaf whose AF is clear is accessed. `test_and_clear_accessed`
+        // aarch64 manages AF in software: the port leaves `TCR_EL1.HA`
+        // clear, so every part, the Pi 5's A76 with HAFDBS included, raises
+        // an Access-Flag fault when a valid leaf whose AF is clear is
+        // accessed. `test_and_clear_accessed`
         // clears AF (and invalidates the leaf's TLB entry); the next access
         // then takes that fault, which the synchronous-exception path
         // (`crate::exceptions`) resolves by setting AF back through
         // [`set_accessed_flag_in_active`] and retrying — so a probe reading
         // AF still clear proves the page went untouched. The whole clock
-        // round-trip is proven on emulated cortex-a57 hardware by the
-        // `accessed-bit-qemu-aarch64` vertical.
+        // round-trip is proven by the `accessed-bit-qemu-aarch64` vertical,
+        // on the baseline model, which lacks HAFDBS.
         AccessTracking::Supported
     }
 
@@ -2308,20 +2309,20 @@ fn active_root_phys() -> u64 {
 /// This is the exception-path counterpart of
 /// [`AddressSpace::test_and_clear_accessed`]: after the cold-page scanner
 /// clears a leaf's AF (bit 10), the next access to that page takes an
-/// Access-Flag fault (cortex-a57/a72 lack HAFDBS hardware AF update). The
-/// synchronous-exception handler (`crate::exceptions`) calls this with
-/// `FAR_EL1` to set AF back on the faulting leaf and invalidate its stale
-/// TLB entry, so the retried instruction succeeds and a later probe sees
+/// Access-Flag fault, since the port leaves `TCR_EL1.HA` clear and no part
+/// sets it in its walk. The synchronous-exception handler
+/// (`crate::exceptions`) calls this with `FAR_EL1` to set AF back on the
+/// faulting leaf, so the retried instruction succeeds and a later probe sees
 /// the page was touched.
 ///
-/// It walks the live tables through the frame source that drew them, sets
-/// AF only on a **valid** leaf whose AF is currently **clear**, and returns
-/// `true` only in that case. A `vaddr` with no valid leaf, or a leaf whose
-/// AF is already set (so the fault was *not* the software referenced-bit
-/// mechanism), leaves the tables untouched and returns `false` — the
-/// caller then takes the ordinary fault path (fail closed: this never
-/// fabricates a mapping or masks a genuine fault). It allocates nothing
-/// and is sound in exception context.
+/// It walks the live tables through the frame source that drew them and
+/// answers whether the access is to be retried: a **valid** leaf covers
+/// `vaddr`, AF now set on it, whether this CPU set it or another CPU's
+/// fix-up set it first. Only an address no valid leaf covers takes the
+/// ordinary fault path (fail closed: this never fabricates a mapping). Any
+/// other cause of the fault is reported on the retry as its own, the Access
+/// flag being checked ahead of permissions. It allocates nothing and is
+/// sound in exception context.
 ///
 /// It takes no lock, so `unmap` or the scanner may be changing the same
 /// leaf on another CPU. AF is set only by an exchange from the descriptor
@@ -2353,9 +2354,9 @@ pub fn set_accessed_flag_in_active(vaddr: u64) -> bool {
 }
 
 /// Walk the stage-1 hierarchy rooted at `root_phys` and set the Access
-/// Flag on the valid leaf covering `vaddr` when its AF is clear, as
-/// [`set_accessed_flag_in_active`] does for the live root. Returns `true`
-/// only when it set AF on a valid AF-clear leaf.
+/// Flag on the valid leaf covering `vaddr`, as [`set_accessed_flag_in_active`]
+/// does for the live root. Returns whether the access is to be retried: a
+/// valid leaf covers `vaddr`.
 ///
 /// # Safety
 ///
@@ -2370,17 +2371,20 @@ unsafe fn set_accessed_flag_in_root(
     let Some(leaf) = (unsafe { leaf_in(frames, root_phys, vaddr) }) else {
         return false;
     };
-    if leaf.set_while(attrs::AF, access_flag_clear).is_none() {
+    if leaf.set_while(attrs::AF, retries_access).is_none() {
         return false;
     }
-    invalidate_page_inner_shareable(vaddr);
+    // No TLB caches an entry that faults on its Access flag, so setting the
+    // flag owes the walkers ordering, not an invalidation.
+    publish_table_update();
     true
 }
 
-/// Whether `desc` is a valid leaf whose Access Flag the scanner cleared: the
-/// only leaf an Access-Flag fault is this mechanism's.
-const fn access_flag_clear(desc: u64) -> bool {
-    (desc & attrs::VALID) != 0 && (desc & attrs::AF) == 0
+/// Whether an Access-flag fault on the leaf holding `desc` is retried: while
+/// it is valid, whether this CPU sets the flag or another CPU's fix-up set
+/// it first.
+const fn retries_access(desc: u64) -> bool {
+    (desc & attrs::VALID) != 0
 }
 
 /// The valid leaf, block or page, covering `vaddr` in the hierarchy rooted

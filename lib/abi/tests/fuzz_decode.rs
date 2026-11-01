@@ -791,15 +791,21 @@ fn imageattach_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
         ImageAccess, ImageAttach, ImageAttachReply, ImageRefusal, IMAGE_ATTACH_MAX,
     };
     use tairix_abi::netattach::{AttachReply, Presentation};
-    use tairix_abi::volume::VolumeFsType;
+    use tairix_abi::volume::{VolumeFsType, VolumeFsTypes};
     let mut frames = std::vec::Vec::new();
     for (name, target, expects, access) in [
         (None, None, None, ImageAccess::WritableWherePossible),
         (
             Some("floppy"),
             Some("/Users/ann/Home/floppy"),
-            Some(VolumeFsType::Affs),
+            VolumeFsTypes::of([VolumeFsType::Affs]),
             ImageAccess::ReadOnly,
+        ),
+        (
+            Some("dvd"),
+            None,
+            VolumeFsTypes::of([VolumeFsType::Udf, VolumeFsType::Iso9660]),
+            ImageAccess::WritableWherePossible,
         ),
         (Some("disk"), None, None, ImageAccess::Writable),
     ] {
@@ -835,6 +841,123 @@ fn imageattach_frames_with_flipped_bits_round_trip_or_are_refused() {
     for mut frame in imageattach_frames() {
         exercise_imageattach(&frame);
         each_bit_flipped(&mut frame, exercise_imageattach);
+    }
+}
+
+/// Drive every volume-frame decoder on `bytes` (one arm of [`exercise`]): an
+/// accepted attach, detach or control request is its own encoding, and an
+/// accepted description is too, short of a medium record this ABI does not
+/// define, which reads as none.
+fn exercise_volume_requests(bytes: &[u8]) {
+    use tairix_abi::volume::{
+        VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeInfo, VOLUME_ATTACH_MAX_LEN,
+        VOLUME_DETACH_LEN, VOLUME_INFO_LEN,
+    };
+    if let Ok(attach) = VolumeAttachRequest::decode(bytes) {
+        let mut out = [0u8; VOLUME_ATTACH_MAX_LEN];
+        let len = attach
+            .encode(&mut out)
+            .expect("an accepted attach must re-encode");
+        assert_eq!(&out[..len], bytes, "an accepted attach is canonical");
+    }
+    if let Ok(detach) = VolumeDetachRequest::decode(bytes) {
+        let mut out = [0u8; VOLUME_DETACH_LEN];
+        let len = detach
+            .encode(&mut out)
+            .expect("an accepted detach must re-encode");
+        assert_eq!(&out[..len], bytes, "an accepted detach is canonical");
+    }
+    if let Ok(ctl) = VolumeCtl::decode(bytes) {
+        assert_eq!(
+            &ctl.encode()[..],
+            bytes,
+            "an accepted control request is canonical"
+        );
+    }
+    if let Ok(info) = VolumeInfo::decode(bytes) {
+        let out = info.encode();
+        let medium = VOLUME_INFO_LEN - tairix_abi::blkio::BLK_MEDIUM_LEN;
+        assert_eq!(
+            &out[..medium],
+            &bytes[..medium],
+            "an accepted description is canonical"
+        );
+        assert_eq!(VolumeInfo::decode(&out), Ok(info));
+    }
+}
+
+/// Well-formed frames of every volume-frame decoder.
+fn volume_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
+    use tairix_abi::driver::block::{DiscLayout, DiscardCapability};
+    use tairix_abi::volume::{
+        DetachMode, VolumeAttachRequest, VolumeCtl, VolumeCtlOp, VolumeDetachRequest, VolumeFsType,
+        VolumeInfo, VOLUME_ATTACH_MAX_LEN, VOLUME_DETACH_LEN,
+    };
+    let mut frames = std::vec::Vec::new();
+    let mut attach = [0u8; VOLUME_ATTACH_MAX_LEN];
+    let len = VolumeAttachRequest {
+        endpoint: 7,
+        window: 9,
+        first_lba: 2048,
+        blocks: 1 << 20,
+        fstype: VolumeFsType::Fat32,
+        name: b"usb-stick_1",
+    }
+    .encode(&mut attach)
+    .expect("an attach in shape");
+    frames.push(attach[..len].to_vec());
+    for mode in [DetachMode::Plain, DetachMode::Force, DetachMode::Lost] {
+        let mut detach = [0u8; VOLUME_DETACH_LEN];
+        VolumeDetachRequest {
+            volume_id: [0x5A; 16],
+            mode,
+        }
+        .encode(&mut detach)
+        .expect("a detach in shape");
+        frames.push(detach.to_vec());
+    }
+    for (op, lba, blocks) in [
+        (VolumeCtlOp::Info, 0, 0),
+        (VolumeCtlOp::Flush, 0, 0),
+        (VolumeCtlOp::Discard, 64, 8),
+    ] {
+        frames.push(VolumeCtl { op, lba, blocks }.encode().to_vec());
+    }
+    for (read_only, discard, disc_layout) in [
+        (false, DiscardCapability::unsupported(), None),
+        (
+            true,
+            DiscardCapability {
+                supported: true,
+                granularity_blocks: 8,
+                max_blocks_per_request: 4096,
+            },
+            Some(DiscLayout {
+                last_session_start: 1000,
+                last_recorded: Some(5000),
+            }),
+        ),
+    ] {
+        let info = VolumeInfo {
+            block_size: 2048,
+            block_count: 1 << 18,
+            read_only,
+            discard,
+            disc_layout,
+            medium: None,
+        };
+        frames.push(info.encode().to_vec());
+    }
+    frames
+}
+
+/// Every volume frame, each bit flipped in turn: it decodes to its own
+/// encoding or is refused, never panics.
+#[test]
+fn volume_frames_with_flipped_bits_round_trip_or_are_refused() {
+    for mut frame in volume_frames() {
+        exercise_volume_requests(&frame);
+        each_bit_flipped(&mut frame, exercise_volume_requests);
     }
 }
 
@@ -1523,6 +1646,7 @@ fn exercise(bytes: &[u8]) {
     exercise_netshare(bytes);
     exercise_netattach(bytes);
     exercise_imageattach(bytes);
+    exercise_volume_requests(bytes);
     exercise_elevate(bytes);
     exercise_session_ipc(bytes);
     exercise_saver_ipc(bytes);

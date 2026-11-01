@@ -29,6 +29,18 @@ pub enum BrowseError {
     /// The network endpoint cannot be reached now: no address is known for
     /// it.
     Unreachable,
+    /// The entry cannot be named by any path the kernel takes.
+    Unnamable(Unnamable),
+}
+
+/// Why an entry cannot be named by a path.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Unnamable {
+    /// Its name holds a character no path may carry, as a name another
+    /// system wrote may.
+    Name,
+    /// Its path is longer than any path the kernel takes.
+    Length,
 }
 
 impl BrowseError {
@@ -50,6 +62,10 @@ impl fmt::Display for BrowseError {
             Self::NotADirectory => f.write_str("not a directory"),
             Self::OutOfMemory => f.write_str("out of memory"),
             Self::Unreachable => f.write_str("cannot be reached now"),
+            Self::Unnamable(Unnamable::Name) => {
+                f.write_str("name holds a character no path may carry")
+            }
+            Self::Unnamable(Unnamable::Length) => f.write_str("path too long"),
         }
     }
 }

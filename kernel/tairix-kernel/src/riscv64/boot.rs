@@ -917,7 +917,7 @@ fn install_direct_physical_map(map: &BootMemoryMap, fdt: &Fdt<'_>) -> Result<(),
     if !paging::install_boot_physmap(&BOOT_PAGE_TABLES, gib) {
         return Err(BootError::DirectMapInstall);
     }
-    if kernel_end_addr() > (crate::riscv64::spawn_producer::identity_gigapages() as u64) << 30 {
+    if kernel_end_addr() > (paging::KERNEL_IDENTITY_GIGAPAGES as u64) << 30 {
         return Err(BootError::KernelAboveIdentityWindow);
     }
     Ok(())
@@ -1513,7 +1513,7 @@ fn seed_hardware_tree(
 /// One past the highest physical address the identity window every root the
 /// kernel runs under maps, not merely the boot root's wider identity map.
 fn identity_reach() -> u64 {
-    (crate::riscv64::spawn_producer::identity_gigapages() as u64) << 30
+    (paging::KERNEL_IDENTITY_GIGAPAGES as u64) << 30
 }
 
 /// A mapping of the device registers at `[base, base + len)` that every root

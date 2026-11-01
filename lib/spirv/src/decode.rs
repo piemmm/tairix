@@ -10,6 +10,8 @@
 
 use alloc::vec::Vec;
 
+use tairix_util::fallible::trim;
+
 use crate::grammar::{self, Quantity, Shape, Spec};
 use crate::module::{text, Instruction, Module, Operand, Version};
 use crate::{DecodeError, Fault, Id, Kind, Op, MAX_MODULE_BYTES};
@@ -118,6 +120,11 @@ pub(crate) fn decode(input: &[u8], max_instructions: usize) -> Result<Module, De
             u32::try_from(first).map_err(|_| refused(start, Fault::TooManyInstructions))?;
         entry.count = u16::try_from(count).map_err(|_| refused(start, Fault::TrailingWords))?;
     }
+    // A string operand spans many words, and the tables grew by doubling.
+    let mut definitions = definitions;
+    trim(&mut instructions);
+    trim(&mut operands);
+    trim(&mut definitions);
     Ok(Module {
         bytes,
         version,

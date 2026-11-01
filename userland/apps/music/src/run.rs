@@ -963,7 +963,10 @@ mod program {
                     .map(|row| row.name.as_str());
                 let headline = match named {
                     Some(name) if !name.is_empty() => {
-                        format!("\u{201c}{name}\u{201d} {headline}")
+                        format!(
+                            "\u{201c}{}\u{201d} {headline}",
+                            tairix_util::utf8::shown(name)
+                        )
                     }
                     _ => format!("A track {headline}"),
                 };
@@ -1259,7 +1262,7 @@ mod program {
         if name.is_empty() {
             String::from("The file could not be opened")
         } else {
-            format!("\u{201c}{name}\u{201d} could not be opened")
+            tairix_util::utf8::refusal_headline(name, "opened")
         }
     }
 

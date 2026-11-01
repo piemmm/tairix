@@ -243,7 +243,8 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
   the namespace without the kernel waiting on the server's own lanes, unless
   the server last said it held writes it had not published: that one keeps its
   mount behind the fail-closed stand-in, reporting `UnavailableLost`, until its
-  owner detaches it with `force`. An attach whose explicit target is refused
+  owner detaches it with `force`, or with `DetachMode::Lost`, which forces only
+  a volume still lost. An attach whose explicit target is refused
   is undone, holds let go, and the offer stays to be attached again.
 - The implementation is `kernel/tairix-kernel/src/network_volume.rs` (audit
   4300–4305) over `kernel/core`'s lanes (`ServedFs::lanes`,

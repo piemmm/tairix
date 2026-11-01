@@ -394,6 +394,12 @@ impl Projection {
         self.live.load(Ordering::Acquire)
     }
 
+    /// Whether this shows the root of the volume `driver` serves as the
+    /// system attached it, no bind having made it.
+    fn shows_attached(&self, driver: DriverHandle) -> bool {
+        self.backing == Some(driver) && self.subtree.is_empty() && self.binder.is_none()
+    }
+
     /// The projection left the table.
     fn withdraw(&self) {
         self.live.store(false, Ordering::Release);
@@ -988,8 +994,34 @@ impl MountTable {
     pub fn shown_at(&self, driver: DriverHandle) -> Option<&Path> {
         self.mounts
             .iter()
-            .find(|m| m.backing == Some(driver) && m.subtree.is_empty() && m.binder.is_none())
+            .find(|m| m.shows_attached(driver))
             .map(|m| &m.path)
+    }
+
+    /// What a kernel hold on a node reached through `view` is kept through, so
+    /// that it leaves only with the node's volume: `view` itself unless a bind
+    /// made it, else the projection showing that volume as the system attached
+    /// it, narrowing nothing `view` does not.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::Stale`] for a `view` that has left the table;
+    /// [`VfsError::NotSupported`] for a bind of a volume no projection of its
+    /// own shows as widely.
+    pub fn kept_through(&self, view: &Arc<Projection>) -> Result<Arc<Projection>, VfsError> {
+        if !view.is_live() {
+            return Err(VfsError::Stale);
+        }
+        let (Some(driver), Some(_)) = (view.backing, view.binder) else {
+            return Ok(Arc::clone(view));
+        };
+        self.mounts
+            .iter()
+            .find(|m| {
+                m.shows_attached(driver) && view.flags.contains(m.flags) && m.class == view.class
+            })
+            .map(Arc::clone)
+            .ok_or(VfsError::NotSupported)
     }
 
     /// Withdraw the bind at exactly `path`.
@@ -2109,6 +2141,63 @@ mod tests {
             alloc::vec![pinned(nodes, 2), pinned(nodes, 3)],
             pinned(nodes, 4),
         )
+    }
+
+    /// A hold on a node reached through a bind is kept through the projection
+    /// showing the bind's volume as the system attached it, so it outlives
+    /// the bind; one through any other projection is kept through that one.
+    #[test]
+    fn a_hold_through_a_bind_is_kept_through_the_volume_it_shows() {
+        let (mut table, share, nodes) = with_root_and_share();
+        let root = Arc::clone(table.root().expect("root"));
+        let target = p("/Users/ann/nas");
+        table
+            .bind(
+                target.owned().expect("held"),
+                share,
+                Vec::new(),
+                MountFlags::READ_ONLY,
+                Some(cover(&root, &nodes)),
+                7,
+            )
+            .expect("binds");
+        let bind = Arc::clone(table.resolve(&target));
+        let catalog = Arc::clone(table.resolve(&p("/Storage/share")));
+        assert!(Arc::ptr_eq(
+            &table.kept_through(&bind).expect("kept"),
+            &catalog
+        ));
+        assert!(Arc::ptr_eq(
+            &table.kept_through(&catalog).expect("kept"),
+            &catalog
+        ));
+        assert!(Arc::ptr_eq(
+            &table.kept_through(&root).expect("kept"),
+            &root
+        ));
+        table.unbind(&target).expect("unbinds");
+        assert_eq!(table.kept_through(&bind).err(), Some(VfsError::Stale));
+
+        let archive = attached(&mut table, 0x6003, MountFlags::default());
+        table
+            .mount(p("/Archive"), MountFlags::READ_ONLY, Some(archive))
+            .expect("mounted at boot, narrower than the volume");
+        table
+            .bind(
+                target.owned().expect("held"),
+                archive,
+                Vec::new(),
+                MountFlags::default(),
+                Some(cover(&root, &nodes)),
+                7,
+            )
+            .expect("binds");
+        let bind = Arc::clone(table.resolve(&target));
+        assert_eq!(
+            table.kept_through(&bind).err(),
+            Some(VfsError::NotSupported),
+            "no projection of its own narrows nothing the bind does not"
+        );
     }
 
     #[test]

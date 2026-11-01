@@ -16,6 +16,40 @@ extern "C" fn host_entry(_cpu: CpuId) -> ! {
     }
 }
 
+/// A core's answer and its verdict each sit alone in a writeback granule at
+/// the start of its slot, and the slot ends on a granule, so nothing a cache
+/// holds of any other data can be written back over either.
+#[test]
+fn a_slot_keeps_its_answer_and_verdict_alone_in_their_granules() {
+    assert_eq!(core::mem::align_of::<SecondaryStack>(), WRITEBACK_GRANULE);
+    assert_eq!(core::mem::offset_of!(SecondaryStack, answer), 0);
+    assert_eq!(
+        core::mem::offset_of!(SecondaryStack, verdict),
+        WRITEBACK_GRANULE
+    );
+    assert_eq!(
+        core::mem::offset_of!(SecondaryStack, bytes),
+        2 * WRITEBACK_GRANULE
+    );
+    assert_eq!(
+        core::mem::size_of::<SecondaryStack>(),
+        2 * WRITEBACK_GRANULE + SECONDARY_STACK_BYTES
+    );
+}
+
+/// A started core's first push, at its slot's end through the stack pointer
+/// the trampoline derives from the published base, while `slot` is a shared
+/// argument of the code running on that stack; what the slot answers after.
+fn push_while_shared(slot: &SecondaryStack, top: *mut u8) -> u64 {
+    // SAFETY: the caller passes the last byte of `slot`'s own stack.
+    unsafe { top.write(0xA5) };
+    slot.answer.0.load(Ordering::Acquire)
+}
+
+/// The registered pool is one global, so this one test owns it: the ids it
+/// covers, the whole slot the trampoline steps per core, each core's own
+/// slot of it, a core's stack written beneath its shared slot, and
+/// registration set once.
 #[test]
 fn cpu_validity_tracks_the_registered_pool() {
     // A caller-sized pool covers exactly its `N` slots (the capacity
@@ -29,12 +63,26 @@ fn cpu_validity_tracks_the_registered_pool() {
     // Fail closed before any pool is registered: every id is invalid, so
     // a `start_secondary` cannot select an unbacked stack slice.
     assert!(!is_valid_cpu(0));
+    assert!(slot(1).is_none(), "no pool, no slot");
 
     assert_eq!(POOL.register(), Ok(3));
     assert!(is_valid_cpu(0));
     assert!(is_valid_cpu(2));
     assert!(!is_valid_cpu(3));
     assert!(!is_valid_cpu(u32::MAX));
+    assert_eq!(
+        SECONDARY_STACK_STRIDE.load(Ordering::Acquire),
+        core::mem::size_of::<SecondaryStack>() as u64
+    );
+    for (cpu, stack) in (0..).zip(&POOL.stacks) {
+        assert!(core::ptr::eq(slot(cpu).expect("a slot"), stack), "{cpu}");
+    }
+    assert!(slot(3).is_none());
+
+    let base = SECONDARY_STACK_BASE.load(Ordering::Acquire).cast::<u8>();
+    // SAFETY: slot 1 ends two slots into the registered three-slot pool.
+    let top = unsafe { base.add(2 * core::mem::size_of::<SecondaryStack>() - 1) };
+    assert_eq!(push_while_shared(slot(1).expect("a slot"), top), 0);
 
     // A second pool is refused rather than silently re-pointing the live
     // trampoline.
@@ -95,6 +143,55 @@ fn start_cpu_error_cause_strings_are_stable() {
         "no_secondary_affinity_table"
     );
     assert_eq!(StartCpuError::Psci(-4).as_str(), "psci_cpu_on_failed");
+    assert_eq!(
+        StartCpuError::StartTimedOut.as_str(),
+        "core_start_timed_out"
+    );
+    assert_eq!(StartCpuError::LacksPan.as_str(), "core_lacks_pan");
+}
+
+/// A core lacking PAN answers so, and the start is refused for exactly that
+/// rather than read as one that never came up.
+#[test]
+fn the_boot_cpu_reads_a_cores_answer_as_joined_refused_or_silent() {
+    assert_eq!(outcome(Some(StartAnswer::Joined)), Ok(()));
+    assert_eq!(
+        outcome(Some(StartAnswer::Refused(crate::protection::PAN))),
+        Err(StartCpuError::LacksPan)
+    );
+    let other = core::num::NonZeroU8::new(1 << 4).unwrap();
+    assert_eq!(
+        outcome(Some(StartAnswer::Refused(other))),
+        Err(StartCpuError::StartTimedOut),
+        "a refusal naming no protection of this port's is no answer it reads"
+    );
+    assert_eq!(outcome(None), Err(StartCpuError::StartTimedOut));
+}
+
+#[test]
+fn a_start_error_reaches_the_hal_under_its_neutral_cause() {
+    assert_eq!(
+        SmpError::from(StartCpuError::LacksPan),
+        SmpError::LacksProtection
+    );
+    assert_eq!(
+        SmpError::from(StartCpuError::StartTimedOut),
+        SmpError::StartRejected(0)
+    );
+    assert_eq!(
+        SmpError::from(StartCpuError::Psci(-4)),
+        SmpError::StartRejected(-4)
+    );
+    assert_eq!(
+        SmpError::from(StartCpuError::CpuIdOutOfRange),
+        SmpError::InvalidCpu
+    );
+    for err in [
+        StartCpuError::NoEntryInstalled,
+        StartCpuError::NoAffinityTable,
+    ] {
+        assert_eq!(SmpError::from(err), SmpError::NotReady);
+    }
 }
 
 #[test]

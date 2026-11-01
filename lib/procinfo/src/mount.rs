@@ -185,15 +185,14 @@ impl Namespace {
         Some(&self.volumes[self.by_id[at]])
     }
 
-    /// The binding covering the absolute `path`: the longest view path that
-    /// is `path` or one of its ancestors, compared a whole component at a
-    /// time.
+    /// The binding covering the absolute `path`, by [`covering`]: `None` for a
+    /// relative one.
     #[must_use]
     pub fn covering(&self, path: &[u8]) -> Option<&ViewBindingRecord> {
-        self.views
-            .iter()
-            .filter(|view| covers(view.target_bytes(), path))
-            .max_by_key(|view| view.target_bytes().len())
+        if path.first() != Some(&b'/') {
+            return None;
+        }
+        covering(&self.views, &components_of(path))
     }
 
     /// The binding covering `path` and the volume it shows. `None` when the
@@ -206,14 +205,30 @@ impl Namespace {
     }
 }
 
-/// Whether the view path `target` is the absolute `path` or one of its
-/// ancestors.
-fn covers(target: &[u8], path: &[u8]) -> bool {
-    if target == b"/" {
-        return path.first() == Some(&b'/');
-    }
-    path.strip_prefix(target)
-        .is_some_and(|rest| rest.first().is_none_or(|&byte| byte == b'/'))
+/// The binding among `views` covering the place `place` names, root-first:
+/// the longest view path that is the place or one of its ancestors, compared a
+/// whole component at a time. Of bindings stacked at one place, the last in
+/// table order, which is the one on top.
+pub fn covering<'v, 'p>(
+    views: &'v [ViewBindingRecord],
+    place: &(impl Iterator<Item = &'p [u8]> + Clone),
+) -> Option<&'v ViewBindingRecord> {
+    views
+        .iter()
+        .filter(|view| covers(view.target_bytes(), place.clone()))
+        .max_by_key(|view| view.target_bytes().len())
+}
+
+/// The components of the absolute `path`, root-first.
+fn components_of(path: &[u8]) -> impl Iterator<Item = &[u8]> + Clone {
+    path.split(|&byte| byte == b'/')
+        .filter(|part| !part.is_empty())
+}
+
+/// Whether the absolute view path `target` is the place `place` names or one
+/// of its ancestors.
+fn covers<'p>(target: &[u8], mut place: impl Iterator<Item = &'p [u8]>) -> bool {
+    target.first() == Some(&b'/') && components_of(target).all(|part| place.next() == Some(part))
 }
 
 /// Render one binding as a `source on target type fstype (options)` line,
@@ -277,8 +292,8 @@ pub fn render_options(flags: MountFlags) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        for_each_mount, for_each_volume_service, render_binding, render_options, Namespace,
-        WalkStep, MOUNT_PAGE, VIEW_PAGE, VOLUME_SERVICE_PAGE,
+        covering, for_each_mount, for_each_volume_service, render_binding, render_options,
+        Namespace, WalkStep, MOUNT_PAGE, VIEW_PAGE, VOLUME_SERVICE_PAGE,
     };
     use crate::list::ListError;
     use crate::request::CallError;
@@ -454,6 +469,44 @@ mod tests {
         assert_eq!(source(b"/Storage"), None);
         assert_eq!(source(b"/Storage/absent"), None);
         assert!(ns.covering(b"relative/path").is_none());
+    }
+
+    #[test]
+    fn a_place_named_by_its_components_resolves_as_its_spelled_path_does() {
+        let ns = installed();
+        let target = |place: &[&str]| {
+            covering(ns.views(), &place.iter().map(|part| part.as_bytes()))
+                .map(ViewBindingRecord::target_bytes)
+        };
+        for (place, path) in [
+            (&["Storage", "usb1", "x"][..], &b"/Storage/usb1/x"[..]),
+            (&["System", "Logs"][..], &b"/System/Logs"[..]),
+            (&["Systemic"][..], &b"/Systemic"[..]),
+            (&["Storage"][..], &b"/Storage"[..]),
+            (&[][..], &b"/"[..]),
+        ] {
+            assert_eq!(
+                target(place),
+                ns.covering(path).map(ViewBindingRecord::target_bytes),
+                "{place:?}"
+            );
+        }
+        assert_eq!(
+            target(&["Storage", "usb1", "x"]),
+            Some(&b"/Storage/usb1"[..])
+        );
+        assert_eq!(target(&["Systemic"]), Some(&b"/"[..]));
+        // Stacked at one place, the binding on top answers.
+        let stacked = [
+            view(b"/", b"/", MountFlags::default(), 1),
+            view(b"/Storage/usb1", b"/", MountFlags::NOEXEC, 3),
+            view(b"/Storage/usb1", b"/", MountFlags::NOEXEC, 4),
+        ];
+        let top = covering(&stacked, &[&b"Storage"[..], b"usb1"].into_iter());
+        assert_eq!(top.map(ViewBindingRecord::volume_id), Some([4; 16]));
+        // A view path that is not absolute covers nothing.
+        let relative = [view(b"Storage", b"/", MountFlags::default(), 5)];
+        assert!(covering(&relative, &[&b"Storage"[..]].into_iter()).is_none());
     }
 
     #[test]

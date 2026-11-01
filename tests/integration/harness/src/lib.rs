@@ -31,6 +31,7 @@
 
 pub mod elf2rxe;
 
+pub use tairix_qemu::aarch64::BASELINE_CPU;
 pub use tairix_qemu::{Board, DmaTranslation, InterruptControllers};
 
 /// The freestanding cross-compile target vocabulary (`PieArch`) and how
@@ -174,7 +175,7 @@ pub fn dump_virt_dtb_args(dtb_path: &str, cpus: u32, ram_mib: u32, board: Board)
     }
     args.extend([
         "-cpu".to_string(),
-        tairix_qemu::aarch64::CPU.to_string(),
+        tairix_qemu::aarch64::cpu(board).to_string(),
         "-m".to_string(),
         format!("{ram_mib}M"),
         "-smp".to_string(),
@@ -518,6 +519,23 @@ mod tests {
                 assert!(KNOWN_CFGS.contains(&name), "{name} not declared");
             }
         }
+    }
+
+    #[test]
+    fn a_board_naming_a_cpu_dumps_its_tree_on_that_cpu() {
+        let cpu_of = |board: Board| {
+            let args = dump_virt_dtb_args("/tmp/out/virt.dtb", 1, DEFAULT_DTB_RAM_MIB, board);
+            let at = args
+                .iter()
+                .position(|arg| arg == "-cpu")
+                .expect("a CPU model");
+            args[at + 1].clone()
+        };
+        assert_eq!(cpu_of(Board::default()), tairix_qemu::aarch64::CPU);
+        assert_eq!(
+            cpu_of(Board::default().with_cpu(BASELINE_CPU)),
+            BASELINE_CPU
+        );
     }
 
     #[test]

@@ -47,11 +47,17 @@ extern "C" {
 ///    IDTR `boot.s` leaves. A binary observes its own faults through the
 ///    fault-handler slot, and the kernel replaces the tables with its
 ///    per-CPU ones.
-/// 5. Moves onto the kernel root under the kernel's protections
+/// 5. Lifts the limit firmware can put on the CPU's basic `CPUID` leaves
+///    ([`crate::cpuid`]), which would hide what the CPU offers past them,
+///    and records the outcome for the boot to report.
+/// 6. Refuses a CPU that offers no execute-disable, which `boot.s` arms only
+///    where offered: every root the kernel builds maps data and the direct
+///    map non-executable.
+/// 7. Moves onto the kernel root under the kernel's protections
 ///    ([`crate::paging::enter_kernel_root`], [`crate::protection`]), leaving
 ///    the trampoline's identity window behind, so no binary runs where a
 ///    stray kernel access to a low address or a user page lands in memory.
-/// 6. Transfers to the binary-supplied `kernel_main`.
+/// 8. Transfers to the binary-supplied `kernel_main`.
 ///
 /// # Safety
 ///
@@ -87,11 +93,21 @@ pub extern "C" fn tairix_arch_x86_64_main(
     if unsafe { crate::percpu::install_boot_tables(boot_tables) }.is_err() {
         refuse("the boot descriptor tables were refused");
     }
+    // SAFETY: CPL 0, after the tables, so a fault is reported.
+    let uncapped = unsafe { crate::cpuid::lift_limit() };
+    if crate::cpuid::record_boot_cpu(uncapped.limit()).is_err() {
+        refuse("the boot CPU's CPUID limit was recorded twice");
+    }
+    // SAFETY: CPL 0; `IA32_EFER` is architectural on every x86-64 CPU.
+    let efer = unsafe { crate::msr::read(crate::syscall_entry::IA32_EFER) };
+    if efer & crate::syscall_entry::EFER_NXE == 0 {
+        refuse("the boot CPU offers no execute-disable");
+    }
     // SAFETY: the boot CPU, once, with interrupts disabled and `AC` clear
     // (`boot.s` writes `RFLAGS` whole), on the trampoline's root, and with
     // the descriptor tables just installed in the image's boot data rather
     // than the identity window.
-    if let Err(reason) = unsafe { crate::paging::enter_kernel_root() } {
+    if let Err(reason) = unsafe { crate::paging::enter_kernel_root(&uncapped) } {
         refuse(reason);
     }
     // SAFETY: `kernel_main` is provided by the linked test binary and is

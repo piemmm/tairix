@@ -164,6 +164,11 @@ and checks:
   (Chinese and Japanese prose carries no word boundaries a word split can
   find).
 
+`options_entry_mentions` reads one switch's `OPTIONS` entry and answers
+whether it mentions a phrase, for the per-app help tests (`groupadd`,
+`useradd`) that hold every locale's id switch to stating the first id the
+program allocates.
+
 The feature is host-only tooling; a TAIRiX program never links it. The
 `help-lint` gate additionally verifies coverage: every command app the
 `AppInfo.toml` discovery walk finds ships an `en-US/<command>.md` document.

@@ -304,6 +304,12 @@ fn a_volume_attached_for_a_principal_is_theirs_to_eject() {
     assert_eq!(image.facts.volume_id, [7; 16]);
     assert!(image.facts.ejectable_by(1000));
     assert!(!image.facts.ejectable_by(1001), "someone else's");
+    let unnamed = VolumeFacts {
+        volume_id: tairix_abi::sysinfo::VOLUME_ID_UNPUBLISHED,
+        ..image.facts
+    };
+    assert_eq!(unnamed.ejector(), None, "a detach could not name it");
+    assert!(!unnamed.ejectable_by(1000));
 }
 
 /// Another principal's private volume is withheld from this session, which
@@ -2000,6 +2006,16 @@ fn tree_source_with_links(
         move |path: &str| dirs.get(path).cloned().ok_or(Errno::NotFound),
         links,
     )
+}
+
+/// A message names a place with what hides in each name shown; the path a
+/// read opens stays byte-exact.
+#[test]
+fn a_place_a_message_names_is_spelled_with_what_hides_in_it_shown() {
+    let hiding = ["Users".to_string(), "a\u{202e}b".to_string()];
+    assert_eq!(crate::vfs::spell_shown_path(&hiding), "/Users/a\u{fffd}b");
+    assert_eq!(crate::vfs::spell_shown_path(&[]), "/");
+    assert_eq!(absolute_path(&hiding).expect("a path"), "/Users/a\u{202e}b");
 }
 
 #[test]
@@ -6985,6 +7001,142 @@ fn a_declared_context_row_is_disabled_with_its_reason_never_left_out() {
     }
 }
 
+/// A read-only mount of an image no path can name is refused, saying why, as
+/// an open of it is; one of a nameable image mounts, and anything else asks
+/// for none.
+#[test]
+fn mount_read_only_of_an_unnamable_image_is_refused_not_dropped() {
+    use crate::error::Unnamable;
+    use crate::mount::MountAct;
+    use tairix_abi::fs::FS_NAME_MAX;
+
+    let deep: Vec<String> = (0..16).map(|at| alloc::format!("{at:0>250}")).collect();
+    let long_image = alloc::format!("{}.adf", "x".repeat(FS_NAME_MAX - 4));
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[
+            (b"backup:2024.iso", FileKind::Regular),
+            (b"game.adf", FileKind::Regular),
+            (b"notes.txt", FileKind::Regular),
+        ]),
+    );
+    let mut at = String::new();
+    for (level, part) in deep.iter().enumerate() {
+        let parent = if at.is_empty() {
+            "/".to_string()
+        } else {
+            at.clone()
+        };
+        at = alloc::format!("{at}/{part}");
+        if level > 0 {
+            dirs.insert(
+                parent,
+                encoded_stream(&[(part.as_bytes(), FileKind::Directory)]),
+            );
+        }
+    }
+    dirs.insert(
+        at,
+        encoded_stream(&[(long_image.as_bytes(), FileKind::Regular)]),
+    );
+    let mut browser = Browser::open_root(tree_source(dirs)).expect("root");
+    assert_eq!(
+        MountAct::read_only_of(&mut browser),
+        Ok(None),
+        "nothing chosen"
+    );
+    let chosen = |browser: &mut Browser<_>, name: &str| {
+        let at = browser
+            .entries()
+            .iter()
+            .position(|entry| entry.name() == name)
+            .expect("listed");
+        browser.select(at).expect("selects");
+        MountAct::read_only_of(browser)
+    };
+    assert_eq!(
+        chosen(&mut browser, "backup:2024.iso"),
+        Err(BrowseError::Unnamable(Unnamable::Name))
+    );
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Launch),
+        Err(BrowseError::Unnamable(Unnamable::Name)),
+        "an open of it is refused alike"
+    );
+    assert_eq!(
+        chosen(&mut browser, "game.adf"),
+        Ok(Some(MountAct::Attach {
+            path: "/game.adf".to_string(),
+            read_only: true,
+        }))
+    );
+    assert_eq!(chosen(&mut browser, "notes.txt"), Ok(None), "no disk image");
+    browser.navigate_to(deep).expect("the deep folder lists");
+    assert_eq!(
+        chosen(&mut browser, &long_image),
+        Err(BrowseError::Unnamable(Unnamable::Length))
+    );
+}
+
+/// A lost volume is no place on the rail, but its catalog entry still ejects
+/// it, for its attacher alone, as an eject that lets its loss go.
+#[test]
+fn the_chosen_lost_volume_is_ejected_letting_its_loss_go() {
+    use crate::mount::MountAct;
+    use tairix_abi::sysinfo::MountAvailability;
+
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[(b"Storage", FileKind::Directory)]),
+    );
+    dirs.insert(
+        "/Storage".to_string(),
+        encoded_stream(&[(b"game", FileKind::Directory)]),
+    );
+    let places = Places::new(
+        &["Users".to_string(), "ann".to_string()],
+        &[Volume {
+            label: "game".to_string(),
+            target: "/Storage/game".to_string(),
+            medium: None,
+            facts: VolumeFacts {
+                filesystem: String::from("affs"),
+                free: None,
+                availability: MountAvailability::UnavailableLost,
+                owner: Some(1000),
+                volume_id: [5; 16],
+            },
+            offered: false,
+        }],
+    );
+    let mut browser = Browser::open_root(tree_source(dirs)).expect("root");
+    browser
+        .navigate_to(alloc::vec!["Storage".to_string()])
+        .expect("navigates");
+    browser.mark_volume_roots(&places);
+    browser.select(0).expect("selects game");
+    assert_eq!(
+        MountAct::eject_chosen(&browser, Some(1000)),
+        Some(MountAct::Eject {
+            volume_id: [5; 16],
+            name: String::from("game"),
+            lost: true,
+        })
+    );
+    assert_eq!(
+        MountAct::eject_chosen(&browser, Some(1001)),
+        None,
+        "another's"
+    );
+    assert_eq!(
+        MountAct::eject_chosen(&browser, None),
+        None,
+        "an unknown viewer"
+    );
+}
+
 #[test]
 fn a_disk_image_mounts_read_only_and_only_its_attachers_volume_ejects() {
     use crate::chrome::{ContextCommand, ContextMenuModel};
@@ -7395,6 +7547,32 @@ fn the_open_with_wheel_scrolls_the_list_and_clamps_at_the_ends() {
 /// A list resting a pixel into its first row shows that row cut at the top
 /// and a sliver of the next one past the popup's rows at the foot; both are
 /// drawn whole and cut, and each is hit where it shows.
+/// A candidate's name hiding a direction override draws as the name with
+/// that character shown, never as the name it would pass for.
+#[test]
+fn a_chooser_row_shows_what_hides_in_an_applications_name() {
+    use crate::open_with::{AppAssociation, OpenWithChooser};
+    use crate::render::draw_open_with_chooser;
+
+    let theme = Theme::dark();
+    let drawn = |name: &str| {
+        let app = AppAssociation::new(name, "/System/Applications/A.app", vec![]);
+        let chooser = OpenWithChooser::new(&[&app], "/f", "f").expect("a candidate");
+        let vp = Rect::new(0, 0, 420, 200);
+        let mut surface = Surface::new(vp.width, vp.height).expect("surface");
+        draw_open_with_chooser(
+            &mut surface,
+            &chooser,
+            Scale::ONE,
+            &theme,
+            vp,
+            &mut NoArtwork,
+        );
+        surface.pixels().to_vec()
+    };
+    assert_eq!(drawn("View\u{202e}er"), drawn("View\u{fffd}er"));
+}
+
 #[test]
 fn a_chooser_scrolled_part_way_draws_and_hits_the_rows_its_edges_cut() {
     use crate::render::{draw_open_with_chooser, open_with_scroll_wheel, OPEN_WITH_MAX_ROWS};
@@ -8449,6 +8627,19 @@ fn the_general_section_shows_where_an_alias_points_and_only_for_an_alias() {
         "the spelling the link holds, verbatim"
     );
 
+    let hiding = Properties::from_stat(
+        "Documents",
+        crate::entry::EntryKind::Link(LinkTarget::Directory),
+        &props_stat(FileKind::Symlink, 0o777),
+    )
+    .with_target("../a\u{202e}b");
+    assert!(
+        general_facts(&hiding)
+            .iter()
+            .any(|(label, value)| *label == "Alias to" && value == "../a\u{fffd}b"),
+        "what hides in a target is shown"
+    );
+
     // A link with no target attached shows no row rather than an empty one.
     let unattached = Properties::from_stat(
         "gone",
@@ -9280,6 +9471,42 @@ fn the_frame_does_not_move_with_the_node_it_describes() {
         properties_attr_editor_rect(window, Scale::ONE, &theme),
         properties_attr_editor_rect(window, Scale::ONE, &theme)
     );
+}
+
+/// The identity band names its node with what hides in the name shown, so a
+/// direction override cannot make it read as another.
+#[test]
+fn the_identity_band_shows_what_hides_in_a_name() {
+    use tairix_icon::NoArtwork;
+    use tairix_raster::Surface;
+
+    let theme = Theme::dark();
+    let window = props_window();
+    let bar = ScrollColumn::new();
+    let perms = PermsPanel::default();
+    let editor = TextField::new();
+    let drawn = |name: &str| {
+        let controls = PropertiesControls {
+            identity: Identity {
+                name,
+                ..props_identity()
+            },
+            ..resting(&bar, &editor, &perms)
+        };
+        let mut surface = Surface::new(window.width, window.height).expect("surface");
+        draw_properties_window(
+            &mut surface,
+            PropertiesFrame::Reading,
+            PropertiesView::default(),
+            controls,
+            Scale::ONE,
+            &theme,
+            window,
+            &mut NoArtwork,
+        );
+        surface.pixels().to_vec()
+    };
+    assert_eq!(drawn("a\u{202e}b.txt"), drawn("a\u{fffd}b.txt"));
 }
 
 #[test]

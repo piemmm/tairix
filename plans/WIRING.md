@@ -1063,8 +1063,9 @@ interface creep).
   - **x86_64** owns a per-AP stack pool, the `AP_TRAMPOLINE_PHYS` frame,
     the boot `CR3`, a PIT `Delay`, and a set-once entry slot;
     `smp::start_secondary` installs the trampoline, stamps each
-    `ApBootSlot`, runs the SDM INIT-SIPI-SIPI handshake, and waits on the
-    AP `ready` flag. This orchestration **moved out of**
+    `ApBootSlot`, runs the SDM INIT-SIPI-SIPI handshake, and waits for the
+    AP's answer, joined or refused; a refusal is
+    `SmpError::LacksProtection`. This orchestration **moved out of**
     `scheduler_stress_qemu` and `cross_cpu_tlb_shootdown_qemu_x86_64`
     into the arch crate (§2.2 — the two verticals had duplicated it);
     both now call `X86_64Arch::start_secondary`.
@@ -1073,7 +1074,11 @@ interface creep).
     `NotReady`): PSCI `CPU_ON` over the discovered conduit (the W6
     `smp::start_secondary`), or the Devicetree spin-table release
     (`smp::start_secondary_spintable`) on a PSCI-less tree (the Pi 4's
-    stock firmware).
+    stock firmware), then waits, bounded, for the core's answer
+    (`StartAnswer`, written MMU-off in the core's own slot, alone in a
+    writeback granule) and gives back the `StartVerdict` the core waits on
+    before it runs; a refusal is `SmpError::LacksProtection`. x86_64 settles
+    its AP's answer on one compare-and-swap (`settle_start`).
   - **riscv64** delegates to the SBI HSM `hart_start` `smp::start_secondary`.
   - **wasm32** delegates to `smp::start_worker` (Web Worker spawn); it
     has no settable entry, so it never reports `NotReady`.

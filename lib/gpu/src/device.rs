@@ -4,19 +4,25 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::Duration64;
+use tairix_collections::Key;
 use tairix_inline::ArrayVec;
-use tairix_rt::sync::{Mutex, MutexGuard};
+use tairix_parallel::JobRunner;
+use tairix_rt::sync::{Condvar, Mutex};
 
-use crate::command::{Command, CopyRegion};
+use crate::command::{Command, CopyRegion, Recorded};
+use crate::fair::{Fair, FairGuard};
 use crate::info::{BufferUsage, DeviceInfo};
-use crate::memory::Memory;
+use crate::memory::{self, Memory, MemoryUse};
 use crate::model::{
-    AllocationKey, BufferKey, ContextKey, Model, Point, Request, TimelineKey, Woken,
+    AllocationKey, BufferKey, ContextKey, Model, Pick, Point, Request, TimelineKey, Woken,
 };
-use crate::software::{self, Outcome};
+use crate::software::texel::Srgb;
+use crate::software::{self, Outcome, Spawn};
+use crate::Loss;
 use crate::{
     Error, SubmitError, MAX_COPY_REGIONS, MAX_SUBMISSION_BUFFERS, MAX_SUBMISSION_COMMANDS,
     MAX_SUBMISSION_POINTS, MAX_UPDATE_BYTES,
@@ -24,30 +30,152 @@ use crate::{
 
 /// What every handle of one device shares.
 pub(crate) struct Shared {
-    model: Mutex<Model>,
-    info: DeviceInfo,
-    clock: Arc<dyn MonotonicClock + Send + Sync>,
+    /// Had in turn, so no thread that locks it again at once keeps another
+    /// out.
+    pub(crate) model: Fair<Model>,
+    pub(crate) info: DeviceInfo,
+    pub(crate) clock: Arc<dyn MonotonicClock + Send + Sync>,
+    pub(crate) runner: Arc<dyn JobRunner + Send>,
+    pub(crate) srgb: Srgb,
+    wake: Arc<Wake>,
+}
+
+/// How work reaches the device's own worker: a pending flag it parks on,
+/// whether the device is gone, and whether there is a worker at all.
+pub(crate) struct Wake {
+    state: Mutex<WakeState>,
+    ready: Condvar,
+    /// Set once the worker's thread is started; until then, and for good where
+    /// none can be, work runs on the thread whose act made it ready.
+    running: AtomicBool,
+}
+
+#[derive(Default)]
+struct WakeState {
+    pending: bool,
+    closed: bool,
+    /// Whether the worker waits to be poked, so a poke must wake it.
+    parked: bool,
+}
+
+impl Wake {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(WakeState::default()),
+            ready: Condvar::new(),
+            running: AtomicBool::new(false),
+        }
+    }
+
+    fn poke(&self, close: bool) {
+        let mut state = self.state.lock();
+        state.pending = true;
+        state.closed |= close;
+        let parked = state.parked;
+        drop(state);
+        if parked {
+            self.ready.notify_one();
+        }
+    }
+
+    /// Park until poked, answering whether the device is still there.
+    fn park(&self) -> bool {
+        let mut state = self.state.lock();
+        while !state.pending && !state.closed {
+            state.parked = true;
+            #[cfg(test)]
+            waits::note(state.parked);
+            state = self.ready.wait(state);
+        }
+        state.parked = false;
+        state.pending = false;
+        !state.closed
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        self.wake.poke(true);
+    }
+}
+
+/// The device's worker: it runs every job that is ready, then parks holding
+/// only a weak reference, so an idle device it serves is never kept alive by
+/// it; a job it runs keeps the device until that job ends.
+fn work(device: &alloc::sync::Weak<Shared>, wake: &Wake) {
+    loop {
+        let Some(shared) = device.upgrade() else {
+            return;
+        };
+        shared.run_ready(shared.model.lock());
+        drop(shared);
+        if !wake.park() {
+            return;
+        }
+    }
 }
 
 impl Shared {
-    /// Run, on this thread, every job the device has room for and that is
-    /// ready, until none is: work runs on the thread whose act made it
-    /// ready, or on the one already running its engine's work.
-    fn drive<'a>(&'a self, mut model: MutexGuard<'a, Model>) {
-        let mut woken = Woken::new();
-        while let Some(dispatch) = model.dispatch(self.clock.now_ns()) {
-            drop(model);
-            notify(&mut woken);
-            let outcome = software::run(&dispatch.ops, dispatch.deadline, &*self.clock);
-            model = self.model.lock();
-            match outcome {
-                Outcome::Done => woken = model.complete(dispatch.job, false),
-                Outcome::Fault => woken = model.complete(dispatch.job, true),
-                Outcome::Overran => model.reset(dispatch.engine, self.clock.now_ns(), &|_| true),
-            }
+    /// Take `item` out of the context's table `pick` names, letting it go
+    /// once the device's lock is: it may hold the last of a memory.
+    pub(crate) fn release<K: Key, V>(&self, context: ContextKey, pick: Pick<K, V>, item: K) {
+        let released = self.model.lock().release(context, pick, item);
+        drop(released);
+    }
+
+    /// Have the work a change just made ready run: on the device's worker,
+    /// or on this thread where it has none, or, where its engine is already
+    /// running work, on the thread running it, which takes it next.
+    fn drive<'a>(&'a self, model: FairGuard<'a, Model>) {
+        if !model.has_ready() {
+            return;
         }
-        drop(model);
-        notify(&mut woken);
+        if self.wake.running.load(Ordering::Acquire) {
+            drop(model);
+            self.wake.poke(false);
+        } else {
+            self.run_ready(model);
+        }
+    }
+
+    /// Run every job the device has room for and that is ready, until none
+    /// is.
+    fn run_ready<'a>(&'a self, mut model: FairGuard<'a, Model>) {
+        let mut woken = Woken::new();
+        let now = || self.clock.now_ns();
+        loop {
+            let (next, pruned) = model.dispatch(&now);
+            drop(model);
+            drop(pruned);
+            notify(&mut woken);
+            let Some(mut dispatch) = next else {
+                return;
+            };
+            let outcome = software::run(
+                &dispatch.ops.ops,
+                dispatch.deadline,
+                self,
+                &mut dispatch.workspaces,
+            );
+            model = self.model.lock();
+            let (engine, job) = (dispatch.engine, dispatch.job);
+            match outcome {
+                Outcome::Done => woken = model.complete(engine, job, None),
+                Outcome::Fault => woken = model.complete(engine, job, Some(Loss::Fault)),
+                Outcome::OutOfMemory => {
+                    woken = model.complete(engine, job, Some(Loss::OutOfMemory));
+                }
+                Outcome::Overran => model.reset(engine, now(), &|_| true),
+            }
+            let workspaces = core::mem::take(&mut dispatch.workspaces);
+            let given = model.give_back(workspaces);
+            let discarded = model.take_discarded();
+            drop(model);
+            // The job may have held the last of a memory, so it goes with the
+            // lock let go; the next dispatch fits the pool after it.
+            drop((dispatch, given, discarded));
+            model = self.model.lock();
+        }
     }
 
     /// Wait until `timeline` reaches `value`, the context is lost or
@@ -73,9 +201,9 @@ impl Shared {
             if now >= limit {
                 return Err(Error::TimedOut);
             }
-            model = wake
-                .wait_timeout(model, Duration64::from_nanos(limit - now))
-                .0;
+            model = self
+                .model
+                .wait_timeout(model, &wake, Duration64::from_nanos(limit - now));
         }
     }
 }
@@ -89,7 +217,7 @@ fn notify(woken: &mut Woken) {
 
 /// Whether a handle of `shared`'s device and `context` belongs where it is
 /// used.
-fn owned(
+pub(crate) fn owned(
     shared: &Arc<Shared>,
     context: ContextKey,
     by: &Arc<Shared>,
@@ -108,15 +236,34 @@ pub struct Device {
 }
 
 impl Device {
-    pub(crate) fn from_model(model: Model, clock: Arc<dyn MonotonicClock + Send + Sync>) -> Self {
+    /// A device over `model`, its work run on a thread `threads` starts or,
+    /// where none can be started, on the thread whose act made it ready.
+    pub(crate) fn from_model(
+        model: Model,
+        clock: Arc<dyn MonotonicClock + Send + Sync>,
+        runner: Arc<dyn JobRunner + Send>,
+        threads: &dyn Spawn,
+    ) -> Result<Self, Error> {
+        let mut model = model;
+        model.set_width(runner.width());
         let info = model.info().clone();
-        Self {
-            shared: Arc::new(Shared {
-                model: Mutex::new(model),
-                info,
-                clock,
-            }),
+        let wake = crate::shared(Wake::new())?;
+        let shared = crate::shared(Shared {
+            model: Fair::new(model),
+            info,
+            clock,
+            runner,
+            srgb: Srgb::new(),
+            wake: Arc::clone(&wake),
+        })?;
+        let device = Arc::downgrade(&shared);
+        let parked = Arc::clone(&wake);
+        let body = alloc::boxed::Box::try_new(move || work(&device, &parked))
+            .map_err(|_| Error::OutOfMemory)?;
+        if threads.spawn(body) {
+            wake.running.store(true, Ordering::Release);
         }
+        Ok(Self { shared })
     }
 
     /// What the device is.
@@ -130,7 +277,11 @@ impl Device {
     ///
     /// # Errors
     ///
-    /// [`Error::OutOfMemory`] when its state cannot be had.
+    /// [`Error::OverLimit`] where its own state would pass its limit, then
+    /// [`Error::HeapFull`] where that and the device's room for it would pass
+    /// the heap, and [`Error::OutOfMemory`] where the host cannot hold it. The
+    /// room the device made for it ahead of a refusal stays, charged to the
+    /// heap, for the next.
     pub fn create_context(&self, desc: &ContextDesc) -> Result<Context, Error> {
         let key = self.shared.model.lock().create_context(desc.memory_limit)?;
         Ok(Context {
@@ -151,17 +302,28 @@ impl fmt::Debug for Device {
 /// How a context is made.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ContextDesc {
-    /// The most bytes its allocations may take, or, when `None`, as much as
-    /// the device's heaps hold.
+    /// The most bytes it may take, as [`Context`] says what is charged, or,
+    /// when `None`, as much as the device's heaps hold.
     pub memory_limit: Option<u64>,
 }
 
 /// The unit of isolation: memory, objects and queues no other context can
 /// name. Dropping it releases all of them; handles it made then refuse every
 /// request with [`Error::Destroyed`].
+///
+/// # Memory
+///
+/// Every request that makes the device hold memory — an allocation, an
+/// object, room in one of the context's tables or queues, a recorded update,
+/// a submission — is charged to the context's limit. It is refused with
+/// [`Error::OverLimit`] past the limit, [`Error::HeapFull`] past its heap's
+/// size, and [`Error::OutOfMemory`] where, within both, the host refuses the
+/// memory; a lost context refuses it with [`Error::Lost`], a released one
+/// with [`Error::Destroyed`]. A refusal changes nothing but the room a table
+/// or queue made ahead of it, which stays, charged, for the next.
 pub struct Context {
-    shared: Arc<Shared>,
-    key: ContextKey,
+    pub(crate) shared: Arc<Shared>,
+    pub(crate) key: ContextKey,
 }
 
 impl Context {
@@ -174,11 +336,16 @@ impl Context {
         self.shared.model.lock().status(self.key)
     }
 
-    /// The bytes its allocations take from its memory limit, for as long as
-    /// anything holds them.
+    /// What its memory limit is spent on: its allocations, and the host
+    /// memory its own state, its objects, its tables' room and its queued
+    /// work keep on the device, each for as long as anything holds it.
     #[must_use]
-    pub fn memory_used(&self) -> u64 {
-        self.shared.model.lock().memory_taken(self.key).unwrap_or(0)
+    pub fn memory_used(&self) -> MemoryUse {
+        self.shared
+            .model
+            .lock()
+            .memory_taken(self.key)
+            .unwrap_or_default()
     }
 
     /// `desc.size` zeroed bytes of memory type `desc.memory_type`.
@@ -190,11 +357,30 @@ impl Context {
     /// memory cannot be had; [`Error::Empty`], [`Error::TooLarge`] and
     /// [`Error::NoSuchMemoryType`] for what no device could allocate.
     pub fn allocate(&self, desc: &AllocationDesc) -> Result<Allocation, Error> {
-        let key = self
-            .shared
-            .model
-            .lock()
-            .allocate(self.key, desc.size, desc.memory_type)?;
+        let (charge, overhead) =
+            self.shared
+                .model
+                .lock()
+                .charge_allocation(self.key, desc.size, desc.memory_type)?;
+        // Made between two holds of the device's lock, as zeroing it takes as
+        // long as it is large; its charges stand for it meanwhile.
+        let made = Memory::zeroed(desc.size, charge, overhead).and_then(crate::shared);
+        let memory = match made {
+            Ok(memory) => memory,
+            Err(error) => {
+                self.shared.model.lock().unreserve_allocation(self.key);
+                return Err(error);
+            }
+        };
+        let filed =
+            self.shared
+                .model
+                .lock()
+                .file_allocation(self.key, memory, desc.memory_type, desc.size);
+        let key = filed.map_err(|(error, refused)| {
+            drop(refused);
+            error
+        })?;
         Ok(Allocation {
             shared: Arc::clone(&self.shared),
             context: self.key,
@@ -209,7 +395,8 @@ impl Context {
     ///
     /// # Errors
     ///
-    /// [`Error::Foreign`] for memory of another device.
+    /// [`Error::Foreign`] for memory of another device, and those of every
+    /// request that makes memory ([`Context#memory`]).
     pub fn import(&self, export: Export) -> Result<Allocation, Error> {
         if !Arc::ptr_eq(&self.shared, &export.shared) {
             return Err(Error::Foreign);
@@ -220,11 +407,15 @@ impl Context {
             size,
             ..
         } = export;
-        let key = self
+        let filed = self
             .shared
             .model
             .lock()
-            .import(self.key, memory, memory_type, size)?;
+            .file_memory(self.key, memory, memory_type, size);
+        let key = filed.map_err(|(error, refused)| {
+            drop(refused);
+            error
+        })?;
         Ok(Allocation {
             shared: Arc::clone(&self.shared),
             context: self.key,
@@ -240,7 +431,8 @@ impl Context {
     ///
     /// [`Error::Foreign`] for another context's allocation; [`Error::Empty`],
     /// [`Error::Usage`], [`Error::Misaligned`] and [`Error::OutOfRange`] for
-    /// a buffer the allocation cannot hold as asked.
+    /// a buffer the allocation cannot hold as asked; and those of every
+    /// request that makes memory ([`Context#memory`]).
     pub fn create_buffer(
         &self,
         allocation: &Allocation,
@@ -272,7 +464,7 @@ impl Context {
     ///
     /// # Errors
     ///
-    /// [`Error::Lost`] once the context is lost.
+    /// Those of every request that makes memory ([`Context#memory`]).
     pub fn create_timeline(&self, initial: u64) -> Result<Timeline, Error> {
         let key = self
             .shared
@@ -315,7 +507,11 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        self.shared.model.lock().destroy_context(self.key);
+        let released = self.shared.model.lock().destroy_context(self.key);
+        // What it held goes without the device's lock, its memories among it.
+        drop(released);
+        let pruned = self.shared.model.lock().prune_workspaces();
+        drop(pruned);
     }
 }
 
@@ -339,9 +535,9 @@ pub struct AllocationDesc {
 /// Memory of one memory type, held by one context, and released when this
 /// and everything made over it is.
 pub struct Allocation {
-    shared: Arc<Shared>,
-    context: ContextKey,
-    key: AllocationKey,
+    pub(crate) shared: Arc<Shared>,
+    pub(crate) context: ContextKey,
+    pub(crate) key: AllocationKey,
     size: u64,
     memory_type: u32,
 }
@@ -388,10 +584,8 @@ impl Allocation {
     /// [`Error::OutOfRange`] past its end.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), Error> {
         let (memory, range) = self.host(offset, data.len())?;
-        let mut bytes = memory.lock();
-        let target = bytes.get_mut(range).ok_or(Error::OutOfRange)?;
-        target.copy_from_slice(data);
-        Ok(())
+        let mut words = memory.lock();
+        memory::write_bytes(&mut words, range.start, data).ok_or(Error::OutOfRange)
     }
 
     /// Read `out.len()` bytes at `offset` from the CPU.
@@ -401,9 +595,8 @@ impl Allocation {
     /// As [`write`](Self::write).
     pub fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), Error> {
         let (memory, range) = self.host(offset, out.len())?;
-        let bytes = memory.lock();
-        out.copy_from_slice(bytes.get(range).ok_or(Error::OutOfRange)?);
-        Ok(())
+        let words = memory.lock();
+        memory::read_bytes(&words, range.start, out).ok_or(Error::OutOfRange)
     }
 
     /// A token another context of this device imports the memory through.
@@ -426,7 +619,8 @@ impl Allocation {
 
 impl Drop for Allocation {
     fn drop(&mut self) {
-        self.shared.model.lock().free(self.context, self.key);
+        self.shared
+            .release(self.context, |context| &mut context.allocations, self.key);
     }
 }
 
@@ -472,9 +666,9 @@ pub struct BufferDesc {
 /// A typed span of an allocation, used only as its usage says. It keeps its
 /// memory while it lives, whatever becomes of the allocation's handle.
 pub struct Buffer {
-    shared: Arc<Shared>,
-    context: ContextKey,
-    key: BufferKey,
+    pub(crate) shared: Arc<Shared>,
+    pub(crate) context: ContextKey,
+    pub(crate) key: BufferKey,
     size: u64,
     usage: BufferUsage,
 }
@@ -496,9 +690,7 @@ impl Buffer {
 impl Drop for Buffer {
     fn drop(&mut self) {
         self.shared
-            .model
-            .lock()
-            .destroy_buffer(self.context, self.key);
+            .release(self.context, |context| &mut context.buffers, self.key);
     }
 }
 
@@ -535,8 +727,9 @@ impl Timeline {
             .timeline_value(self.context, self.key)
     }
 
-    /// Set it to `value` from the CPU, running any work that was waiting for
-    /// it.
+    /// Set it to `value` from the CPU, readying any work that was waiting for
+    /// it: that runs on the device's worker, or, where it has none, on this
+    /// thread or the one already running its engine's work.
     ///
     /// # Errors
     ///
@@ -544,7 +737,11 @@ impl Timeline {
     /// short of every signal queued work will make.
     pub fn signal(&self, value: u64) -> Result<(), Error> {
         let mut model = self.shared.model.lock();
-        model.signal(self.context, self.key, value)?.notify_all();
+        let waited = model.signal(self.context, self.key, value)?;
+        // Before the work it readied runs, which may be on this thread.
+        if let Some(wake) = waited {
+            wake.notify_all();
+        }
         self.shared.drive(model);
         Ok(())
     }
@@ -562,10 +759,12 @@ impl Timeline {
 
 impl Drop for Timeline {
     fn drop(&mut self) {
-        self.shared
+        let released = self
+            .shared
             .model
             .lock()
             .destroy_timeline(self.context, self.key);
+        drop(released);
     }
 }
 
@@ -605,12 +804,14 @@ impl Queue {
     ///
     /// # Errors
     ///
-    /// Refused whole, changing nothing, for anything of another context
+    /// Refused whole, changing nothing but the room its queues may have made
+    /// ahead of it, for anything of another context
     /// ([`Error::Foreign`]), any object since released ([`Error::Stale`]),
     /// any range past what it names, any use a buffer was not made for, any
     /// signal that would not advance its timeline, a deadline of zero or past
-    /// the device's longest, or more than a submission carries; the error
-    /// names the refused command where there is one.
+    /// the device's longest, or more than a submission carries, and for
+    /// what every request that makes memory is ([`Context#memory`]); the
+    /// error names the refused command where there is one.
     pub fn submit(&self, submission: &Submission<'_>) -> Result<Fence, SubmitError> {
         let mut buffers: ArrayVec<&[Command], MAX_SUBMISSION_BUFFERS> = ArrayVec::new();
         for buffer in submission.command_buffers {
@@ -628,8 +829,10 @@ impl Queue {
             signals: &signals,
             span: submission.deadline.saturating_total_nanos(),
         };
+        // Before the lock, so what a refusal leaves in it goes after it.
+        let mut resolved = Vec::new();
         let mut model = self.shared.model.lock();
-        let (timeline, value) = model.submit(self.context, &request)?;
+        let (timeline, value) = model.submit(self.context, &request, &mut resolved)?;
         self.shared.drive(model);
         Ok(Fence {
             shared: Arc::clone(&self.shared),
@@ -728,8 +931,8 @@ impl fmt::Debug for Fence {
 /// what is named belongs to the context; the rest is checked whole when a
 /// submission carries it, and the buffer can be submitted again.
 pub struct CommandBuffer {
-    shared: Arc<Shared>,
-    context: ContextKey,
+    pub(crate) shared: Arc<Shared>,
+    pub(crate) context: ContextKey,
     commands: Vec<Command>,
 }
 
@@ -751,7 +954,7 @@ impl CommandBuffer {
         self.commands.clear();
     }
 
-    fn record(&mut self, command: Command) -> Result<(), Error> {
+    pub(crate) fn record(&mut self, command: Command) -> Result<(), Error> {
         if self.commands.len() >= MAX_SUBMISSION_COMMANDS {
             return Err(Error::TooMany);
         }
@@ -762,7 +965,7 @@ impl CommandBuffer {
         Ok(())
     }
 
-    fn named(&self, buffer: &Buffer) -> Result<BufferKey, Error> {
+    pub(crate) fn named(&self, buffer: &Buffer) -> Result<BufferKey, Error> {
         owned(&buffer.shared, buffer.context, &self.shared, self.context)?;
         Ok(buffer.key)
     }
@@ -812,23 +1015,33 @@ impl CommandBuffer {
     }
 
     /// Write `data`, whole words and at most [`MAX_UPDATE_BYTES`], into `dst`
-    /// at `offset` when the command runs.
+    /// at `offset` when the command runs. The bytes are kept, charged to the
+    /// context, until the command buffer and every submission of it are done
+    /// with them.
     ///
     /// # Errors
     ///
-    /// [`Error::Foreign`] for a buffer of another context, and
-    /// [`Error::TooMany`] past [`MAX_UPDATE_BYTES`].
+    /// [`Error::Foreign`] for a buffer of another context,
+    /// [`Error::TooMany`] past [`MAX_UPDATE_BYTES`], [`Error::OverLimit`] or
+    /// [`Error::HeapFull`] where the bytes would pass the context's limit or
+    /// the heap, and [`Error::Lost`] or [`Error::Destroyed`] for a context
+    /// that can take no more.
     pub fn update_buffer(&mut self, dst: &Buffer, offset: u64, data: &[u8]) -> Result<(), Error> {
         let dst = self.named(dst)?;
         if data.len() > MAX_UPDATE_BYTES {
             return Err(Error::TooMany);
         }
-        let data = tairix_util::fallible::collected(data.len(), data.iter().copied())
+        let bytes = tairix_util::fallible::collected(data.len(), data.iter().copied())
             .ok_or(Error::OutOfMemory)?;
+        let charge = self
+            .shared
+            .model
+            .lock()
+            .host_charge(self.context, Recorded::held(&bytes))?;
         self.record(Command::Update {
             dst,
             offset,
-            data: Arc::new(data),
+            data: crate::shared(Recorded::new(bytes, charge))?,
         })
     }
 }
@@ -840,3 +1053,28 @@ impl fmt::Debug for CommandBuffer {
             .finish_non_exhaustive()
     }
 }
+
+/// How many of this thread's waits it made unflagged as parked, so a test
+/// can see that a poke during any of them would have woken it.
+#[cfg(test)]
+mod waits {
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static UNFLAGGED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn note(parked: bool) {
+        if !parked {
+            UNFLAGGED.with(|unflagged| unflagged.set(unflagged.get() + 1));
+        }
+    }
+
+    pub(super) fn unflagged() -> usize {
+        UNFLAGGED.with(Cell::get)
+    }
+}
+
+#[cfg(test)]
+#[path = "device_wake_tests.rs"]
+mod wake_tests;

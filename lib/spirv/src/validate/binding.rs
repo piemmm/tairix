@@ -14,6 +14,35 @@ use super::{Limit, Rule, Validator, MAX_BINDINGS, NONE};
 use crate::enumerant::{Decoration, Dim, ImageFormat, StorageClass};
 
 tairix_util::flags! {
+    /// The pipeline stages that see a resource.
+    pub struct Stages(u8) {
+        /// The vertex stage.
+        const VERTEX = 1;
+        /// The fragment stage.
+        const FRAGMENT = 1 << 1;
+        /// The compute stage.
+        const COMPUTE = 1 << 2;
+    }
+}
+
+impl Stages {
+    /// Every stage.
+    pub const ALL: Self = Self::VERTEX.with(Self::FRAGMENT).with(Self::COMPUTE);
+}
+
+impl super::Stage {
+    /// The stage as a set of one.
+    #[must_use]
+    pub const fn stages(self) -> Stages {
+        match self {
+            Self::Vertex => Stages::VERTEX,
+            Self::Fragment => Stages::FRAGMENT,
+            Self::Compute => Stages::COMPUTE,
+        }
+    }
+}
+
+tairix_util::flags! {
     /// How a resource is accessed.
     pub struct Access(u8) {
         /// Read: loaded from, sampled, fetched, gathered or read.
@@ -85,16 +114,21 @@ pub struct Binding {
     pub count: u32,
     /// An entry point's accesses, or what a layout allows.
     pub access: Access,
+    /// An entry point's own stage, or the stages a layout lets see it.
+    pub stages: Stages,
 }
 
 /// What a pipeline's layout provides: its bindings, by ascending set and
-/// binding, and the bytes of push constants it holds.
+/// binding, and the bytes of push constants it holds and the stages that see
+/// them.
 #[derive(Copy, Clone, Debug)]
 pub struct Layout<'a> {
     /// The bindings.
     pub bindings: &'a [Binding],
     /// The push-constant bytes.
     pub push_constants: u32,
+    /// The stages that see the push constants.
+    pub push_constant_stages: Stages,
 }
 
 /// Why an entry point and a layout disagree.
@@ -111,7 +145,10 @@ pub enum Disagreement {
     Count(u32, u32),
     /// An access the layout does not allow.
     Access(u32, u32),
-    /// More push-constant bytes than the layout holds.
+    /// A binding the layout does not let the entry point's stage see.
+    Stage(u32, u32),
+    /// More push-constant bytes than the layout holds, or push constants it
+    /// does not let the entry point's stage see.
     PushConstants,
 }
 
@@ -144,11 +181,14 @@ impl super::EntryPoint {
             if !have.access.contains(need.access) {
                 return Err(Disagreement::Access(at.0, at.1));
             }
+            if !have.stages.contains(self.stage.stages()) {
+                return Err(Disagreement::Stage(at.0, at.1));
+            }
         }
-        if self
-            .push_constants
-            .is_some_and(|bytes| bytes > layout.push_constants)
-        {
+        if self.push_constants.is_some_and(|bytes| {
+            bytes > layout.push_constants
+                || !layout.push_constant_stages.contains(self.stage.stages())
+        }) {
             return Err(Disagreement::PushConstants);
         }
         Ok(())
@@ -176,7 +216,11 @@ fn kind_agrees(need: BindingKind, have: BindingKind) -> bool {
 impl Validator<'_> {
     /// The resource bindings the call tree statically uses, and the bytes
     /// of push constants it reads.
-    pub(crate) fn resources(&mut self, reach: &Reach) -> Result<(Vec<Binding>, Option<u32>), Rule> {
+    pub(crate) fn resources(
+        &mut self,
+        reach: &Reach,
+        stage: super::Stage,
+    ) -> Result<(Vec<Binding>, Option<u32>), Rule> {
         let mut bindings: Vec<Binding> = Vec::new();
         let mut push_constants = None;
         for &(slot, access) in &reach.globals {
@@ -226,6 +270,7 @@ impl Validator<'_> {
                     kind,
                     count,
                     access,
+                    stages: stage.stages(),
                 },
             )
             .map_err(|r| r.rule)?;

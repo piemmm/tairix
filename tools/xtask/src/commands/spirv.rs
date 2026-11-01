@@ -90,11 +90,11 @@ pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
     let generated = generate(&ctx.workspace_root)?;
     let path = ctx.workspace_root.join(TABLES);
     if write {
-        eprintln!("xtask: [spirv --write] {TABLES}");
+        noteln!("xtask: [spirv --write] {TABLES}");
         return std::fs::write(&path, generated)
             .map_err(|e| format!("spirv: cannot write {}: {e}", path.display()));
     }
-    eprintln!("xtask: [spirv] {TABLES}");
+    noteln!("xtask: [spirv] {TABLES}");
     match std::fs::read(&path) {
         Ok(committed) if committed == generated.as_bytes() => Ok(()),
         _ => Err(format!(
@@ -280,6 +280,7 @@ struct Enumerant {
 
 struct ExtInst {
     number: u32,
+    name: String,
     operands: usize,
     capabilities: Vec<String>,
 }
@@ -544,6 +545,7 @@ fn glsl_of(glsl: &Json, capabilities: &Capabilities) -> Result<Vec<ExtInst>, Str
             })?;
         found.push(ExtInst {
             number,
+            name: name.to_string(),
             operands: operands.len(),
             capabilities: needs,
         });
@@ -599,6 +601,7 @@ fn generate(root: &Path) -> Result<String, String> {
     emit_enumerants(&mut out, &grammar.kinds, &names)?;
     emit_kinds(&mut out, &grammar.kinds, &names)?;
     emit_tables(&mut out, &grammar, &names)?;
+    emit_names(&mut out, &grammar);
     Ok(out)
 }
 
@@ -894,6 +897,49 @@ fn emit_tables(w: &mut String, grammar: &Grammar, names: &Names) -> Result<(), S
     }
     let _ = writeln!(w, "];");
     Ok(())
+}
+
+/// The grammar's names for the enumerants and the `GLSL.std.450`
+/// instructions, which the test assembler reads; no other build carries them.
+fn emit_names(w: &mut String, grammar: &Grammar) {
+    let mut enumerants: Vec<(&str, &str, u32)> = grammar
+        .kinds
+        .iter()
+        .flat_map(|(kind, (_, enumerants))| {
+            enumerants
+                .iter()
+                .map(move |e| (e.name.as_str(), kind.as_str(), e.value))
+        })
+        .collect();
+    enumerants.sort_unstable();
+    let gate = "#[cfg(any(test, feature = \"test-support\"))]";
+    let _ = writeln!(
+        w,
+        "\n/// Each enumerant's name, kind and value, by ascending name.\n\
+         {gate}\n\
+         pub(crate) static ENUMERANT_NAMES: [(&str, Kind, u32); {}] = [",
+        enumerants.len()
+    );
+    for (name, kind, value) in enumerants {
+        let _ = writeln!(w, "    (\"{name}\", Kind::{kind}, {}),", hex(value));
+    }
+    let mut glsl: Vec<(&str, u32)> = grammar
+        .glsl
+        .iter()
+        .map(|inst| (inst.name.as_str(), inst.number))
+        .collect();
+    glsl.sort_unstable();
+    let _ = writeln!(
+        w,
+        "];\n\n/// Each `GLSL.std.450` instruction's name and number, by ascending name.\n\
+         {gate}\n\
+         pub(crate) static GLSL_STD_450_NAMES: [(&str, u32); {}] = [",
+        glsl.len()
+    );
+    for (name, number) in glsl {
+        let _ = writeln!(w, "    (\"{name}\", {number}),");
+    }
+    let _ = writeln!(w, "];");
 }
 
 #[cfg(test)]

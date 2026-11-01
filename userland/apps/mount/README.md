@@ -14,7 +14,7 @@ tool holds no authority of its own. A device or volume source is not mounted
 ## Usage
 
 ```
-mount [-lrvw] [-t TYPE] [-o OPTIONS] [--] [IMAGE [TARGET]]
+mount [-lrvw] [-t LIST] [-o OPTIONS] [--] [IMAGE [TARGET]]
 
   (no operands)            list the mounted filesystems, of the types -t names
   IMAGE                    mount the disk image IMAGE, at /Storage/NAME
@@ -22,7 +22,7 @@ mount [-lrvw] [-t TYPE] [-o OPTIONS] [--] [IMAGE [TARGET]]
   IMAGE DIRECTORY          mount it, and show it at DIRECTORY too
   -r, --read-only          mount read-only (as -o ro)
   -w, --rw, --read-write   mount read-write, or not at all
-  -t, --types TYPE         the filesystem IMAGE must hold, or auto
+  -t, --types LIST         the filesystems IMAGE must hold one of, or auto
   -o, --options LIST       comma-separated: ro,rw,noexec,loop,name=NAME
   -v, --verbose            say where it was mounted
   -l, --show-labels        accepted for the listing, which carries no labels
@@ -30,10 +30,11 @@ mount [-lrvw] [-t TYPE] [-o OPTIONS] [--] [IMAGE [TARGET]]
 ```
 
 The options follow util-linux: the last of `-r`, `-w`, `-o ro` and `-o rw`
-wins, `-w` never falls back to read-only, and `-t` names a filesystem as the
-mount table does, or `auto` — with no operands, a util-linux type list the
-listing is filtered by. Every target is resolved and refused as itself, never
-as the image. An empty or unknown `-o` element is refused, as
+wins, `-w` never falls back to read-only unless a later `-r` takes it back,
+and `-t` is a util-linux type list — the filesystems an image must hold one
+of, each as the mount table names it, or `auto`; with no operands, the types
+the listing is filtered by. Every target is resolved and refused as itself,
+named as resolved, never as the image. An empty or unknown `-o` element is refused, as
 are `nosuid`, `nodev` and `exec`, which have nothing to restrict or are never
 granted. The exit status is util-linux's: `1` for a command line not
 understood, `2` for a listing or terminal that failed, `32` for a mount that

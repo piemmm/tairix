@@ -7053,6 +7053,24 @@ fn bring_up_keyboard_returns_a_directly_attached_keyboard() {
     assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
 }
 
+/// A report queue the heap cannot hold refuses the request as out of memory,
+/// and fixes no transfer length: memory back, the same request starts over.
+#[test]
+fn a_report_queue_that_cannot_be_sized_is_out_of_memory() {
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    device.bring_up().expect("the boot keyboard enumerates");
+    let mut buf = [0u8; INT_TRANSFER_MAX];
+    let queue = REPORT_QUEUE_CAP * BOOT_REPORT_LEN;
+    assert_eq!(
+        tairix_fuzzseed::meter::refusing_above(queue - 1, || {
+            device.next_report(0, BOOT_REPORT_LEN, &mut buf)
+        }),
+        Err(DriverError::OutOfMemory)
+    );
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
+}
+
 #[test]
 fn the_first_report_request_fixes_the_transfer_length() {
     let mem = shared_mem();
@@ -13916,72 +13934,10 @@ fn detaching_a_downstream_device_releases_its_dma_chunk() {
     );
 }
 
-/// Allocation counter behind the test harness's global allocator, so the report
-/// path can be *proved* allocation-free rather than argued to be.
-///
-/// The counters are **per thread**: this crate's unit tests share one binary and
-/// the harness runs them in parallel, so a process-global counter would fold
-/// unrelated tests' allocations into the measured window and the budget would
-/// pass or fail by scheduling luck. Every allocating method is counted,
-/// `realloc`/`alloc_zeroed` included, so a growing `Vec` reintroduced on the
-/// path cannot slip past an `alloc`-only counter.
-mod alloc_counter {
-    use core::alloc::{GlobalAlloc, Layout};
-    use core::cell::Cell;
-    use std::alloc::System;
-    use std::thread::LocalKey;
-    use std::thread_local;
-
-    // `Cell<usize>` has no destructor, so these are const-initialised with no
-    // TLS teardown hook — the access itself never allocates and so cannot
-    // recurse into the allocator. `try_with` keeps a late allocation during
-    // thread teardown from panicking.
-    thread_local! {
-        static ALLOCS: Cell<usize> = const { Cell::new(0) };
-        static FREES: Cell<usize> = const { Cell::new(0) };
-    }
-
-    fn bump(counter: &'static LocalKey<Cell<usize>>) {
-        let _ = counter.try_with(|count| count.set(count.get().saturating_add(1)));
-    }
-
-    /// Allocations charged to the calling thread so far.
-    pub(super) fn allocs() -> usize {
-        ALLOCS.with(Cell::get)
-    }
-
-    /// Frees charged to the calling thread so far.
-    pub(super) fn frees() -> usize {
-        FREES.with(Cell::get)
-    }
-
-    pub(super) struct Counting;
-
-    // SAFETY: every method forwards to the system allocator unchanged; the only
-    // added behaviour is a thread-local counter bump over a destructor-free
-    // `Cell`, which allocates nothing and cannot affect memory safety.
-    unsafe impl GlobalAlloc for Counting {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            bump(&ALLOCS);
-            unsafe { System.alloc(layout) }
-        }
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            bump(&FREES);
-            unsafe { System.dealloc(ptr, layout) }
-        }
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            bump(&ALLOCS);
-            unsafe { System.alloc_zeroed(layout) }
-        }
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            bump(&ALLOCS);
-            unsafe { System.realloc(ptr, layout, new_size) }
-        }
-    }
-}
-
+/// The metered system allocator, so the report path can be proved
+/// allocation-free and a refused reservation can be driven.
 #[global_allocator]
-static COUNTING_ALLOC: alloc_counter::Counting = alloc_counter::Counting;
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
 /// Bring up an onboard-hub topology (onboard hub, keyboard and mouse behind
 /// it), settle the report endpoints, and post one mouse-move report — the state
@@ -14077,16 +14033,9 @@ fn a_report_interrupt_allocates_nothing() {
     // never touches the heap. Growth happens on attach/detach alone.
     let mem = shared_mem();
     let mut device = hub_with_a_mouse_report_posted(&mem);
-    let allocs = alloc_counter::allocs();
-    let frees = alloc_counter::frees();
-
-    let _ = one_report_interrupt_cost(&mut device);
-
+    let (_, metering) = tairix_fuzzseed::meter::metered(|| one_report_interrupt_cost(&mut device));
     assert_eq!(
-        (
-            alloc_counter::allocs() - allocs,
-            alloc_counter::frees() - frees,
-        ),
+        (metering.allocations, metering.frees),
         (0, 0),
         "no allocation or free on the report path"
     );

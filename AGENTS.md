@@ -999,13 +999,13 @@ an update to this section.
   1. `cargo fmt --all` (and verify with `cargo fmt --all --check`).
   2. `cargo xtask ci` — the full pull-request pipeline (clippy, deps-check,
      cfg-check, board-check, the test matrix, docs-check, `cargo deny`, supply-chain,
-     the per-PR `--quick` fuzz and proptest gates, the `miri` and `loom`
+     the per-PR `--once` fuzz and proptest gates, the `miri` and `loom`
      oracles over their enrolled sets (§19.11), model-check, spec-review,
      crypto constant-time, and abi-check). Run this **exactly once**: the
      pipeline is internally idempotent and runs each check a single time, so a
      second consecutive `cargo xtask ci` is pure waste and is forbidden.
   3. A fuzzing run of **at least 5 seconds** per harness:
-     `cargo xtask fuzz --secs 5` (this is on top of the `--quick` gate that
+     `cargo xtask fuzz --secs 5` (this is on top of the `--once` gate that
      `cargo xtask ci` already runs).
   4. Anything `.github/workflows/ci.yml` runs **beyond `cargo xtask ci`
      itself** that steps 1–3 above do not already cover — i.e. the parallel
@@ -1511,7 +1511,8 @@ You are not exempt from any rule above. In addition:
    second `cargo xtask ci` (see §7's "Definition of done").
    `tools/ci/soak.sh` is run on a developer machine (that's us) for a
    **maximum of 20 seconds** — `tools/ci/soak.sh both --secs 20` — never the
-   unbounded 24 h nightly budget, which belongs to the CI/soak host alone.
+   nightly window or the unbounded 24 h soak, which belong to the CI/soak
+   host alone.
    Quote the actual output. Any failure found — yours or pre-existing — is
    fixed before the task is done. **Watch each run to completion and report
    the status it actually produced**, per §7's rule of that name: wait in the
@@ -1659,8 +1660,8 @@ You are not exempt from any rule above. In addition:
     | Menus: who owns a menu's pixels and behaviour, the one-menu-at-a-time rule, the app's request/outcome contract, artwork on rows, the *Info* sheet | `plans/NEW-MENUS.md` |
     | Tooltips: what an app declares (a window-local region and one line) versus what the seat owns (the dwell, the placement, the pixels, the lifetime), and the input-transparent overlay a plate is drawn in | `plans/TOOLTIPS.md` |
     | Display / GPU acceleration: driver-allocated scan-out buffers, hardware layer compositing, the `AcceleratedDisplay`/`AccelLayer` ABI, the cursor plane, virtio-gpu, HVS, flips and their completion, the kernel console a display driver hosts | `plans/FIX-DISPLAY-ACCELERATION.md` |
-    | Reaching a GPU for *render and compute* work: the device-neutral `lib/gpu` seam, the memory/submission/isolation model, the virtio-gpu, Venus and V3D backends, presentation, why the object model is Vulkan's rather than OpenGL's, and where the desktop's own 2D work runs — the CPU, the display engine's planes (what a layered present copies, band-free blending, a frosted window as planes, the fade as a layer's opacity) or a GPU | `plans/GPU.md` |
-    | Shader programs: the SPIR-V IR, the validator that admits a module, the Rust builder and the pinned first-party set, the WGSL front end, and the sandbox the compiling path runs in | `plans/SHADER.md` |
+    | Reaching a GPU for *render and compute* work: the device-neutral `lib/gpu` seam, the memory/submission/isolation model, the software backend's SPIR-V interpreter and the one software 3D pipeline it drives in `lib/raster`, the virtio-gpu, Venus and V3D backends, presentation, why the object model is Vulkan's rather than OpenGL's, and where the desktop's own 2D work runs — the CPU, the display engine's planes (what a layered present copies, band-free blending, a frosted window as planes, the fade as a layer's opacity) or a GPU | `plans/GPU.md` |
+    | Shader programs: the SPIR-V IR, the validator that admits a module, the lowering view and specialization every backend lowers from, the Rust builder and the pinned first-party set, the WGSL front end, and the sandbox the compiling path runs in | `plans/SHADER.md` |
     | Desktop redraw speed without hardware acceleration: compositor occlusion/opaque runs, per-control damage, the frosted-backdrop cache, present batching, frame pacing, and CPU-dispatched raster kernels | `plans/FIX-DESKTOP-SPEEDUP.md` |
     | Civil time zones: the vendored IANA rules and CLDR-derived regions, the zone store compiled with `zic`'s semantics and held to its output, the `lib/tz` engine, which zone and region a reader is in, how a process that may open no file is delegated the store, and the one renderer of a local reading | `plans/TIMEZONES.md` |
     | Setting the clock: the NTP client service, the sync-decision policy (unset/implausible/stale-boot/refresh cadence), NTP-server politeness, RTC drivers and the wall clock's provenance ladder, and the enable/disable surfaces | `plans/TIMESYNC.md` |
@@ -2863,10 +2864,13 @@ on untrusted input. It is as non-negotiable as §2.
 - Every IPC endpoint (§4), every syscall (§9), every parser of
   untrusted input (§19.5), and every public `lib/abi` decoder has a
   `cargo-fuzz` (or equivalent in-tree harness) target.
-- `cargo xtask fuzz --quick` runs each harness for ≥ 5 s on every
-  PR and is part of `cargo xtask ci` (§7). The short per-PR budget is
-  a practicality concession; the nightly soak is the real coverage.
-- A nightly `cargo xtask fuzz --soak` runs each harness for ≥ 24 h.
+- `cargo xtask ci` (§7) runs each harness once on every PR
+  (`fuzz --once`, a fresh logged seed), and the definition of done adds
+  `cargo xtask fuzz --secs 5`, at least 5 s per harness. The short
+  per-PR budget is a practicality concession; the nightly soak is the
+  real coverage.
+- A nightly `cargo xtask fuzz --soak` runs each harness to the close of
+  the seven-hour nightly soak window.
   Any crash, hang, or sanitiser report blocks the next release.
 - Crashing inputs are added to the crate's regression corpus
   alongside a unit test (§7).
@@ -2879,9 +2883,10 @@ on untrusted input. It is as non-negotiable as §2.
   property tests.
 - **Bronze (mandatory):** every public function in these crates has a
   `proptest`-style stateful model and runs under `cargo xtask
-  proptest` for ≥ 5 s per change. The short per-PR budget is a
-  practicality concession; the nightly soak (`--soak`, ≥ 24 h per
-  model) is the real coverage.
+  proptest` on every change (`--once` in `cargo xtask ci`, a fresh
+  logged seed). The short per-PR budget is a practicality concession;
+  the nightly soak (`--soak`, each model to the close of the seven-hour
+  nightly window) is the real coverage.
 - **Silver (target):** a TLA+ (or equivalent) model of the capability
   + IPC state machine is kept in sync with the code under
   `docs/src/security/model/`. `cargo xtask ci` runs the model

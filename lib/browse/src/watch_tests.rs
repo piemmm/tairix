@@ -428,6 +428,27 @@ fn drains_are_coalesced_and_their_updates_fold_until_adopted() {
     );
 }
 
+/// A reader serving its own share drains only the folders it admits, and the
+/// drain it passes over stays wanted for the reader whose it is.
+#[test]
+fn a_reader_drains_only_the_folders_it_admits() {
+    let mut watches = Watches::new();
+    installed(&mut watches, 0, &["Storage", "stick"], 1);
+    installed(&mut watches, 1, &["Users"], 2);
+    assert!(watches.want_drain(0) && watches.want_drain(1));
+    let home = |location: &[String]| location.first().is_some_and(|root| root == "Users");
+    assert_eq!(watches.next_drain_where(home), Some((1, at(&["Users"]), 2)));
+    assert!(watches.next_drain_where(home).is_none());
+    assert!(
+        !watches.want_drain(0),
+        "the drain passed over is still wanted, so it is not asked twice"
+    );
+    assert_eq!(
+        watches.next_drain(),
+        Some((0, at(&["Storage", "stick"]), 1))
+    );
+}
+
 #[test]
 fn a_drain_of_a_location_the_consumer_left_is_dropped() {
     let mut watches = Watches::new();
@@ -457,7 +478,8 @@ fn closing_or_leaving_hands_the_watch_back_to_release() {
 #[test]
 fn leaving_a_volume_releases_what_lies_on_it_and_nothing_else() {
     let mut watches = Watches::new();
-    let on_disk = |at: &[String]| at.starts_with(&self::at(&["Storage", "disk"]));
+    let disk = at(&["Storage", "disk"]);
+    let on_disk: &[&[String]] = &[disk.as_slice()];
     installed(&mut watches, 0, &["Storage"], 1);
     watches.offer(0, &at(&["Storage", "disk"]), 2);
     assert_eq!(

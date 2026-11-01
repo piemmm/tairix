@@ -272,7 +272,7 @@ pub use time::{
     RELEASE_EPOCH_SECS, SECS_PER_DAY,
 };
 pub use volume::{
-    validate_volume_name, VolumeAttachRequest, VolumeDetachRequest, VolumeFsType,
+    validate_volume_name, DetachMode, VolumeAttachRequest, VolumeDetachRequest, VolumeFsType,
     VOLUME_ATTACH_MAX_LEN, VOLUME_DETACH_LEN, VOLUME_ID_LEN, VOLUME_NAME_MAX,
 };
 pub use waitset::{WaitSetOp, WaitSourceKind, WAITSET_CHILD_ANY, WAITSET_TIMEOUT_NONE};

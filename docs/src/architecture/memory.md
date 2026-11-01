@@ -1311,9 +1311,10 @@ process's threads (`plans/PI.md` 5d-0-ii (b′); `plans/THREADS.md` decision 4).
   allocation's own strong count. A pointer to a `ProcessSpace` that was never
   inside an `Arc` would turn that increment into an out-of-bounds write to the
   bytes preceding the value, so the type refuses to be built from one. A
-  dispatch step that *refuses* a task (a foreign suspension point) returns
-  before publishing anything, so a reaped control block can never be named by
-  a per-CPU slot.
+  dispatch step that finds a foreign suspension point returns before the
+  switch-in hook or any publication, so the corrupt-stack report that follows
+  finds nothing on the CPU naming the task and walks the dispatcher's own
+  stack.
 - **The production producers.** `kernel/core::live_producer` provides
   `LiveMemMap<A>` (`MemMap`) and `LiveMmioMap<A>` (`MmioMapFacility`); each
   holds a `&'static A` (mirroring `KernelProcessWait`), reads
@@ -2264,14 +2265,17 @@ and its architecture-neutral core lands here (staged in
     software fault path. `flags::ACCESSED` is the single definition of
     bit 5.
   - **aarch64**: the Access Flag (AF, descriptor bit 10) is
-    software-managed — cortex-a57/a72 (the boards and the default QEMU
-    CPU) lack ARMv8.1 HAFDBS, so an access to a valid leaf whose AF is
-    clear raises an Access-Flag fault. `test_and_clear_accessed` clears AF
-    (+ TLBI); the synchronous-exception path
-    (`is_access_flag_fault` → `paging::set_accessed_flag_in_active`) sets
-    AF back on the faulting leaf and retries. Both data and instruction
-    aborts, from either EL, are handled; a non-AF fault falls through
-    unchanged (fail closed).
+    software-managed — the port leaves `TCR_EL1.HA` clear, so on every
+    part an access to a valid leaf whose AF is clear raises an Access-Flag
+    fault. `test_and_clear_accessed` clears AF (+ TLBI); the
+    synchronous-exception path (`is_access_flag_fault` →
+    `paging::set_accessed_flag_in_active`) sets AF back on the faulting
+    leaf with no TLBI — an entry that faults on its Access flag is never
+    cached — ordered by `dsb ishst`, and retries. A leaf another CPU's
+    fix-up set first is retried as it stands, not sent to the fault
+    resolver. Both data and instruction aborts, from either EL, are
+    handled; an address no valid leaf covers falls through unchanged (fail
+    closed).
   - **riscv64**: the Accessed bit (A, PTE bit 6) is likewise
     software-managed — RISC-V leaves A/D *update* implementation-defined
     (a Svade part faults, a Svadu part updates in the walk).
@@ -2310,7 +2314,7 @@ and its architecture-neutral core lands here (staged in
   drives the full clock transition on real (emulated) hardware — a fresh
   mapping's bit, a clear making the page read cold, a genuine access
   re-setting it (through the software fault path on aarch64/riscv64,
-  proven because the aarch64 run uses cortex-a72 without HAFDBS and the
+  proven because the aarch64 run is pinned to cortex-a72, without HAFDBS, and the
   riscv64 run pins `svade=true,svadu=false`), and a re-access after the
   next clear — plus the misaligned / unmapped fail-closed rejects and the
   `Supported` declaration.
@@ -2915,9 +2919,9 @@ and reading back a whole page through the live direct map — on the metal.
   over the host doubles, asserting fail-closed restores, faithful
   untampered round-trips, and books that balance to zero after every
   cycle.
-- **Loom tests** — `kernel/mem/tests/loom.rs` model-checks concurrent
-  allocation, gated on `RUSTFLAGS="--cfg loom"` exactly like
-  `lib/sync`.
+- **Loom tests** — `kernel/mem/tests/loom.rs` models concurrent
+  allocation. It is built only under `RUSTFLAGS="--cfg loom"`, and no stage
+  runs it until `plans/OPEN-DEFECTS.md` D131 is resolved.
 
 [`BootMemoryMap`]: ../../tairix_kernel_mem/struct.BootMemoryMap.html
 [`AddressSpace<P: PageTable>`]: ../../tairix_kernel_mem/struct.AddressSpace.html

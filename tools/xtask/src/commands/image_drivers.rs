@@ -1698,10 +1698,10 @@ pub fn optical_driver_store_files(
 
 /// The signed **disk-image set** — the ADFS, AmigaDOS and ISO 9660 drivers
 /// the disk-image vertical's three images are served by — each paired with
-/// its store path. An image volume's node hangs off the virtual bus, so no
-/// bus or device driver rides with them, and the console stays the text
-/// console the serial script drives. Built once per xtask process and
-/// memoised.
+/// its store path. An image volume's node hangs off the kernel's
+/// image-volumes node, which no driver binds, so no bus or device driver rides
+/// with them, and the console stays the text console the serial script drives.
+/// Built once per xtask process and memoised.
 ///
 /// # Errors
 ///

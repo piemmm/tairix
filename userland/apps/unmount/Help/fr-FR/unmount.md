@@ -28,9 +28,13 @@ il est lié : il se nomme donc par l'endroit où il est monté sous
 
 Un volume dont le périphérique a été retiré alors qu'il portait
 encore des écritures non validées reste visible comme
-`unavailable-dirty` (ou `unavailable-lost`) dans la liste des
-montages, et un `unmount` simple refuse : les données retenues sont
-conservées pour une réinsertion vérifiée. Un `unmount` simple est
+`unavailable-dirty` dans la liste des montages, et un `unmount` simple
+refuse : les données retenues sont conservées pour une réinsertion
+vérifiée. Ce refus vaut également pour un volume réinséré dont on n'a
+pas pu établir qu'il était inchangé (`recovery-conflict`), qui conserve
+encore ces données, et pour un volume dont les écritures non validées
+n'ont pas pu être gardées (`unavailable-lost`), afin que leur perte
+soit reconnue plutôt que passée sous silence. Un `unmount` simple est
 aussi refusé pour un volume sur lequel des fichiers sont encore
 ouverts, ou qu'un programme a pour répertoire de travail. `--force`
 est la sortie délibérée — les fichiers encore ouverts sur le volume en

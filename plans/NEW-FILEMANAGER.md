@@ -62,9 +62,10 @@ which the drift guard enforces.
 | FM19 | A window follows every change any program makes to the folder it shows, through the directory watch, repainting only the rows that moved | done |
 | FM21 | A `/Storage` volume is drawn as its drive, and the rail keeps a degraded or recovering volume | done |
 | FM22 | A drive's Properties: kind, filesystem, options, capacity as a ring, activity as a live trace, health, read off the loop | done |
-| FM20 | Nothing touches a disk on the window's loop: long operations on an operations worker, every one-shot write on the reader by ticket, the opening ladder and the mount list on the reader, and every refusal stated in the window | done |
+| FM20 | Nothing touches a disk on the window's loop: long operations on operations workers, every one-shot write on a reader by ticket, the opening ladder and the mount list on the readers, and every refusal stated in the window | done |
 | FM23 | The file manager's own settings, kept in its app-data store and edited in a settings window of its own | done |
 | FM24 | Disk images: activating one mounts it and opens its volume, *Mount Read-Only* and *Eject* in the context menu, *Eject* on the rail's own menu (`plans/DISK-IMAGES.md` DI5) | done |
+| FM25 | A slow or failing device holds up only its own work: every read, write and operation on its volume's lane, one worker to a lane, with a spare whenever every worker is busy | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
@@ -78,7 +79,7 @@ takes the chosen application (`TakeDropTarget`) and opens the file for it
 exactly as its "Open With" does, so no path and no authority crosses to the
 desktop. Drops onto its own windows and the desktop are
 `plans/FILES-INTERACTION.md` FI9. Every document open — activation, "Open With", a drop —
-runs on the reader worker (`Reads`), FIFO: resolving the application waits
+runs on the reader of the document's volume (`Reads`), FIFO: resolving the application waits
 for the bundle scan when it has not landed, and the `fs_open` of the document
 never runs on the loop that owes the window a frame. A document is opened
 read-write for an application whose manifest edits documents, where the user
@@ -159,14 +160,14 @@ folder. A watch the kernel refuses leaves the listing correct but not live,
 and says so.
 
 **FM20 — nothing waits on a disk.** A delete, a move to Trash and a paste run
-on an operations worker, a thread beside the reader, one bounded unit at a
-time and one operation after another in the order asked
-(`operations::OperationDesk`): the worker posts its count and checks for a
+on an operations worker, a thread beside the readers, one bounded unit at a
+time, those sharing a volume one after another in the order asked
+(`operations::OperationDesk`, FM25): the worker posts its count and checks for a
 cancel between units, the loop parks and shows a new count at most once a
 frame, and an answer reaches only the window that asked — a closed window's
 operation stops and its answer is dropped. Every one-shot write — a rename,
 New ▸, the Properties mode, owner and attribute commits, the Trash folder, and
-the reads that word a delete's confirmation — is one `WriteJob` on the reader,
+the reads that word a delete's confirmation — is one `WriteJob` on the reader serving its volume,
 answered by ticket to the window that keeps its live state until it lands.
 A window's first listing is asked of the reader before the window exists, and
 the window opens, fitted to it, once it lands; a refused listing moves it down
@@ -386,7 +387,7 @@ delete the `files.app` `Run` binary resolves the user's home from the exported
 `HOME`, ensures the fixed `Library/Trash` subtree (shared `trash::trash_dir`),
 and — when Trash and every target share a volume — carries the removal out as a
 recoverable **move to Trash** (`Job::Trash`: one `fs_rename` per target into its
-collision-free `trash_dest_path`, carried out by the operations worker),
+collision-free `trash_dest_path`, carried out by an operations worker),
 falling back fail-closed to the irreversible
 removal when Trash is unavailable or cross-volume. The delete
 question is disposition-aware (`DeleteDisposition` passed to
@@ -415,7 +416,7 @@ and FM7b's app-side Delete verb (the `Delete`-key confirmation alert
 + an engine removal per target under the user's own identity),
 FM7b's app-side **progress + cancel** for both Delete and copy/paste (each
 confirmed operation a `Job` — a `Removal`, a `TrashRun` or a `Paste` — the
-operations worker carries out a unit at a time, the window
+operations workers carry out a unit at a time, the window
 drawing the shared `lib/browse::progress` panel and taking a cancel between
 units, so even a large recursive delete or a multi-gigabyte copy never freezes
 the window, FM20),
@@ -552,7 +553,7 @@ FI10) is a submenu of it; the read-only picker opens no write menu. **Mount
 Read-Only** (a disk image) and **Eject** (a volume the user attached, a disk
 image's or a share's) join it, each disabled with its reason where it cannot
 act, and a rail row's own menu holds Open and Eject; a mount goes to the mount
-worker, an eject to the reader once the app has let go of the volume (FM24).
+worker, an eject to its volume's reader once the app has let go of the volume (FM24).
 
 FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
 decision — descend / launch a bundle / open a file, host-proven), and
@@ -597,24 +598,43 @@ user pick any. See FM6b below.
   the engine.
 
 - **The window's reads run off its loop** (`AGENTS.md` §28). Every unbounded read
-  the app makes runs on one reader thread: the directory the user navigated to
+  the app makes runs on a reader: the directory the user navigated to
   (through `ListingDesk<FilesClient>`, committed by `Browser::resume`), the
   icon artwork every visible tile draws (recorded on `tairix_icon::ArtworkDesk`
   from inside the paint), the folder cue every visible folder draws (likewise
   recorded from inside the paint and answered a frame later, so the paint
   performs no I/O at all), and the three-program-store walk the *Open With…*
-  chooser is built from. They share one worker rather than taking one each —
-  the app browses one place at a time, so these are never concurrent workloads
-  — and the sharing is what gives the order they are served in a single stated
-  answer: the listing first (the user navigated and is waiting), then the
-  artwork (which the listing's own tiles are drawn from), then the cues (which
-  decorate a listing already shown), then the bundle scan (which no frame
-  depends on). Nothing starves: each request set is finite and refilled only by
-  the user asking again.
+  chooser is built from. Within a volume's lane they are served in one stated
+  order (`deferred::READ_ORDER`): the listing first (the user navigated and is
+  waiting), then the artwork (which the listing's own tiles are drawn from),
+  then the cues (which decorate a listing already shown), then the bundle scan
+  (which no frame depends on). Nothing starves: each request set is finite and
+  refilled only by the user asking again.
+  - **FM25 — one worker to a volume.** Each read, one-shot write and long
+    operation runs on the lane of the volume it touches (`lanes::Lane`),
+    routed through the namespace's view list (`lanes::Routes` over
+    `tairix_procinfo::covering`) re-read with the places, so routing touches no
+    device; work on no listed place has a lane of its own, and a place no
+    published volume answers for another. One reader serves a lane at a time,
+    so an eject waits for the read under way on its own volume alone; whenever
+    every reader is busy a spare is started, and one finding two waiting leaves
+    (`lanes::Crew`), so the readers follow the volumes the windows show. A
+    reader takes its own lane's next job of each kind first but an earlier kind
+    on another volume before it (`deferred::first_in_order`), and a window's
+    reads under way are kept by what each was taken for, so its move off a hung
+    device is read at once. Operations sharing a volume run in the order asked
+    and never overtake one another; one sharing none starts at once on a worker
+    of its own (`operations::OperationDesk`), and a finished one's files close
+    before the lock is taken for its answer (`operations::carry`). The decoders
+    are pooled across readers, no more decoding at once than fit in one
+    document decoder's share and never fewer than one (`lanes::Decodes`), and
+    share one thumbnail store,
+    held only for a lookup or an insert. A device that hangs therefore stalls
+    only the work aimed at it.
   - A window opens once its first listing lands; a refused listing moves it
     to the next candidate location (FM20).
-  - Every one-shot write rides the reader thread too, answered by ticket; each
-    step of a delete, paste or move to Trash runs on the operations worker
+  - Every one-shot write rides its volume's reader too, answered by ticket;
+    each step of a delete, paste or move to Trash runs on an operations worker
     (FM20).
   - A kernel that grants no thread, or a pipe it refuses, leaves the reads on
     the loop, stated once: slower under load, never wrong.
@@ -824,13 +844,15 @@ without a second draw path.
 
 **The decode is never on the event loop at all.** `crate::icons::IconPipeline`
 is the manager's paint side: the shared reclaim-governed `ArtworkCache` bound to
-the resolver its misses go to. That resolver is the reader thread's
+the resolver its misses go to. That resolver is the readers'
 `tairix_icon::ArtworkDesk`, the same deferred-decode desk the desktop session
 uses (`plans/FIX-DESKTOP.md` DESK-8/DESK-12). A tile that misses records the
-decode and draws its built-in glyph; the reader takes the job, reads and
-decodes it with nothing held (in its **own** sandbox child, so no sandbox
-handle crosses a thread), delivers, and nudges the loop once its artwork queue
-drains. The desk names what landed, and each window repaints only the slots
+decode and draws its built-in glyph; the reader serving the artwork's volume
+takes the job, reads and decodes it with nothing held, through a decoder (a
+sandbox child of the app's own) taken from those no reader is using and put back
+after, delivers, and nudges the loop once its volume's share of the artwork
+queue drains. Every decoder shares one thumbnail store, held only for a lookup
+or an insert. The desk names what landed, and each window repaints only the slots
 drawn through it (`render::manager_art` walks every picture a window draws, as
 the paint draws it), reporting the rest as still shown so the thumbnail sweep
 keeps what any window shows. While a paste writes an item the desk holds every
@@ -1039,7 +1061,8 @@ a chain up: `chrome::context_menu` declares the root plate — Display ▸, the
 selection's own submenu (`File ‘notes.txt’`, the name shortened in the middle
 with its extension kept, or `Selection`; disabled with its reason when nothing
 is selected), New ▸, Select All, Clear Selection, Paste — and on the
-selection's submenu Open, Open With…, Get Info…, Rename, Cut, Copy and Delete,
+selection's submenu Open, Open With…, Mount Read-Only, Eject, Get Info…,
+Rename, Cut, Copy and Delete,
 each command its `ContextCommand::label()` + `shortcut()` caption, *disabled
 with its reason* — never hidden — when the model reports it inapplicable, so a
 plate's shape does not move with the selection; the `Run` binary sends it as an
@@ -1097,8 +1120,8 @@ binary supplies the inline text editor and the `fs_rename` seam.
   (spelling + clash-with-a-different-sibling + no-op `Unchanged`).
   The rename is transactional and fail-closed — `prepare_rename` validates
   before any syscall and spells both paths, the app runs the `fs_rename` under
-  the user's own identity (**no new capability**) on its reader thread rather
-  than its event loop, and `finish_rename` re-lists and follows the selection
+  the user's own identity (**no new capability**) on the reader serving its
+  volume rather than its event loop, and `finish_rename` re-lists and follows the selection
   to the new name; a VFS refusal leaves the listing untouched and is surfaced as
   `RenameError::Refused(errno)` (§2.24, §5.4). The read-only picker composes
   the same `Browser` and never calls the write path.

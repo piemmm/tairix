@@ -76,10 +76,10 @@ that may change them.
 
 **Storage** lists every mounted volume but another user's private one: where
 it is mounted, its filesystem, its device and medium, how full it is, and
-whether it is healthy. It is a
-report, not a control — mounting and unmounting are the file manager's and
-the `mount` command's — and a volume whose format keeps no fixed capacity
-says so rather than showing a bar. `df` reports the same figures at a shell.
+whether it is healthy. It is a report, not a control — mounting and
+unmounting are the file manager's and the `mount` command's — and a volume
+whose format keeps no fixed capacity says so rather than showing a bar. `df`
+reports the same figures at a shell.
 
 **Users & Groups** shows your own account, every account's name and user id,
 and the machine's groups without asking for anything: a principal may read its
@@ -108,8 +108,8 @@ and `Enter` opens the row. `Right` and `Left` open and close the list of the
 category under the cursor. A window too narrow for the sidebar sheds it, and the
 leading crumb of the location trail then lists the categories.
 
-It is launched from the *Settings…* row of the desktop's system menu, from the
-desktop's Program Library, or by name from a shell. It requires a running
+It is launched from the *Settings…* row of the desktop's system menu, or from
+a shell by its path, `/System/Components/settings.app`. It requires a running
 graphical session: without one the window channel is unreachable and it
 reports the refusal on the standard error stream and exits.
 

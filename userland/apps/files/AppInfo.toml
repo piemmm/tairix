@@ -5,9 +5,11 @@
 # it at bring-up in its core role and launches it again to open a folder the
 # user activated.
 # The capability list is the bundle's request: CAP_CONSOLE_WRITE for its
-# fail-loud stderr diagnostics, CAP_FS_ACCESS for the directory listings
-# it browses (every read is still permission-checked per inode under the
-# launching user's identity), CAP_SHM to create and grant the zero-copy
+# fail-loud stderr diagnostics, CAP_FS_ACCESS for what it does with the
+# user's files — listing, opening, copying, moving, renaming and removing
+# them, and mounting the disk images among them, which an image attach asks
+# of its caller — every call still permission-checked per inode under the
+# launching user's identity, CAP_SHM to create and grant the zero-copy
 # window frame region the desktop session maps, and CAP_PROC_SPAWN for
 # the app's two spawns: launching an activated <Name>.app bundle through
 # the ordinary signed app-load gate (double-click / Enter on a bundle

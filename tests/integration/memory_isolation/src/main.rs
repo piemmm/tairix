@@ -129,8 +129,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     };
     // Install the secret mapping through the Arch HAL MMU surface
     // (`tairix_arch_api::mmu::AddressSpace::map_page`), the path the
-    // architecture-neutral kernel uses, rather than the port's inherent
-    // `map_4k` (`plans/WIRING.md` W5b).
+    // architecture-neutral kernel uses (`plans/WIRING.md` W5b).
     if victim
         .map_page(
             SECRET_VADDR,

@@ -135,6 +135,32 @@ fn an_events_chooser_names_what_it_plays() {
         .is_some_and(|note| note.starts_with("gone.flac cannot be read")));
 }
 
+/// A chosen file is named as shown, in its chooser and in the note that it
+/// cannot be read, so what hides in its name cannot make it read as another.
+#[test]
+fn a_chosen_files_name_is_shown_with_what_hides_in_it() {
+    let mut files = [SoundFile::Theme; 13];
+    files[SoundEvent::Error.index()] = SoundFile::Chosen("bell\u{202e}.flac");
+    files[SoundEvent::Info.index()] = SoundFile::Unavailable("gone\u{202e}.flac");
+    let reading = EffectsReading::of(
+        &SoundReading {
+            document: "",
+            files,
+        },
+        alloc::vec![String::from("TAIRiX")],
+    )
+    .expect("a document the registry reads");
+    let groups = groups(Some(&reading)).0;
+    assert_eq!(
+        chooser(&groups, SoundEvent::Error).0[1],
+        "bell\u{fffd}.flac"
+    );
+    let info = &groups[1].rows()[event_row(SoundEvent::Info)];
+    assert!(info
+        .description()
+        .is_some_and(|note| note.starts_with("gone\u{fffd}.flac cannot be read")));
+}
+
 /// While the desktop makes no sound none of its other settings applies.
 #[test]
 fn every_row_but_the_switch_waits_on_it() {

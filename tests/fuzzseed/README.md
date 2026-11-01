@@ -22,9 +22,29 @@ filesystem soak. It is the single place (`AGENTS.md` §2.2) that:
   exactly from its seed. A private generator anywhere else is a defect;
 - owns the **one metered allocator** a host test installs as its global
   allocator to hold a call to an allocation bound or a graceful refusal
-  (`meter::Metered`, `meter::metered`, `meter::refusing_above`): every figure
+  (`meter::Metered`, `meter::metered`, `meter::refusing_above`,
+  `meter::refusing_after`, which grants a call its first requests and refuses
+  the rest, as a heap running out partway does): every figure
   is the calling thread's, so neither the harness's own threads nor tests
-  running beside a measurement charge it.
+  running beside a measurement charge it;
+- owns the **one walk of a crate's own sources** the tests that pin code
+  against them read (`sources::crate_sources`, `unlisted_assembly`,
+  `is_assembly`): every `.s` file and every `.rs` file but a `*_tests.rs`
+  module, so a pin's needles never match themselves;
+- owns the **one lexer of inline-assembly invocations** those pins read
+  (`asm::invocations`, `bindings`, `template_instructions`,
+  `mnemonic`), so no port re-derives where a block ends or what it binds;
+- owns the **one scratch directory** a host test writes a tree into
+  (`scratch::Scratch`): made private to its user by a create that refuses
+  anything already at its name, named apart from every other in the process
+  however coarse the clock, and removed with what it holds once dropped;
+- owns the **one document generator** for a closed settings registry's fuzz
+  harness (`registry::registry_document`): whole lines drawn from the
+  registry's table, one document in `POISONED_ONE_IN` carrying a value its
+  key refuses;
+- with the `proptest` feature, owns the **one stateful-model runner**
+  (`prop::drive`, `prop::config`): the seed resolved and logged before the
+  first case, then the smoke run or a budgeted soak off one continuing RNG.
 
 It lives under `tests/` — not `lib/`, which is reserved for code that ships
 inside TAIRiX — and is consumed only as a `[dev-dependencies]` entry of the

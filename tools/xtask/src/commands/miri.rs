@@ -27,13 +27,12 @@
 //! names: a developer on one arch and a runner on another do not agree.
 
 use std::ffi::OsString;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
+use crate::children::Children;
 use crate::commands::parallel::{self, Job};
 use crate::commands::seed;
-use crate::{
-    await_within, effective_timeout, spawn_in_own_group, Context, DEFAULT_COMMAND_TIMEOUT,
-};
+use crate::{output_or_reason, Context};
 
 /// Which of a crate's test targets the oracle interprets.
 ///
@@ -125,14 +124,10 @@ impl Scope {
         }
     }
 
-    /// The arguments the test binary is handed: the scope's filter, then its
-    /// exclusions.
-    fn harness_args(self) -> Vec<&'static str> {
-        let mut args: Vec<&'static str> = self.filters().to_vec();
-        for pattern in self.skip_patterns() {
-            args.extend(["--skip", pattern]);
-        }
-        args
+    /// Whether the scope names the tests it runs or skips, so a run in one
+    /// process lists its binary first to check that each name still matches.
+    const fn lists_first(self) -> bool {
+        !self.filters().is_empty() || !self.skip_patterns().is_empty()
     }
 }
 
@@ -242,13 +237,25 @@ pub const TARGETS: &[Target] = &[
                 "mathf::tests::angles_past_a_million_quarter_turns_track_a_correctly_rounded_libm",
                 "mathf::tests::logarithm_agrees_with_the_host_to_within_an_ulp",
             ],
-            reason: "each holds the first-party sine, cosine, tangent, arctangent, exponential \
-                     and logarithm to the host's libm within an ulp, and the interpreter \
-                     perturbs each of those host operations by a few ulps on purpose, to model \
-                     how libms differ, so what they would report is its injected error rather than \
+            reason: "each holds the first-party transcendentals to the host's libm, within \
+                     the few ulps the module promises, and the interpreter perturbs each of \
+                     those host operations by a few ulps on purpose, to model how libms \
+                     differ, so what they would report is its injected error rather than \
                      anything about this crate. The module they test carries no `unsafe`, and \
-                     its exact operations — the square root and integer rounding — stay \
-                     interpreted through the tests that remain",
+                     its exact operations — the square root and integer rounding — and its \
+                     values held to quoted correctly rounded ones stay interpreted through the \
+                     tests that remain",
+        },
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-util",
+        description: "`trim` under a global allocator that refuses the exact copy it asks \
+                      for, the buffer it leaves as it was",
+        features: &[],
+        scope: Scope::Test {
+            name: "trim_refusal",
+            reason: "a binary of its own, outside the library's narrowed run",
         },
         spread: Spread::OneProcess,
     },
@@ -307,11 +314,16 @@ pub const TARGETS: &[Target] = &[
                 "tests::entropy_seed_differs_across_calls",
                 "tests::resolve_seed_uses_the_env_when_set",
                 "tests::no_low_bit_repeats_on_a_power_of_two_period",
+                "sources::tests::crate_sources_reads_what_builds_and_not_the_tests",
+                "scratch::tests::a_path_already_there_is_refused_rather_than_used",
             ],
             reason: "the first two draw an entropy seed from the realtime clock, which the \
                      isolated stage refuses to read, and the seeding carries no `unsafe`; the \
                      third is a statistic over eight thousand draws a seed, two minutes \
-                     interpreted of arithmetic that reaches no `unsafe` either",
+                     interpreted of arithmetic that reaches no `unsafe` either; the fourth \
+                     writes and walks a directory and the fifth reads the realtime clock and \
+                     makes one, which the isolated stage refuses, and neither the walk nor the \
+                     scratch directory carries `unsafe`",
         },
         spread: Spread::OneProcess,
     },
@@ -333,19 +345,61 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-gpu",
         description: "`lib/rt`'s futex lock and condition variable under the contention a \
                       device's threads put them to — work run on one thread while another \
-                      parks on its fence, a context released under a waiter, memory locked \
-                      in pairs by the work and singly by the CPU — where the data-race \
-                      detector reads every cell the locks guard; the crate itself forbids \
-                      `unsafe`",
+                      parks on its fence, a context released under a waiter, a device's \
+                      worker woken, parked and ended with its device, memory locked in pairs \
+                      by the work and singly by the CPU — where the data-race detector reads \
+                      every cell the locks guard; the crate itself forbids `unsafe`",
         features: &[],
         scope: Scope::LibExcept {
-            skip: &["device_tests::memory_the_machine_cannot_supply_is_refused_after_the_attempt"],
-            reason: "it asks the host for an exbibyte so that the allocator's refusal is a real \
-                     one; the interpreter cannot represent the request and ends the whole run \
-                     as resource exhaustion instead of answering it, and the refusal path it \
-                     proves carries no `unsafe`",
+            skip: &[
+                "device_tests::memory_the_machine_cannot_supply_is_refused_after_the_attempt",
+                "pipeline::tests::constants_past_what_specialization_holds_refuse_the_module_not_its_values",
+                "software::dispatch::tests::a_clear_reads_the_clock_each_check_s_work_of_it",
+                "software::dispatch::tests::a_module_looping_forever_through_empty_blocks_stops_at_the_first_check_past_its_deadline",
+                "software::dispatch::tests::a_huge_straight_line_block_reads_the_clock_at_each_fixed_amount_of_its_work",
+                "software::dispatch::tests::a_chain_of_many_blocks_reads_the_clock_only_as_its_work_says",
+                "software::dispatch::tests::a_fan_out_of_calls_runs_inlined_stops_at_its_deadline_and_is_refused_past_the_lowering_budget",
+                "software::dispatch::tests::calls_of_a_function_that_makes_nothing_are_refused_past_the_lowering_budget",
+                "software::dispatch::tests::a_job_of_dispatches_each_short_of_a_check_still_stops_past_its_deadline",
+                "software::dispatch::tests::a_dispatch_of_no_workgroups_still_counts_the_descriptors_it_resolves",
+                "software::dispatch::tests::a_dispatch_whose_last_work_is_done_is_never_stopped",
+                "software::dispatch::tests::a_job_s_descriptors_are_counted_as_they_are_resolved",
+                "software::dispatch::tests::pieces_run_in_turn_on_one_thread_read_the_clock_as_one_piece_would",
+                "software::dispatch::tests::work_is_counted_over_the_lanes_a_tile_computes_however_few_it_keeps",
+                "software::shader::lower::regs::tests::widening_past_its_steps_is_refused",
+                "software::shader::lower::tests::the_parts_of_constants_laid_out_are_held_to_their_budget",
+                "software::shader::lower::tests::the_operands_each_inlined_instance_walks_are_held_to_their_budget",
+                "software::shader::lower::tests::values_of_no_words_build_nothing_however_often_they_are_inlined",
+                "software::shader::lower::tests::constants_past_their_budget_are_refused",
+                "software::shader::lower::tests::a_constant_structure_of_the_most_members_is_laid_out_in_one_walk",
+                "software::shader::tests::every_case_runs_as_expected",
+                "software::shader::tests::every_admitted_instruction_has_a_case_that_runs_it",
+            ],
+            reason: "the first asks the host for an exbibyte so that the allocator's refusal is a \
+                     real one, which the interpreter cannot represent and ends the run as \
+                     resource exhaustion. The deadline and budget tests' extent is their \
+                     assertion — millions of words of interpreted work to reach a clock check, a \
+                     module built to the lowering bound, or two million constituents spelled out \
+                     to reach the specialization budget — and, interpreted nine at once, the \
+                     lowering-budget ones were unfinished after three hours, the widest constant \
+                     structure took 43 minutes, the clear across three checks 25, the \
+                     specialization budget's 16, the instruction-case test 69 as it lowers and \
+                     runs hundreds of modules, and the coverage test 8 as it admits them. None \
+                     carries `unsafe`, the dispatch, locks and threads they reach are the kept \
+                     tests' too, every one that finished passed interpreted, and all run in full \
+                     under the ordinary test matrix. Two integration tests are excluded as \
+                     well: `lowering_memory` builds a program to the lowering bound, its extent \
+                     its assertion, and was unfinished after thirteen minutes interpreted; \
+                     `fuzz_shader`'s forty rounds of modules, each lowered and run on a serial \
+                     device and one dealing its pieces in reverse on the same thread, were \
+                     unfinished after ten. Neither reaches `unsafe`, a lock under contention \
+                     or a thread the kept tests do not, and the metered allocator and the \
+                     reversed runner are interpreted under their own crates' enrolments",
         },
-        spread: Spread::OneProcess,
+        spread: Spread::Sharded(
+            "interpreted, the library's tests cost over an hour in one process, most of it \
+             lowering and running their modules",
+        ),
     },
     Target {
         package: "tairix-gpu",
@@ -384,7 +438,13 @@ pub const TARGETS: &[Target] = &[
                      hours interpreted. The crate holds no `unsafe`, the tests kept take the same \
                      paths below each bound at small scale, and all eight run in full under the \
                      ordinary test matrix; the `fuzz_spirv` harness is enrolled beside the \
-                     library",
+                     library. The `specialize_memory` integration test is excluded too: its two \
+                     tests measure what specializing holds and allocates at a size that is \
+                     their assertion, a level of two million nulls and a chain of sixteen \
+                     thousand operations, and the chain was unfinished after seventeen minutes \
+                     interpreted; they reach no `unsafe`, the metered allocator they install is \
+                     interpreted under `tairix-fuzzseed`'s own enrolment, and the library's \
+                     specialization tests take the same paths at small scale",
         },
         spread: Spread::Sharded(
             "interpreted, its tests cost twenty minutes in one process, most of it assembling, \
@@ -601,8 +661,9 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-arch-aarch64",
         description: "the page-table walk's recovery of each level through its frame source, \
-                      the initial-frame write into a task's kernel stack, and the command \
-                      queue and LPI tables the ITS and the redistributors read from memory",
+                      the initial-frame write into a task's kernel stack, the command \
+                      queue and LPI tables the ITS and the redistributors read from memory, \
+                      and a started core's lookup of its slot in the secondary-stack pool",
         features: &[],
         scope: Scope::LibExcept {
             skip: &[
@@ -632,7 +693,16 @@ pub const TARGETS: &[Target] = &[
         description: "the same walk and initial-frame write for Sv39, plus the direct physical \
                       map's gigapage leaves",
         features: &[],
-        scope: Scope::AllTargets,
+        scope: Scope::LibExcept {
+            skip: &[
+                "trap::sum_tests::no_write_in_the_port_sets_sum",
+                "flags_tests::no_block_claiming_to_preserve_the_flags_writes_them",
+            ],
+            reason: "the first walks and reads the S-mode sources of the port and the kernel \
+                     binary, and the second the port's own, which the isolated stage refuses; \
+                     they are text searches reaching no `unsafe`, and the checks they apply stay \
+                     interpreted through their synthetic tests",
+        },
         spread: Spread::OneProcess,
     },
     Target {
@@ -845,12 +915,14 @@ pub const TARGETS: &[Target] = &[
 /// replays exactly.
 const MIRIFLAGS: &str = "-Zmiri-strict-provenance";
 
-/// The flag every interpreted build adds to the caller's `RUSTFLAGS`: `sha2`'s
-/// portable backend, so every host interprets one SHA-256. No interpreter on
-/// an AArch64 host executes the SHA-2 instructions its hardware backend issues,
-/// and that backend reads its round constants through one-element borrows,
-/// which Stacked Borrows refuses (`plans/OPEN-DEFECTS.md` D1588).
-const SHA2_PORTABLE: &str = "--cfg sha2_backend=\"soft\"";
+/// The flags every interpreted build adds to the caller's: `sha2`'s portable
+/// backend for SHA-256 and SHA-512 alike, so every host interprets one SHA-2.
+/// No interpreter on an AArch64 host executes the SHA-2 instructions `sha2`'s
+/// hardware backends issue, and both read their round constants through
+/// one-element borrows, which Stacked Borrows refuses (`plans/OPEN-DEFECTS.md`
+/// D1588). The key is the family-wide one: `sha2` 0.11 takes SHA-512's backend
+/// from no key of its own.
+const SHA2_PORTABLE: [&str; 2] = ["--cfg", "sha2_backend=\"soft\""];
 
 /// Tests whose code reaches an operation the interpreter cannot execute on a
 /// host of one architecture: a run there skips them, and a run on any other
@@ -891,24 +963,28 @@ fn refusals_on<'a>(
         .filter(move |refusal| refusal.package == target.package && refusal.arch == arch)
 }
 
-/// What the test binary of `target` is handed on a host of `arch`: its scope's
-/// filter and exclusions, then what the interpreter refuses there.
-fn harness_args(target: &Target, arch: &str) -> Vec<&'static str> {
-    let mut args = target.scope.harness_args();
-    for refusal in refusals_on(target, arch) {
-        for pattern in refusal.skip {
-            args.extend(["--skip", pattern]);
-        }
-    }
-    args
+/// The libtest `--skip` patterns `target` runs under on a host of `arch`: its
+/// scope's exclusions, then what the interpreter refuses there.
+fn skips(target: &Target, arch: &str) -> Vec<&'static str> {
+    let mut skips = target.scope.skip_patterns().to_vec();
+    skips.extend(refusals_on(target, arch).flat_map(|refusal| refusal.skip.iter().copied()));
+    skips
 }
 
-/// The caller's `RUSTFLAGS` with [`SHA2_PORTABLE`] added.
-fn rustflags() -> String {
-    match std::env::var("RUSTFLAGS") {
-        Ok(caller) if !caller.trim().is_empty() => format!("{caller} {SHA2_PORTABLE}"),
-        _ => SHA2_PORTABLE.to_string(),
+/// Whether a run of `target` in one process on a host of `arch` names the
+/// tests it runs or skips, so it lists its binary first to check each name.
+fn lists_first(target: &Target, arch: &str) -> bool {
+    target.scope.lists_first() || refusals_on(target, arch).next().is_some()
+}
+
+/// What the test binary of `target` is handed on a host of `arch`: its scope's
+/// filter, then [`skips`].
+fn harness_args(target: &Target, arch: &str) -> Vec<&'static str> {
+    let mut args = target.scope.filters().to_vec();
+    for pattern in skips(target, arch) {
+        args.extend(["--skip", pattern]);
     }
+    args
 }
 
 /// Parsed `miri` arguments.
@@ -986,22 +1062,21 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let opts = parse(args)?;
     if opts.list {
         for target in TARGETS {
-            println!("{:<24} {}", target.package, target.description);
+            outln!("{:<24} {}", target.package, target.description)?;
         }
         return Ok(());
     }
-    if !crate::commands::cargo_subcommand_available(ctx, "miri") {
-        return Err(
-            "miri is not installed; run `rustup component add miri` (it is pinned in \
+    crate::commands::cargo_subcommand_available(ctx, "miri").map_err(|why| {
+        format!(
+            "{why}; install miri with `rustup component add miri` (it is pinned in \
              rust-toolchain.toml, so `rustup toolchain install` also brings it)"
-                .to_string(),
-        );
-    }
+        )
+    })?;
 
     let targets = selected(&opts)?;
     for target in &targets {
         for refusal in refusals_on(target, std::env::consts::ARCH) {
-            eprintln!(
+            noteln!(
                 "xtask: [{}] skips {} on this {} host: {}",
                 scope_label(target),
                 refusal.skip.join(", "),
@@ -1021,7 +1096,7 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // else has drained.
     let mut jobs: Vec<Job> = Vec::new();
     let mut shards: Vec<Job> = Vec::new();
-    for (index, target) in targets.iter().enumerate() {
+    for (index, &target) in targets.iter().enumerate() {
         let seed = seed::job_seed(opts.seed, index);
         match target.spread {
             Spread::Sharded(_) => match shard_jobs(ctx, target, seed) {
@@ -1033,12 +1108,20 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
                     jobs.push(Job::closure(scope_label(target), 1, move || Err(why)));
                 }
             },
+            // A run in one process lists nothing to deal, so one whose scope
+            // names tests lists them as it starts, to check each name.
+            Spread::OneProcess if lists_first(target, std::env::consts::ARCH) => {
+                let listing = listing_command(ctx, target, seed);
+                let children = std::sync::Arc::clone(&ctx.children);
+                let check = move || run_listing(&children, target, listing).map(drop);
+                jobs.push(whole_job(ctx, target, seed).checked_by(check));
+            }
             Spread::OneProcess => jobs.push(whole_job(ctx, target, seed)),
         }
     }
     jobs.append(&mut shards);
     let concurrency = parallel::default_concurrency(jobs.len());
-    parallel::run(jobs, concurrency)
+    parallel::run(&ctx.children, jobs, concurrency)
 }
 
 /// The `cargo miri test` invocation for `target`, without the libtest
@@ -1066,7 +1149,7 @@ fn base_command(ctx: &Context, target: &Target, seed: u64) -> Command {
         "MIRIFLAGS",
         format!("{MIRIFLAGS} -Zmiri-env-forward={}", seed::FUZZ_SEED_ENV),
     );
-    cmd.env("RUSTFLAGS", rustflags());
+    crate::rustflags::add(&mut cmd, &SHA2_PORTABLE);
     cmd
 }
 
@@ -1106,10 +1189,12 @@ fn whole_job(ctx: &Context, target: &Target, seed: u64) -> Job {
 /// from the host, so a per-shard seed would make a reported failure replay
 /// only on a machine with the same core count.
 fn shard_jobs(ctx: &Context, target: &Target, seed: u64) -> Result<Vec<Job>, String> {
-    let names = enumerate(ctx, target, seed)?;
+    // Listing builds the target, so the shards behind it are cargo no-ops
+    // that go straight to interpreting.
+    let names = run_listing(&ctx.children, target, listing_command(ctx, target, seed))?;
     let found = names.len();
     let shards = deal(names, shard_count(found, parallel::host_parallelism()));
-    eprintln!(
+    noteln!(
         "xtask: [{}] {found} tests dealt across {} processes",
         scope_label(target),
         shards.len()
@@ -1133,19 +1218,83 @@ fn shard_jobs(ctx: &Context, target: &Target, seed: u64) -> Result<Vec<Job>, Str
         .collect())
 }
 
-/// Every test the target's binary reports, with the scope's exclusions
-/// already applied by libtest itself.
-///
-/// This pass is also what builds the target, so the shards behind it are
-/// cargo no-ops that go straight to interpreting.
-fn enumerate(ctx: &Context, target: &Target, seed: u64) -> Result<Vec<String>, String> {
+/// The command listing every test of `target`'s binary, so its scope's
+/// filters and skips can each be checked against the names.
+fn listing_command(ctx: &Context, target: &Target, seed: u64) -> Command {
     let mut cmd = base_command(ctx, target, seed);
-    cmd.arg("--")
-        .arg("--list")
-        .args(harness_args(target, std::env::consts::ARCH));
+    cmd.arg("--").arg("--list");
+    cmd
+}
+
+/// The tests `listing` reports that `target`'s scope runs: within one of its
+/// filters and outside its skips. A filter or skip naming no listed test is
+/// refused — a module or test renamed since would leave the oracle or run
+/// under it unseen, and a deleted one leaves the entry dead — and so are
+/// skips that leave nothing to run, which would report success having
+/// interpreted none.
+fn run_listing(
+    children: &Children,
+    target: &Target,
+    listing: Command,
+) -> Result<Vec<String>, String> {
     let label = format!("{} --list", scope_label(target));
-    let listing = capture(&label, cmd)?;
-    parse_listing(&listing).map_err(|why| format!("{label}: {why}"))
+    let listed = capture(children, &label, listing)?;
+    let names = parse_listing(&listed).map_err(|why| format!("{label}: {why}"))?;
+    within(names, target.scope.filters())
+        .and_then(|names| unskipped(names, &skips(target, std::env::consts::ARCH)))
+        .map_err(|why| format!("{label}: {why}"))
+}
+
+/// The `names` within one of `filters`, all of them where there are none,
+/// refusing a filter within no name.
+fn within(names: Vec<String>, filters: &[&str]) -> Result<Vec<String>, String> {
+    if filters.is_empty() {
+        return Ok(names);
+    }
+    if let Some(stale) = stale_pattern(&names, filters) {
+        return Err(format!(
+            "the filter `{stale}` matches no test; a module renamed since would \
+             leave the stage without interpreting it, and with no failure"
+        ));
+    }
+    Ok(names
+        .into_iter()
+        .filter(|name| filters.iter().any(|filter| name.contains(filter)))
+        .collect())
+}
+
+/// The `names` none of `skips` drops, refusing a skip within no name and
+/// skips that drop every one.
+fn unskipped(names: Vec<String>, skips: &[&str]) -> Result<Vec<String>, String> {
+    if let Some(stale) = stale_pattern(&names, skips) {
+        return Err(format!(
+            "the skip `{stale}` matches no test; a test renamed since would run \
+             interpreted unskipped, and a deleted one leaves the entry dead"
+        ));
+    }
+    let kept: Vec<String> = names
+        .into_iter()
+        .filter(|name| !skipped(name, skips))
+        .collect();
+    if kept.is_empty() {
+        return Err("every test is skipped, so the stage would interpret nothing".to_string());
+    }
+    Ok(kept)
+}
+
+/// Whether libtest's `--skip` drops `name` for one of `skips`: a pattern
+/// within it.
+fn skipped(name: &str, skips: &[&str]) -> bool {
+    skips.iter().any(|pattern| name.contains(pattern))
+}
+
+/// The first of `patterns` within none of `names`, as libtest matches a
+/// filter or a skip.
+fn stale_pattern<'p>(names: &[String], patterns: &[&'p str]) -> Option<&'p str> {
+    patterns
+        .iter()
+        .copied()
+        .find(|pattern| !names.iter().any(|name| name.contains(pattern)))
 }
 
 /// The test names in a libtest `--list` listing, checked against the count
@@ -1173,8 +1322,8 @@ fn parse_listing(listing: &str) -> Result<Vec<String>, String> {
         ));
     }
     if names.is_empty() {
-        return Err("no tests to interpret; a sharded target with nothing to \
-                    run would report success having interpreted nothing"
+        return Err("no tests to interpret; a target with nothing to run \
+                    would report success having interpreted nothing"
             .to_string());
     }
     Ok(names)
@@ -1209,23 +1358,9 @@ fn deal(names: Vec<String>, ways: usize) -> Vec<Vec<String>> {
 }
 
 /// Run `cmd` to completion under the standard command budget and return its
-/// stdout, failing closed on a non-zero status.
-fn capture(label: &str, mut cmd: Command) -> Result<String, String> {
-    let budget = effective_timeout(DEFAULT_COMMAND_TIMEOUT)?;
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let child = spawn_in_own_group(&mut cmd)
-        .map_err(|err| format!("{label} could not be spawned: {err}"))?;
-    let pid = child.id();
-    let output = await_within(label, pid, budget, move || child.wait_with_output())?;
-    if !output.status.success() {
-        return Err(format!(
-            "{label} failed with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
+/// stdout, failing closed.
+fn capture(children: &Children, label: &str, mut cmd: Command) -> Result<String, String> {
+    let output = output_or_reason(children, label, &mut cmd, children.ordinary_budget())?;
     String::from_utf8(output.stdout)
         .map_err(|err| format!("{label} produced output that is not UTF-8: {err}"))
 }
@@ -1233,13 +1368,127 @@ fn capture(label: &str, mut cmd: Command) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        deal, harness_args, parse, parse_listing, selected, shard_count, Scope, Spread,
-        HOST_REFUSALS, SHARD_TESTS, TARGETS,
+        base_command, deal, harness_args, lists_first, parse, parse_listing, selected, shard_count,
+        skipped, skips, stale_pattern, unskipped, within, Scope, Spread, HOST_REFUSALS,
+        SHARD_TESTS, TARGETS,
     };
+    use crate::children::Children;
+    use crate::rustflags::tests::flags_of;
+    use crate::Context;
     use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    /// Every interpreted build takes `sha2`'s portable backend after the
+    /// caller's flags, as cargo reads them, whatever the caller set.
+    #[test]
+    fn an_interpreted_build_carries_the_portable_sha2_after_the_caller_s_flags() {
+        let ctx = Context {
+            workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            cargo: OsString::from("true"),
+            children: Arc::new(Children::new(None)),
+        };
+        for target in TARGETS {
+            let (encoded, removes_plain) = flags_of(&base_command(&ctx, target, 1));
+            assert!(
+                encoded.is_some_and(|flags| flags.ends_with("--cfg\u{1f}sha2_backend=\"soft\"")),
+                "{}",
+                target.package
+            );
+            assert!(removes_plain, "{}", target.package);
+        }
+    }
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn a_listing_keeps_what_its_skips_leave_and_refuses_skips_that_leave_none() {
+        let names = || {
+            vec![
+                "mathf::tests::host".to_string(),
+                "mathf::tests::near_zero".to_string(),
+            ]
+        };
+        assert_eq!(
+            unskipped(names(), &["host"]),
+            Ok(vec!["mathf::tests::near_zero".to_string()])
+        );
+        let stale = unskipped(names(), &["renamed"]).expect_err("stale");
+        assert!(stale.contains("`renamed` matches no test"), "{stale}");
+        let none = unskipped(names(), &["tests::"]).expect_err("nothing left");
+        assert!(none.contains("every test is skipped"), "{none}");
+    }
+
+    #[test]
+    fn a_skip_naming_no_listed_test_is_found_stale() {
+        let names = vec![
+            "dispatch::tests::a_job_s_descriptors_are_counted".to_string(),
+            "dispatch::tests::two_sets".to_string(),
+        ];
+        assert_eq!(stale_pattern(&names, &["dispatch::tests::two_sets"]), None);
+        assert_eq!(
+            stale_pattern(
+                &names,
+                &["a_job_s", "dispatch::tests::a_dispatch_s_descriptors"]
+            ),
+            Some("dispatch::tests::a_dispatch_s_descriptors"),
+            "a renamed test's old name"
+        );
+        assert!(
+            skipped(&names[0], &["a_job_s"]),
+            "a part of the name, as libtest matches"
+        );
+        assert!(!skipped(&names[1], &["a_job_s"]));
+    }
+
+    #[test]
+    fn a_listing_keeps_what_its_filters_name_and_refuses_a_filter_naming_none() {
+        let names = || {
+            vec![
+                "accel::tests::blend".to_string(),
+                "lent::tests::borrow".to_string(),
+                "scan::tests::rows".to_string(),
+            ]
+        };
+        assert_eq!(within(names(), &[]), Ok(names()), "no filter keeps all");
+        assert_eq!(
+            within(names(), &["accel::", "lent::"]),
+            Ok(vec![
+                "accel::tests::blend".to_string(),
+                "lent::tests::borrow".to_string(),
+            ])
+        );
+        let stale = within(names(), &["accel::", "lend::"]).expect_err("a renamed module");
+        assert!(stale.contains("`lend::` matches no test"), "{stale}");
+    }
+
+    /// A filter narrows a run by name as much as a skip does, so either has
+    /// a one-process run list its binary first.
+    #[test]
+    fn a_scope_naming_tests_to_run_or_skip_is_listed_first() {
+        let reason = "";
+        assert!(Scope::LibModules {
+            modules: &["lent::"],
+            reason
+        }
+        .lists_first());
+        assert!(Scope::LibExcept {
+            skip: &["host"],
+            reason
+        }
+        .lists_first());
+        for whole in [
+            Scope::AllTargets,
+            Scope::LibOnly(reason),
+            Scope::Test {
+                name: "fuzz",
+                reason,
+            },
+        ] {
+            assert!(!whole.lists_first(), "{whole:?}");
+        }
     }
 
     #[test]
@@ -1330,10 +1579,14 @@ mod tests {
                     refusal.arch
                 );
             }
-            let elsewhere = harness_args(target, "a host of another architecture");
+            assert!(
+                lists_first(target, refusal.arch),
+                "a run on {} checks its refused names still match",
+                refusal.arch
+            );
             assert_eq!(
-                elsewhere,
-                target.scope.harness_args(),
+                skips(target, "a host of another architecture"),
+                target.scope.skip_patterns(),
                 "{}",
                 refusal.package
             );

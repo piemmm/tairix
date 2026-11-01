@@ -10,9 +10,9 @@ use crate::enumerant::{BuiltIn, Capability};
 use crate::grammar::{self, Gate, Shape};
 use crate::{Instruction, Kind, Module, Op, Value, Version};
 
-/// The admitted capabilities, by ascending value; closed under what each
-/// implicitly declares.
-pub(crate) const CAPABILITIES: [Capability; 25] = [
+/// The capabilities a module may declare, by ascending value; closed under
+/// what each implicitly declares.
+pub const CAPABILITIES: [Capability; 25] = [
     Capability::MATRIX,
     Capability::SHADER,
     Capability::FLOAT16,
@@ -50,6 +50,9 @@ pub(crate) const EXTENSIONS: [&str; 3] = [
 
 /// The oldest version admitted: the Vulkan 1.1 baseline.
 pub(crate) const OLDEST: Version = Version { major: 1, minor: 3 };
+
+/// The version several rules change at.
+pub(crate) const V1_4: Version = Version { major: 1, minor: 4 };
 
 /// The built-ins a block may declare without their capabilities, as latent
 /// members nothing reads or writes: glslang declares both in every

@@ -27,13 +27,17 @@ collegato, quindi lo si indica con il punto in cui è montato in
 `/Storage`.
 
 Un volume il cui dispositivo è stato rimosso con scritture non ancora
-confermate resta visibile come `unavailable-dirty` (o
-`unavailable-lost`) nell'elenco dei montaggi, e un `unmount` semplice
-rifiuta: i dati trattenuti sono conservati per un reinserimento
-verificato. Anche un volume su cui restano file aperti, o che un
-programma ha come directory di lavoro, rifiuta un `unmount` semplice.
-`--force` è l'uscita deliberata — i file ancora aperti sul volume
-vengono tagliati fuori, un programma che vi lavora resta in una
+confermate resta visibile come `unavailable-dirty` nell'elenco dei
+montaggi, e un `unmount` semplice rifiuta: i dati trattenuti sono
+conservati per un reinserimento verificato. Lo stesso vale per un volume
+reinserito di cui non si è potuto dimostrare che sia rimasto invariato
+(`recovery-conflict`), il quale trattiene ancora quei dati, e per uno di
+cui è stato impossibile conservare le scritture non confermate
+(`unavailable-lost`), perché la loro perdita sia riconosciuta anziché
+passata sotto silenzio. Anche un volume su cui restano file aperti, o
+che un programma ha come directory di lavoro, rifiuta un `unmount`
+semplice. `--force` è l'uscita deliberata — i file ancora aperti sul
+volume vengono tagliati fuori, un programma che vi lavora resta in una
 directory che non esiste più, i dati trattenuti vengono scartati, il
 volume viene rimosso e ciò a cui si è rinunciato è registrato nel
 registro di controllo. Su un volume sano `--force` svuota e scollega

@@ -45,8 +45,8 @@ ordinateur : un nom ne prouve donc jamais quel ordinateur vous regardez. La
 connexion aux partages d'un ordinateur n'est pas disponible sur ce système,
 et en ouvrir un le dit.
 
-Lancé par son nom depuis un shell (ou ouvert sur un dossier depuis le
-bureau), c'est au contraire une application ordinaire : une seule fenêtre,
+Lancé depuis un shell par son chemin, `/System/Components/files.app`,
+c'est au contraire une application ordinaire : une seule fenêtre,
 et elle se termine quand vous la fermez. Dans tous les cas, il exige une
 session graphique en cours : sans elle, le canal des fenêtres est
 injoignable, et le navigateur signale le refus sur le flux d'erreur standard
@@ -114,13 +114,18 @@ sur un espace vide efface la sélection, si bien que le sous-menu de l'entrée
 est grisé.
 
 Ouvrir une image disque — un fichier `.iso`, `.adf`, `.hdf` et autres — la
-monte pour vous sous `/Storage`, en écriture là où le fichier l'est, et
-ouvre sa fenêtre ; *Monter en lecture seule* la monte en lecture seule. Elle
-reste montée jusqu'à ce que vous l'éjectiez ou que votre session se termine.
-*Éjecter* retire un volume que vous avez monté, depuis son icône ou depuis
-sa ligne dans la barre des emplacements, dont le menu contextuel propre
-contient *Ouvrir* et *Éjecter* ; vos fenêtres qui s'y trouvent passent
-d'abord à `/Storage`.
+monte pour vous sous `/Storage`, en écriture là où le fichier et son format
+le permettent tous deux, et ouvre sa fenêtre ; *Monter en lecture seule* la
+monte plutôt en lecture seule. Elle reste montée jusqu'à ce que vous
+l'éjectiez ou que votre session de connexion se termine. *Éjecter* retire un
+volume que vous avez monté, depuis son icône ou depuis sa ligne dans la
+colonne des lieux, dont le menu contextuel propre contient *Ouvrir* et
+*Éjecter* ; vos fenêtres qui s'y trouvent passent d'abord à `/Storage`. Si
+un volume disparaît — son disque retiré, ou son serveur perdu — avant que
+tout ce que vous y avez écrit soit enregistré, il quitte la colonne des
+lieux mais garde son icône dans `/Storage`, et ce qui n'a pas été enregistré
+est perdu ; *Éjecter* depuis cette icône demande confirmation avant de le
+laisser partir.
 
 Le sous-menu *Nouveau* du menu contextuel crée un dossier, ou un document
 vide de chaque sorte qu'un éditeur installé sait écrire, et ouvre son nom

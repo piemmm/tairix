@@ -8942,7 +8942,7 @@ where
         request_len: usize,
     ) -> SyscallResult {
         // A detach frame is exactly the 16-byte volume identity plus the
-        // force byte.
+        // mode byte.
         if request_len != tairix_abi::volume::VOLUME_DETACH_LEN {
             return Err(Errno::LengthOutOfRange);
         }
@@ -9178,7 +9178,7 @@ where
         if let Err(err) = self.copy_out_user(caller, reply, &attached.encode()) {
             let undo = tairix_abi::volume::VolumeDetachRequest {
                 volume_id: attached.volume_id,
-                force: true,
+                mode: tairix_abi::volume::DetachMode::Force,
             };
             let _ = self.volume_service.detach(&undo, &who);
             return Err(err);
@@ -17307,11 +17307,8 @@ mod tests {
     use crate::random::BootReserve;
 
     fn install_trace_filter() {
-        // The global log filter defaults to `Error`; `SyscallFeatureUnavailable`
-        // is emitted at `Error`, but `set_max_level(Trace)` keeps the
-        // tests robust against a future raise of `SyscallFeatureUnavailable`'s
-        // severity or against other dispatcher events flowing through
-        // the same sink (no flaky tests).
+        // The global filter defaults to `Error`; these tests read records of
+        // every level.
         set_max_level(Level::Trace);
     }
 
@@ -18231,11 +18228,10 @@ mod tests {
     }
 
     /// `ipc_send` to an endpoint that is not bound in the registry
-    /// fails closed with `NotFound` — a real lookup miss. The deferral
-    /// audit is *not* emitted: the call never reached the copy-in
-    /// branch, so there is no `SyscallFeatureUnavailable` record.
+    /// fails closed with `NotFound` — a real lookup miss — and the handler
+    /// records nothing.
     #[test]
-    fn ipc_send_to_unbound_endpoint_is_not_found_without_deferral_audit() {
+    fn ipc_send_to_unbound_endpoint_is_not_found() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -18257,8 +18253,6 @@ mod tests {
         );
         sink.clear();
         assert_eq!(h.ipc_send(&ctx, 1, 0x1000, 4), Err(Errno::NotFound));
-        // The endpoint never resolved, so the handler did not announce
-        // the copy-in deferral.
         assert!(sink.event_ids().is_empty());
     }
 
@@ -18358,8 +18352,7 @@ mod tests {
     /// `ipc_send` to a *bound* endpoint copies the payload in from the
     /// caller's address space and delivers it to the port — the
     /// increment-D.1 wiring of the user-memory copy-in path. The
-    /// receiver observes the exact bytes and the sender's task id, and
-    /// no `SyscallFeatureUnavailable` deferral is announced.
+    /// receiver observes the exact bytes and the sender's task id.
     #[test]
     fn ipc_send_to_bound_endpoint_copies_payload_and_delivers() {
         install_trace_filter();
@@ -18390,10 +18383,6 @@ mod tests {
         );
         sink.clear();
         assert_eq!(h.ipc_send(&ctx, 1, 0x1000, payload.len()), Ok(0));
-        // The deferral audit is gone now that the copy-in path is live.
-        assert!(!sink
-            .event_ids()
-            .contains(&AuditEvent::SyscallFeatureUnavailable.id().0));
         // The receiver drains exactly the bytes the caller sent.
         let guard = ipc.read();
         let port = guard.lookup(EndpointId(1)).expect("port stays bound");
@@ -19287,8 +19276,7 @@ mod tests {
     /// task's effective set to that subset — the increment-D.3 wiring of
     /// the capability-set copy-in + `CapTable` delegate path. The handler
     /// returns `0`, the target loses the un-delegated capability, and the
-    /// `CapTable` delegate decision is audited (no
-    /// `SyscallFeatureUnavailable` deferral).
+    /// `CapTable` delegate decision is audited.
     #[test]
     fn cap_delegate_copies_set_in_and_narrows_target() {
         install_trace_filter();
@@ -19335,7 +19323,6 @@ mod tests {
                 .id()
                 .0
         ));
-        assert!(!ids.contains(&AuditEvent::SyscallFeatureUnavailable.id().0));
     }
 
     /// A delegation that would *widen* the target's authority fails closed
@@ -19713,7 +19700,7 @@ mod tests {
     /// the outer dispatcher and is therefore not asserted here
     /// (`kernel/syscall::Dispatcher` covers it); this test asserts
     /// the handler's *behaviour* — a fresh handle returned, the
-    /// table populated, no `SyscallFeatureUnavailable` emission.
+    /// table populated, and no record of its own.
     #[test]
     fn irq_bind_mints_handle_and_records_owner_against_caller() {
         install_trace_filter();
@@ -19744,15 +19731,9 @@ mod tests {
             .expect("binding present");
         assert_eq!(entry.line, 5);
         assert_eq!(entry.owner, ProcessId(7));
-        // No `SyscallFeatureUnavailable` audit emission — the
-        // subsystem is now wired (`docs/src/security/irq.md`
-        // failure-mode table: a successful bind is audited by the
-        // dispatcher's `SyscallInvoked`, not by the handler).
         assert!(
-            !sink
-                .event_ids()
-                .contains(&AuditEvent::SyscallFeatureUnavailable.id().0),
-            "deferred-feature audit must no longer fire"
+            sink.event_ids().is_empty(),
+            "the dispatcher, not the handler, audits a successful bind"
         );
     }
 
@@ -20259,8 +20240,7 @@ mod tests {
 
     /// `random_get` against the **unseeded** boot reserve fails closed
     /// with `EntropyNotReady` (never weak bytes before
-    /// the RNG is seeded), even with a perfectly writable buffer, and
-    /// emits no `SyscallFeatureUnavailable` deferral.
+    /// the RNG is seeded), even with a perfectly writable buffer.
     #[test]
     fn random_get_unseeded_reserve_is_entropy_not_ready() {
         install_trace_filter();
@@ -20292,9 +20272,6 @@ mod tests {
             h.random_get(&ctx, 0x1000, 32, RandomFlags::NON_BLOCKING),
             Err(Errno::EntropyNotReady)
         );
-        assert!(!sink
-            .event_ids()
-            .contains(&AuditEvent::SyscallFeatureUnavailable.id().0));
     }
 
     /// `random_get` against a **seeded** reserve copies the requested
@@ -20330,9 +20307,6 @@ mod tests {
         );
         sink.clear();
         assert_eq!(h.random_get(&ctx, 0x1000, 32, RandomFlags::empty()), Ok(32));
-        assert!(!sink
-            .event_ids()
-            .contains(&AuditEvent::SyscallFeatureUnavailable.id().0));
         // The bytes landed at the caller's pointer and are not all zero
         // (a seeded CSPRNG never returns an all-zero block here).
         let delivered = h
@@ -58144,7 +58118,7 @@ mod tests {
     #[derive(Default)]
     struct Asked {
         /// A detach's caller: its uid, group and mount authority.
-        detach: Option<(u32, u32, bool)>,
+        detach: Option<(u32, u32, bool, tairix_abi::volume::DetachMode)>,
         /// An attach's caller and the offer it named.
         attach: Option<(u32, u32, bool, u64)>,
         /// A server's word on an offer: its process, the offer and the op.
@@ -58172,10 +58146,10 @@ mod tests {
 
         fn detach(
             &self,
-            _request: &tairix_abi::volume::VolumeDetachRequest,
+            request: &tairix_abi::volume::VolumeDetachRequest,
             caller: &crate::fs::Principal<'_>,
         ) -> Result<(), Errno> {
-            self.0.lock().detach = Some((caller.uid, caller.gid, caller.may_mount()));
+            self.0.lock().detach = Some((caller.uid, caller.gid, caller.may_mount(), request.mode));
             Ok(())
         }
 
@@ -58479,7 +58453,7 @@ mod tests {
     #[test]
     fn a_detach_and_a_servers_word_carry_who_asks() {
         use tairix_abi::netattach::FsserveCtl;
-        use tairix_abi::volume::{VolumeDetachRequest, VOLUME_DETACH_LEN};
+        use tairix_abi::volume::{DetachMode, VolumeDetachRequest, VOLUME_DETACH_LEN};
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -58491,7 +58465,7 @@ mod tests {
         let mut frame = [0u8; VOLUME_DETACH_LEN];
         VolumeDetachRequest {
             volume_id: [9; 16],
-            force: false,
+            mode: DetachMode::Lost,
         }
         .encode(&mut frame)
         .expect("encodes");
@@ -58499,8 +58473,8 @@ mod tests {
         assert_eq!(h.volume_detach(&ctx, 0x1000, VOLUME_DETACH_LEN), Ok(0));
         assert_eq!(
             recorder.0.lock().detach,
-            Some((1000, 0, false)),
-            "the service decides on the caller's own authority"
+            Some((1000, 0, false, DetachMode::Lost)),
+            "the service decides on the caller's own authority, in the mode asked"
         );
         assert_eq!(h.fsserve_ctl(&ctx, 7, FsserveCtl::Alive), Ok(0));
         assert_eq!(

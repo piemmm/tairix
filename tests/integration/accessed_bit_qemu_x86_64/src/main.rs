@@ -43,7 +43,7 @@ use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(itest_x86_64)]
-use tairix_arch_api::fatal::KernelFault;
+use tairix_arch_api::fatal::{Cause, KernelFault};
 #[cfg(itest_x86_64)]
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlags};
 #[cfg(itest_x86_64)]
@@ -236,7 +236,8 @@ fn unexpected_fault(trap: KernelFault) -> ! {
     };
     let _ = writeln!(
         com1,
-        "[accessed_bit] FAIL: unexpected fault {phase}: {trap}"
+        "[accessed_bit] FAIL: unexpected fault {phase}: {}",
+        Cause::Fault(trap)
     );
     qemu_exit::exit_failure();
 }

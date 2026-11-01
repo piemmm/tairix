@@ -16,22 +16,28 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::clock::TestClock;
-use tairix_abi::driver::filesystem::listing::listed;
+use tairix_abi::driver::filesystem::listing::{first_listed, listed};
 use tairix_abi::driver::filesystem::{
     DirVisit, FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemStats,
     FilesystemWrite, NameMatching, NodeId, NodeKind, NodeSecurity, Unpinned, WriteRefusal,
 };
+use tairix_abi::driver::GrantingHost;
 use tairix_abi::time::Time64;
-use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind};
+use tairix_abi::{CapabilityId, DriverError};
 use tairix_fsprobe::affs::{
     be32, put_be32, root_block, DateStamp, Offsets, BITMAP_VALID, ST_LINKDIR, ST_SOFTLINK, T_HEADER,
 };
 use tairix_fuzzseed::Prng;
 use tairix_writeback::TestVolumeHost;
 
-use crate::{Affs, FormatOptions};
+use crate::{Affs, FormatOptions, SPARE_BLOCKS};
 
 const RECORD: NodeSecurity = NodeSecurity::new(0o644, 0, 0);
+
+/// Every request this binary makes, metered per thread, so a test can bound
+/// what a change holds or have the heap refuse it.
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
 /// An in-memory block device.
 struct MemDisk {
@@ -302,21 +308,16 @@ fn check_fs(fs: Affs<MemDisk>) -> Affs<MemDisk> {
     .expect("reopens")
 }
 
-struct MockHost;
-
-impl DriverHost for MockHost {
-    fn has_capability(&self, cap: CapabilityId) -> bool {
-        cap == CapabilityId::DRV_LOAD
-    }
-
-    fn kind(&self) -> DriverKind {
-        DriverKind::UserSpace
-    }
-}
-
 #[test]
 fn register_needs_the_load_capability() {
-    assert!(crate::register(&MockHost).is_ok());
+    let loading = GrantingHost {
+        granted: &[CapabilityId::DRV_LOAD],
+    };
+    assert!(crate::register(&loading).is_ok());
+    assert_eq!(
+        crate::register(&GrantingHost { granted: &[] }).err(),
+        Some(DriverError::PermissionDenied)
+    );
 }
 
 #[test]
@@ -762,6 +763,34 @@ fn soft_links_read_in_posix_spelling() {
     );
 }
 
+#[test]
+fn a_soft_link_read_on_a_short_heap_is_refused() {
+    use tairix_fuzzseed::meter::refusing_after;
+    let mut fs = floppy(1);
+    let root = fs.root();
+    for (name, target) in [
+        (&b"absolute"[..], "/top/x"),
+        (b"parents", "../../far"),
+        (b"inner", "a/../b"),
+    ] {
+        let link = fs
+            .create_link(root, name, target.as_bytes(), &RECORD)
+            .expect("link");
+        let mut granted = 0;
+        loop {
+            let mut out = [0u8; 64];
+            match refusing_after(granted, || fs.read_link(link, &mut out)) {
+                Ok(len) => {
+                    assert_eq!(&out[..len], target.as_bytes());
+                    break;
+                }
+                Err(err) => assert_eq!(err, DriverError::OutOfMemory, "{target}, {granted}"),
+            }
+            granted += 1;
+        }
+    }
+}
+
 /// Turn the entry `name` of `dir` into a link of `sec_type` naming `real` or
 /// storing `target`, sealing it as AmigaDOS would have written it.
 fn forge_link(
@@ -782,9 +811,7 @@ fn forge_link(
     put_be32(block, at.sec_type(), sec_type);
     put_be32(block, at.real_entry(), crate::header::low32(real));
     block[24..24 + target.len()].copy_from_slice(target);
-    put_be32(block, 20, 0);
-    let sum = tairix_fsprobe::affs::checksum(block, 20);
-    put_be32(block, 20, sum);
+    tairix_fsprobe::affs::seal(block, tairix_fsprobe::affs::CHECKSUM);
     Affs::open(MemDisk {
         data,
         block_size: 512,
@@ -1010,9 +1037,7 @@ fn damaged_structures_are_refused_never_followed() {
     let (mut data, _) = image(fs);
     let block = &mut data[first as usize * 512..(first as usize + 1) * 512];
     put_be32(block, 8, 9);
-    put_be32(block, 20, 0);
-    let sum = tairix_fsprobe::affs::checksum(block, 20);
-    put_be32(block, 20, sum);
+    tairix_fsprobe::affs::seal(block, tairix_fsprobe::affs::CHECKSUM);
     let mut fs = Affs::open(MemDisk {
         data,
         block_size: 512,
@@ -1035,9 +1060,7 @@ fn a_hash_chain_that_loops_ends_the_walk_as_damage() {
         Offsets::new(bs).hash_chain(),
         crate::header::low32(first.raw()),
     );
-    put_be32(block, 20, 0);
-    let sum = tairix_fsprobe::affs::checksum(block, 20);
-    put_be32(block, 20, sum);
+    tairix_fsprobe::affs::seal(block, tairix_fsprobe::affs::CHECKSUM);
     let mut fs = Affs::open(MemDisk {
         data,
         block_size: 512,
@@ -1048,18 +1071,10 @@ fn a_hash_chain_that_loops_ends_the_walk_as_damage() {
         listed(&mut fs, root, 0, b"").err(),
         Some(DriverError::BadMagic)
     );
-    let bucket = |name: &str| {
-        crate::name::Name::encode(name.as_bytes())
-            .expect("a name")
-            .bucket(
-                NameMatching::AsciiCaseInsensitive,
-                Offsets::new(512).table_len(),
-            )
-    };
     // A name filed in the same bucket walks the looping chain to its end.
     let twin = (0..10_000)
         .map(|n| alloc::format!("t{n}"))
-        .find(|name| bucket(name) == bucket("a"))
+        .find(|name| bucket_of(name) == bucket_of("a"))
         .expect("a name sharing the bucket");
     assert_eq!(fs.lookup(root, twin.as_bytes()), Err(DriverError::BadMagic));
 }
@@ -1225,17 +1240,32 @@ fn logged(fs: &mut Affs<Recorded>) -> Vec<Op> {
 /// A one-character name every volume files in the bucket `"3"` is in.
 const BUCKET_64: [&str; 3] = ["3", "{", "\u{C3}"];
 
+/// The bucket a volume of 512-byte blocks that folds ASCII files `name` in.
+fn bucket_of(name: &str) -> usize {
+    crate::name::Name::encode(name.as_bytes())
+        .expect("a name")
+        .bucket(
+            NameMatching::AsciiCaseInsensitive,
+            Offsets::new(512).table_len(),
+        )
+}
+
+/// `count` names `{prefix}{n}` such a volume files in the bucket of
+/// `{prefix}0`.
+fn names_in_one_bucket(prefix: &str, count: usize) -> Vec<String> {
+    let wanted = bucket_of(&alloc::format!("{prefix}0"));
+    (0..)
+        .map(|n| alloc::format!("{prefix}{n}"))
+        .filter(|name| bucket_of(name) == wanted)
+        .take(count)
+        .collect()
+}
+
 #[test]
 fn removing_a_hard_link_filed_after_its_file_keeps_their_bucket_whole() {
-    let bucket = |name: &str| {
-        crate::name::Name::encode(name.as_bytes())
-            .expect("a name")
-            .bucket(
-                NameMatching::AsciiCaseInsensitive,
-                Offsets::new(512).table_len(),
-            )
-    };
-    assert!(BUCKET_64.iter().all(|name| bucket(name) == bucket("3")));
+    assert!(BUCKET_64
+        .iter()
+        .all(|name| bucket_of(name) == bucket_of("3")));
     let mut fs = floppy(1);
     let root = fs.root();
     let file = make(&mut fs, root, BUCKET_64[0], b"real");
@@ -1271,11 +1301,7 @@ fn forge_dir_link(
         .expect("placeholder");
     let (mut data, bs) = image(fs);
     let at = Offsets::new(bs);
-    let seal = |block: &mut [u8]| {
-        put_be32(block, 20, 0);
-        let sum = tairix_fsprobe::affs::checksum(block, 20);
-        put_be32(block, 20, sum);
-    };
+    let seal = |block: &mut [u8]| tairix_fsprobe::affs::seal(block, tairix_fsprobe::affs::CHECKSUM);
     let link = &mut data[id.raw() as usize * bs..(id.raw() as usize + 1) * bs];
     put_be32(link, at.sec_type(), ST_LINKDIR);
     put_be32(link, at.real_entry(), crate::header::low32(real.raw()));
@@ -1424,10 +1450,11 @@ fn a_new_extension_block_is_written_before_anything_points_at_it() {
         .rposition(|op| matches!(op, Op::Write(lba, _) if *lba == file.raw()))
         .expect("the header is written");
     assert!(written(first) < header_written, "and so is the header's");
-    assert_eq!(read_all_recorded(&mut fs, file), pattern(160 * 512, 4));
+    assert_eq!(read_whole(&mut fs, file), pattern(160 * 512, 4));
 }
 
-fn read_all_recorded(fs: &mut Affs<Recorded>, file: NodeId) -> Vec<u8> {
+/// `file` read whole, in as few calls as the driver answers it in.
+fn read_whole<B: Block>(fs: &mut Affs<B>, file: NodeId) -> Vec<u8> {
     let size = fs.node_info(file).expect("info").size as usize;
     let mut out = vec![0; size];
     let mut at = 0;
@@ -1569,20 +1596,8 @@ fn a_listing_that_stops_early_resolves_only_what_it_handed_over() {
     let mut fs = floppy(1);
     let root = fs.root();
     let real = make(&mut fs, root, "target", b"x");
-    let bucket = |name: &str| {
-        crate::name::Name::encode(name.as_bytes())
-            .expect("a name")
-            .bucket(
-                NameMatching::AsciiCaseInsensitive,
-                Offsets::new(512).table_len(),
-            )
-    };
-    let wanted = bucket("l0");
-    let links: Vec<String> = (0..2000)
-        .map(|n| alloc::format!("l{n}"))
-        .filter(|name| bucket(name) == wanted)
-        .take(12)
-        .collect();
+    let wanted = bucket_of("l0");
+    let links = names_in_one_bucket("l", 12);
     for name in &links {
         fs.link(root, name.as_bytes(), real).expect("link");
     }
@@ -1618,11 +1633,14 @@ fn writes_logged(fs: &mut Affs<Recorded>) -> Vec<(u64, Vec<u8>)> {
         .collect()
 }
 
-/// Grow or cut `f`, `before` bytes on a fresh floppy, to `after`, then
-/// replay every prefix of the change's writes onto the volume as it was: a
-/// device that took only those writes reopens and reads `f` as it was or as
-/// it became, never as damage.
-fn every_cut_reads_old_or_new(dos_type: u8, before: usize, after: usize) {
+/// A change to a file holding `old`, answering what it then holds.
+type Change<'a> = &'a dyn Fn(&mut Affs<Recorded>, NodeId, &[u8]) -> Vec<u8>;
+
+/// Change `f`, `before` bytes on a fresh floppy, by `change`, then replay
+/// every prefix of the change's writes onto the volume as it was: a device
+/// that took only those writes reopens and reads `f` as it was or as it
+/// became, never as damage.
+fn every_cut_reads_old_or_new(dos_type: u8, before: usize, change: Change<'_>) {
     let mut fs = floppy(dos_type);
     let root = fs.root();
     let old = pattern(before, 3);
@@ -1638,14 +1656,7 @@ fn every_cut_reads_old_or_new(dos_type: u8, before: usize, after: usize) {
     let root = fs.root();
     let file = fs.lookup(root, b"f").expect("f");
     logged(&mut fs);
-    let new = if after > before {
-        let tail = pattern(after - before, 7);
-        fs.write_all(file, before as u64, &tail).expect("grows");
-        [old.as_slice(), tail.as_slice()].concat()
-    } else {
-        fs.truncate(file, after as u64).expect("cuts");
-        old[..after].to_vec()
-    };
+    let new = change(&mut fs, file, &old);
     fs.flush().expect("commits");
     let writes = writes_logged(&mut fs);
     assert!(writes.len() > 3, "the change takes several writes");
@@ -1683,19 +1694,65 @@ fn every_cut_reads_old_or_new(dos_type: u8, before: usize, after: usize) {
     }
 }
 
+/// The file grown by data written from its end to `after` bytes.
+fn appended(fs: &mut Affs<Recorded>, file: NodeId, old: &[u8], after: usize) -> Vec<u8> {
+    let tail = pattern(after - old.len(), 7);
+    fs.write_all(file, old.len() as u64, &tail).expect("grows");
+    [old, tail.as_slice()].concat()
+}
+
+/// The file cut, or grown with zeros, to `after` bytes.
+fn truncated(fs: &mut Affs<Recorded>, file: NodeId, old: &[u8], after: usize) -> Vec<u8> {
+    fs.truncate(file, after as u64).expect("truncates");
+    let mut new = old.to_vec();
+    new.resize(after, 0);
+    new
+}
+
+/// The file grown by ten bytes written at `at`, past its end.
+fn written_past_the_end(fs: &mut Affs<Recorded>, file: NodeId, old: &[u8], at: usize) -> Vec<u8> {
+    fs.write_all(file, at as u64, b"0123456789").expect("grows");
+    let mut new = old.to_vec();
+    new.resize(at, 0);
+    new.extend_from_slice(b"0123456789");
+    new
+}
+
 #[test]
 fn every_state_a_growth_cut_short_leaves_reads_the_file_as_it_was_or_became() {
     // Past the header's 72 pointers into a second extension block.
-    every_cut_reads_old_or_new(1, 100 * 512, 200 * 512 + 100);
-    every_cut_reads_old_or_new(0, 100 * 488 + 7, 200 * 488);
+    every_cut_reads_old_or_new(1, 100 * 512, &|fs, file, old| {
+        appended(fs, file, old, 200 * 512 + 100)
+    });
+    every_cut_reads_old_or_new(0, 100 * 488 + 7, &|fs, file, old| {
+        appended(fs, file, old, 200 * 488)
+    });
 }
 
 #[test]
 fn every_state_a_cut_left_part_way_reads_the_file_as_it_was_or_became() {
     // Into the header's table, and into the first extension block.
-    every_cut_reads_old_or_new(1, 200 * 512, 50 * 512 + 5);
-    every_cut_reads_old_or_new(1, 200 * 512, 80 * 512);
-    every_cut_reads_old_or_new(0, 200 * 488 + 9, 80 * 488 + 3);
+    every_cut_reads_old_or_new(1, 200 * 512, &|fs, file, old| {
+        truncated(fs, file, old, 50 * 512 + 5)
+    });
+    every_cut_reads_old_or_new(1, 200 * 512, &|fs, file, old| {
+        truncated(fs, file, old, 80 * 512)
+    });
+    every_cut_reads_old_or_new(0, 200 * 488 + 9, &|fs, file, old| {
+        truncated(fs, file, old, 80 * 488 + 3)
+    });
+}
+
+/// The zeros a growth lays down move in runs, crossing two extension blocks,
+/// and every state they leave part-way reads as the old file or the new.
+#[test]
+fn every_state_a_zero_growth_cut_short_leaves_reads_the_file_as_it_was_or_became() {
+    every_cut_reads_old_or_new(1, 100 * 512, &|fs, file, old| {
+        truncated(fs, file, old, 250 * 512)
+    });
+    every_cut_reads_old_or_new(1, 100 * 512, &|fs, file, old| {
+        written_past_the_end(fs, file, old, 250 * 512)
+    });
 }
 
 /// A sparse device that logs what it is asked and fails the write it is told
@@ -1876,32 +1933,42 @@ fn mkdir_on<B: Block>(fs: &mut Affs<B>, dir: NodeId, name: &str) -> NodeId {
 
 #[test]
 fn a_damaged_volume_writes_nothing_more_even_to_count_its_space() {
-    // More bitmap pages than the cache holds, so counting the space evicts.
-    let mut fs = faulty(256 * 1024 * 1024);
-    let root = fs.root();
-    let file = fs
-        .create(root, b"f", NodeKind::RegularFile, &RECORD)
-        .expect("create");
-    fs.write_all(file, 0, &pattern(100 * 512, 4))
-        .expect("write");
-    fs.flush().expect("commits");
-    let extension = u64::from(fs.node(file).expect("header").extension());
-    let mut device = fs.into_device();
-    if let Some(block) = device.data.get_mut(&extension) {
-        block[100] ^= 1;
+    for damaged_extension in [true, false] {
+        // More bitmap pages than the cache holds, so counting the space evicts.
+        let mut fs = faulty(256 * 1024 * 1024);
+        let root = fs.root();
+        let file = fs
+            .create(root, b"f", NodeKind::RegularFile, &RECORD)
+            .expect("create");
+        fs.write_all(file, 0, &pattern(100 * 512, 4))
+            .expect("write");
+        fs.flush().expect("commits");
+        let extension = u64::from(fs.node(file).expect("header").extension());
+        let mut device = fs.into_device();
+        // Reopened, so the free space is not yet counted.
+        let expected = if damaged_extension {
+            if let Some(block) = device.data.get_mut(&extension) {
+                block[100] ^= 1;
+            }
+            // Found before the removal writes.
+            DriverError::BadMagic
+        } else {
+            // The header's zeroing fails, once the file's blocks are given
+            // back to the bitmap the change leaves part-way.
+            device.fail_write_in(2, DriverError::DeviceFault);
+            DriverError::DeviceFault
+        };
+        let mut fs = Affs::open(device).expect("reopens");
+        let root = fs.root();
+        assert_eq!(fs.remove(root, b"f"), Err(expected));
+        assert_eq!(fs.write_refusal(), Some(WriteRefusal::Damaged));
+        faulty_device(&mut fs).log.clear();
+        fs.stats().expect("stats");
+        assert!(
+            !faulty_device(&mut fs).wrote(),
+            "counting a damaged volume's space writes nothing to it"
+        );
     }
-    let mut fs = Affs::open(device).expect("reopens");
-    let root = fs.root();
-    // The header's 72 data blocks are given back, then the damaged
-    // extension is found: the change stops part-way.
-    assert_eq!(fs.remove(root, b"f"), Err(DriverError::BadMagic));
-    assert_eq!(fs.write_refusal(), Some(WriteRefusal::Damaged));
-    faulty_device(&mut fs).log.clear();
-    fs.stats().expect("stats");
-    assert!(
-        !faulty_device(&mut fs).wrote(),
-        "counting a damaged volume's space writes nothing to it"
-    );
 }
 
 #[test]
@@ -1927,11 +1994,1352 @@ fn listing_a_directory_of_links_walks_their_file_s_chain_once() {
         .iter()
         .filter(|op| matches!(op, Op::Read(_)))
         .count();
-    // The bucket chains, each entry again as it is handed over and the file it
-    // names, and the file's chain of links once: walked per entry, it would
-    // be read again for every link.
+    // The directory, its bucket chains, the file each link names, and the
+    // file's chain of links once: walked per entry, it would be read again
+    // for every link.
     assert!(
-        reads <= 1 + 4 * (links + 1),
+        reads <= 1 + 3 * (links + 1),
         "{reads} reads for {links} links"
     );
+}
+
+/// File an empty file in `dir` under the raw `recorded` name, as a volume
+/// another writer made may hold it.
+fn plant(fs: &mut Affs<MemDisk>, dir: NodeId, recorded: &[u8]) -> NodeId {
+    let name = crate::name::Name::recorded(recorded).expect("a recorded name");
+    fs.change(|fs| {
+        let mut dir = fs.directory(dir)?;
+        let block = fs.allocate(None)?;
+        let buf = fs.disk.buffer()?;
+        let mut entry = crate::header::Header::new(
+            block,
+            crate::header::Kind::File,
+            buf,
+            fs.at,
+            &name,
+            dir.block,
+            fs.now(),
+        );
+        fs.file_entry(&mut dir, &mut entry)?;
+        fs.write_header(&mut dir)?;
+        Ok(NodeId::from_raw(block))
+    })
+    .expect("planted")
+}
+
+/// An entry a volume records under a name no new entry may take is still
+/// found, read, renamed and removed by that name, and reached through a link
+/// to it; only a name a change gives is held to the rules.
+#[test]
+fn an_entry_recorded_under_a_name_no_new_entry_may_take_is_still_reached() {
+    for recorded in [&b"\x01Hidden"[..], b"Demo\x9b", b"a:b"] {
+        let mut fs = floppy(3);
+        let root = fs.root();
+        let dir = mkdir(&mut fs, root, "planted");
+        let planted = plant(&mut fs, dir, recorded);
+        let spelled: String = recorded.iter().map(|&b| char::from(b)).collect();
+        assert_eq!(names(&mut fs, dir), core::slice::from_ref(&spelled));
+        assert_eq!(fs.lookup(dir, spelled.as_bytes()), Ok(planted));
+        fs.write_all(planted, 0, b"payload").expect("written");
+        assert_eq!(read_all(&mut fs, planted), b"payload");
+        assert_eq!(
+            fs.create(dir, spelled.as_bytes(), NodeKind::RegularFile, &RECORD)
+                .err(),
+            Some(DriverError::OutOfRange)
+        );
+        assert_eq!(
+            fs.link(root, spelled.as_bytes(), planted).err(),
+            Some(DriverError::OutOfRange)
+        );
+        // A link target spells no `:`, AmigaDOS's volume separator.
+        if !recorded.contains(&b':') {
+            let via = fs
+                .create_link(dir, b"via", spelled.as_bytes(), &RECORD)
+                .expect("a link to it");
+            let mut target = [0u8; 64];
+            let len = fs.read_link(via, &mut target).expect("reads");
+            assert_eq!(
+                fs.lookup(dir, &target[..len]),
+                Ok(planted),
+                "through the link"
+            );
+            fs.remove(dir, b"via").expect("the link goes");
+        }
+        assert_eq!(
+            fs.rename(dir, spelled.as_bytes(), dir, spelled.as_bytes()),
+            Ok(())
+        );
+        fs.rename(dir, spelled.as_bytes(), root, b"moved")
+            .expect("renamed to a name it may take");
+        assert_eq!(fs.lookup(root, b"moved"), Ok(planted));
+        assert_eq!(
+            fs.rename(root, b"moved", dir, spelled.as_bytes()).err(),
+            Some(DriverError::OutOfRange)
+        );
+        let second = plant(&mut fs, dir, recorded);
+        fs.remove(dir, spelled.as_bytes())
+            .expect("removed by its name");
+        assert_eq!(
+            fs.lookup(dir, spelled.as_bytes()).err(),
+            Some(DriverError::NotFound)
+        );
+        let _ = second;
+        fs.remove(root, b"planted")
+            .expect("the emptied directory goes");
+        check_fs(fs);
+    }
+}
+
+#[test]
+fn a_volume_name_no_volume_may_take_is_refused_as_out_of_range() {
+    let long = [b'n'; 31];
+    for name in [&long[..], b"", b"a:b", b"tab\there"] {
+        let formatted = Affs::format(
+            MemDisk::new(901_120),
+            &FormatOptions {
+                dos_type: 3,
+                block_size: 512,
+                name,
+                created: created(),
+            },
+        );
+        assert_eq!(formatted.err(), Some(DriverError::OutOfRange), "{name:?}");
+    }
+}
+
+/// A pinned file that has lost its last name, on `fs`, `bytes` of `seed`.
+fn orphan_on(fs: &mut Affs<Faulty>, name: &str, seed: u8) -> NodeId {
+    let root = fs.root();
+    let file = fs
+        .create(root, name.as_bytes(), NodeKind::RegularFile, &RECORD)
+        .expect("create");
+    fs.write_all(file, 0, &pattern(4000, seed)).expect("write");
+    fs.pin(file).expect("pin");
+    fs.remove(root, name.as_bytes()).expect("unlink");
+    file
+}
+
+/// An orphan whose free fails at its last unpin is still counted, so the root
+/// stays marked invalid for AmigaDOS's validator to reclaim its blocks.
+#[test]
+fn an_orphan_whose_free_fails_is_left_for_amigados_to_validate() {
+    let mut fs = faulty(901_120);
+    let temp = orphan_on(&mut fs, "temp", 3);
+    faulty_device(&mut fs).fail_read = Some(temp.raw());
+    assert_eq!(fs.unpin(temp), Err(DriverError::DeviceFault));
+    assert_eq!(fs.write_refusal(), None, "nothing was written");
+    faulty_device(&mut fs).fail_read = None;
+    let root = fs.root();
+    fs.create(root, b"after", NodeKind::RegularFile, &RECORD)
+        .expect("the next change goes ahead");
+    fs.flush().expect("commits");
+    let fs = Affs::open(fs.into_device()).expect("reopens");
+    assert_eq!(fs.write_refusal(), Some(WriteRefusal::NeedsCheck));
+
+    let mut fs = faulty(901_120);
+    let one = orphan_on(&mut fs, "one", 4);
+    let two = orphan_on(&mut fs, "two", 5);
+    faulty_device(&mut fs).fail_read = Some(one.raw().min(two.raw()));
+    assert_eq!(fs.release_pins(), Err(DriverError::DeviceFault));
+    faulty_device(&mut fs).fail_read = None;
+    fs.flush().expect("commits");
+    let fs = Affs::open(fs.into_device()).expect("reopens");
+    assert_eq!(fs.write_refusal(), Some(WriteRefusal::NeedsCheck));
+}
+
+/// `fs`'s image with block `block` edited by `edit` and sealed again.
+fn resealed(fs: Affs<MemDisk>, block: usize, edit: impl FnOnce(&mut [u8], Offsets)) -> Vec<u8> {
+    let (mut data, bs) = image(fs);
+    let at = Offsets::new(bs);
+    let region = &mut data[block * bs..(block + 1) * bs];
+    edit(region, at);
+    tairix_fsprobe::affs::seal(region, tairix_fsprobe::affs::CHECKSUM);
+    data
+}
+
+/// A change on `data`, opened afresh, is refused as damage, the volume is
+/// written no more, and nothing was written.
+fn refused_as_damage(data: &[u8], change: impl FnOnce(&mut Affs<MemDisk>) -> DriverError) {
+    let mut fs = Affs::open(MemDisk {
+        data: data.to_vec(),
+        block_size: 512,
+    })
+    .expect("opens");
+    assert_eq!(change(&mut fs), DriverError::BadMagic);
+    assert_eq!(fs.write_refusal(), Some(WriteRefusal::Damaged));
+    let (after, _) = image(fs);
+    assert!(after == data, "nothing was written");
+}
+
+/// A bitmap that names the root, one block twice, or leaves a page the volume
+/// needs unnamed is damage, found before anything is written.
+#[test]
+fn a_bitmap_block_named_as_the_root_twice_or_after_a_gap_is_damage_and_nothing_is_written() {
+    let create = |fs: &mut Affs<MemDisk>| {
+        let root = fs.root();
+        fs.create(root, b"new", NodeKind::RegularFile, &RECORD)
+            .expect_err("refused")
+    };
+    let mut floppy = floppy(1);
+    let root = floppy.root();
+    make(&mut floppy, root, "keep", b"kept");
+    refused_as_damage(
+        &resealed(floppy, 880, |block, at| put_be32(block, at.bm_pages(), 880)),
+        create,
+    );
+    let four_mib = || {
+        let mut fs = fresh(1, 512, 4 << 20);
+        let root = fs.root();
+        make(&mut fs, root, "keep", b"kept");
+        fs
+    };
+    let root_block = (4 << 20) / 512 / 2;
+    refused_as_damage(
+        &resealed(four_mib(), root_block, |block, at| {
+            let first = be32(block, at.bm_pages());
+            put_be32(block, at.bm_pages() + 4, first);
+        }),
+        create,
+    );
+    refused_as_damage(
+        &resealed(four_mib(), root_block, |block, at| {
+            put_be32(block, at.bm_pages() + 4, 0);
+            put_be32(block, at.bm_pages() + 12, 8000);
+        }),
+        create,
+    );
+}
+
+/// A file whose data pointer names the root or a bitmap block never has its
+/// data written over it, nor its removal free it.
+#[test]
+fn a_file_naming_the_root_or_a_bitmap_block_as_its_data_is_never_written_over_or_freed() {
+    for named in [880u32, 881] {
+        let mut fs = floppy(1);
+        let root = fs.root();
+        make(&mut fs, root, "keep", b"kept");
+        let victim = make(&mut fs, root, "victim", &[0x11; 512]);
+        let data = resealed(fs, victim.raw() as usize, |block, at| {
+            put_be32(
+                block,
+                tairix_fsprobe::affs::TABLE + 4 * (at.table_len() - 1),
+                named,
+            );
+            put_be32(block, 16, named);
+        });
+        refused_as_damage(&data, |fs| {
+            fs.write_at(victim, 0, &[0xAB; 512]).expect_err("refused")
+        });
+        let mut removing = Affs::open(MemDisk {
+            data: data.clone(),
+            block_size: 512,
+        })
+        .expect("opens");
+        let root = removing.root();
+        assert_eq!(removing.remove(root, b"victim"), Err(DriverError::BadMagic));
+        assert_eq!(removing.write_refusal(), Some(WriteRefusal::Damaged));
+        let (after, bs) = image(removing);
+        let bit = u64::from(named) - 2;
+        let page = &after[881 * bs..882 * bs];
+        let long = be32(page, 4 + 4 * (bit / 32) as usize);
+        assert_eq!(long >> (bit % 32) & 1, 0, "{named} is still marked in use");
+        let mut fs = Affs::open(MemDisk {
+            data,
+            block_size: 512,
+        })
+        .expect("opens");
+        let root = fs.root();
+        let keep = fs.lookup(root, b"keep").expect("keep");
+        assert_eq!(read_all(&mut fs, keep), b"kept");
+    }
+}
+
+/// Bytes of a file one data block of a `dos_type` volume of 512-byte blocks
+/// carries.
+fn data_size(dos_type: u8) -> usize {
+    if dos_type & 1 == 1 {
+        512
+    } else {
+        512 - 24
+    }
+}
+
+/// The extension blocks of the file whose header is `header` in `image`, as
+/// many as its size counts, by their links.
+fn extensions_of(image: &[u8], bs: usize, header: u64) -> Vec<u64> {
+    let at = Offsets::new(bs);
+    let block = |n: u64| &image[n as usize * bs..(n as usize + 1) * bs];
+    let ds = if image[3] & 1 == 1 { bs } else { bs - 24 } as u64;
+    let table = at.table_len() as u64;
+    let head = block(header);
+    let blocks = u64::from(be32(head, at.byte_size())).div_ceil(ds);
+    let mut next = be32(head, at.extension());
+    (0..blocks.saturating_sub(table).div_ceil(table))
+        .map(|_| {
+            let this = u64::from(next);
+            next = be32(block(this), at.extension());
+            this
+        })
+        .collect()
+}
+
+/// The reads `log` holds of any of `blocks`.
+fn reads_of(log: &[Op], blocks: &[u64]) -> usize {
+    log.iter()
+        .filter(|op| matches!(op, Op::Read(lba) if blocks.contains(lba)))
+        .count()
+}
+
+#[test]
+fn appending_reads_only_the_extension_block_it_fills() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let mut model = pattern(900 * 512, 2);
+    let file = make(&mut fs, root, "grows", &model);
+    let mut fs = Recorded::over(fs);
+    let append = |fs: &mut Affs<Recorded>, model: &mut Vec<u8>, seed: u8| {
+        let data = pattern(8 * 512, seed);
+        fs.write_all(file, model.len() as u64, &data)
+            .expect("appends");
+        model.extend_from_slice(&data);
+    };
+    // The first walks the cold chain once.
+    append(&mut fs, &mut model, 0);
+    logged(&mut fs);
+    for seed in 1..=20 {
+        append(&mut fs, &mut model, seed);
+    }
+    let log = logged(&mut fs);
+    assert_eq!(read_whole(&mut fs, file), model);
+    let data = fs.into_device().disk.data;
+    check(&data, 512);
+    let reads = reads_of(&log, &extensions_of(&data, 512, file.raw()));
+    assert!(reads <= 2 * 20, "{reads} extension reads for 20 appends");
+}
+
+#[test]
+fn an_overwrite_reads_no_extension_block() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let file = make(&mut fs, root, "kept", &pattern(900 * 512, 3));
+    let mut fs = Recorded::over(fs);
+    logged(&mut fs);
+    fs.write_all(file, 0, &[9]).expect("overwrites");
+    let log = logged(&mut fs);
+    let mut first = [0u8; 1];
+    assert_eq!(fs.read_at(file, 0, &mut first), Ok(1));
+    assert_eq!(first, [9]);
+    let data = fs.into_device().disk.data;
+    let extensions = extensions_of(&data, 512, file.raw());
+    assert_eq!(extensions.len(), 12);
+    assert_eq!(reads_of(&log, &extensions), 0);
+}
+
+#[test]
+fn two_files_read_in_turn_walk_neither_chain_again() {
+    for dos_type in [0, 1] {
+        let mut fs = floppy(dos_type);
+        let root = fs.root();
+        let bodies = [
+            pattern(648 * data_size(dos_type), 4),
+            pattern(648 * data_size(dos_type), 5),
+        ];
+        let files = [
+            make(&mut fs, root, "a", &bodies[0]),
+            make(&mut fs, root, "b", &bodies[1]),
+        ];
+        let mut fs = Recorded::over(fs);
+        logged(&mut fs);
+        let mut read = [vec![0u8; bodies[0].len()], vec![0u8; bodies[1].len()]];
+        let mut calls = 0;
+        for at in (0..bodies[0].len()).step_by(4096) {
+            for (&file, out) in files.iter().zip(read.iter_mut()) {
+                let end = (at + 4096).min(out.len());
+                assert_eq!(fs.read_at(file, at as u64, &mut out[at..end]), Ok(end - at));
+                calls += 1;
+            }
+        }
+        let log = logged(&mut fs);
+        assert!(read == bodies, "DOS\\{dos_type}: both read back");
+        let data = fs.into_device().disk.data;
+        let extensions: Vec<u64> = files
+            .iter()
+            .flat_map(|file| extensions_of(&data, 512, file.raw()))
+            .collect();
+        assert_eq!(extensions.len(), 16);
+        let reads = reads_of(&log, &extensions);
+        assert!(
+            reads <= calls,
+            "DOS\\{dos_type}: {reads} extension reads for {calls} calls"
+        );
+    }
+}
+
+#[test]
+fn a_copy_within_the_volume_walks_neither_side_s_chain() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let body = pattern(648 * 512, 6);
+    let from = make(&mut fs, root, "from", &body);
+    let to = make(&mut fs, root, "to", b"");
+    let mut fs = Recorded::over(fs);
+    logged(&mut fs);
+    let mut chunk = vec![0u8; 4096];
+    let mut calls = 0;
+    for at in (0..body.len()).step_by(chunk.len()) {
+        let got = fs.read_at(from, at as u64, &mut chunk).expect("reads");
+        fs.write_all(to, at as u64, &chunk[..got]).expect("writes");
+        calls += 2;
+    }
+    let log = logged(&mut fs);
+    assert_eq!(read_whole(&mut fs, to), body);
+    let data = fs.into_device().disk.data;
+    check(&data, 512);
+    let extensions: Vec<u64> = [from, to]
+        .iter()
+        .flat_map(|file| extensions_of(&data, 512, file.raw()))
+        .collect();
+    let reads = reads_of(&log, &extensions);
+    assert!(reads <= calls, "{reads} extension reads for {calls} calls");
+}
+
+#[test]
+fn a_sequential_read_reads_each_extension_block_once() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let body = pattern(648 * 512, 7);
+    let file = make(&mut fs, root, "stream", &body);
+    let mut fs = Recorded::over(fs);
+    logged(&mut fs);
+    let mut out = vec![0u8; body.len()];
+    for (n, chunk) in out.chunks_mut(4096).enumerate() {
+        assert_eq!(fs.read_at(file, (n * 4096) as u64, chunk), Ok(chunk.len()));
+    }
+    let log = logged(&mut fs);
+    assert_eq!(out, body);
+    let data = fs.into_device().disk.data;
+    let extensions = extensions_of(&data, 512, file.raw());
+    assert_eq!(extensions.len(), 8);
+    for extension in extensions {
+        assert_eq!(
+            reads_of(&log, &[extension]),
+            1,
+            "extension block {extension}"
+        );
+    }
+}
+
+/// More files than the driver keeps chains for, long enough to span many
+/// extension blocks, written, cut, removed and made again, every change read
+/// back and the volume read cold beside it: a chain held across a change that
+/// it no longer describes reads the wrong blocks, or writes them.
+#[test]
+fn a_model_of_changes_across_many_long_files_is_kept_and_checks_out() {
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "affs-long-model",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    for dos_type in [0, 1] {
+        let mut fs = fresh(dos_type, 512, 4 << 20);
+        let root = fs.root();
+        let mut model: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let compare = |fs: &mut Affs<MemDisk>, model: &BTreeMap<String, Vec<u8>>, step: u32| {
+            for (name, data) in model {
+                let file = fs.lookup(root, name.as_bytes()).expect("in the model");
+                assert!(
+                    read_whole(fs, file) == *data,
+                    "DOS\\{dos_type} step {step}: {name}"
+                );
+            }
+        };
+        for step in 0..300u32 {
+            let name = alloc::format!("long{}", rng.below(16));
+            let changed = match rng.below(5) {
+                0 | 1 => {
+                    let offset = rng.below(600_000);
+                    let data = pattern(rng.below(64_000), step as u8);
+                    let file = match fs.lookup(root, name.as_bytes()) {
+                        Ok(file) => file,
+                        Err(_) => make(&mut fs, root, &name, &[]),
+                    };
+                    let entry = model.entry(name.clone()).or_default();
+                    match fs.write_all(file, offset as u64, &data) {
+                        Ok(()) => {
+                            if entry.len() < offset + data.len() {
+                                entry.resize(offset + data.len(), 0);
+                            }
+                            entry[offset..offset + data.len()].copy_from_slice(&data);
+                        }
+                        Err(DriverError::NoSpace) => {}
+                        Err(err) => panic!("DOS\\{dos_type} step {step}: {err:?}"),
+                    }
+                    true
+                }
+                2 => match fs.lookup(root, name.as_bytes()) {
+                    Ok(file) => {
+                        let size = rng.below(700_000);
+                        match fs.truncate(file, size as u64) {
+                            Ok(()) => model.entry(name.clone()).or_default().resize(size, 0),
+                            Err(DriverError::NoSpace) => {}
+                            Err(err) => panic!("DOS\\{dos_type} step {step}: {err:?}"),
+                        }
+                        true
+                    }
+                    Err(_) => false,
+                },
+                3 => {
+                    let removed = fs.remove(root, name.as_bytes());
+                    assert_eq!(
+                        removed.is_ok(),
+                        model.remove(&name).is_some(),
+                        "step {step}"
+                    );
+                    false
+                }
+                _ => false,
+            };
+            if changed {
+                let file = fs.lookup(root, name.as_bytes()).expect("in the model");
+                assert!(
+                    read_whole(&mut fs, file) == model[&name],
+                    "DOS\\{dos_type} step {step}: {name} as changed"
+                );
+            }
+            // Another file's window, so chains are reached out of turn and
+            // dropped.
+            if let Some((other, data)) = model.iter().nth(rng.below(model.len().max(1))) {
+                let file = fs.lookup(root, other.as_bytes()).expect("in the model");
+                let at = rng.below(data.len().max(1));
+                let end = (at + 4096).min(data.len());
+                let mut window = vec![0u8; end - at];
+                assert_eq!(fs.read_at(file, at as u64, &mut window), Ok(end - at));
+                assert!(
+                    window == data[at..end],
+                    "DOS\\{dos_type} step {step}: {other}"
+                );
+            }
+            if step % 50 == 49 {
+                let mut cold = Affs::open(MemDisk {
+                    data: fs.disk.dev.device_mut().data.clone(),
+                    block_size: 512,
+                })
+                .expect("opens cold");
+                compare(&mut cold, &model, step);
+            }
+        }
+        let mut fs = check_fs(fs);
+        compare(&mut fs, &model, 300);
+        let mut listed = names(&mut fs, root);
+        listed.sort();
+        assert_eq!(listed, model.keys().cloned().collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn a_cut_holds_no_list_of_what_it_frees() {
+    use tairix_fuzzseed::meter::{metered, refusing_above};
+    for dos_type in [0, 1] {
+        let mut fs = fresh(dos_type, 512, 32 << 20);
+        let root = fs.root();
+        let free = fs.stats().expect("stats").free_blocks;
+        let body = pattern(40_000 * data_size(dos_type), 8);
+        let file = make(&mut fs, root, "big", &body);
+        // Every bitmap page held, so a cut's own allocations are all it makes.
+        fs.stats().expect("stats");
+        for size in [10_000 * data_size(dos_type) + 7, 0] {
+            let (cut, metering) =
+                metered(|| refusing_above(16 * 1024, || fs.truncate(file, size as u64)));
+            assert_eq!(cut, Ok(()), "DOS\\{dos_type} cut to {size}");
+            assert!(metering.peak < 16 * 1024, "DOS\\{dos_type}: {metering:?}");
+            assert!(read_whole(&mut fs, file) == body[..size], "reads as cut");
+        }
+        assert_eq!(
+            fs.stats().expect("stats").free_blocks,
+            free - 1,
+            "all but the header given back"
+        );
+        drop(check_fs(fs));
+    }
+}
+
+/// A floppy holding one file of `blocks` data blocks whose extension block
+/// `from` links back to its first, sealed as a writer would have left it.
+fn looped(dos_type: u8, blocks: usize, from: usize) -> (Vec<u8>, NodeId) {
+    let mut fs = floppy(dos_type);
+    let root = fs.root();
+    make(&mut fs, root, "keep", b"kept");
+    let file = make(
+        &mut fs,
+        root,
+        "looped",
+        &pattern(blocks * data_size(dos_type), 9),
+    );
+    let extensions = extensions_of(&fs.disk.dev.device_mut().data, 512, file.raw());
+    let first = crate::header::low32(extensions[0]);
+    let data = resealed(fs, extensions[from] as usize, |block, at| {
+        put_be32(block, at.extension(), first);
+    });
+    (data, file)
+}
+
+/// A chain the size counts four extension blocks of, the third linking back
+/// to the first, passes the first twice within those four before a loop
+/// check can see it: walked on to its end, it never ends. Every change that
+/// frees or fills what the chain holds is refused before it writes.
+#[test]
+fn a_chain_that_returns_to_a_block_it_passed_is_damage_to_every_change() {
+    for dos_type in [0, 1] {
+        let ds = data_size(dos_type) as u64;
+        let (data, file) = looped(dos_type, 318, 2);
+        refused_as_damage(&data, |fs| {
+            fs.truncate(file, 200 * ds).expect_err("a cut refused")
+        });
+        refused_as_damage(&data, |fs| {
+            fs.write_at(file, 318 * ds, b"x")
+                .expect_err("a growth refused")
+        });
+        let mut fs = Affs::open(MemDisk {
+            data,
+            block_size: 512,
+        })
+        .expect("opens");
+        let root = fs.root();
+        assert_eq!(fs.remove(root, b"looped"), Err(DriverError::BadMagic));
+        assert_eq!(fs.write_refusal(), Some(WriteRefusal::Damaged));
+        // A chain whose freed part links back into what a cut keeps.
+        let (data, file) = looped(dos_type, 250, 1);
+        refused_as_damage(&data, |fs| {
+            fs.truncate(file, 144 * ds).expect_err("a cut refused")
+        });
+    }
+}
+
+#[test]
+fn a_growth_whose_chain_has_no_room_to_grow_still_lands() {
+    let mut fs = fresh(1, 512, 8 << 20);
+    let root = fs.root();
+    // 128 extension blocks: the chain the growth linked fills its room.
+    let mut body = pattern((72 + 128 * 72) * 512, 10);
+    let file = make(&mut fs, root, "long", &body);
+    let tail = [0x5A; 512];
+    let grown = tairix_fuzzseed::meter::refusing_above(1023, || {
+        fs.write_all(file, body.len() as u64, &tail)
+    });
+    assert_eq!(grown, Ok(()));
+    body.extend_from_slice(&tail);
+    // Grown again before any read could learn the link the cache lost.
+    fs.write_all(file, body.len() as u64, &tail)
+        .expect("grows again");
+    body.extend_from_slice(&tail);
+    assert_eq!(fs.write_refusal(), None);
+    assert!(read_whole(&mut fs, file) == body, "reads back grown");
+    drop(check_fs(fs));
+}
+
+#[test]
+fn the_chain_kept_follows_a_cut_and_goes_with_its_file() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let file = make(&mut fs, root, "long", &pattern(500 * 512, 11));
+    let on_medium = |fs: &mut Affs<MemDisk>| -> Vec<u32> {
+        extensions_of(&fs.disk.dev.device_mut().data, 512, file.raw())
+            .into_iter()
+            .map(crate::header::low32)
+            .collect()
+    };
+    assert_eq!(
+        fs.chains.held(file.raw()),
+        Some(on_medium(&mut fs)),
+        "linked as it grew"
+    );
+    fs.truncate(file, 200 * 512).expect("cuts");
+    let kept = on_medium(&mut fs);
+    assert_eq!(kept.len(), 2);
+    assert_eq!(fs.chains.held(file.raw()), Some(kept), "cut with it");
+    fs.remove(root, b"long").expect("removes");
+    assert_eq!(fs.chains.held(file.raw()), None, "gone with its header");
+}
+
+#[test]
+fn a_growth_by_truncate_writes_its_zeros_in_runs() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let file = make(&mut fs, root, "zeros", b"");
+    let mut fs = Recorded::over(fs);
+    logged(&mut fs);
+    fs.truncate(file, 300 * 512).expect("grows");
+    fs.flush().expect("commits");
+    let writes = writes_logged(&mut fs).len();
+    assert!(writes <= 30, "{writes} writes");
+    assert!(
+        read_whole(&mut fs, file) == vec![0; 300 * 512],
+        "reads as zeros"
+    );
+    check(&fs.into_device().disk.data, 512);
+}
+
+#[test]
+fn a_write_past_the_end_writes_the_gap_in_runs() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let file = make(&mut fs, root, "gap", b"");
+    let mut fs = Recorded::over(fs);
+    logged(&mut fs);
+    fs.write_all(file, 200 * 512, b"0123456789").expect("grows");
+    fs.flush().expect("commits");
+    let writes = writes_logged(&mut fs).len();
+    assert!(writes <= 25, "{writes} writes");
+    let mut expected = vec![0; 200 * 512];
+    expected.extend_from_slice(b"0123456789");
+    assert!(
+        read_whole(&mut fs, file) == expected,
+        "reads as the gap and the data"
+    );
+    check(&fs.into_device().disk.data, 512);
+}
+
+/// The reads `log` holds.
+fn reads(log: &[Op]) -> usize {
+    log.iter().filter(|op| matches!(op, Op::Read(_))).count()
+}
+
+#[test]
+fn a_listing_reads_each_entry_of_a_bucket_once() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    for name in names_in_one_bucket("e", 12) {
+        make(&mut fs, root, &name, b"");
+    }
+    let mut fs = Recorded::over(fs);
+    logged(&mut fs);
+    assert_eq!(listed(&mut fs, root, 0, b"").expect("lists").len(), 12);
+    let reads = reads(&logged(&mut fs));
+    assert!(
+        reads <= 1 + 12,
+        "{reads} reads: the directory, then each entry once"
+    );
+}
+
+#[test]
+fn a_listing_resumed_an_entry_at_a_time_walks_its_bucket_once() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let mut names = names_in_one_bucket("r", 200);
+    for name in &names {
+        make(&mut fs, root, name, b"");
+    }
+    let mut fs = Recorded::over(fs);
+    logged(&mut fs);
+    let mut seen = Vec::new();
+    let (mut cursor, mut after) = (0, Vec::new());
+    while let Some((entry, name)) = first_listed(&mut fs, root, cursor, &after).expect("lists") {
+        cursor = entry.next_cursor;
+        after.clone_from(&name);
+        seen.push(String::from_utf8(name).expect("utf-8"));
+    }
+    seen.sort();
+    names.sort();
+    assert_eq!(seen, names);
+    let reads = reads(&logged(&mut fs));
+    assert!(reads <= 2 * 200 + 2, "{reads} reads");
+}
+
+/// A listing stopping on the first entry of a later bucket, past the one it
+/// handed over, is resumed at that entry from its predecessor's cursor, as a
+/// served listing whose reply filled is: neither the bucket it stopped in nor
+/// the one before is walked again.
+#[test]
+fn a_listing_resumed_at_the_entry_it_stopped_on_walks_no_bucket_again() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let mut buckets = Vec::new();
+    let names: Vec<String> = (0..)
+        .map(|n| alloc::format!("s{n}"))
+        .filter(|name| {
+            let bucket = bucket_of(name);
+            let fresh = !buckets.contains(&bucket);
+            buckets.push(bucket);
+            fresh
+        })
+        .take(6)
+        .collect();
+    for name in &names {
+        make(&mut fs, root, name, b"");
+    }
+    let mut fs = Recorded::over(fs);
+    let mut taken = None;
+    fs.read_dir(root, 0, b"", &mut |entry, name| {
+        if taken.is_some() {
+            return DirVisit::Stop;
+        }
+        taken = Some((*entry, name.to_vec()));
+        DirVisit::Take
+    })
+    .expect("lists");
+    let (first, first_name) = taken.expect("an entry");
+    logged(&mut fs);
+    let rest = listed(&mut fs, root, first.next_cursor, &first_name).expect("lists");
+    assert_eq!(rest.len(), names.len() - 1);
+    let reads = reads(&logged(&mut fs));
+    assert_eq!(
+        reads,
+        1 + names.len() - 2,
+        "the directory, then each bucket past the one stopped in"
+    );
+}
+
+#[test]
+fn listings_of_two_directories_in_turn_each_hand_every_entry_over_once() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let dirs = [mkdir(&mut fs, root, "one"), mkdir(&mut fs, root, "two")];
+    let names = names_in_one_bucket("t", 30);
+    for dir in dirs {
+        for name in &names {
+            make(&mut fs, dir, name, b"");
+        }
+    }
+    let mut cursors = [(0, Vec::new()), (0, Vec::new())];
+    let mut seen = [Vec::new(), Vec::new()];
+    let mut done = [false; 2];
+    while done.contains(&false) {
+        for side in 0..2 {
+            if done[side] {
+                continue;
+            }
+            let (cursor, after) = &cursors[side];
+            match first_listed(&mut fs, dirs[side], *cursor, after).expect("lists") {
+                Some((entry, name)) => {
+                    seen[side].push(String::from_utf8(name.clone()).expect("utf-8"));
+                    cursors[side] = (entry.next_cursor, name);
+                }
+                None => done[side] = true,
+            }
+        }
+    }
+    let mut want = names.clone();
+    want.sort();
+    for mut side in seen {
+        side.sort();
+        assert_eq!(side, want);
+    }
+    // Resumed after an entry a change removed, each entry left after it is
+    // handed over once.
+    let (first, first_name) = first_listed(&mut fs, dirs[0], 0, b"")
+        .expect("lists")
+        .expect("an entry");
+    let (second, second_name) = first_listed(&mut fs, dirs[0], first.next_cursor, &first_name)
+        .expect("lists")
+        .expect("another");
+    fs.remove(dirs[0], &second_name).expect("removes");
+    let rest = listed(&mut fs, dirs[0], second.next_cursor, &second_name).expect("lists");
+    assert_eq!(rest.len(), names.len() - 2);
+    assert!(rest
+        .iter()
+        .all(|(_, name)| *name != first_name && *name != second_name));
+}
+
+#[test]
+fn a_damaged_soft_link_fails_only_the_call_that_reaches_it() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    make(&mut fs, root, BUCKET_64[0], b"");
+    // A soft link storing no target, which a writer never leaves.
+    let mut fs = forge_link(fs, BUCKET_64[1].as_bytes(), ST_SOFTLINK, 0, b"");
+    let cursor = (bucket_of(BUCKET_64[0]) as u64) << 32;
+    let (entry, name) = first_listed(&mut fs, root, cursor, b"")
+        .expect("the file before it is handed over")
+        .expect("an entry");
+    assert_eq!(name, BUCKET_64[0].as_bytes());
+    assert_eq!(
+        first_listed(&mut fs, root, entry.next_cursor, &name).err(),
+        Some(DriverError::BadMagic)
+    );
+}
+
+#[test]
+fn a_listing_keeps_only_the_bucket_it_stopped_in() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let names = names_in_one_bucket("k", 6);
+    for name in &names {
+        make(&mut fs, root, name, b"");
+    }
+    let (listing, metering) = tairix_fuzzseed::meter::metered(|| {
+        listed(&mut fs, root, 0, b"").map(|listing| listing.len())
+    });
+    assert_eq!(listing, Ok(names.len()));
+    assert!(
+        fs.listing.is_none(),
+        "a listing run to its end keeps nothing"
+    );
+    assert_eq!(metering.retained, 0);
+    let bucket = bucket_of(&names[0]);
+    first_listed(&mut fs, root, (bucket as u64) << 32, b"")
+        .expect("lists")
+        .expect("an entry");
+    assert!(fs
+        .listing
+        .as_ref()
+        .is_some_and(|held| held.is(root.raw(), bucket)));
+    make(&mut fs, root, "after", b"");
+    assert!(fs.listing.is_none(), "a change drops it");
+}
+
+#[test]
+fn security_reads_only_the_node_s_own_header() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let file = make(&mut fs, root, "named", b"x");
+    for n in 0..40 {
+        fs.link(root, alloc::format!("l{n}").as_bytes(), file)
+            .expect("link");
+    }
+    let mut fs = Recorded::over(fs);
+    logged(&mut fs);
+    assert_eq!(
+        fs.security(file),
+        Ok(NodeSecurity::unrecorded(NodeKind::RegularFile))
+    );
+    let reads = reads(&logged(&mut fs));
+    assert!(reads <= 1, "{reads} reads");
+}
+
+/// A change a shortage meets, given the payload it writes.
+type Shortened<'a> = &'a dyn Fn(&mut Affs<MemDisk>, &[u8]) -> Result<(), DriverError>;
+
+/// A change a shortage meets, by name.
+type Named = (
+    &'static str,
+    fn(&mut Affs<MemDisk>, &[u8]) -> Result<(), DriverError>,
+);
+
+/// Run `change` on a volume `prepare` makes under every count of granted
+/// allocations short of what it needs: each is a refusal — `OutOfMemory`,
+/// nothing written, the volume still writable — after which the same change
+/// goes ahead; once enough are granted it goes ahead at once. The volume
+/// checks out either way.
+fn every_shortage_is_a_refusal(
+    what: &str,
+    prepare: &dyn Fn() -> Affs<MemDisk>,
+    change: Shortened<'_>,
+    payload_blocks: usize,
+) {
+    use tairix_fuzzseed::meter::refusing_after;
+    // What a change writes is the caller's, made before any shortage.
+    let payload = pattern(payload_blocks * 512, 9);
+    for granted in 0.. {
+        assert!(granted < 4096, "{what}: never went ahead");
+        let mut fs = prepare();
+        let before = fs.disk.dev.device().data.clone();
+        let outcome = refusing_after(granted, || change(&mut fs, &payload));
+        if let Err(err) = outcome {
+            assert_eq!(err, DriverError::OutOfMemory, "{what}, {granted} granted");
+            assert_eq!(
+                fs.write_refusal(),
+                None,
+                "{what}, {granted} granted: a shortage is no damage"
+            );
+            assert!(
+                fs.disk.dev.device().data == before,
+                "{what}, {granted} granted: a refusal writes nothing"
+            );
+            change(&mut fs, &payload)
+                .unwrap_or_else(|err| panic!("{what}: {err:?} once memory is there"));
+        }
+        fs.flush().expect("commits");
+        drop(check_fs(fs));
+        if outcome.is_ok() {
+            return;
+        }
+    }
+}
+
+/// A floppy holding a file `"3"`, a 200-block file `long` and an empty
+/// directory `moved` in a directory `d`, a file `full` of 72 and one `rows`
+/// of 144 blocks, and an empty directory `e` with a hard link to it in `d`.
+fn shortage_floppy(dos_type: u8, deferred: bool) -> Affs<MemDisk> {
+    let mut fs = floppy(dos_type);
+    let root = fs.root();
+    let ds = data_size(dos_type);
+    make(&mut fs, root, BUCKET_64[0], b"three");
+    let dir = mkdir(&mut fs, root, "d");
+    make(&mut fs, dir, "long", &pattern(200 * ds, 1));
+    mkdir(&mut fs, dir, "moved");
+    make(&mut fs, root, "full", &pattern(72 * ds, 2));
+    make(&mut fs, root, "rows", &pattern(144 * ds, 3));
+    let empty = mkdir(&mut fs, root, "e");
+    let (mut fs, _) = forge_dir_link(fs, dir, b"elink", empty);
+    if deferred {
+        open_transaction(&mut fs);
+    }
+    fs
+}
+
+/// Defer `fs`'s commits to a volume host, with a transaction already open, as
+/// a later change finds one.
+fn open_transaction(fs: &mut Affs<MemDisk>) {
+    let host = TestVolumeHost::leaked(1_000);
+    fs.set_volume_host(TestVolumeHost::volume(), host);
+    let root = fs.root();
+    make(fs, root, "opened", b"x");
+}
+
+/// A floppy crowding every bucket a rename over a linked name walks. Blocks
+/// are taken in turn, so each filler, made first, files ahead of what comes
+/// later in its bucket: `d`'s file to move behind one, and in `e`, behind two,
+/// a file a link in `p` names (its link behind a filler there) and a link to
+/// `r` that another link to it was made after.
+fn crowded_floppy(dos_type: u8, deferred: bool) -> Affs<MemDisk> {
+    let mut fs = floppy(dos_type);
+    let root = fs.root();
+    let from = mkdir(&mut fs, root, "d");
+    let into = mkdir(&mut fs, root, "e");
+    let linking = mkdir(&mut fs, root, "p");
+    let [ey0, ey1, ey2] = crowded("ey");
+    let [ez0, ez1, ez2] = crowded("ez");
+    let [pl0, pl1, _] = crowded("pl");
+    let [dx0, dx1, _] = crowded("dx");
+    for (dir, filler) in [
+        (into, &ey0),
+        (into, &ey1),
+        (into, &ez0),
+        (into, &ez1),
+        (linking, &pl0),
+        (from, &dx0),
+    ] {
+        make(&mut fs, dir, filler, b"0");
+    }
+    let named = make(&mut fs, into, &ey2, b"y");
+    fs.link(linking, pl1.as_bytes(), named)
+        .expect("the file's link");
+    let linked = make(&mut fs, root, "r", b"r");
+    fs.link(into, ez2.as_bytes(), linked)
+        .expect("the occupant link");
+    fs.link(root, b"rlink", linked)
+        .expect("a link made after it");
+    make(&mut fs, from, &dx1, b"x");
+    if deferred {
+        open_transaction(&mut fs);
+    }
+    fs
+}
+
+/// Three names filed in one bucket, `{prefix}`'s.
+fn crowded(prefix: &str) -> [String; 3] {
+    let mut names = names_in_one_bucket(prefix, 3).into_iter();
+    core::array::from_fn(|_| names.next().expect("three names in one bucket"))
+}
+
+/// A rename over a name a link shares, every bucket it walks crowded, is
+/// refused before it writes whatever its working set: once written, a change
+/// takes only the spares it holds.
+#[test]
+fn a_rename_over_a_linked_name_in_crowded_buckets_is_refused_before_it_writes() {
+    // Spelled before any shortage: the meter refuses this test's own heap too.
+    let (dx, ey, ez) = (crowded("dx"), crowded("ey"), crowded("ez"));
+    let over_file = |fs: &mut Affs<MemDisk>, _: &[u8]| {
+        let (d, e) = (look(fs, &["d"])?, look(fs, &["e"])?);
+        fs.rename(d, dx[1].as_bytes(), e, ey[2].as_bytes())
+    };
+    let over_link = |fs: &mut Affs<MemDisk>, _: &[u8]| {
+        let (d, e) = (look(fs, &["d"])?, look(fs, &["e"])?);
+        fs.rename(d, dx[1].as_bytes(), e, ez[2].as_bytes())
+    };
+    let changes: [(&str, Shortened<'_>); 2] = [
+        ("a rename over a file a link names", &over_file),
+        ("a rename over a hard link", &over_link),
+    ];
+    for dos_type in [0, 1] {
+        for deferred in [false, true] {
+            for (what, change) in changes {
+                every_shortage_is_a_refusal(
+                    &alloc::format!(
+                        "DOS\\{dos_type}{}: {what}",
+                        if deferred { ", deferred" } else { "" }
+                    ),
+                    &|| crowded_floppy(dos_type, deferred),
+                    change,
+                    1,
+                );
+            }
+        }
+    }
+}
+
+/// [`shortage_floppy`] with `d/long` held and its name removed: an orphan
+/// its last unpin frees.
+fn orphan_floppy(dos_type: u8, deferred: bool) -> Affs<MemDisk> {
+    let mut fs = shortage_floppy(dos_type, deferred);
+    let long = look(&mut fs, &["d", "long"]).expect("long");
+    let dir = look(&mut fs, &["d"]).expect("d");
+    fs.pin(long).expect("pinned");
+    fs.remove(dir, b"long").expect("unnamed");
+    fs
+}
+
+fn look(fs: &mut Affs<MemDisk>, path: &[&str]) -> Result<NodeId, DriverError> {
+    path.iter()
+        .try_fold(fs.root(), |dir, name| fs.lookup(dir, name.as_bytes()))
+}
+
+/// Every kind of change, by name, made with the payload it writes on a
+/// volume [`shortage_floppy`] makes.
+fn changes_a_shortage_meets() -> [Named; 15] {
+    [
+        ("a create filed after another", |fs, _| {
+            let root = fs.root();
+            fs.create(
+                root,
+                BUCKET_64[1].as_bytes(),
+                NodeKind::RegularFile,
+                &RECORD,
+            )
+            .map(|_| ())
+        }),
+        ("a link", |fs, _| {
+            let three = look(fs, &[BUCKET_64[0]])?;
+            let root = fs.root();
+            fs.link(root, BUCKET_64[1].as_bytes(), three)
+        }),
+        ("a growth into a first extension", |fs, _| {
+            let full = look(fs, &["full"])?;
+            let at = fs.node_info(full)?.size;
+            fs.write_all(full, at, b"x")
+        }),
+        ("an append past a full extension", |fs, _| {
+            let rows = look(fs, &["rows"])?;
+            let at = fs.node_info(rows)?.size;
+            fs.write_all(rows, at, b"x")
+        }),
+        ("an overwrite across extensions", |fs, payload| {
+            let long = look(fs, &["d", "long"])?;
+            fs.write_all(long, 1000, payload)
+        }),
+        ("a cut into the header", |fs, _| {
+            let long = look(fs, &["d", "long"])?;
+            fs.truncate(long, 50 * 512 + 5)
+        }),
+        ("a cut into an extension", |fs, _| {
+            let long = look(fs, &["d", "long"])?;
+            fs.truncate(long, 80 * 512)
+        }),
+        ("a growth over a gap", |fs, _| {
+            let full = look(fs, &["full"])?;
+            fs.truncate(full, 300 * 512)
+        }),
+        ("a removal", |fs, _| {
+            let dir = look(fs, &["d"])?;
+            fs.remove(dir, b"long")
+        }),
+        ("a rename across directories over a file", |fs, _| {
+            let dir = look(fs, &["d"])?;
+            let root = fs.root();
+            fs.rename(root, b"full", dir, b"long")
+        }),
+        ("a rename over a directory a link names", |fs, _| {
+            let root = fs.root();
+            let dir = look(fs, &["d"])?;
+            fs.rename(dir, b"moved", root, b"e")
+        }),
+        ("a removal promoting a link", |fs, _| {
+            let root = fs.root();
+            fs.remove(root, b"e")
+        }),
+        ("a directory", |fs, _| {
+            let root = fs.root();
+            fs.create(root, b"made", NodeKind::Directory, &RECORD)
+                .map(|_| ())
+        }),
+        ("a soft link", |fs, _| {
+            let root = fs.root();
+            fs.create_link(root, b"soft", b"d/long", &RECORD)
+                .map(|_| ())
+        }),
+        ("a comment", |fs, _| {
+            let three = look(fs, &[BUCKET_64[0]])?;
+            fs.set_attr(three, b"amiga.comment", b"noted")
+        }),
+    ]
+}
+
+/// A heap that runs short partway through a change refuses the change before
+/// it writes, never leaving the volume part-way: whatever the change, and
+/// whether its transaction opens with it or is open already.
+#[test]
+fn every_change_a_shortage_meets_is_refused_before_it_writes() {
+    for dos_type in [0, 1] {
+        for deferred in [false, true] {
+            for (what, change) in changes_a_shortage_meets() {
+                every_shortage_is_a_refusal(
+                    &alloc::format!(
+                        "DOS\\{dos_type}{}: {what}",
+                        if deferred { ", deferred" } else { "" }
+                    ),
+                    &|| shortage_floppy(dos_type, deferred),
+                    &change,
+                    150,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_commit_allocates_nothing() {
+    let mut fs = shortage_floppy(1, true);
+    let root = fs.root();
+    make(&mut fs, root, "pending", &pattern(3000, 4));
+    let committed = tairix_fuzzseed::meter::refusing_above(0, || fs.flush());
+    assert_eq!(committed, Ok(()));
+    assert_eq!(fs.write_refusal(), None);
+    drop(check_fs(fs));
+}
+
+/// An orphan whose free at its last unpin meets a shortage is refused before
+/// it writes, and stays owed its free: the release of the mount's pins frees
+/// it, and the volume ends validated.
+#[test]
+fn an_orphan_whose_free_meets_a_shortage_is_freed_when_the_pins_are_released() {
+    use tairix_fuzzseed::meter::refusing_after;
+    let mut refused = 0;
+    for granted in 0.. {
+        assert!(granted < 4096, "never freed");
+        let mut fs = orphan_floppy(1, false);
+        let orphan = (&fs.held)
+            .into_iter()
+            .next()
+            .map(|(block, _)| NodeId::from_raw(block))
+            .expect("held");
+        let before = fs.disk.dev.device().data.clone();
+        match refusing_after(granted, || fs.unpin(orphan)) {
+            Ok(Unpinned::Freed) => {
+                drop(check_fs(fs));
+                assert!(refused > 0, "a shortage was met first");
+                return;
+            }
+            Ok(other) => panic!("{other:?}"),
+            Err(err) => {
+                assert_eq!(err, DriverError::DeviceFault, "{granted} granted");
+                assert_eq!(fs.write_refusal(), None, "{granted} granted");
+                assert!(fs.disk.dev.device().data == before, "{granted} granted");
+                fs.release_pins().expect("freed once memory is there");
+                fs.flush().expect("commits");
+                drop(check_fs(fs));
+                refused += 1;
+            }
+        }
+    }
+}
+
+/// A walk hands each extension block's buffer back as it steps on, so one
+/// made once a change has written leaves the spares as it found them.
+#[test]
+fn a_walk_once_a_change_has_written_takes_no_buffer_from_the_heap() {
+    use tairix_fuzzseed::meter::refusing_above;
+    let mut fs = fresh(0, 512, 4 << 20);
+    let root = fs.root();
+    make(&mut fs, root, "big", &pattern(3000 * data_size(0), 6));
+    let (data, _) = image(fs);
+    let mut fs = Affs::open(MemDisk {
+        data,
+        block_size: 512,
+    })
+    .expect("reopens");
+    assert!(fs.extension_blocks(3000) > 2 * SPARE_BLOCKS as u64);
+    let big = look(&mut fs, &["big"]).expect("big");
+    let header = fs.header(big.raw()).expect("its header");
+    fs.disk.stock().expect("the spares");
+    fs.disk.spending = true;
+    let mut held = None;
+    let mut buf = [0u8; 16];
+    let last = 2999 * data_size(0) as u64;
+    // Refused a block buffer, though not the chain's own growth.
+    let read = refusing_above(511, || fs.read_file(&header, last, &mut buf, &mut held));
+    assert_eq!(read, Ok(16), "the cold chain walked on spares alone");
+    assert_eq!(buf, pattern(3000 * data_size(0), 6)[last as usize..][..16]);
+}
+
+/// A read outside any change keeps no buffer it walks the chain with, so on a
+/// heap running short it is refused at every request it makes, never stopped
+/// by a spare grown to keep one.
+#[test]
+fn a_read_across_a_files_extensions_keeps_no_buffer_and_is_refused_on_a_short_heap() {
+    use tairix_fuzzseed::meter::refusing_after;
+    let payload = pattern(300 * data_size(1), 3);
+    let mut fs = fresh(1, 512, 4 << 20);
+    let root = fs.root();
+    make(&mut fs, root, "long", &payload);
+    let (data, _) = image(fs);
+    // In the third extension block, so the walk reads two on the way.
+    let at = 250 * data_size(1);
+    let mut granted = 0;
+    loop {
+        // Reopened for every grant, so each read walks the chain cold.
+        let mut fs = Affs::open(MemDisk {
+            data: data.clone(),
+            block_size: 512,
+        })
+        .expect("reopens");
+        assert!(fs.extension_blocks(300) > 3);
+        let long = look(&mut fs, &["long"]).expect("long");
+        let mut out = [0u8; 64];
+        match refusing_after(granted, || fs.read_at(long, at as u64, &mut out)) {
+            Ok(len) => {
+                assert_eq!(out[..], payload[at..][..len]);
+                assert!(fs.disk.spare.is_empty(), "a read keeps no buffer");
+                break;
+            }
+            Err(err) => assert_eq!(err, DriverError::OutOfMemory, "{granted}"),
+        }
+        granted += 1;
+    }
+}
+
+/// A long file's walks hand each extension block's buffer back, so a change
+/// crossing far more extension blocks than are held in reserve still takes
+/// none from the heap once it has written.
+#[test]
+fn a_change_across_a_long_file_takes_nothing_from_the_heap_once_it_writes() {
+    let changes: [Named; 3] = [
+        ("a removal", |fs, _| {
+            let root = fs.root();
+            fs.remove(root, b"big")
+        }),
+        ("a cut", |fs, _| {
+            let big = look(fs, &["big"])?;
+            fs.truncate(big, 100 * 512)
+        }),
+        ("an overwrite", |fs, payload| {
+            let big = look(fs, &["big"])?;
+            fs.write_all(big, 0, payload)
+        }),
+    ];
+    for dos_type in [0, 1] {
+        let prepare = || {
+            let mut fs = fresh(dos_type, 512, 4 << 20);
+            let root = fs.root();
+            make(
+                &mut fs,
+                root,
+                "big",
+                &pattern(3000 * data_size(dos_type), 6),
+            );
+            // Reopened, so every chain is walked cold.
+            let (data, _) = image(fs);
+            Affs::open(MemDisk {
+                data,
+                block_size: 512,
+            })
+            .expect("reopens")
+        };
+        for (what, change) in changes {
+            every_shortage_is_a_refusal(
+                &alloc::format!("DOS\\{dos_type}: {what} of a long file"),
+                &prepare,
+                &change,
+                2500,
+            );
+        }
+    }
 }

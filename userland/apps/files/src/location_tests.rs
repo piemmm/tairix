@@ -7,7 +7,7 @@ use alloc::vec;
 use tairix_abi::window_ipc::WindowTitle;
 use tairix_browse::Browser;
 
-use super::{leave_directory, location_title, retitle, Leave};
+use super::{leave_directory, location_title, refusal, retitle, Leave};
 use crate::test_fs::{browser, FakeFs};
 
 /// A browser showing `/Users/ann/Home`, three levels down the fixture.
@@ -34,6 +34,20 @@ fn leaving_a_subdirectory_climbs_to_its_parent() {
 }
 
 /// The gesture closes the window only where there is nothing left to leave.
+/// A refused climb names the place with what hides in its names shown.
+#[test]
+fn a_refused_climb_names_the_parent_as_shown() {
+    let folder = vec![
+        "Storage".to_string(),
+        "Docs\u{202e}x".to_string(),
+        "leaf".to_string(),
+    ];
+    assert_eq!(
+        refusal(Some(&folder)),
+        "could not open /Storage/Docs\u{fffd}x"
+    );
+}
+
 #[test]
 fn leaving_the_root_closes_the_window() {
     let mut browser = browser();

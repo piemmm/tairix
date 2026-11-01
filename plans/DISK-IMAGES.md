@@ -31,6 +31,7 @@ eject it or their login session ends. It consumes and never contradicts
 | DI17 | A mount listing that waits on no driver and reads the table once: usage kept current off the listing's path by drivers that count it, and `sysinfod` sizing its read from the kernel's answer, so neither a slow image's driver nor the number of volumes stalls every principal's listing | planned |
 | DI18 | An incremental hardware-tree read: the nodes changed since a generation, so neither the copy under the tree's lock nor `devmgr`'s decode and match spans every image node in the system | planned |
 | DI19 | Bounce buffers sized by transfers, not volumes: staging borrowed from a pool reserved per nesting level, so memory follows the transfers in flight and no transfer waits on a buffer one above it holds | planned |
+| DI20 | Partitioned removable devices: the volume manager plans the partitions an Amiga Rigid Disk Block lays out on a device, as it plans a PC table's, rather than attaching none | planned |
 
 ## 1. What an image is
 
@@ -60,23 +61,31 @@ eject it or their login session ends. It consumes and never contradicts
   attach did not ask for it read-only, and the driver writes the format.
   `ImageAccess::Writable` asks for a writable volume or none: a read-only
   descriptor, or a first serve that would mount it read-only, is refused
-  `ReadOnly`. The reply says whether the volume is read-only; a target
+  `ReadOnly`. `expects` is a set of filesystems (`VolumeFsTypes`, the frame's
+  own word) the probe's answer must fall in, else `NotExpected`: a claim held
+  to recognition, never a choice of driver. The reply says whether the volume is read-only; a target
   directory that would not take the volume is answered `TargetRefused`, and an
   asked name the volume may not take — kept by the naming policy, or in use,
   judged again as the volume is shown — `NameRefused`, each with its errno and
-  nothing left attached, so a caller names the directory or the name and never
-  the image. The attachment keeps a counted clone of the description, acting as the
+  nothing left attached (a volume mounted before the directory was tried is
+  taken out before the reply, unless the attach is being killed or the volume
+  is held; §4), so a caller names the directory or the name and never the
+  image. The attachment keeps a counted clone of the description, acting as the
   attacher's identity frozen at the attach, so the file outlives the
-  caller's close and an unlink.
+  caller's close and an unlink. It is held through the projection its file's
+  volume was attached as, never a bind it was opened through, so a bind
+  unbound, or withdrawn with a volume it stood in, takes nothing from it.
 - **One attachment per principal and file.** The identity is derived:
   SHA-256 over a domain label, the attacher's uid, the file's volume identity
   and inode, and the identity the probe found — so two copies of one image,
   or an image and its disc, attach side by side, and attaching the same file
   again answers `AlreadyAttached` with the volume it has. An attach that
   adopts it (the desktop's) hands it to its login session too, cancelling a
-  teardown owed, so it lives until every session it was handed to has ended;
-  one that does not (`mount`'s) changes nothing, and is refused `Busy` for a
-  volume owing its teardown. One that another attach is answering for, that
+  teardown owed, so it lives until every session it was handed to has ended
+  — but only a volume as writable as it asks (`ImageAccess::accepts`): a
+  read-only attach meeting a writable volume is answered as one that does
+  not adopt. One that does not (`mount`'s) changes nothing, and is refused
+  `Busy` for a volume owing its teardown. One that another attach is answering for, that
   an operation holds, or that is lost awaiting its owner's eject is refused
   `Busy`.
 - **Writers are kept apart.** The attachment takes an advisory lock over the
@@ -133,11 +142,21 @@ eject it or their login session ends. It consumes and never contradicts
 ## 4. Lifetime
 
 - **Eject.** The owner detaches it without `CAP_FS_MOUNT`, like a network
-  volume: flushed through its driver, then the file, then retracted.
-- **Owed teardowns.** A teardown that parks — the session's end, or an
-  attach that gave up after its volume was mounted — is never done by the
-  task that finds it owed, which may be the volume's own driver in its serve
-  or a path that may not park. The volume is marked owed (`Owed::Orphaned`,
+  volume: flushed through its driver, then the file, then retracted. A lost
+  volume is taken only by a force or by a detach that takes the lost
+  (`DetachMode::Lost`), which the kernel forces only for a volume still
+  recorded lost, decided under its claim, and is a plain detach otherwise —
+  so a stale view of a lost volume whose identity a healthy one has taken
+  since cannot force the healthy one. A forced take-down's audit records its
+  outcome `forced`.
+- **Owed teardowns.** An attach that gives up once its volume is mounted —
+  its target refused, its answer undeliverable — takes the volume down itself
+  with a plain detach before it returns, so nothing it did not report is left
+  attached. A teardown the task finding it owed may not wait on — the
+  session's end, which the reaper finds; an attach killed meanwhile, which
+  waits on no flush; one whose volume an operation holds, perhaps its own
+  driver in its serve; a take-back's plain detach that was refused — is never
+  done by that task. The volume is marked owed (`Owed::Orphaned`,
   `Owed::Abandoned`) and the session notifier's tasks
   (`session_reaper::NOTIFIER_TASKS`) settle it, one volume a task and never
   two of one owner's at once, so one principal's slow device holds up only
@@ -154,6 +173,8 @@ eject it or their login session ends. It consumes and never contradicts
   with it, stand-in style, nothing waiting on a server.
 - **The driver lost.** As for a stick: the stand-in answers, the mount reports
   recovering, the node stays published and `devmgr`'s restart serves it again.
+  A plain eject meanwhile detaches it as a stick's detach does, nothing being
+  left to flush (`Writes::Gone`).
 
 ## 5. The mount table
 
@@ -178,7 +199,8 @@ still listed in `/Storage` to everyone (DI12).
   international volumes fold as `NameMatching::Latin1CaseInsensitive`, the
   others as `AsciiCaseInsensitive`, the fold one definition with the hash.
 - Node ids are header block numbers: stable, the root's its own. A removed
-  held node keeps its blocks until its last unpin.
+  held node keeps its blocks until its last unpin, and the root stays invalid
+  while one does or its free failed there, so AmigaDOS reclaims them.
 - Metadata: `amiga.protection` (the raw low byte) and `amiga.comment`; times
   are AmigaDOS date stamps (days since 1978, minutes, ticks), local time read
   as UTC, as FAT's are.
@@ -210,24 +232,33 @@ still listed in `/Storage` to everyone (DI12).
   volume is shown (`tairix_browse::mount::shown_at`: its rail row and each
   view binding, `Projection`) to the catalog, giving up a navigation onto it
   and letting go of what they watch or were offered there
-  (`Watches::release_within`); the reader then carries the eject out
-  (`tairix_browse::mount::carry_out`) after the read under way, so no read of
-  the app's own overlaps it, and with no reader the loop does, as it reads
-  then. *Mount Read-Only* of an image mounted writable already is refused,
-  saying so, never answered with the writable volume.
+  (`Watches::release_within`); the reader serving the volume's lane then
+  carries the eject out (`tairix_browse::mount::carry_out`) after the read under
+  way there, so no read of the app's own routed to the volume overlaps it — one
+  routed before the mount table was re-read can still hold it, and the eject is
+  then refused as busy, saying so — and with no reader the loop does, as it
+  reads then. A lost volume is no rail row but keeps its catalog entry, whose
+  *Eject* asks first (`tairix_browse::mount::lost_eject_question`, the
+  window's one question) and then sends `DetachMode::Lost`. *Mount
+  Read-Only* of an image mounted writable already is refused, saying so,
+  never answered with the writable volume or taken up for the session; one
+  of an image no path can name says why (`MountAct::read_only_of`), as Open
+  does.
 
 ## 8. The command line
 
-`mount [-lrvw] [-t TYPE] [-o ro,rw,noexec,loop,name=NAME] IMAGE [TARGET]`: the
+`mount [-lrvw] [-t LIST] [-o ro,rw,noexec,loop,name=NAME] IMAGE [TARGET]`: the
 source is an image file (util-linux's implied loop), opened read-write where
 the user may write it; `-w` asks for it read-write or not at all, as
-util-linux's does. TARGET `/Storage/NAME` names the volume, any other
+util-linux's does, until a later `-r` takes it back. TARGET `/Storage/NAME` names the volume, any other
 directory is bound too, resolved and bounded first and refused as itself —
 the kernel answers a directory that would not take the volume
 `TargetRefused`, and an asked name it may not take `NameRefused` — and a
 `name=` the naming policy keeps is a name no volume may take (exit `1`, with the
-hint to `--help`); one in use refuses the mount as `/Storage/NAME`. `-t` names the filesystem as the mount table does, or
-`auto`, and is the attach's `expects`; with no operands it is a util-linux type
+hint to `--help`); one in use refuses the mount as `/Storage/NAME`. `-t` is a
+util-linux type list, each element a filesystem as the mount table names it, a
+leading `no` naming the ones excluded, or `auto`; it is the attach's `expects`,
+the set the probe's answer must fall in, so the order chooses nothing; with no operands it is a util-linux type
 list the listing is filtered by, and `-v`/`-l` list as without them. Silent on
 success; `-v` says where it went; a volume mounted read-only unasked is warned
 of, as util-linux warns of a write-protected source. Exit `32` for a mount
@@ -254,7 +285,11 @@ surface.
   partition list, or `lib/partition`'s MBR/GPT walk, naming the extent.
 - **DI11.** Validating a volume walks every header, extension and data block
   from the root, marks each in a fresh bitmap, and writes it with the root's
-  flag set, refusing a tree it finds damaged.
+  flag set, refusing a tree it finds damaged. It is also what finds a bitmap
+  naming a live object as one of its pages, or marking one free, and a data
+  block two tables name — two of one file's, or two files' — which no read of
+  a single block can tell from the truth: until then a cut or removal frees
+  such a block while another table still names it.
 - **DI12.** The catalog's listing filters a volume attached for one principal
   — an image, a private share — to that principal and the mount authority,
   and a lookup of its name by anyone else answers `NotFound`, the namespace
@@ -274,14 +309,17 @@ surface.
   window, open a second window on a directory it is bound at, eject from the
   rail, and require the audited detach rather than a refusal. Until then the
   decisions it composes are host-tested in `lib/browse` (`shown_at`,
-  `holds_within`, `Watches::release_within`, `Browser::navigate_to`), and the
-  loop that strings them together is not.
+  `within`, `holds_within`, `Watches::release_within`, `Browser::navigate_to`,
+  `MountAct::eject_chosen`, `MountAct::read_only_of`) and in `files.app`'s
+  `question` module, and the loop that strings them together is not.
 - **DI15.** `drivers/filesystem/affs`'s `Bitmap` holds every bitmap-block
   pointer and every structural block it checks a change against for the
   volume's life: about 4 MiB each for a 2 TiB volume of 512-byte blocks, in
   the driver's own process. Pages loaded on demand under the reclaim model,
   with the structural check made against the headers a change reaches, bound
-  it by the working set instead.
+  it by the working set instead, keeping the invariant that the root and the
+  bitmap's own blocks are named once and never written or freed as anything
+  else.
 - **DI16.** `MountTable::child` and `beneath` search every projection, and
   `LateFilesystem` every registered driver by handle, under the locks every
   path walk and file operation takes; each image volume adds one of each, so
@@ -308,8 +346,9 @@ surface.
   then withheld included. The image drivers differ: FAT32, ISO 9660 and UDF
   answer from counters they keep; AFFS scans its bitmap on the first call;
   ADFS reads its whole free-space map on every call. `sysinfod` serves one request at a
-  time, so that wait holds every principal's queries — `ps`, `df`, the rail —
-  and any user may attach `IMAGE_VOLUMES_PER_PRINCIPAL` images to lengthen it.
+  time, so that wait holds every principal's queries — `ps`, `df`, the rail,
+  `fstree`'s free-space figure on every directory change — and any user may
+  attach `IMAGE_VOLUMES_PER_PRINCIPAL` images to lengthen it.
   `sysinfod`'s `read_whole` starts at 64 records and doubles, each attempt a
   fresh introspection that runs the whole snapshot again (`log2(N/64) + 1`
   snapshots of `N` volumes), an unheld page walk reads the list again for
@@ -336,3 +375,9 @@ surface.
   borrowing only from level `d`'s share and waiting (parked, never spinning)
   only on its own level, bound the memory by the transfers in flight while no
   transfer ever waits on a buffer a transfer above it holds.
+- **DI20.** `drivers/storage/volmgr` recognises a Rigid Disk Block and counts
+  the device unrecognised. Planning it walks the RDB's partition list under a
+  bound — the one reader DI10 walks for an image — and probes each partition's
+  extent by content, as a PC table's partitions are; a readable PC table
+  written over the disk's start still wins, and a device holding neither is
+  never offered for an array as blank.

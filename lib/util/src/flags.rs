@@ -18,6 +18,7 @@
 /// assert!(door.contains(Door::LOCK));
 /// assert!(!door.without(Door::LOCK).contains(Door::LOCK));
 /// assert_eq!(Door::from_bits(door.bits()), door);
+/// assert!(Door::OPEN.intersects(door) && !Door::OPEN.intersects(Door::LOCK));
 /// ```
 #[macro_export]
 macro_rules! flags {
@@ -65,6 +66,12 @@ macro_rules! flags {
             #[must_use]
             pub const fn contains(self, other: Self) -> bool {
                 self.0 & other.0 == other.0
+            }
+
+            /// Whether any flag of `other` is set.
+            #[must_use]
+            pub const fn intersects(self, other: Self) -> bool {
+                self.0 & other.0 != 0
             }
         }
     };

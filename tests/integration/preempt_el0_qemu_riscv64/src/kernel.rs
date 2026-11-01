@@ -62,11 +62,7 @@ const TARGET_PREEMPTIONS: u64 = 1;
 /// re-armed periodic tick (no flaky tests;).
 const SOLE_PREEMPT_SLACK: u64 = 16;
 
-/// Gigabytes of identity map the U-mode address space provides: `[0, 4 GiB)`
-/// covers the `virt` board's low MMIO and the RAM base where this kernel runs,
-/// so switching into the space never moves the ground under the running kernel.
-/// [`USER_BIAS`] (64 GiB) sits far above, on freshly walked Sv39 tables.
-const IDENTITY_GIGABYTES: usize = 4;
+use tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES;
 
 /// User stack base (1 MiB into the high user region) and size. `tairix-rt`
 /// carves scratch space off the stack, so it must comfortably exceed it.
@@ -231,7 +227,8 @@ extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -
 /// Build the isolated U-mode address space from the fixture `image` over
 /// [`PAGE_TABLES`], returning its Sv39 root and the entry register state.
 fn build_user_space(image: &LoadImage) -> (u64, UserEntry) {
-    let Some(arch) = ArchAddressSpace::new_identity_gigapages(&PAGE_TABLES, IDENTITY_GIGABYTES)
+    let Some(arch) =
+        ArchAddressSpace::new_identity_gigapages(&PAGE_TABLES, KERNEL_IDENTITY_GIGAPAGES)
     else {
         qemu_exit::exit_failure(FAIL_POOL);
     };
@@ -245,7 +242,7 @@ fn build_user_space(image: &LoadImage) -> (u64, UserEntry) {
 
     let mut space = AddressSpace::new(arch);
     // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::identity((IDENTITY_GIGABYTES as u64) << 30) }
+    let physmap = unsafe { DirectPhysMap::identity((KERNEL_IDENTITY_GIGAPAGES as u64) << 30) }
         .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image,

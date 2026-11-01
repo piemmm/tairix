@@ -43,8 +43,8 @@ cada ordenador, así que un nombre nunca prueba qué ordenador está mirando.
 Conectarse a los recursos compartidos de un ordenador no está disponible en
 este sistema, y abrir uno lo indica.
 
-Iniciado por su nombre desde un shell (o abierto sobre una carpeta desde el
-escritorio), es en cambio una aplicación ordinaria: una ventana, y termina
+Iniciado desde un shell por su ruta, `/System/Components/files.app`,
+es en cambio una aplicación ordinaria: una ventana, y termina
 cuando usted la cierra. En cualquier caso requiere una sesión gráfica en
 marcha: sin ella el canal de ventanas es inalcanzable, y el explorador
 informa del rechazo en el flujo de error estándar y termina.
@@ -111,12 +111,16 @@ espacio vacío borra la selección, así que el submenú del elemento aparece
 atenuado.
 
 Abrir una imagen de disco — un archivo `.iso`, `.adf`, `.hdf` y similares —
-la monta para usted en `/Storage`, con escritura donde el archivo la
-permite, y abre su ventana; *Montar solo lectura* la monta en solo lectura.
-Sigue montada hasta que la expulse o termine su sesión. *Expulsar* retira un
-volumen que usted montó, desde su icono o desde su fila en la barra de
-lugares, cuyo propio menú contextual contiene *Abrir* y *Expulsar*; sus
-ventanas en él pasan antes a `/Storage`.
+la monta para usted en `/Storage`, con escritura donde tanto el archivo como
+su formato la permiten, y abre su ventana; *Montar solo lectura* la monta,
+en cambio, en solo lectura. Sigue montada hasta que la expulse o termine su
+sesión. *Expulsar* retira un volumen que usted montó, desde su icono o desde
+su fila en la columna de lugares, cuyo propio menú contextual contiene
+*Abrir* y *Expulsar*; sus ventanas en él pasan antes a `/Storage`. Si un
+volumen desaparece — retirado su disco, o perdido su servidor — antes de que
+se guarde todo lo que usted haya escrito en él, sale de la columna de
+lugares, pero conserva su icono en `/Storage`, y lo que no se guardó se
+pierde; *Expulsar* desde ese icono pide confirmación antes de dejarlo ir.
 
 El submenú *Nuevo* del menú contextual crea una carpeta, o un documento
 vacío de cada tipo que escribe un editor instalado, y abre su nombre para

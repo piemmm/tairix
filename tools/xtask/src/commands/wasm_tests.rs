@@ -118,15 +118,14 @@ pub fn packages() -> (&'static str, Vec<&'static str>) {
 /// Call this before the (possibly repeated) [`run_once`] passes. A host
 /// lacking `node` fails loudly here rather than skipping (never silently skip a test).
 pub fn prepare(ctx: &Context) -> Result<(), String> {
-    eprintln!("xtask: [test --wasm] building the wasm32 verticals");
+    noteln!("xtask: [test --wasm] building the wasm32 verticals");
 
-    if !node_available() {
-        return Err(
-            "node is not on PATH; the wasm32 harnesses need Node.js, and the \
-             browser ones additionally need puppeteer and a Chrome binary"
-                .to_string(),
-        );
-    }
+    super::probe_version(ctx, "node").map_err(|why| {
+        format!(
+            "{why}; the wasm32 harnesses need Node.js on PATH, and the browser \
+             ones additionally need puppeteer and a Chrome binary"
+        )
+    })?;
 
     for vertical in VERTICALS {
         build(ctx, vertical)?;
@@ -172,13 +171,4 @@ fn run_harness(ctx: &Context, vertical: &Vertical) -> Result<(), String> {
         .arg("--wasm")
         .arg(&wasm);
     ctx.run(&format!("test --wasm (harness {})", vertical.package), cmd)
-}
-
-fn node_available() -> bool {
-    std::process::Command::new("node")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
 }

@@ -13,10 +13,13 @@ muss `[a-z_][a-z0-9_-]*` entsprechen, und die Kennung ist ein dezimaler
 Wert. Das Anlegen einer Gruppe ist ein Verwaltungsvorgang: das Register
 weist einen Aufrufer ohne die Benutzerverwaltungs-Berechtigung ab.
 
-Wird `-g` weggelassen, wird die Gruppenkennung automatisch vergeben,
-eins über der höchsten vorhandenen Kennung. Eine angeforderte, bereits
-vergebene Kennung wird abgewiesen; das Register ist die Autorität über
-Kollisionen.
+Wird `-g` weggelassen, wird die Gruppenkennung automatisch vergeben:
+eins über der höchsten vorhandenen Kennung ab 1000 oder, wenn keine
+Gruppe eine solche hat, 1000. Kennungen unter 1000 gehören dem System
+und werden nie vergeben, und sobald über der höchsten keine Kennung
+mehr übrig ist, wird die Gruppe nicht angelegt. Eine angeforderte,
+bereits vergebene Kennung wird abgewiesen; das Register ist die
+Autorität über Kollisionen.
 
 `--` beendet die Optionsauswertung: jedes spätere Argument ist ein
 Operand.
@@ -24,7 +27,8 @@ Operand.
 ## OPTIONS
 
 - `-g, --gid GID` — numerische Gruppenkennung; wird bei Weglassen
-  automatisch vergeben (eins über der höchsten vorhandenen).
+  automatisch vergeben (eins über der höchsten vorhandenen ab 1000,
+  sonst 1000).
 - `-h, -?, --help` — die Kurzhilfe dieses Befehls anzeigen.
 
 ## EXAMPLES

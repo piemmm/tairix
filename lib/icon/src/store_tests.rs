@@ -8,7 +8,7 @@ use tairix_abi::fs::FileId;
 use tairix_abi::time::Time64;
 use tairix_geometry::Rect;
 
-use super::{StoreFile, StoreKey, ThumbnailStore, HEADER_LEN, WAYS};
+use super::{serve_thumbnail, StoreAccess, StoreFile, StoreKey, ThumbnailStore, HEADER_LEN, WAYS};
 use crate::picture::Fitted;
 use crate::thumbnail::{ArtworkDocument, DocumentStamp, Reading};
 
@@ -305,32 +305,55 @@ fn a_serve_decodes_once_per_version_and_keeps_only_one_it_read_whole() {
         now: Some(stamp(1, 4)),
     };
     assert_eq!(
-        store.serve(Reading::Signature, &mut steady, &mut decode),
+        serve_thumbnail(&mut store, Reading::Signature, &mut steady, &mut decode),
         Some(picture(0x60))
     );
     assert_eq!(
-        store.serve(Reading::Signature, &mut steady, &mut decode),
+        serve_thumbnail(&mut store, Reading::Signature, &mut steady, &mut decode),
         Some(picture(0x60))
     );
     let mut raced = Document {
         stamp: stamp(2, 4),
         now: Some(stamp(2, 5)),
     };
-    assert!(store
-        .serve(Reading::Signature, &mut raced, &mut decode)
-        .is_some());
-    assert!(store
-        .serve(Reading::Signature, &mut raced, &mut decode)
-        .is_some());
+    assert!(serve_thumbnail(&mut store, Reading::Signature, &mut raced, &mut decode).is_some());
+    assert!(serve_thumbnail(&mut store, Reading::Signature, &mut raced, &mut decode).is_some());
     let mut inexact = Document {
         stamp: stamp(3, 0),
         now: Some(stamp(3, 0)),
     };
-    assert!(store
-        .serve(Reading::Signature, &mut inexact, &mut decode)
-        .is_some());
+    assert!(serve_thumbnail(&mut store, Reading::Signature, &mut inexact, &mut decode).is_some());
     assert_eq!(
         decodes, 4,
         "one for the steady file, two raced, one inexact"
     );
+}
+
+/// A shared store is reached for one lookup before the decode and one insert
+/// after it, never across it, so a decoder reading a slow document holds the
+/// store for none of that time.
+#[test]
+fn a_shared_store_is_reached_around_the_decode_never_across_it() {
+    struct Lent<'a>(&'a core::cell::RefCell<Vec<&'static str>>);
+    impl StoreAccess for Lent<'_> {
+        fn find(&mut self, _: StoreKey) -> Option<Fitted> {
+            self.0.borrow_mut().push("find");
+            None
+        }
+        fn insert(&mut self, _: StoreKey, _: &Fitted) -> bool {
+            self.0.borrow_mut().push("insert");
+            true
+        }
+    }
+    let calls = core::cell::RefCell::new(Vec::new());
+    let mut steady = Document {
+        stamp: stamp(1, 4),
+        now: Some(stamp(1, 4)),
+    };
+    let drawn = serve_thumbnail(&mut Lent(&calls), Reading::Signature, &mut steady, |_| {
+        calls.borrow_mut().push("decode");
+        Some(picture(0x60))
+    });
+    assert_eq!(drawn, Some(picture(0x60)));
+    assert_eq!(*calls.borrow(), ["find", "decode", "insert"]);
 }

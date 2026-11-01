@@ -403,7 +403,7 @@ mod program {
         if name.is_empty() {
             String::from("The document could not be opened")
         } else {
-            format!("\u{201c}{name}\u{201d} could not be opened")
+            tairix_util::utf8::refusal_headline(name, "opened")
         }
     }
 

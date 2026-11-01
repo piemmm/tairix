@@ -1693,9 +1693,11 @@ pub extern "C" fn sys_volume_attach(request: *const u8, request_len: usize) -> i
 
 /// `volume_detach`: flush, unmount, and unpublish a runtime-attached
 /// volume (`SyscallNumber::VOLUME_DETACH`). `request`/`request_len` name
-/// an encoded volume-detach request frame (the volume's stable 16-byte
-/// identity); its owner may detach a network volume, any other needs
-/// `CAP_FS_MOUNT`. Returns a `TAIRIX_E_*` code.
+/// an encoded volume-detach request frame: the volume's stable 16-byte
+/// identity, then a `TAIRIX_VOLUME_DETACH_*` mode byte (plain, force, or a
+/// force only of a volume recorded lost). The owner of a network or
+/// disk-image volume may detach it; any other needs `CAP_FS_MOUNT`. Returns
+/// a `TAIRIX_E_*` code.
 #[must_use]
 #[export_name = "tairix_sys_volume_detach"]
 pub extern "C" fn sys_volume_detach(request: *const u8, request_len: usize) -> i32 {

@@ -86,32 +86,72 @@ fn every_outstanding_probe_is_taken_as_one_batch() {
     }
 }
 
-/// A second worker finds nothing while a batch is in flight: two batches in
-/// flight would each clear the other's record of what is being read.
+/// Batches in flight side by side each settle only their own folders: one
+/// landing leaves the other's folders being read, so a re-ask of them still
+/// records nothing.
 #[test]
-fn one_batch_is_in_flight_at_a_time() {
+fn batches_in_flight_settle_only_their_own_folders() {
     let mut probes = Probes::new();
     let _ = probes.ask(&path(&["a"]));
     let first = probes.next_batch().expect("a batch");
     assert_eq!(probes.ask(&path(&["b"])), (Ok(Probe::Pending), true));
-    assert!(
-        !probes.has_work(),
-        "the second ask waits for the first batch"
-    );
-    assert_eq!(probes.next_batch(), None);
-    assert_eq!(
-        probes.ask(&path(&["a"])),
-        (Ok(Probe::Pending), false),
-        "the batch in flight still answers its own folder"
-    );
+    assert!(probes.has_work(), "b waits for a worker, beside a's batch");
+    let second = probes.next_batch().expect("b's batch beside a's");
+    assert_eq!(second, vec![path(&["b"])]);
     assert!(probes.deliver(first.into_iter().map(|f| (f, Ok(text()))).collect()));
     assert_eq!(
-        probes.next_batch(),
-        None,
-        "a landed batch waits for the sweep"
+        probes.ask(&path(&["b"])),
+        (Ok(Probe::Pending), false),
+        "b's batch is still in flight"
     );
-    assert!(probes.sweep(), "b was asked since, so it stays wanted");
-    assert_eq!(probes.next_batch(), Some(vec![path(&["b"])]));
+    assert!(
+        !probes.sweep(),
+        "b is still being read, so the re-ask recorded nothing to take"
+    );
+    assert_eq!(probes.ask(&path(&["a"])), (Ok(text()), false));
+    assert!(probes.deliver(second.into_iter().map(|f| (f, EMPTY)).collect()));
+    assert_eq!(probes.ask(&path(&["b"])), (EMPTY, false));
+}
+
+/// A worker serving one share takes that share's folders as its batch and
+/// leaves the others for theirs, and a folder no share admits waits.
+#[test]
+fn a_share_takes_its_own_folders_as_one_batch() {
+    let mut probes = Probes::new();
+    for folder in [
+        &["Storage", "stick", "a"][..],
+        &["Users", "b"],
+        &["Storage", "stick", "c"],
+    ] {
+        let _ = probes.ask(&path(folder));
+    }
+    let _ = probes.ask(&path(&["Busy", "d"]));
+    let share = |folder: &[String]| match folder.first().map(String::as_str) {
+        Some("Busy") | None => None,
+        Some(root) => Some(String::from(root)),
+    };
+    let (taken, batch) = probes.next_batch_by(share).expect("a batch");
+    assert_eq!(
+        taken, "Storage",
+        "the first folder admitted names the share"
+    );
+    assert_eq!(
+        batch,
+        vec![
+            path(&["Storage", "stick", "a"]),
+            path(&["Storage", "stick", "c"])
+        ]
+    );
+    let (taken, batch) = probes.next_batch_by(share).expect("the next share's batch");
+    assert_eq!(
+        (taken.as_str(), batch),
+        ("Users", vec![path(&["Users", "b"])])
+    );
+    assert!(
+        probes.next_batch_by(share).is_none(),
+        "the busy share's folder waits"
+    );
+    assert_eq!(probes.next_batch(), Some(vec![path(&["Busy", "d"])]));
 }
 
 /// An answer is served once: the entry latches it, so a later ask means the
@@ -248,6 +288,12 @@ fn a_folder_that_changed_mid_probe_is_asked_afresh() {
         probes.ask(&folder).1,
         "asked again while the stale probe is still under way"
     );
+    assert!(!probes.has_work(), "the folder is still being read");
+    assert_eq!(
+        probes.next_batch(),
+        None,
+        "no folder is in two batches at once"
+    );
     assert!(
         !probes.deliver(vec![(batch[0].clone(), EMPTY)]),
         "the stale answer is dropped"
@@ -273,6 +319,50 @@ fn a_folder_that_changed_mid_probe_is_asked_afresh() {
         probes.ask(&folder).0,
         Ok(Probe::Pending),
         "a held answer goes too"
+    );
+}
+
+/// A change to a folder mid-probe is kept for the batch reading it, whatever
+/// another batch in flight beside it delivers first.
+#[test]
+fn a_change_mid_probe_is_kept_for_the_batch_reading_it() {
+    let dir = path(&["Users"]);
+    let mut probes = Probes::new();
+    let _ = probes.ask(&path(&["Users", "a"]));
+    let first = probes.next_batch().expect("a's batch");
+    let _ = probes.ask(&path(&["Users", "b"]));
+    let second = probes.next_batch().expect("b's batch beside a's");
+    assert!(probes.invalidate(&dir, &[EntryChange::Upsert(Entry::directory("b"))]));
+    assert!(probes.deliver(first.into_iter().map(|f| (f, Ok(text()))).collect()));
+    assert!(
+        !probes.deliver(second.into_iter().map(|f| (f, EMPTY)).collect()),
+        "b changed while its batch read it"
+    );
+    assert_eq!(
+        probes.ask(&path(&["Users", "b"])).0,
+        Ok(Probe::Pending),
+        "b is asked afresh"
+    );
+}
+
+/// A folder asked again while a batch still reads it stays out of the next
+/// batch, which takes the others: no folder is in two batches at once.
+#[test]
+fn a_folder_still_being_read_stays_out_of_the_next_batch() {
+    let dir = path(&["Users"]);
+    let src = path(&["Users", "src"]);
+    let mut probes = Probes::new();
+    let _ = probes.ask(&src);
+    let stale = probes.next_batch().expect("src's batch");
+    assert!(probes.invalidate(&dir, &[EntryChange::Upsert(Entry::directory("src"))]));
+    assert!(probes.ask(&src).1, "asked again while the stale probe runs");
+    let _ = probes.ask(&path(&["Users", "docs"]));
+    assert_eq!(probes.next_batch(), Some(vec![path(&["Users", "docs"])]));
+    assert!(!probes.deliver(stale.into_iter().map(|f| (f, EMPTY)).collect()));
+    assert_eq!(
+        probes.next_batch(),
+        Some(vec![src]),
+        "its fresh probe follows"
     );
 }
 

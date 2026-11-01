@@ -12,7 +12,7 @@ belongs in a *named* `cargo xtask` subcommand (`tools/xtask`), not here.
 |------|---------|
 | `lib.sh` | Sourced by the others. Puts the pinned toolchain on `PATH`, resolves the repo root, sets the log directory, (opt-in) syncs the checkout, and collects the QEMU verticals' serial/hang post-mortems into an uploaded log directory — they live in the build cache, which nothing uploads and the next run's clean wipes. |
 | `ci-run.sh` | Run one `cargo xtask` subcommand, logging to a timestamped file. Default subcommand is `ci` (the full per-PR gate, §7). |
-| `soak.sh` | Run the nightly 24 h soaks (§19.6 fuzz, §19.7 proptest, and the §7 repeated-test soak) with every harness/model/the test matrix **in parallel**, one log per job. |
+| `soak.sh` | Run the soaks (every fuzz harness, proptest model, filesystem and generator soak, and the repeated-test matrix) **in parallel**, one log per job: each for its own budget, or to one window's close (`--window`, `--scheduled`). |
 | `install-qemu.sh` | Provision the one pinned QEMU version the QEMU integration tests need (built from GPG-verified official source, cached on the runner). Idempotent; called by the GitHub workflows. A distro QEMU is too old for the riscv64 `svade` CPU pin, and the build names its features explicitly so meson's `auto` detection cannot drop one a consumer needs (the cipher library the virtio-crypto vertical's AES sessions require, the GTK window `cargo xtask run` opens and the user-mode network its NIC sits on). |
 | `crontab.sample` | Ready-to-edit `crontab` for any cron-based host (Linux/Unix/macOS). |
 | `systemd/*.{service,timer}` | systemd user units for a Linux host (preferred over cron on systemd distros). |
@@ -35,10 +35,10 @@ tools/ci/ci-run.sh                       # == cargo xtask ci
 tools/ci/ci-run.sh build --headless --target x86_64-tairix-none
 tools/ci/ci-run.sh test --qemu
 
-# The nightly soaks: every harness, model, and the test matrix in parallel:
-tools/ci/soak.sh all
+# The scheduled soak: every harness, model, and the test matrix in parallel:
+tools/ci/soak.sh all --scheduled
 
-# See exactly which soak jobs would run, without waiting 24 h:
+# See exactly which soak jobs would run, without waiting for them:
 tools/ci/soak.sh --dry-run
 ```
 
@@ -62,9 +62,12 @@ only the trigger differs.
   `launchctl load` them. `launchd` survives sleep/wake more predictably than
   cron on a laptop.
 
-All three run the full gate every 30 minutes and the soaks nightly at 02:00.
-The systemd timers and the cron `Persistent` behaviour both catch up a run
-missed while the host was asleep.
+All three run the full gate every 30 minutes and the scheduled soak
+(`soak.sh all --scheduled`) nightly at 02:00, which ends hours before the next.
+The soak runs from a checkout of its own (`git clone` it once beside the
+gate's): the gate resets its checkout every 30 minutes, which would change the
+tree under a running soak. systemd's `Persistent=true` and launchd catch up a
+run missed while the host slept; cron does not.
 
 ### GitHub Actions
 
@@ -78,10 +81,11 @@ code on a machine we own — see `github-runner/README.md`):
 - `.github/workflows/ci-long.yml` runs the exhaustive flake hunt
   (`cargo xtask ci-long`, 2 × 20 executions of every test) on demand
   (`workflow_dispatch`), on its own `long`-labelled runner instance.
-- `.github/workflows/soak.yml` runs the nightly seven-hour soak window
-  (`soak.sh all --window 25200`: fuzz, proptest, and the repeated-test soak)
-  on its own `soak`-labelled runner instance, because a multi-hour job exceeds
-  the GitHub-hosted per-job time cap.
+- `.github/workflows/soak.yml` runs the scheduled seven-hour soak
+  (`soak.sh all --scheduled`: fuzz, proptest, the filesystem and generator
+  soaks, and the repeated-test soak) on its own `soak`-labelled runner
+  instance, because a multi-hour job exceeds the GitHub-hosted per-job time
+  cap.
 
 Each workflow provisions the pinned build toolchains it needs into the runner's
 persistent cache — the clang/lld the CCOMPAT tests require and, via
@@ -92,22 +96,33 @@ for the one-time host prerequisites those provisioning steps assume. A given
 host runs *either* a standalone builder (cron/systemd/launchd above) *or* a
 GitHub Actions runner — not both.
 
-## The 24 h soaks, in parallel
+## The soaks, in parallel
 
 `soak.sh` reads each registry via `cargo xtask <fuzz|proptest|fssoak|rngsoak>
 --list` (so the target list is never duplicated here) and launches one
-`--soak --target <name>` process per target, all running at once. The §7
-repeated-test soak adds one more job, `cargo xtask test --qemu --soak`, that
-repeats the whole test matrix for the same budget.
+`--soak --target <name>` process per target, all running at once. Every
+listing is read before the first job starts, and one that fails or names no
+target stops the soak with nothing started. The repeated-test soak adds one
+more job, `cargo xtask test --qemu --soak`, that repeats the whole test matrix
+for the same budget.
 
 The budget has two forms. By default (24 h) or with `--secs N`, each job gets
 the whole budget counted from its own start, so the soak lasts as long as the
 slowest job's build plus the budget — every job compiles behind one build
-lock. `--window N` instead finishes every job within N seconds of the soak's
-start: each job is handed the window's close (`--until`), its build comes out
-of the window, a harness that reaches a closed window makes only its smoke
-iteration, and the test matrix starts no pass it cannot finish inside it. A
-scheduled soak with a hard stop — the nightly workflow — uses the window.
+lock. `--window N` opens a window as the script starts and hands every job its
+close (`--until`). What a job spends building comes out of the window. Past
+the close no harness starts another iteration, nor a filesystem or generator
+soak another pass, and the test matrix starts another pass only while one as
+long as the last still fits before it. Work in flight at the close still
+finishes: a harness's last iteration or pass, the one smoke iteration of a
+harness built after the close, and the matrix's first pass, which it always
+makes. A harness still running an ordinary step's allowance after the close,
+or after its own start where that came later (45 minutes, or
+`TAIRIX_XTASK_TIMEOUT_SECS` where longer), is killed and named as hung; the
+matrix's steps keep their own budgets. `--scheduled` is the window every
+scheduled soak runs, the nightly workflow's and every standalone scheduler's,
+defined once in `soak.sh`; a dispatch may shorten it with `--window N`, never
+lengthen it.
 
 The repeated-test soak's purpose is **detection, not tolerance**: it exists to
 *catch* a defect too rare for the per-PR single-pass run (where `ci` runs each
@@ -133,8 +148,9 @@ The soak's job scheduling is one such **structural** measure — it bounds how
 badly the parallel fan-out can contend with the timed guests, it is not a
 licence to tolerate a timeout. Every job fans out to all cores, so running them
 together oversubscribes the host many-fold; the QEMU verticals in the test
-matrix are the ones with a hard wall-clock deadline. The fuzz/proptest/fssoak
-jobs therefore run at a lowered scheduling priority (`nice`) and the
+matrix are the ones with a hard wall-clock deadline. The fuzz, proptest,
+fssoak and rngsoak jobs therefore run at a lowered scheduling priority (`nice`)
+and the
 repeated-test matrix at normal priority, so the kernel hands the timed guests
 their cores whenever runnable. If a vertical still cannot make its deadline
 under this arrangement, the deadline or the test is wrong and is fixed (§7) —
@@ -142,13 +158,14 @@ the scheduling split is not the last word, correctness is.
 
 ```sh
 tools/ci/soak.sh                 # both fuzz + proptest, parallel (default)
-tools/ci/soak.sh all             # fuzz + proptest + the repeated-test soak
-tools/ci/soak.sh fuzz            # only the §19.6 fuzz harnesses
-tools/ci/soak.sh proptest        # only the §19.7 proptest models
-tools/ci/soak.sh test            # only the §7 repeated-test soak
+tools/ci/soak.sh all             # fuzz, proptest, fssoak, rngsoak and the test soak
+tools/ci/soak.sh fuzz            # only the fuzz harnesses
+tools/ci/soak.sh proptest        # only the proptest models
+tools/ci/soak.sh test            # only the repeated-test soak
 tools/ci/soak.sh --sequential    # one at a time (low-resource hosts)
 tools/ci/soak.sh --secs 30       # 30 s for each job, a smoke run
-tools/ci/soak.sh all --window 3600   # every job done within the hour
+tools/ci/soak.sh all --window 3600   # soaking ends at the hour's close
+tools/ci/soak.sh all --scheduled     # the scheduled soak
 ```
 
 ## Configuration (environment variables)

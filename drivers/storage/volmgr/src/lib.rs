@@ -23,10 +23,12 @@
 //! sibling device's transport (no ambient authority). The instance:
 //!
 //! 1. connects the blkio client and validates the device geometry,
-//! 2. probes the partition table (`lib/partition`; a device with no table
-//!    is probed whole),
-//! 3. probes each candidate extent's head for a supported filesystem
-//!    signature (`lib/fsprobe`),
+//! 2. plans its volumes by content (`lib/fsprobe`), as [`plan`] orders it: a
+//!    whole-device volume first, then a disc image weighed against the
+//!    partition table it sits behind, else each partition of the table
+//!    (`lib/partition`); a RAID member is published as one and attaches
+//!    nothing, and so does a disk an Amiga Rigid Disk Block partitions,
+//! 3. reads each planned volume's label where its format keeps it,
 //! 4. derives the catalog name from the volume alone (its own label in
 //!    kebab case, else `<transport>_<fingerprint>`; a label in use or
 //!    reserved takes `_<fingerprint>` of the volume's identity —

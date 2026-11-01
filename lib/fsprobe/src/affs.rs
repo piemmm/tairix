@@ -29,8 +29,6 @@ pub const T_HEADER: u32 = 2;
 pub const T_DATA: u32 = 8;
 /// The type field of a file extension block, holding more data pointers.
 pub const T_LIST: u32 = 16;
-/// The type field of a directory-cache block.
-pub const T_DIRCACHE: u32 = 33;
 
 /// The secondary type of the root block.
 pub const ST_ROOT: u32 = 1;
@@ -356,10 +354,18 @@ fn sum_except(block: &[u8], skip: usize) -> u32 {
         })
 }
 
-/// The checksum to store at byte `at` of `block` so its longwords sum to zero.
-#[must_use]
-pub fn checksum(block: &[u8], at: usize) -> u32 {
-    sum_except(block, at).wrapping_neg()
+/// The checksum's byte offset in a header, a file extension block and an OFS
+/// data block.
+pub const CHECKSUM: usize = 20;
+
+/// A bitmap block's checksum: its first longword, its bits following.
+pub const BITMAP_CHECKSUM: usize = 0;
+
+/// Seal `block` with the checksum at byte `at` that makes its longwords sum to
+/// zero; the longword at `at` is not summed.
+pub fn seal(block: &mut [u8], at: usize) {
+    let sum = sum_except(block, at).wrapping_neg();
+    put_be32(block, at, sum);
 }
 
 /// Whether `block`'s longwords sum to zero, its stored checksum included.
@@ -449,31 +455,37 @@ pub fn identify<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<Layout>, Dri
 }
 
 /// The blocks an Amiga Rigid Disk Block may lie in, the first it is looked for.
-pub const RDB_SEARCH_BLOCKS: u64 = 16;
+pub const RDB_SEARCH_BLOCKS: usize = 16;
 
 /// The block size the Rigid Disk Block is looked for in.
 const RDB_BLOCK: usize = 512;
+
+/// The bytes the Rigid Disk Block is looked for in.
+const RDB_WINDOW: usize = RDB_SEARCH_BLOCKS * RDB_BLOCK;
 
 /// Whether `dev` opens with an Amiga Rigid Disk Block: `RDSK` in one of its
 /// first [`RDB_SEARCH_BLOCKS`] blocks, its summed longwords within the block
 /// and summing to zero. Such a disk holds partitions, not one volume.
 ///
+/// The window is read in one transfer.
+///
 /// # Errors
 ///
-/// A device fault.
+/// A device fault, or a refused allocation.
 pub fn rigid_disk_block<B: Block>(dev: &mut ByteDevice<B>) -> Result<bool, DriverError> {
-    let mut block = [0u8; RDB_BLOCK];
-    for at in 0..RDB_SEARCH_BLOCKS {
-        if !read_present(dev, at * RDB_BLOCK as u64, &mut block)? {
-            return Ok(false);
-        }
-        if &block[..4] != b"RDSK" {
-            continue;
-        }
-        let summed = usize::try_from(be32(&block, 4)).unwrap_or(usize::MAX);
-        if (3..=RDB_BLOCK / 4).contains(&summed) && sums_to_zero(&block[..summed * 4]) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    let (window, len) = crate::read_upto::<_, RDB_WINDOW>(dev, 0)?;
+    Ok(window[..len]
+        .as_chunks::<RDB_BLOCK>()
+        .0
+        .iter()
+        .any(is_rigid_disk_block))
+}
+
+/// Whether `block` is a Rigid Disk Block: `RDSK`, its summed longwords within
+/// the block and summing to zero.
+fn is_rigid_disk_block(block: &[u8; RDB_BLOCK]) -> bool {
+    let summed = usize::try_from(be32(block, 4)).unwrap_or(usize::MAX);
+    &block[..4] == b"RDSK"
+        && (3..=RDB_BLOCK / 4).contains(&summed)
+        && sums_to_zero(&block[..summed * 4])
 }

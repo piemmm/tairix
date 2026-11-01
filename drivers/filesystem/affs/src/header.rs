@@ -6,14 +6,11 @@ use alloc::vec::Vec;
 use tairix_abi::DriverError;
 use tairix_fsmeta::preset::amiga::MAX_COMMENT_LEN;
 use tairix_fsprobe::affs::{
-    be32, put_be32, sums_to_zero, DateStamp, Offsets, BOOT_BLOCKS, NAME_MAX, ST_FILE, ST_LINKDIR,
-    ST_LINKFILE, ST_ROOT, ST_SOFTLINK, ST_USERDIR, TABLE, T_HEADER, T_LIST,
+    be32, put_be32, seal, sums_to_zero, DateStamp, Offsets, BOOT_BLOCKS, CHECKSUM, NAME_MAX,
+    ST_FILE, ST_LINKDIR, ST_LINKFILE, ST_ROOT, ST_SOFTLINK, ST_USERDIR, TABLE, T_HEADER, T_LIST,
 };
 
 use crate::name::Name;
-
-/// Where a header's checksum lies.
-pub(crate) const CHECKSUM: usize = 20;
 
 /// What a header block is.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -151,10 +148,19 @@ impl Header {
 
     /// The block's bytes, sealed: what is written.
     pub(crate) fn sealed(&mut self) -> &[u8] {
-        put_be32(&mut self.buf, CHECKSUM, 0);
-        let sum = tairix_fsprobe::affs::checksum(&self.buf, CHECKSUM);
-        put_be32(&mut self.buf, CHECKSUM, sum);
+        seal(&mut self.buf, CHECKSUM);
         &self.buf
+    }
+
+    /// The block's buffer, given back for another read.
+    pub(crate) fn into_buf(self) -> Vec<u8> {
+        self.buf
+    }
+
+    /// Take `other`'s bytes: the same block, as a later write left it.
+    pub(crate) fn copy_from(&mut self, other: &Self) {
+        let len = self.buf.len().min(other.buf.len());
+        self.buf[..len].copy_from_slice(&other.buf[..len]);
     }
 
     fn long(&self, at: usize) -> u32 {
@@ -404,10 +410,13 @@ impl Extension {
     }
 
     pub(crate) fn sealed(&mut self) -> &[u8] {
-        put_be32(&mut self.buf, CHECKSUM, 0);
-        let sum = tairix_fsprobe::affs::checksum(&self.buf, CHECKSUM);
-        put_be32(&mut self.buf, CHECKSUM, sum);
+        seal(&mut self.buf, CHECKSUM);
         &self.buf
+    }
+
+    /// The block's buffer, given back for another read.
+    pub(crate) fn into_buf(self) -> Vec<u8> {
+        self.buf
     }
 
     pub(crate) fn table(&self, index: usize) -> u32 {

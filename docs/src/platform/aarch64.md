@@ -1375,10 +1375,14 @@ cargo test -p tairix-arch-aarch64
 ```
 
 The host-side argv contract lives in `tools/qemu/src/aarch64.rs`:
-`-M virt -cpu cortex-a72 -no-reboot -display none -serial stdio
+`-M virt -cpu cortex-a76 -no-reboot -display none -serial stdio
 -semihosting-config enable=on,target=native -m 256M -smp N -kernel <elf>`,
 with virtio-mmio block/net devices and `ramfb` attached on demand
-(mirroring the riscv64 `virt` backend).
+(mirroring the riscv64 `virt` backend). `cortex-a76` is the Raspberry Pi 5's
+core, which offers PAN; `cortex-a72`, the Pi 4's, is pinned
+(`BASELINE_CPU`) only where a run's subject is a CPU without PAN or HAFDBS,
+and a vertical whose tree is dumped ahead of the run dumps it on the same
+model.
 
 ## Platform discovery (hardware tree)
 
@@ -2636,8 +2640,10 @@ Stage W6), in `kernel/arch/aarch64::smp`:
 - The secondary-stack pool is **not** a fixed `.bss` reserve (which would
   cap the machine at a compile-time core count, `AGENTS.md` §24.1). The
   caller registers a `smp::SecondaryStackPool<N>` sized to its machine's
-  discovered core count (a `static` for the allocator-free bins); its
-  `register` publishes the pool base and per-core stride to the `smp.s`
+  discovered core count (a `static` for the allocator-free bins). Each
+  slot's stack is an `UnsafeCell`, so a `static` pool lies in writable
+  memory and the slot a core shares with the CPU starting it may span its
+  live stack. `register` publishes the pool base and per-core stride to the `smp.s`
   trampoline (ordered ahead of any `CPU_ON` by a `dsb sy`) and the covered
   count to `smp::is_valid_cpu`. Registration is set-once, and every id is
   invalid until a pool is registered, so an unstarted system fails closed.
@@ -2901,17 +2907,38 @@ Where the CPU offers PAN (`FEAT_PAN`, ARMv8.1, reported in
 every user leaf is `PXN`, so it cannot execute one either. The boot CPU
 settles whether PAN is in force from what it offers, before any other CPU
 starts (`protection::settle`). Each CPU then sets `PSTATE.PAN` as it starts
-(`protection::hold`), and a CPU that cannot hold it does not join.
+(`protection::hold`), and a CPU that cannot hold it does not join: still
+MMU-off, it answers that it lacks PAN, and stops. The boot CPU waits for
+every started core's answer, PSCI or spin-table, for half a second at most,
+so a refusal fails the start `smp_cpu_lacks_protection` (`core_lacks_pan`)
+at once, and a core that never answers fails it `smp_start_rejected`, rather
+than either being read as a core that never checked in. The boot CPU then
+gives every start it made a verdict, a failed `CPU_ON` included, and wakes
+the core with `sev`. A joined core waits for it in `wfe`, timed by the boot
+CPU's clock alone, since a secondary's own `CNTFRQ_EL0` is unprogrammed on
+a board whose counter rate comes from the device tree, and runs its entry
+only on a verdict that took its answer: a core answering a start already
+given up on stops. Each core answers in its own
+slot of the stack pool, the answer and the verdict each alone in a 2 KiB
+writeback granule, the architectural most `CTR_EL0.CWG` allows: the core
+reaches them with its caches off while every other CPU runs with theirs on,
+so no line of other data, written back from any cache, can overwrite either,
+and no core's late answer can land on another's start.
 Translation comes on with `SCTLR_EL1.SPAN` clear, so every exception taken
 to EL1 sets PAN again before any kernel code runs. The kernel reaches user
 memory only through the direct map, so it never clears PAN. `AT S1E1R`
 ignores PAN, so the watchdog's stack-link probe (`paging::el1_may_read`)
 also refuses a page EL0 can reach while translation is on. The boot records the outcome as event
-4105 (`KERNEL_BOOT_PROTECTIONS`, field `pan`), at Warn where PAN is absent,
-as on the Raspberry Pi 4's Cortex-A72. `uaccess_fault_qemu_aarch64` runs on
-`cortex-a76` (the Raspberry Pi 5's core) and proves a guarded copy reading
-an EL0 page through its user address faults, while the same bytes copy
-through the kernel's own mapping.
+4115 (`KERNEL_BOOT_PROTECTIONS`, field `pan`), at Warn where PAN is absent,
+as on the Raspberry Pi 4's Cortex-A72. Every aarch64 vertical but two runs
+on `cortex-a76` (the Raspberry Pi 5's core), which offers PAN, so every
+production path runs under it. The two boot on `cortex-a72`: the production
+boot vertical's GICv2 run, which requires the Warn record (its GICv3 run
+requires every core held to PAN and the record at Info), and
+`accessed_bit_qemu_aarch64`, which needs a core without hardware Access-flag
+updates. `uaccess_fault_qemu_aarch64` proves a guarded copy
+reading an EL0 page through its user address faults, while the same bytes
+copy through the kernel's own mapping.
 
 ### Kthread kernel stacks and their guard page
 
@@ -2993,7 +3020,7 @@ the cross-CPU contract requires.
 real two-core `virt` board: the boot core starts core 1 (PSCI `CPU_ON`),
 then drives `Aarch64Arch::shootdown_page`; reaching the PASS finisher
 proves the broadcast executes across a multi-PE domain without faulting.
-It runs on `cortex-a76`, which offers PAN, and also requires both cores to
+It runs on the default model, which offers PAN, and also requires both cores to
 hold it and, with translation off, the stack-link probe to admit the core's
 own stack. Enrolled in `tools/xtask/src/commands/qemu_tests.rs` (`cpus: 2`,
 60 s).

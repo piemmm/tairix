@@ -32,7 +32,9 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+
+use crate::Launch;
 
 /// A QEMU display backend that opens a native host window by itself.
 ///
@@ -174,12 +176,19 @@ fn resolve_executable(candidate: &Path) -> Option<PathBuf> {
 /// Returns an empty vector if the binary cannot be run (missing, not
 /// executable) or produced no parseable list; the caller treats that the same
 /// as "no windowing backend", so a broken candidate is simply skipped.
-fn available_backends(binary: &Path) -> Vec<String> {
-    let output = Command::new(binary)
-        .arg("-display")
-        .arg("help")
-        .output()
-        .ok();
+fn available_backends(binary: &Path, launch: &dyn Launch) -> Vec<String> {
+    let mut probe = Command::new(binary);
+    probe
+        .args(["-display", "help"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let Ok(child) = launch.spawn(&mut probe, false) else {
+        return Vec::new();
+    };
+    let pid = child.id();
+    let output = child.wait_with_output().ok();
+    launch.reaped(pid);
     match output {
         Some(out) => {
             // QEMU prints the list on stdout; tolerate builds that use stderr.
@@ -204,8 +213,19 @@ fn available_backends(binary: &Path) -> Vec<String> {
 /// windowing backend — including which binaries were probed and the backends
 /// each reported — so the developer can install a GUI-capable QEMU or point
 /// [`QEMU_BIN_ENV`] at one instead of staring at a window that never opens.
-pub fn select_interactive(binary_name: &str) -> Result<InteractiveQemu, String> {
-    let override_bin = std::env::var_os(QEMU_BIN_ENV);
+pub fn select_interactive(
+    binary_name: &str,
+    launch: &dyn Launch,
+) -> Result<InteractiveQemu, String> {
+    select_among(binary_name, std::env::var_os(QEMU_BIN_ENV), launch)
+}
+
+/// [`select_interactive`] with [`QEMU_BIN_ENV`] read by its caller.
+fn select_among(
+    binary_name: &str,
+    override_bin: Option<OsString>,
+    launch: &dyn Launch,
+) -> Result<InteractiveQemu, String> {
     let overridden = override_bin.is_some();
     let candidates = candidate_paths(binary_name, override_bin);
 
@@ -221,7 +241,7 @@ pub fn select_interactive(binary_name: &str) -> Result<InteractiveQemu, String> 
         if !seen.insert(canonical.clone()) {
             continue;
         }
-        let backends = available_backends(&canonical);
+        let backends = available_backends(&canonical, launch);
         if let Some(backend) = pick_backend(&backends) {
             return Ok(InteractiveQemu {
                 binary: canonical,
@@ -282,6 +302,28 @@ fn no_windowing_backend_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_backend_probe_is_reported_reaped_once_and_a_missing_binary_not_spawned() {
+        // Found where it is looked for, or named by the override, one binary
+        // is probed once.
+        for (name, override_bin) in [
+            ("/bin/sh", None),
+            ("/definitely/not/a/qemu", Some(OsString::from("/bin/sh"))),
+        ] {
+            let launch = crate::tests::Recording::default();
+            let _ = select_among(name, override_bin, &launch);
+            let (spawned, reaped) = launch.record();
+            let [(pid, on_terminal)] = spawned[..] else {
+                panic!("one probe, not {spawned:?}");
+            };
+            assert!(!on_terminal, "a probe may lead a group of its own");
+            assert_eq!(reaped, [(pid, false)], "reported reaped once, once it was");
+        }
+        let none = crate::tests::Recording::default();
+        let _ = select_among("/definitely/not/a/qemu", None, &none);
+        assert_eq!(none.record(), (Vec::new(), Vec::new()), "nothing to spawn");
+    }
 
     #[test]
     fn parses_backend_names_between_header_and_blank_line() {

@@ -21,9 +21,13 @@ nessuna può essere indovinata), esattamente come lo strumento GNU crea un
 account disabilitato. Impostare poi una password con il comando `passwd`
 dello strumento `users`.
 
-Quando `-u` è omesso, l'identificatore è assegnato automaticamente, uno
-sopra il più alto esistente. Quando `-d` è omesso, la directory
-personale segue la disposizione standard `/Users/NAME`. L'account avvia
+Quando `-u` è omesso, l'identificatore dell'utente è assegnato
+automaticamente: uno sopra il più alto esistente pari o superiore a
+1000, oppure 1000 quando nessun account ne ha uno. Gli identificatori
+inferiori a 1000 appartengono al sistema e non vengono mai assegnati, e,
+una volta che sopra il più alto non resta alcun identificatore,
+l'account non viene creato. Quando `-d` è omesso, la directory personale
+segue la disposizione standard `/Users/NAME`. Inizialmente l'account ha
 la shell predefinita del sistema e il tetto di capacità di sessione
 ordinario; un amministratore lo amplia poi con il comando `grant` dello
 strumento `users`.
@@ -34,7 +38,8 @@ operando.
 ## OPTIONS
 
 - `-u, --uid UID` — identificatore numerico dell'utente; assegnato
-  automaticamente quando è omesso (uno sopra il più alto esistente).
+  automaticamente quando è omesso (uno sopra il più alto esistente pari
+  o superiore a 1000, altrimenti 1000).
 - `-g, --gid GID` — identificatore numerico del gruppo primario.
   Obbligatorio: non c'è una politica di gruppo predefinito da
   indovinare.

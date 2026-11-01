@@ -368,14 +368,14 @@ pub fn run(workspace_root: &Path, output: Option<&Path>) -> Result<(), String> {
             }
             std::fs::write(path, document.as_bytes())
                 .map_err(|e| format!("sbom: cannot write {}: {e}", path.display()))?;
-            eprintln!(
+            noteln!(
                 "xtask: [sbom] wrote {} components to {}",
                 packages.len(),
                 path.display()
             );
         }
         None => {
-            print!("{document}");
+            crate::out(&document)?;
         }
     }
     Ok(())

@@ -44,7 +44,7 @@ cyfrifiadur sy'n dewis ei enw ar y rhwydwaith, felly nid yw enw byth yn
 profi pa gyfrifiadur rydych chi'n edrych arno. Nid yw cysylltu â chyfrannau
 cyfrifiadur ar gael ar y system hon, ac mae agor un yn dweud hynny.
 
-O'i redeg wrth ei enw o gragen (neu o'i agor ar ffolder o'r bwrdd gwaith)
+O'i gychwyn o gragen wrth ei lwybr, `/System/Components/files.app`,
 mae'n rhaglen gyffredin yn lle hynny: un ffenestr, ac mae'n dod i ben pan
 fyddwch yn ei chau. Y naill ffordd neu'r llall, mae angen sesiwn graffigol
 sy'n rhedeg: hebddi, ni ellir cyrraedd sianel y ffenestri, ac mae'r porwr yn
@@ -110,12 +110,17 @@ dewis*, ac yn olaf *Gludo*. Mae clic de ar le gwag yn clirio'r dewis, felly
 mae is-ddewislen yr eitem wedi'i llwydo.
 
 Mae agor delwedd ddisg — ffeil `.iso`, `.adf`, `.hdf` ac ati — yn ei gosod i
-chi yn `/Storage`, yn ysgrifenadwy lle mae'r ffeil, ac yn agor ei ffenestr;
-mae *Mowntio darllen-yn-unig* yn ei gosod yn ddarllen-yn-unig yn lle hynny.
-Mae'n aros wedi'i gosod nes i chi ei thaflu allan neu i'ch sesiwn ddod i
-ben. Mae *Taflu allan* yn tynnu cyfrol a osodwyd gennych, o'i heicon neu o'i
-rhes yn y bar lleoedd, y mae ei dewislen clic de ei hun yn dal *Agor* a
-*Taflu allan*; mae'ch ffenestri arni'n symud i `/Storage` yn gyntaf.
+chi yn `/Storage`, yn ysgrifenadwy lle mae'r ffeil a'i fformat ill dau'n
+caniatáu hynny, ac yn agor ei ffenestr; mae *Mowntio darllen-yn-unig* yn ei
+gosod yn ddarllen-yn-unig yn lle hynny. Mae'n aros wedi'i gosod nes i chi ei
+thaflu allan neu i'ch sesiwn fewngofnodi ddod i ben. Mae *Taflu allan* yn
+tynnu cyfrol a osodwyd gennych, o'i heicon neu o'i rhes yn y bar lleoedd, y
+mae ei dewislen clic de ei hun yn dal *Agor* a *Taflu allan*; mae'ch
+ffenestri arni'n symud i `/Storage` yn gyntaf. Mae cyfrol a ddiflannodd —
+ei disg wedi'i thynnu allan, neu ei gweinydd wedi'i golli — cyn i bopeth a
+ysgrifennwyd gennych iddi gael ei gadw yn gadael y bar ond yn cadw ei heicon
+yn `/Storage`, a chollir yr hyn na chafodd ei gadw; mae *Taflu allan* ar
+yr eicon hwnnw'n gofyn cyn ei gollwng.
 
 Mae is-ddewislen *Newydd* y ddewislen clic de yn creu ffolder, neu ddogfen
 wag o bob math y mae golygydd wedi'i osod yn ei ysgrifennu, ac yn agor ei

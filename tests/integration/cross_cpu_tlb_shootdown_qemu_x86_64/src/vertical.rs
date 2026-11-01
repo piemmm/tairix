@@ -48,6 +48,11 @@
 //! boot CPU enters x2APIC mode to start it, and both CPUs find their dense id
 //! and their shootdown slot by an id no byte holds.
 //!
+//! The lacking-SMAP binary cold-plugs an AP with SMAP off beside a boot CPU
+//! holding it, and passes only if the start is refused for exactly that
+//! (`SmpError::LacksProtection`) and the AP is dropped from the map, never
+//! running the vertical's entry.
+//!
 //! ## How it differs from a production kernel
 //!
 //! It links only the `tairix-arch-x86_64` port and `lib/sync`, is alloc-free,
@@ -61,12 +66,13 @@ mod kernel {
     use core::fmt::Write as _;
     use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-    use tairix_arch_api::{CpuMask, CrossCpuTlbShootdown, SecondaryBringup};
+    use tairix_arch_api::{CpuMask, CrossCpuTlbShootdown, SecondaryBringup, SmpError};
     use tairix_arch_x86_64::acpi;
     use tairix_arch_x86_64::apic::{self, Lapic, LocalApic};
     use tairix_arch_x86_64::bootinfo::BootData;
     use tairix_arch_x86_64::irqmask::PortIrqControl;
     use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
+    use tairix_arch_x86_64::protection::{self, Protections};
     use tairix_arch_x86_64::smp;
     use tairix_arch_x86_64::{percpu, qemu_exit, serial, tlb_shootdown};
     use tairix_sync::irq::InterruptControl as _;
@@ -165,6 +171,10 @@ mod kernel {
 
     /// Entry the AP runs after the trampoline hands control to long mode.
     extern "C" fn ap_entry(cpu_id: u32) -> ! {
+        // An AP that lacks a protection in force must never get here.
+        if crate::AP_REFUSED {
+            qemu_exit::exit_failure();
+        }
         // SAFETY: called once on this AP before interrupts are enabled;
         // installs its per-CPU GDT + IDT.
         unsafe {
@@ -282,6 +292,35 @@ mod kernel {
     #[panic_handler]
     fn tairix_xtlb_x86_64_panic(info: &core::panic::PanicInfo<'_>) -> ! {
         tairix_arch_x86_64::panic::handle_panic_via_serial(info)
+    }
+
+    /// The verdict on a run whose AP offers no SMAP: the boot CPU holds it,
+    /// and the AP is refused for lacking it, sent back, and dropped from the
+    /// map.
+    fn refused_ap_verdict(
+        com1: &mut serial::Serial,
+        started: Result<(), SmpError>,
+        arch: &X86_64Arch,
+    ) -> ! {
+        if !protection::in_force().contains(Protections::SMAP) {
+            let _ = writeln!(
+                com1,
+                "[cross_cpu_tlb_shootdown_qemu_x86_64] FAIL: the boot CPU does not hold SMAP"
+            );
+            qemu_exit::exit_failure();
+        }
+        if started == Err(SmpError::LacksProtection) && arch.lapic_id_of(1).is_none() {
+            let _ = writeln!(
+                com1,
+                "[cross_cpu_tlb_shootdown_qemu_x86_64] PASS: the AP lacking SMAP was refused for it"
+            );
+            qemu_exit::exit_success();
+        }
+        let _ = writeln!(
+            com1,
+            "[cross_cpu_tlb_shootdown_qemu_x86_64] FAIL: the AP lacking SMAP started as {started:?}"
+        );
+        qemu_exit::exit_failure();
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
@@ -402,7 +441,11 @@ mod kernel {
         // SAFETY: BSP; `boot.s` zeroed `.bss` (clear AP stack pool), the
         // BSP LAPIC is software-enabled, the entry is installed, and dense
         // CPU 1 maps to the real, parked AP discovered from the MADT.
-        if let Err(e) = unsafe { arch.start_secondary(1) } {
+        let started = unsafe { arch.start_secondary(1) };
+        if crate::AP_REFUSED {
+            refused_ap_verdict(&mut com1, started, &arch);
+        }
+        if let Err(e) = started {
             let _ = writeln!(
                 com1,
                 "[cross_cpu_tlb_shootdown_qemu_x86_64] FAIL: start_secondary: {}",

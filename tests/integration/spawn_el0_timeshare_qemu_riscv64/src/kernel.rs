@@ -40,12 +40,7 @@ include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 /// The two U-mode tasks the test timeshares.
 const TASK_COUNT: u64 = 2;
 
-/// Gigabytes of identity map each U-mode address space provides: `[0, 4 GiB)`
-/// covers the `virt` board's low MMIO and the RAM base where this kernel runs,
-/// so switching between the two spaces never moves the ground under the running
-/// kernel (every kernel pointer keeps its identity address). [`USER_BIAS`]
-/// (64 GiB) sits far above, on freshly walked Sv39 tables.
-const IDENTITY_GIGABYTES: usize = 4;
+use tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES;
 
 /// User stack base (1 MiB into the high user region) and size. `tairix-rt`
 /// carves scratch space off the stack, so it must comfortably exceed it.
@@ -211,7 +206,8 @@ extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -
 /// image through the production capability-checked, audited `spawn_image`
 /// caller. Fails the test with a distinct finisher on any error.
 fn build_user_space(pool: &'static paging::PageTablePool, image: &LoadImage) -> (u64, UserEntry) {
-    let Some(arch) = ArchAddressSpace::new_identity_gigapages(pool, IDENTITY_GIGABYTES) else {
+    let Some(arch) = ArchAddressSpace::new_identity_gigapages(pool, KERNEL_IDENTITY_GIGAPAGES)
+    else {
         qemu_exit::exit_failure(FAIL_POOL);
     };
     // Capture the `satp` root before the arch space is moved into the
@@ -225,7 +221,7 @@ fn build_user_space(pool: &'static paging::PageTablePool, image: &LoadImage) -> 
 
     let mut space = AddressSpace::new(arch);
     // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::identity((IDENTITY_GIGABYTES as u64) << 30) }
+    let physmap = unsafe { DirectPhysMap::identity((KERNEL_IDENTITY_GIGAPAGES as u64) << 30) }
         .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image,

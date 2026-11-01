@@ -133,15 +133,11 @@ pub const KTHREAD_STACK_BYTES: usize = 32 * 1024;
 
 /// Width of the [`BoxStack`] guard region, in bytes: one 4 KiB page.
 ///
-/// The guard sits immediately below the usable stack. Sized at one page so
-/// it matches the on-hardware form this emulates — a single *unmapped* page
-/// below the stack (the same model `kernel/mem`'s slab guard
-/// documents) — and absorbs a 4 KiB overrun before it can reach the
-/// lower-addressed neighbour. The deployment form that turns the overrun into
-/// an immediate hardware fault (unmapping this page in the kernel's own page
-/// tables) is staged in `plans/PI.md`; until the page-table split it backs on
-/// lands, the poison-byte emulation below is the real, non-deferred defence
-/// (a guard now, not "later").
+/// The guard sits immediately below the usable stack and absorbs a 4 KiB
+/// overrun before it can reach the lower-addressed neighbour. It is the
+/// software stand-in for the unmapped guard slot the window tier gives a
+/// stack, used where no window tier is installed or it cannot supply a run
+/// ([`crate::kstack::alloc_kernel_stack`]).
 const STACK_GUARD_BYTES: usize = 4096;
 
 /// A kernel-stack guard violation: the task overran its stack into the
@@ -246,9 +242,8 @@ pub struct BoxStack {
 /// The whole allocation: the guard region below the usable stack.
 const BOX_STACK_BYTES: usize = STACK_GUARD_BYTES + KTHREAD_STACK_BYTES;
 
-/// The canary window must fit inside the guard region, and the guard is a
-/// whole number of 4 KiB pages so the staged deployment form (unmapping it,
-/// `plans/PI.md`) lands on a clean page boundary. Allocating the whole
+/// The canary window must fit inside the guard region, and the guard is
+/// whole pages, as the window tier's guard slot is. Allocating the whole
 /// extent `STACK_ALIGN`-aligned is what lets the usable top be the
 /// allocation's end rather than a rounded-down approximation of it.
 const _STACK_LAYOUT_OK: () = {

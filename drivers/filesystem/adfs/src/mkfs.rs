@@ -13,8 +13,9 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
 use tairix_fsprobe::adfs::{
-    boot_block_checksum, zone_check, DiscRecord, BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE,
-    DISC_RECORD_IN_BOOT_BLOCK, DISC_RECORD_SIZE, FRAG_BAD, FRAG_ROOT,
+    link_bits, seal_boot_block, zone_check, zone_start_bit, DiscRecord, BOOT_BLOCK_OFFSET,
+    BOOT_BLOCK_SIZE, CROSS_CHECK_BYTE, CROSS_CHECK_SUM, DISC_RECORD_SIZE, FRAG_BAD, FRAG_ROOT,
+    FREELINK_BIT, LINK_BITS_MAX, ZONE_CHECK_BYTE, ZONE_HEADER_SIZE,
 };
 
 /// Disc id stamped into freshly formatted volumes.
@@ -144,8 +145,8 @@ pub(crate) fn new_map_record(
                 log2bpmb += 1;
             }
             record.log2bpmb = log2bpmb;
-            let zone0_bits = zone_stream_bits(&record, true);
-            let later_zone_bits = zone_stream_bits(&record, false);
+            let zone0_bits = u64::from(record.zone_stream_bits(0));
+            let later_zone_bits = u64::from(record.zone_stream_bits(1));
             let total_bits = device_bytes >> log2bpmb;
             let extra = total_bits.saturating_sub(zone0_bits);
             let nzones = 1 + extra.div_ceil(later_zone_bits);
@@ -163,7 +164,7 @@ pub(crate) fn new_map_record(
     // Round down to whole sectors, then trim so the map's coverage
     // excess is either zero or a representable defect fragment.
     let mut disc_size = size & !(record.sector_size() - 1);
-    let coverage = map_coverage_bits(&record);
+    let coverage = record.zone_start_block(u32::from(record.nzones));
     loop {
         let bits = disc_size >> record.log2bpmb;
         if bits == 0 {
@@ -177,22 +178,6 @@ pub(crate) fn new_map_record(
     }
     record.disc_size = disc_size;
     Ok(record)
-}
-
-/// Map bits a zone's fragment stream holds (`zone 0` also embeds the
-/// disc record).
-pub(crate) fn zone_stream_bits(record: &DiscRecord, zone0: bool) -> u64 {
-    let zone_size = u64::from(record.zone_bits());
-    if zone0 {
-        zone_size - (DISC_RECORD_SIZE as u64) * 8
-    } else {
-        zone_size
-    }
-}
-
-/// Total disc blocks (map bits) the whole map can describe.
-pub(crate) fn map_coverage_bits(record: &DiscRecord) -> u64 {
-    zone_stream_bits(record, true) + u64::from(record.nzones - 1) * zone_stream_bits(record, false)
 }
 
 /// A [`DirStore`] window over a fixed byte range of the volume, used
@@ -350,24 +335,23 @@ fn write_fresh_map<B: Block>(
     // The sector size was validated against `MAX_ZONE_BYTES`.
     let sector = usize::try_from(record.sector_size()).unwrap_or(MAX_ZONE_BYTES);
     let idlen = u32::from(record.idlen);
-    let dr_bits = (DISC_RECORD_SIZE as u64) * 8;
-    let zone_size = u64::from(record.zone_bits());
     let total_blocks = record.disc_size / record.bytes_per_map_bit();
-    for zone in 0..u64::from(record.nzones) {
+    for zone in 0..u32::from(record.nzones) {
         let mut buf = [0u8; MAX_ZONE_BYTES];
-        let (start_bit, start_block) = if zone == 0 {
-            (bit_offset(32 + dr_bits), 0u64)
-        } else {
-            (32u32, zone * zone_size - dr_bits)
-        };
-        let physical_end = bit_offset(32 + zone_size);
-        let covered = u64::from(physical_end - start_bit);
-        let logical_blocks = total_blocks.saturating_sub(start_block).min(covered);
+        let start_bit = zone_start_bit(zone);
+        let start_block = record.zone_start_block(zone);
+        let covered = record.zone_stream_bits(zone);
+        let physical_end = start_bit + covered;
+        let logical_blocks = total_blocks
+            .saturating_sub(start_block)
+            .min(u64::from(covered));
         let logical_end = start_bit + bit_offset(logical_blocks);
-        // Zone 0 embeds the disc record.
+        // Zone 0 embeds the disc record, and its cross-check byte alone makes
+        // every zone's XOR to the sum.
         if zone == 0 {
-            buf[4..4 + DISC_RECORD_SIZE].copy_from_slice(&record.encode());
-            buf[3] = 0xFF; // Cross-check bytes XOR to 0xFF across zones.
+            buf[ZONE_HEADER_SIZE..ZONE_HEADER_SIZE + DISC_RECORD_SIZE]
+                .copy_from_slice(&record.encode());
+            buf[CROSS_CHECK_BYTE] = CROSS_CHECK_SUM;
         }
         // Collect this zone's allocated segments in block order. Every
         // segment arrives at least `idlen + 1` map bits long (the
@@ -456,8 +440,8 @@ fn write_fresh_map<B: Block>(
             bits_set_field(&mut buf, at, idlen, FRAG_BAD);
             bits_set(&mut buf, physical_end - 1, true);
         }
-        buf[0] = zone_check(&buf[..sector]);
-        let at = record.map_offset() + zone * record.sector_size();
+        buf[ZONE_CHECK_BYTE] = zone_check(&buf[..sector]);
+        let at = record.map_offset() + u64::from(zone) * record.sector_size();
         volume.write(at, &buf[..sector])?;
     }
     Ok(())
@@ -473,14 +457,14 @@ fn bit_offset(bits: u64) -> u32 {
 /// zone header) at the free fragment starting at `bit`, writing the
 /// header's stop bit when the link is the header's.
 fn link_free(buf: &mut [u8; MAX_ZONE_BYTES], record: &DiscRecord, prev: Option<u32>, bit: u32) {
-    let link_bits = u32::from(record.idlen).min(15);
+    let width = link_bits(record.idlen);
     match prev {
         None => {
-            // The 16-bit header link carries its own stop bit at the top.
-            bits_set_field(buf, 8, link_bits, bit - 8);
-            bits_set(buf, 23, true);
+            // The header's link field carries its own stop bit at its top.
+            bits_set_field(buf, FREELINK_BIT, width, bit - FREELINK_BIT);
+            bits_set(buf, FREELINK_BIT + LINK_BITS_MAX, true);
         }
-        Some(pos) => bits_set_field(buf, pos, link_bits, bit - pos),
+        Some(pos) => bits_set_field(buf, pos, width, bit - pos),
     }
 }
 
@@ -490,9 +474,7 @@ fn write_boot_block<B: Block>(
     record: &DiscRecord,
 ) -> Result<(), DriverError> {
     let mut block = [0u8; BOOT_BLOCK_SIZE];
-    block[DISC_RECORD_IN_BOOT_BLOCK..DISC_RECORD_IN_BOOT_BLOCK + DISC_RECORD_SIZE]
-        .copy_from_slice(&record.encode());
-    block[BOOT_BLOCK_SIZE - 1] = boot_block_checksum(&block);
+    seal_boot_block(&mut block, record);
     volume.write(BOOT_BLOCK_OFFSET, &block)
 }
 

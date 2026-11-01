@@ -88,6 +88,9 @@ pub enum Topology {
     /// The boot CPU, and one more at the first core of a second socket of
     /// 256, so its APIC id is 256: past the eight bits xAPIC names.
     ApPastXapic,
+    /// The boot CPU, and one more of the run's model beside it with the CPU
+    /// property named turned off, so it offers less than the boot CPU.
+    ApLacking(&'static str),
 }
 
 /// [`Topology::ApPastXapic`]'s `-smp`: room for two sockets of 256 cores,
@@ -97,6 +100,13 @@ const AP_PAST_XAPIC_SMP: &str = "1,maxcpus=512,sockets=2,cores=256,threads=1";
 /// Where [`Topology::ApPastXapic`] plugs its second CPU in.
 const AP_PAST_XAPIC_SLOT: &str = "socket-id=1,core-id=0,thread-id=0";
 
+/// [`Topology::ApLacking`]'s `-smp`: room for a second core beside the boot
+/// CPU alone present at the start.
+const AP_LACKING_SMP: &str = "1,maxcpus=2,sockets=1,cores=2,threads=1";
+
+/// Where [`Topology::ApLacking`] plugs its second CPU in.
+const AP_LACKING_SLOT: &str = "socket-id=0,core-id=1,thread-id=0";
+
 /// The `-cpu` model for `spec`: its capability override with the entropy
 /// features appended, or the default [`CPU`].
 fn cpu_model(spec: &Spec) -> String {
@@ -104,6 +114,21 @@ fn cpu_model(spec: &Spec) -> String {
         Some(model) => alloc_format(model),
         None => CPU.into(),
     }
+}
+
+/// `model` with its `+feature` in the property form: QEMU sets the `+` form
+/// on each CPU as it is realised, over the CPU's own `-device` properties,
+/// while the property form is a default a plugged-in CPU's `feature=off`
+/// overrides.
+fn as_overridable(model: &str, feature: &str) -> String {
+    model
+        .split(',')
+        .map(|part| match part.strip_prefix('+') {
+            Some(named) if named == feature => format!("{feature}=on"),
+            _ => part.into(),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Compose `{model},{ENTROPY_FEATURES}`.
@@ -148,6 +173,9 @@ fn push_board(argv: &mut Vec<OsString>, spec: &Spec) {
     if spec.dma_translation.remaps() || past_xapic {
         cpu.push_str(",+x2apic");
     }
+    if let Topology::ApLacking(feature) = spec.x86_64_topology {
+        cpu = as_overridable(&cpu, feature);
+    }
     // The type a plugged-in CPU is of: the model, without its features.
     let cpu_type = format!("{}-x86_64-cpu", cpu.split(',').next().unwrap_or_default());
     argv.push("-cpu".into());
@@ -159,6 +187,11 @@ fn push_board(argv: &mut Vec<OsString>, spec: &Spec) {
             argv.push(AP_PAST_XAPIC_SMP.into());
             argv.push("-device".into());
             argv.push(format!("{cpu_type},{AP_PAST_XAPIC_SLOT}").into());
+        }
+        Topology::ApLacking(feature) => {
+            argv.push(AP_LACKING_SMP.into());
+            argv.push("-device".into());
+            argv.push(format!("{cpu_type},{AP_LACKING_SLOT},{feature}=off").into());
         }
     }
 }
@@ -543,6 +576,38 @@ mod tests {
                 "{model} lacks {feature}"
             );
         }
+    }
+
+    /// The AP-lacking layout plugs a second CPU of the run's model in beside
+    /// the boot CPU with the property named off, on the default board; the
+    /// boot CPU's model still carries it.
+    #[test]
+    fn an_ap_lacking_a_feature_is_cold_plugged_without_it() {
+        let spec = fixture_spec(2).with_x86_64_topology(Topology::ApLacking("smap"));
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let after = |flag: &str| {
+            argv.iter()
+                .position(|a| a == flag)
+                .map(|at| argv[at + 1].clone())
+        };
+        assert_eq!(
+            after("-smp").as_deref(),
+            Some("1,maxcpus=2,sockets=1,cores=2,threads=1")
+        );
+        assert_eq!(
+            after("-device").as_deref(),
+            Some("qemu64-x86_64-cpu,socket-id=0,core-id=1,thread-id=0,smap=off")
+        );
+        assert_eq!(after("-machine"), None, "the default board holds two");
+        let cpu = after("-cpu").expect("a CPU model");
+        assert!(
+            cpu.split(',').any(|f| f == "smap=on") && !cpu.split(',').any(|f| f == "+smap"),
+            "{cpu}: the boot CPU offers it as a default the AP's own property overrides"
+        );
+        assert!(
+            cpu.split(',').any(|f| f == "+smep"),
+            "{cpu}: nothing else is rewritten"
+        );
     }
 
     /// The AP-past-xAPIC layout plugs a second CPU of the run's own model in

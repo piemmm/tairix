@@ -40,6 +40,8 @@ pub enum GuardDefect {
     /// A stack pointer below the stack's lowest byte was not reported as
     /// an overrun.
     BelowStackMissed,
+    /// A fault inside the guard was not reported as an overrun.
+    FaultedMissed,
 }
 
 impl GuardDefect {
@@ -58,6 +60,7 @@ impl GuardDefect {
             Self::DisturbanceMissed => 6,
             Self::RestoreNotIntact => 7,
             Self::BelowStackMissed => 8,
+            Self::FaultedMissed => 9,
         };
         match NonZeroU16::new(raw) {
             Some(code) => code,
@@ -78,6 +81,7 @@ impl GuardDefect {
             Self::DisturbanceMissed => "a write through the canary went undetected",
             Self::RestoreNotIntact => "the restored guard did not read as intact",
             Self::BelowStackMissed => "a stack pointer below the stack was not an overrun",
+            Self::FaultedMissed => "a fault inside the guard was not an overrun",
         }
     }
 }
@@ -108,17 +112,22 @@ unsafe fn wholly_poisoned(low: u64, high: u64) -> bool {
 /// Write `byte` into the guard's topmost address — where a downward
 /// overrun arrives first.
 ///
+/// The fence keeps the region's reads after the write: `stack_bottom` may be
+/// an alias of the bytes the region reads through, which the compiler cannot
+/// know.
+///
 /// # Safety
 ///
-/// `stack_bottom` must be one past the reserved guard's last byte, and
-/// nothing else may be using those bytes.
+/// `stack_bottom` must be one past the reserved guard's last byte, through a
+/// mapping that may write it, and nothing else may be using those bytes.
 unsafe fn poke_canary_top(stack_bottom: u64, byte: u8) {
     let Ok(top) = usize::try_from(stack_bottom - 1) else {
         return;
     };
     // SAFETY: the caller vouched the byte below `stack_bottom` is the
-    // guard's own, which nothing else reads or writes.
+    // guard's own, writable here, which nothing else reads or writes.
     unsafe { core::ptr::with_exposed_provenance_mut::<u8>(top).write_volatile(byte) };
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
 /// Run every on-target check against the port's guard, leaving it poisoned
@@ -127,6 +136,9 @@ unsafe fn poke_canary_top(stack_bottom: u64, byte: u8) {
 /// `sp` must be the caller's live stack pointer, which is on the boot stack
 /// and so above the guard; the fault-injection leg needs a verdict that is
 /// decided by the canary rather than short-circuited by the stack pointer.
+/// `writable_bottom` is `stack_bottom` seen through a mapping that may write
+/// the guard: `stack_bottom` itself where the port maps the guard writable,
+/// an alias of the same bytes where it maps it read-only.
 ///
 /// # Errors
 ///
@@ -135,13 +147,15 @@ unsafe fn poke_canary_top(stack_bottom: u64, byte: u8) {
 /// # Safety
 ///
 /// `guard_low` and `stack_bottom` must be the port's own linker symbols for
-/// the reservation `region` names, and no other code may be using the guard
-/// (this writes a byte of it and restores it).
+/// the reservation `region` names, `writable_bottom` the same byte through a
+/// writable mapping, and no other code may be using the guard (this writes a
+/// byte of it and restores it).
 pub unsafe fn check(
     region: Option<BootStackGuardRegion>,
     guard_low: u64,
     stack_bottom: u64,
     sp: u64,
+    writable_bottom: u64,
 ) -> Result<(), GuardDefect> {
     let Some(region) = region else {
         return Err(GuardDefect::NotReserved);
@@ -158,35 +172,45 @@ pub unsafe fn check(
     if !unsafe { wholly_poisoned(guard_low, stack_bottom) } {
         return Err(GuardDefect::NotPoisoned);
     }
-    if region.assess(Some(sp)) != BootStackGuard::Intact {
+    if region.assess(Some(sp), None) != BootStackGuard::Intact {
         return Err(GuardDefect::FreshNotIntact);
     }
 
     // Fault injection: a zero is what both a real overrun and a guard the
     // stub never poisoned leave behind, so it must not read as intact.
     // SAFETY: as above; the byte is the guard's own and is restored below.
-    unsafe { poke_canary_top(stack_bottom, 0) };
-    let disturbed = region.assess(Some(sp));
+    unsafe { poke_canary_top(writable_bottom, 0) };
+    let disturbed = region.assess(Some(sp), None);
     // SAFETY: as above. Restored before the verdict is acted on, so the
     // guard is left armed whatever this check returns.
-    unsafe { poke_canary_top(stack_bottom, GUARD_BYTE) };
+    unsafe { poke_canary_top(writable_bottom, GUARD_BYTE) };
     if disturbed != BootStackGuard::Disturbed {
         return Err(GuardDefect::DisturbanceMissed);
     }
-    if region.assess(Some(sp)) != BootStackGuard::Intact {
+    if region.assess(Some(sp), None) != BootStackGuard::Intact {
         return Err(GuardDefect::RestoreNotIntact);
     }
 
     // A frame larger than the guard steps over it without writing a byte,
     // so the stack pointer has to be decisive on its own.
     let below = stack_bottom - 8;
-    if region.assess(Some(below))
+    if region.assess(Some(below), None)
         != (BootStackGuard::BelowStack {
             sp: below,
             bytes: 8,
         })
     {
         return Err(GuardDefect::BelowStackMissed);
+    }
+    // A guard mapped read-only stops the write, so the address that faulted
+    // has to be decisive on its own as well.
+    if region.assess(None, Some(below))
+        != (BootStackGuard::Faulted {
+            addr: below,
+            bytes: 8,
+        })
+    {
+        return Err(GuardDefect::FaultedMissed);
     }
     Ok(())
 }

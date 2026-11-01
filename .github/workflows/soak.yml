@@ -1,20 +1,21 @@
 name: soak
 
-# Nightly soak window (fuzz, proptest, the
-# repeated-test soak, and the docs/src/filesystem/soak.md filesystem soak).
-# The default `all` runs every fuzz harness, every proptest model, every
-# registered filesystem soak (each target on its own ≥1 GiB RAM volume, so
-# budget ≥1 GiB of runner RAM per target running in parallel), and the whole
-# test matrix in parallel. This is enough exposure to surface a flake too rare
+# Nightly soak window (fuzz, proptest, the filesystem and generator soaks, and
+# the repeated-test soak). The default `all` runs every fuzz harness, every
+# proptest model, every registered filesystem soak (each target on its own
+# ≥1 GiB RAM volume, so budget ≥1 GiB of runner RAM per target running in
+# parallel), every random-generator soak, and the whole test matrix in
+# parallel. This is enough exposure to surface a flake too rare
 # to catch in the per-PR single-pass test run (where `ci` runs each test once)
 # without holding the soak runner all day.
 #
-# The run starts at 00:00 UTC every day and lasts a fixed seven-hour window:
-# `soak.sh --window` hands every job the window's close, so what a job spends
-# building comes out of the window rather than being added after it, and the
-# test matrix starts no pass it cannot finish inside it. GitHub's cron is
-# UTC-only, so the schedule is a single midnight-UTC tick with no timezone
-# juggling.
+# The run starts at 00:00 UTC every day and soaks the scheduled seven-hour
+# window (`soak.sh --scheduled`): every job is handed the window's close, so
+# what a job spends building comes out of the window rather than being added
+# after it, and the test matrix starts another pass only while one as long as
+# the last still fits; tools/ci/README.md says what may still finish past the
+# close. GitHub's cron is UTC-only, so the schedule is a single midnight-UTC
+# tick with no timezone juggling.
 #
 # These cannot run on GitHub-hosted runners: a hosted job is hard-capped well
 # below a seven-hour window. They therefore run on a *self-hosted Linux runner*
@@ -38,7 +39,7 @@ name: soak
 # `schedule` (which always runs from the base repo's default branch, never a
 # fork) and on `workflow_dispatch` — never on `pull_request`/`pull_request_target`.
 # Every job is additionally gated (see the job `if:` below) to the owner
-# (`piemmm`) in the canonical `piemmm/rustos` repo, so a fork or any other
+# (`piemmm`) in the canonical `piemmm/tairix` repo, so a fork or any other
 # actor manually dispatching is refused before any step runs.
 on:
   schedule:
@@ -50,9 +51,9 @@ on:
         description: "Which soaks to run"
         type: choice
         default: all
-        options: [all, both, fuzz, proptest, fssoak, test]
+        options: [all, both, fuzz, proptest, fssoak, rngsoak, test]
       window:
-        description: "Window in seconds (blank = the seven-hour window; a small value makes a smoke run)"
+        description: "Window in seconds, at most the seven-hour scheduled window (blank = that window; a small value makes a smoke run)"
         type: string
         default: ""
 
@@ -97,10 +98,7 @@ jobs:
     # it; the two run concurrently on the same host (see the runner README for
     # registering both runner instances).
     runs-on: [self-hosted, linux, soak]
-    env:
-      # Seven hours: every soak job is finished this long after the soak starts.
-      TAIRIX_SOAK_WINDOW_SECS: 25200
-    # A backstop no healthy run reaches: the window, then the 45 minutes
+    # A backstop no healthy run reaches: the scheduled window, then the 45 minutes
     # `cargo xtask` lets a wedged job run past the close before it kills and
     # names it, then 30 minutes for setup (a cold runner builds QEMU) and 10
     # for collecting and uploading the logs.
@@ -170,8 +168,8 @@ jobs:
           TAIRIX_CI_LOGDIR: ${{ runner.temp }}/tairix-soak-logs
           # Dispatch inputs reach the script as data, never as script text.
           KIND: ${{ github.event.inputs.kind || 'all' }}
-          WINDOW: ${{ github.event.inputs.window || env.TAIRIX_SOAK_WINDOW_SECS }}
-        run: tools/ci/soak.sh "$KIND" --window "$WINDOW"
+          WINDOW: ${{ github.event.inputs.window }}
+        run: tools/ci/soak.sh "$KIND" --scheduled ${WINDOW:+--window "$WINDOW"}
 
       - name: Upload soak logs
         # Logs are the whole point on failure: a crashing input becomes a

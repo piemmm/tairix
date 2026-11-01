@@ -14,6 +14,7 @@ use tairix_arch_api::{UserEntry, BOOT_CPU};
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
+use tairix_arch_x86_64::protection::Protections;
 use tairix_arch_x86_64::userentry::USER_MODE;
 use tairix_arch_x86_64::{preempt, qemu_exit, syscall_entry};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
@@ -266,14 +267,17 @@ fn build_el0_space(image: &LoadImage) -> (u64, UserEntry) {
 fn run_preempt() -> ! {
     note(TEST_START, "x86_64 P-1c test: building ring-3 spinner");
 
-    // The enrolment runs a model offering no supervisor protection, so every
-    // entry below is taken where `clac` does not exist.
-    if tairix_arch_x86_64::protection::in_force()
-        != tairix_arch_x86_64::protection::Protections::offered(0, 0)
+    // The model offers SMEP and UMIP but not SMAP, so every entry below is
+    // taken where `clac` does not exist while a protection is in force: a
+    // stub testing any bit but SMAP's faults on the first tick.
+    let held = tairix_arch_x86_64::protection::in_force();
+    if !held.contains(Protections::SMEP)
+        || !held.contains(Protections::UMIP)
+        || held.contains(Protections::SMAP)
     {
         note(
             TEST_FAIL,
-            "P-1c test: the model offers a supervisor protection",
+            "P-1c test: the kernel does not hold SMEP and UMIP without SMAP",
         );
         qemu_exit::exit_failure();
     }

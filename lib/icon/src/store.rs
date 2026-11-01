@@ -75,6 +75,85 @@ impl StoreKey {
     }
 }
 
+impl<F: StoreFile> StoreAccess for ThumbnailStore<F> {
+    /// The picture stored under `key`, if a way of its set holds it whole.
+    fn find(&mut self, key: StoreKey) -> Option<Fitted> {
+        let set = key.set(self.sets);
+        let (headers, ways) = self.read_set(set)?;
+        let (way, found) = ways
+            .iter()
+            .enumerate()
+            .find(|(_, way)| way.key == Some(key))?;
+        let mut pixels = tairix_util::fallible::filled(self.payload_len, 0u8)?;
+        if !self
+            .file
+            .read_exact_at(self.payload_at(set, way)?, &mut pixels)
+        {
+            return None;
+        }
+        (slot_crc(&headers[way], &pixels) == found.crc).then_some(Fitted {
+            pixels,
+            bounds: found.bounds,
+        })
+    }
+
+    /// Keep `picture` under `key`, in an empty way of its set or in place of
+    /// the set's oldest. A picture not this store's shape is refused.
+    fn insert(&mut self, key: StoreKey, picture: &Fitted) -> bool {
+        let square = Rect::new(0, 0, self.side, self.side);
+        if picture.pixels.len() != self.payload_len
+            || picture.bounds.is_empty()
+            || picture.bounds.intersection(&square) != picture.bounds
+        {
+            return false;
+        }
+        let set = key.set(self.sets);
+        let Some((_, ways)) = self.read_set(set) else {
+            return false;
+        };
+        let newest = ways.iter().map(|way| way.order).max().unwrap_or(0);
+        let way = ways
+            .iter()
+            .position(|way| way.key == Some(key))
+            .or_else(|| ways.iter().position(|way| way.key.is_none()))
+            .or_else(|| {
+                ways.iter()
+                    .enumerate()
+                    .min_by_key(|(_, way)| way.order)
+                    .map(|(index, _)| index)
+            })
+            .unwrap_or(0);
+        let mut header = [0u8; SLOT_HEADER_LEN];
+        header[S_VOLUME..S_VOLUME + 16].copy_from_slice(&key.id.volume);
+        header[S_NODE..S_NODE + 8].copy_from_slice(&key.id.node.to_le_bytes());
+        header[S_GEN..S_GEN + 8].copy_from_slice(&key.content_gen.to_le_bytes());
+        header[S_READING] = key.reading_byte();
+        let bounds = picture.bounds;
+        for (at, value) in [
+            bounds.left().unsigned_abs(),
+            bounds.top().unsigned_abs(),
+            bounds.width,
+            bounds.height,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let field = S_BOUNDS + at * 4;
+            header[field..field + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        header[S_ORDER..S_ORDER + 8].copy_from_slice(&newest.saturating_add(1).to_le_bytes());
+        let crc = slot_crc(&header, &picture.pixels);
+        header[S_CRC..S_CRC + 4].copy_from_slice(&crc.to_le_bytes());
+        // The payload goes down before the header that vouches for it, so a
+        // write cut short between them leaves a header whose checksum fails.
+        let Some(payload_at) = self.payload_at(set, way) else {
+            return false;
+        };
+        self.file.write_all_at(payload_at, &picture.pixels)
+            && self.file.write_all_at(Self::header_at(set, way), &header)
+    }
+}
+
 /// The store's own constants: the blob layout below is this version's.
 const MAGIC: [u8; 8] = *b"TXTHUMBS";
 const VERSION: u32 = 1;
@@ -94,6 +173,43 @@ const S_READING: usize = 32;
 const S_BOUNDS: usize = 36;
 const S_ORDER: usize = 52;
 const S_CRC: usize = 60;
+
+/// What a store lends one call at a time: a lookup, or an insert.
+pub trait StoreAccess {
+    /// The picture stored under `key`, if one is held whole.
+    fn find(&mut self, key: StoreKey) -> Option<Fitted>;
+
+    /// Keep `picture` under `key`, answering whether it was kept.
+    fn insert(&mut self, key: StoreKey, picture: &Fitted) -> bool;
+}
+
+/// The picture of the open `document`, read as `reading`, through `store`:
+/// the stored one when this version of it is held, else what `decode`
+/// produces — kept only when the document is still the same version once
+/// decoded, so a decode that raced a write is drawn but never stored.
+///
+/// The store is reached for one lookup and one insert, never across the
+/// decode, so a store several decoders share is held by none of them while
+/// it reads its document.
+pub fn serve_thumbnail(
+    store: &mut impl StoreAccess,
+    reading: Reading,
+    document: &mut dyn ArtworkDocument,
+    decode: impl FnOnce(&mut dyn ArtworkDocument) -> Option<Fitted>,
+) -> Option<Fitted> {
+    let stamp = document.stamp();
+    let Some(key) = StoreKey::of(stamp, reading) else {
+        return decode(document);
+    };
+    if let Some(found) = store.find(key) {
+        return Some(found);
+    }
+    let fitted = decode(document)?;
+    if document.restamp() == Some(stamp) {
+        store.insert(key, &fitted);
+    }
+    Some(fitted)
+}
 
 /// A store of pictures `side` pixels square in one blob.
 pub struct ThumbnailStore<F: StoreFile> {
@@ -155,107 +271,6 @@ impl<F: StoreFile> ThumbnailStore<F> {
     #[must_use]
     pub const fn side(&self) -> u32 {
         self.side
-    }
-
-    /// The picture of the open `document`, read as `reading`: the stored one
-    /// when this version of it is held, else what `decode` produces — kept
-    /// only when the document is still the same version once decoded, so a
-    /// decode that raced a write is drawn but never stored.
-    pub fn serve(
-        &mut self,
-        reading: Reading,
-        document: &mut dyn ArtworkDocument,
-        decode: impl FnOnce(&mut dyn ArtworkDocument) -> Option<Fitted>,
-    ) -> Option<Fitted> {
-        let stamp = document.stamp();
-        let Some(key) = StoreKey::of(stamp, reading) else {
-            return decode(document);
-        };
-        if let Some(found) = self.find(key) {
-            return Some(found);
-        }
-        let fitted = decode(document)?;
-        if document.restamp() == Some(stamp) {
-            self.insert(key, &fitted);
-        }
-        Some(fitted)
-    }
-
-    /// The picture stored under `key`, if a way of its set holds it whole.
-    pub fn find(&mut self, key: StoreKey) -> Option<Fitted> {
-        let set = key.set(self.sets);
-        let (headers, ways) = self.read_set(set)?;
-        let (way, found) = ways
-            .iter()
-            .enumerate()
-            .find(|(_, way)| way.key == Some(key))?;
-        let mut pixels = tairix_util::fallible::filled(self.payload_len, 0u8)?;
-        if !self
-            .file
-            .read_exact_at(self.payload_at(set, way)?, &mut pixels)
-        {
-            return None;
-        }
-        (slot_crc(&headers[way], &pixels) == found.crc).then_some(Fitted {
-            pixels,
-            bounds: found.bounds,
-        })
-    }
-
-    /// Keep `picture` under `key`, in an empty way of its set or in place of
-    /// the set's oldest. A picture not this store's shape is refused.
-    pub fn insert(&mut self, key: StoreKey, picture: &Fitted) -> bool {
-        let square = Rect::new(0, 0, self.side, self.side);
-        if picture.pixels.len() != self.payload_len
-            || picture.bounds.is_empty()
-            || picture.bounds.intersection(&square) != picture.bounds
-        {
-            return false;
-        }
-        let set = key.set(self.sets);
-        let Some((_, ways)) = self.read_set(set) else {
-            return false;
-        };
-        let newest = ways.iter().map(|way| way.order).max().unwrap_or(0);
-        let way = ways
-            .iter()
-            .position(|way| way.key == Some(key))
-            .or_else(|| ways.iter().position(|way| way.key.is_none()))
-            .or_else(|| {
-                ways.iter()
-                    .enumerate()
-                    .min_by_key(|(_, way)| way.order)
-                    .map(|(index, _)| index)
-            })
-            .unwrap_or(0);
-        let mut header = [0u8; SLOT_HEADER_LEN];
-        header[S_VOLUME..S_VOLUME + 16].copy_from_slice(&key.id.volume);
-        header[S_NODE..S_NODE + 8].copy_from_slice(&key.id.node.to_le_bytes());
-        header[S_GEN..S_GEN + 8].copy_from_slice(&key.content_gen.to_le_bytes());
-        header[S_READING] = key.reading_byte();
-        let bounds = picture.bounds;
-        for (at, value) in [
-            bounds.left().unsigned_abs(),
-            bounds.top().unsigned_abs(),
-            bounds.width,
-            bounds.height,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let field = S_BOUNDS + at * 4;
-            header[field..field + 4].copy_from_slice(&value.to_le_bytes());
-        }
-        header[S_ORDER..S_ORDER + 8].copy_from_slice(&newest.saturating_add(1).to_le_bytes());
-        let crc = slot_crc(&header, &picture.pixels);
-        header[S_CRC..S_CRC + 4].copy_from_slice(&crc.to_le_bytes());
-        // The payload goes down before the header that vouches for it, so a
-        // write cut short between them leaves a header whose checksum fails.
-        let Some(payload_at) = self.payload_at(set, way) else {
-            return false;
-        };
-        self.file.write_all_at(payload_at, &picture.pixels)
-            && self.file.write_all_at(Self::header_at(set, way), &header)
     }
 
     /// The header this version writes for pictures `side` pixels square in

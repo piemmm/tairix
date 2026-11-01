@@ -25,6 +25,7 @@ bounds stay fixed), §26.4 (untrusted input is hostile).
 | SH0 | This plan, the jump-sheet row, the §3 map entries, the `PLAN.md` section | done | — |
 | SH1 | `lib/spirv`: the module model, and the total, bounded binary decoder and encoder | done | SH2 |
 | SH2 | The validator: the capability allow-list, the addressing-model refusal, structural control flow, types, and resource binding | done | GP3 |
+| SH8 | The lowering view: an admitted module's resolved types and explicit layouts kept and exposed, its specialization evaluated once for every backend, and stage visibility in a pipeline layout's agreement | done | GP3.2, GP3.3 |
 | SH3 | The builder: a Rust API that emits validated modules, plus `cargo xtask shaders` and the pinned first-party set | planned | GP4 |
 | SH4 | The compile sandbox: the service process, its request/answer protocol, its capability floor, and containment on crash | planned | GP8 |
 | SH5 | `lib/wgsl`: the WGSL front end — lexer, parser, resolver, and SPIR-V emission | planned | GP8 |
@@ -33,7 +34,7 @@ bounds stay fixed), §26.4 (untrusted input is hostile).
 
 Items are built in ledger order. SH7's harness is written *with* SH1–SH6 rather
 than after them: a validator whose refusals are untested has no property worth
-naming.
+naming. SH8 follows SH2, which it extends, because GP3 is blocked on it.
 
 ## 0. Binding decisions
 
@@ -146,7 +147,12 @@ An `EntryPoint` states what a pipeline must provide:
 - its stage and workgroup size;
 - each `Binding`: set, binding, `BindingKind`, count and `Access`;
 - its push-constant bytes;
-- each `Varying` its stage interface occupies.
+- each `Varying` its stage interface occupies;
+- the module-scope variables its call tree names, so a module of several
+  entry points is lowered one entry point at a time.
+
+`Admitted::held_bytes` states the host memory an admitted module keeps, which
+`lib/gpu` charges to the context that made the module.
 
 `EntryPoint::agree` is the resource-binding agreement, decided against a
 pipeline `Layout` when the pipeline is created (`plans/GPU.md` GP3, GP8).
@@ -250,6 +256,33 @@ device's per-stage limit without descriptor indexing), and 64 interface
 locations each for a stage's inputs and its outputs (no device's limits reach
 further).
 
+### 2.2 SH8 — the lowering view
+
+What a module *means* is decided once, here, and every backend lowers from it:
+a second reading of the types, the layouts or the constants in a backend would
+be the duplication §2.2 forbids, and two readings can disagree.
+
+- **Types and layouts.** `Admitted` keeps the validator's resolved type table
+  and exposes it: each type's shape, each structure member's `Offset`,
+  `MatrixStride` and majorness and built-in, each array's `ArrayStride`, and
+  each value's type.
+- **Specialization.** `Admitted::specialize` takes the values a pipeline gives
+  its specialization constants and answers every constant of the module
+  evaluated — `OpConstantNull` and `OpUndef` as zero, composites as their
+  constituents' ids so a shared constituent is held once, and each admitted
+  `OpSpecConstantOp` operation computed total over every bit pattern — with
+  each entry point's final workgroup size. A value for an id no constant
+  carries, two for one id, one wider than its constant (a Boolean's past one),
+  and a zero workgroup component are refused; every constant and constituent
+  evaluation keeps counts against `MAX_SPECIALIZED`, a null composite's spelled
+  out where an insertion changes one among them, and it lists nothing on the
+  way, so its time and memory are bounded whatever a module of fixed size
+  declares.
+- **Stage visibility.** A `Layout`'s bindings and push constants carry the
+  stages that see them, and `EntryPoint::agree` refuses a use from a stage that
+  cannot: a binding's as `Disagreement::Stage`, push constants as
+  `Disagreement::PushConstants`.
+
 ## 3. SH3 — the builder and the pinned set
 
 A Rust API that constructs modules programmatically: types, constants,
@@ -301,16 +334,19 @@ problem rather than a security one.
 
 ## 6. SH6 — enforced robustness
 
-The property an admitted module must have: **every buffer, texture and shared
--memory access falls within the resource actually bound, whatever the shader
-computes.** Logical addressing (§2) removes arbitrary addresses; this item
-removes out-of-range indices into legitimate resources.
+The property every execution of an admitted module has: **every buffer, texture
+and shared-memory access falls within the resource actually bound, whatever the
+shader computes.** Logical addressing (§2) removes arbitrary addresses; this
+item removes out-of-range indices into legitimate resources.
 
-Where the device guarantees it in hardware, that is used. Where it does not, the
-builder and the front end inject the clamp, and the validator **checks the
-guarantee holds** rather than trusting that a pass ran. An access that can be
-proven in range statically costs nothing; one that cannot is clamped. A module
-for which neither can be established is refused.
+There is one semantics on every backend, `plans/GPU.md` §1.2's: a read past the
+bound range reads zero and a write past it does nothing — a predicated store and
+a select to zero, never a clamp. Where the device guarantees it in hardware, that
+is used (Venus requires the host's second robustness level); where it does not,
+the backend's own lowering injects the guard as a verified step and checks the
+guarantee holds rather than trusting that a pass ran. An access proven in range
+statically costs nothing. Admission stays device-independent: the validator
+requires nothing of a module for this.
 
 This is the mechanism that makes an untrusted shader safe to execute, and it is
 why it is its own item rather than a note inside the validator.
@@ -338,6 +374,9 @@ why it is its own item rather than a note inside the validator.
   software backend and by a hardware backend produces the same result within a
   stated tolerance, over a corpus covering every admitted opcode. This is the
   oracle that replaces a vendor conformance suite (`plans/GPU.md` §0b).
+- **Tests write modules as assembly text**, through `lib/spirv`'s `test-support`
+  assembler, which reads each operand as the kind the grammar gives its
+  position; no build enables it.
 - **The validator is tested by what it refuses**, not only by what it admits: a
   hostile corpus of malformed headers, truncated modules, id cycles, type
   mismatches, unstructured control flow, unlisted capabilities, physical

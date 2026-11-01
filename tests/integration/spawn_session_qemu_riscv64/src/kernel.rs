@@ -45,12 +45,7 @@ include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 /// spawns.
 const EXPECTED_EXITS: u64 = 2;
 
-/// Gigabytes of identity map each U-mode address space provides: `[0, 4 GiB)`
-/// covers the `virt` board's low MMIO and the RAM base where this kernel runs,
-/// so neither building the child nor switching into a task moves the ground
-/// under the running kernel. [`USER_BIAS`] (64 GiB) sits far above, on freshly
-/// walked Sv39 tables.
-const IDENTITY_GIGABYTES: usize = 4;
+use tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES;
 
 /// User stack base (1 MiB into the high user region) and size. `tairix-rt`
 /// carves scratch space off the stack, so it must comfortably exceed it.
@@ -213,7 +208,7 @@ fn build_user_space(
     args: &[&[u8]],
     activate: bool,
 ) -> Option<(u64, UserEntry)> {
-    let arch = ArchAddressSpace::new_identity_gigapages(pool, IDENTITY_GIGABYTES)?;
+    let arch = ArchAddressSpace::new_identity_gigapages(pool, KERNEL_IDENTITY_GIGAPAGES)?;
     // Capture the `satp` root before the arch space is moved into the
     // `kernel/mem` wrapper, so the per-task `pre_resume` hook can reactivate it
     // on every switch.
@@ -228,7 +223,7 @@ fn build_user_space(
 
     let mut space = AddressSpace::new(arch);
     // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::identity((IDENTITY_GIGABYTES as u64) << 30) }
+    let physmap = unsafe { DirectPhysMap::identity((KERNEL_IDENTITY_GIGAPAGES as u64) << 30) }
         .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image,

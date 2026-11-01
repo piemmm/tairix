@@ -1141,3 +1141,17 @@ fn the_served_driver_offers_every_disc_read_only() {
     let read_only = crate::Served::open(image(), true, budget).expect("mounts");
     assert_eq!(read_only.write_refusal, None);
 }
+
+#[test]
+fn register_needs_the_load_capability() {
+    use tairix_abi::driver::GrantingHost;
+    use tairix_abi::{CapabilityId, DriverError};
+    let loading = GrantingHost {
+        granted: &[CapabilityId::DRV_LOAD],
+    };
+    assert!(crate::register(&loading).is_ok());
+    assert_eq!(
+        crate::register(&GrantingHost { granted: &[] }).err(),
+        Some(DriverError::PermissionDenied)
+    );
+}

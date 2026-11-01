@@ -33,6 +33,7 @@
 //! The `tp` read, the SBI HSM call, and the secondary trampoline are
 //! gated to the freestanding riscv64 target.
 
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_arch_api::CpuId;
@@ -97,8 +98,15 @@ pub enum SecondaryStackError {
 /// aligned for a riscv64 stack pointer (16 bytes).
 #[repr(C, align(16))]
 struct SecondaryStackSlot {
-    bytes: [u8; SECONDARY_STACK_BYTES],
+    /// Written by its hart through its stack pointer, so a `static` pool
+    /// must lie in writable memory, not read-only data.
+    bytes: UnsafeCell<[u8; SECONDARY_STACK_BYTES]>,
 }
+
+// SAFETY: the stack bytes are reached only by the hart whose stack they are,
+// through the stack pointer the trampoline derives from the published base,
+// never through a reference to the slot, so sharing the pool races on nothing.
+unsafe impl Sync for SecondaryStackSlot {}
 
 impl SecondaryStackSlot {
     // A 16 KiB zero array is a deliberately large *static* backing (a
@@ -108,7 +116,7 @@ impl SecondaryStackSlot {
     #[allow(clippy::large_stack_arrays)]
     const fn new() -> Self {
         Self {
-            bytes: [0u8; SECONDARY_STACK_BYTES],
+            bytes: UnsafeCell::new([0u8; SECONDARY_STACK_BYTES]),
         }
     }
 }

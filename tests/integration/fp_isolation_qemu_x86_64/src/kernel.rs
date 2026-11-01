@@ -19,6 +19,7 @@ use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
 use tairix_arch_x86_64::userentry::USER_MODE;
+use tairix_arch_x86_64::xstate::{self, Flavour};
 use tairix_arch_x86_64::{qemu_exit, syscall_entry};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
 use tairix_kernel::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP;
@@ -33,7 +34,7 @@ use tairix_kernel_core::{
 use tairix_kernel_mem::{AddressSpace, Frame, PhysAddr, UserStack};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
-use tairix_log::{log, Event, EventId, Level, Sink};
+use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 
 // `PROGRAM_RXE`, `HYGIENE_RXE`, `USER_BIAS`, and `ROUNDS_PER_TASK`, generated
 // by `build.rs`.
@@ -349,6 +350,43 @@ fn admit(sched: &Scheduler<X86_64Arch>, cs: ContextSwitchHal, root_phys: u64, en
     }
 }
 
+/// A CPU that reports no leaf 0xD names no XSAVE layout, so its state must be
+/// saved with FXSAVE64; and the capped run's CPU must really stop short of it.
+fn check_extended_state() {
+    const LEAF_XSAVE: u32 = 0xD;
+    let highest_basic = core::arch::x86_64::__cpuid(0).eax;
+    let flavour = xstate::published().map(xstate::Config::flavour);
+    log(
+        &SERIAL_SINK,
+        &Event {
+            level: Level::Info,
+            id: TEST_START,
+            message: "fp isolation: the highest basic cpuid leaf, and the save it names",
+            fields: &[
+                Field {
+                    key: "highest_basic",
+                    value: FieldValue::UnsignedInt(u64::from(highest_basic)),
+                },
+                Field {
+                    key: "fxsave",
+                    value: FieldValue::Bool(flavour == Some(Flavour::Fxsave)),
+                },
+            ],
+        },
+    );
+    if crate::CAPPED_CPUID && highest_basic >= LEAF_XSAVE {
+        note(TEST_FAIL, "fp isolation: the capped CPU reports leaf 0xD");
+        qemu_exit::exit_failure();
+    }
+    if highest_basic < LEAF_XSAVE && flavour != Some(Flavour::Fxsave) {
+        note(
+            TEST_FAIL,
+            "fp isolation: a CPU reporting no leaf 0xD saves in an XSAVE layout",
+        );
+        qemu_exit::exit_failure();
+    }
+}
+
 /// Build the three ring-3 images, admit each as a resumable user kthread, and
 /// drive the cooperative `step` loop. Never returns.
 fn run_isolation() -> ! {
@@ -356,6 +394,7 @@ fn run_isolation() -> ! {
         TEST_START,
         "x86_64 fp isolation: building three ring-3 images",
     );
+    check_extended_state();
 
     syscall_entry::set_dispatch_callback(dispatch);
 

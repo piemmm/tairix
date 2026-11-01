@@ -87,6 +87,10 @@
 #[cfg(test)]
 extern crate std;
 
+#[cfg(test)]
+#[path = "flags_tests.rs"]
+mod flags_tests;
+
 // The S-mode entry trampoline is only meaningful on the bare-metal
 // target; host `cargo test` omits it so the crate builds on the host.
 // The boot-stack guard's sentinel is passed in rather than spelled in the

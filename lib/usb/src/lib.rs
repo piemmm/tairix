@@ -47,8 +47,7 @@
 // error, never a panic).
 extern crate alloc;
 
-// The allocation-budget regression owns a counting `#[global_allocator]` that
-// forwards to the host allocator.
+// The test binary installs the shared metered allocator.
 #[cfg(test)]
 extern crate std;
 

@@ -475,8 +475,8 @@ its end.
   keeps the field open with its reason and the press is spent; an unchanged
   name closes the field and the press then acts as it would have; a submitted
   one spends the press too, since the folder may re-sort under the pointer
-  when it takes (`gesture::RenameCommit`). The move runs on the reader thread;
-  the field stays open until the volume answers, then closes or states the
+  when it takes (`gesture::RenameCommit`). The move runs on the reader serving
+  its volume, behind the read under way there and no other; the field stays open until the volume answers, then closes or states the
   volume's refusal. Meanwhile it takes no input and no other rename opens in
   the window (`rename::RenameEdit`), so nothing typed is thrown away and an
   answer reaches only the editor that asked.
@@ -681,11 +681,13 @@ account tiles and every other control draw none.
   torn write reads as an empty slot. The file is sized to the blob's extent
   ceiling, written sparsely, and needs no scan at start; a header for another
   side or version reformats it.
-- **No lock.** The store lives on the reader thread alone. A second instance
-  opens the same blob — a delegated descriptor takes no advisory lock — and
-  the slots are what make that safe: two instances writing one slot leave a
-  header and a payload that do not check out, which reads as empty, never as
-  the wrong picture.
+- **No file lock.** The decoders of one instance share one store, each holding
+  it for one lookup or one insert and never across a document's read
+  (`tairix_icon::serve_thumbnail` over `StoreAccess`), so a slow device holds
+  none of them out of it. A second instance opens the same blob — a delegated
+  descriptor takes no advisory lock — and the slots are what make that safe:
+  two instances writing one slot leave a header and a payload that do not check
+  out, which reads as empty, never as the wrong picture.
 
 ## FI26 — the places
 

@@ -1,14 +1,20 @@
 //! Bounded-concurrency runner for independent jobs.
 //!
-//! Several `cargo xtask` stages run a set of independent, isolated jobs and
-//! want them to overlap instead of paying the *sum* of their wall-clock costs.
-//! Three callers share this one runner ("run more than one
-//! at a time" lives in exactly one place):
+//! A sequential step ([`Context::run_with_timeout`]) is a run of one job, so a
+//! step run alone and one run beside others are bounded, killed and reported
+//! alike; and a stage made of independent, isolated jobs — the fuzz,
+//! proptest, miri and loom harnesses, the static gates, the QEMU matrix,
+//! `ci-long`'s flake hunt — overlaps them instead of paying the *sum* of their
+//! wall-clock costs. "Run more than one at a time" lives in exactly one place.
 //!
-//! * the fuzz and proptest orchestrators, each a registry of
-//!   wall-clock-budgeted `cargo test` harnesses ([`Work::Command`]);
-//! * the QEMU integration matrix ([`Work::Closure`]), which plants per-test
-//!   backing images and drives [`tairix_qemu::Runner::run`] in-process.
+//! A job is one of two kinds. A [`Work::Command`] is an external command the
+//! runner budgets and, past its budget, kills with everything it forked. A
+//! [`Work::Closure`] is work done in-process — a static gate, a QEMU guest
+//! driven through [`tairix_qemu::Runner::run`], a failure known before
+//! anything could run — which nothing can cancel from outside, so it bounds
+//! its own work.
+//!
+//! [`Context::run_with_timeout`]: crate::Context::run_with_timeout
 //!
 //! # Weighted admission
 //!
@@ -36,34 +42,33 @@
 //!
 //! # Output handling
 //!
-//! When more than one job can run at once, each job's output is serialised
-//! into an atomic block so concurrent jobs never interleave their lines: a
-//! [`Work::Command`] job has its stdio captured and printed when it ends, a
-//! job killed at its budget included;
-//! a [`Work::Closure`] job prints a start marker and, on completion, its
-//! verdict and wall-clock duration (the QEMU closures keep their serial logs
-//! inside the returned error, so a failure's log is printed once, by
-//! [`aggregate`], with no interleaving). Reporting every completion is what
-//! makes an outstanding job visible: without it a still-running job is
-//! indistinguishable from a finished one in the log.
-//! Each job is additionally announced at the moment it is *admitted*, with the
-//! resulting in-flight weight, so the log reflects real concurrency rather
-//! than a wall of near-simultaneous start lines that says nothing about
-//! admission.
-//! When at most one job can ever run at a time (budget `1`), a
-//! [`Work::Command`] job instead streams its stdio live, exactly like a plain
-//! sequential run. The runner fails closed: every job runs to completion even
-//! if an earlier one failed, and the aggregate result names every failure.
+//! When more than one job can run at once, each job's lines reach the log in
+//! whole blocks, so concurrent jobs never interleave: a command job's stdio is
+//! captured and logged as it ends, a job killed at its budget included, and
+//! each job is announced as it is *admitted*, with the in-flight weight that
+//! leaves, so the log shows real concurrency rather than a wall of start
+//! lines. When at most one job can run at a time (budget `1`), a command job's
+//! stdio is live instead, as a plain sequential run's is.
+//!
+//! On either path a job's check is a step of its own ahead of its work, and
+//! every step ends with its closing line, so one still outstanding is never
+//! mistaken for one that has ended. A failed step's closing line comes after
+//! why, save a closure's: its detail, a guest's whole serial log say, goes back
+//! in the run's error, for its caller to show once, when the run is over. The
+//! runner fails closed: every job runs to completion even if an earlier one
+//! failed, and the run's error names every failure.
 
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::{
-    await_within, effective_timeout, report_elapsed, spawn_in_own_group, WaitFailure,
-    DEFAULT_COMMAND_TIMEOUT,
-};
+use crate::children::Children;
+use crate::{elapsed_line, output_within, run_within, WaitFailure, DEFAULT_COMMAND_TIMEOUT};
+
+/// A unit of work done in-process that reports its own pass or failure: a
+/// closure job's work, or a job's check.
+type Task = Box<dyn FnOnce() -> Result<(), String> + Send>;
 
 /// What a [`Job`] actually does when run.
 enum Work {
@@ -72,7 +77,7 @@ enum Work {
     /// An arbitrary unit of work that reports its own pass/fail and prints
     /// (or buffers) its own output. Used by the QEMU matrix, where the work
     /// is "plant images, then drive a guest to completion".
-    Closure(Box<dyn FnOnce() -> Result<(), String> + Send>),
+    Closure(Task),
 }
 
 /// One labelled, weighted unit of work to run to completion.
@@ -89,6 +94,8 @@ pub struct Job {
     /// QEMU closure does so through its guest runtime ceiling). A closure that
     /// can run forever would hang the whole runner.
     budget: Duration,
+    /// Made as the job starts, before its work: a refusal is the job's failure.
+    check: Option<Task>,
     work: Work,
 }
 
@@ -101,6 +108,7 @@ impl Job {
             label: label.into(),
             weight: 1,
             budget: DEFAULT_COMMAND_TIMEOUT,
+            check: None,
             work: Work::Command(command),
         }
     }
@@ -109,12 +117,34 @@ impl Job {
     ///
     /// For a job that is legitimately slower than an ordinary step — a
     /// cross-compile that rebuilds the standard library from source, say — so
-    /// that a correct-but-slow job is not mistaken for a hung one. It is the
-    /// parallel counterpart of the sequential runner's per-step budget, and
-    /// the same operator override raises it.
+    /// that a correct-but-slow job is not mistaken for a hung one. The
+    /// operator's override can only raise it.
     #[must_use]
     pub fn with_budget(mut self, budget: Duration) -> Self {
         self.budget = budget;
+        self
+    }
+
+    /// This job's work done only once `check` passes, the check made as the
+    /// job starts, so it overlaps every other job rather than delaying them
+    /// all; its refusal is the job's failure.
+    ///
+    /// The check is reported as a step of its own, its refusal's reason with
+    /// it, and its time comes out of a command job's budget; but like a
+    /// closure it is never cancelled from outside, so it must bound its own
+    /// work.
+    #[must_use]
+    pub fn checked_by(
+        mut self,
+        check: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) -> Self {
+        self.check = Some(match self.check.take() {
+            None => Box::new(check),
+            Some(first) => Box::new(move || {
+                first()?;
+                check()
+            }),
+        });
         self
     }
 
@@ -130,6 +160,7 @@ impl Job {
             label: label.into(),
             weight: weight.max(1),
             budget: DEFAULT_COMMAND_TIMEOUT,
+            check: None,
             work: Work::Closure(Box::new(work)),
         }
     }
@@ -167,12 +198,79 @@ fn heaviest_first(jobs: &mut [Job]) {
     jobs.sort_by_key(|job| core::cmp::Reverse(job.weight));
 }
 
+/// Where a run's log goes and the children its commands are: stderr and the
+/// run's own in a real run, while a test hands its own, so what the runner
+/// reports can be read back and no environment reaches it.
+struct Runtime<'a> {
+    log: &'a (dyn Fn(&str) + Sync),
+    children: &'a Children,
+    /// Holds each block of the log whole where jobs run side by side.
+    lock: Mutex<()>,
+}
+
+impl<'a> Runtime<'a> {
+    fn new(log: &'a (dyn Fn(&str) + Sync), children: &'a Children) -> Self {
+        Self {
+            log,
+            children,
+            lock: Mutex::new(()),
+        }
+    }
+
+    /// Log `block`, which no other job's lines interrupt.
+    fn say(&self, block: &str) {
+        let _guard = self.lock.lock().expect("log lock");
+        (self.log)(block);
+    }
+}
+
 /// Run every job, keeping the sum of in-flight weights within `budget`, and
 /// fail closed.
 ///
 /// All jobs run to completion regardless of earlier failures, so one broken
 /// job never hides another. The returned error names every job that failed.
-pub fn run(mut jobs: Vec<Job>, budget: usize) -> Result<(), String> {
+pub fn run(children: &Children, jobs: Vec<Job>, budget: usize) -> Result<(), String> {
+    run_with(
+        jobs,
+        budget,
+        &Runtime::new(&|block| crate::note(block), children),
+    )
+}
+
+/// [`run`] with nothing logged and no operator floor, for another module's
+/// tests.
+#[cfg(test)]
+pub(crate) fn run_unlogged(jobs: Vec<Job>, budget: usize) -> Result<(), String> {
+    run_with(jobs, budget, &Runtime::new(&|_| {}, &Children::default()))
+}
+
+/// [`run`] against `children`, keeping its log for a test to read, and
+/// holding it to having released every job's group.
+#[cfg(test)]
+pub(crate) fn run_recorded(
+    jobs: Vec<Job>,
+    budget: usize,
+    children: &Children,
+) -> (Result<(), String>, String) {
+    let log = Mutex::new(String::new());
+    let keep = |block: &str| {
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_str(block);
+    };
+    let outcome = run_with(jobs, budget, &Runtime::new(&keep, children));
+    assert!(
+        children.live_children().is_empty(),
+        "every job's group released"
+    );
+    let log = log
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (outcome, log)
+}
+
+/// [`run`] against `runtime`'s log and children.
+fn run_with(mut jobs: Vec<Job>, budget: usize, runtime: &Runtime<'_>) -> Result<(), String> {
     let total = jobs.len();
     if total == 0 {
         return Ok(());
@@ -184,13 +282,15 @@ pub fn run(mut jobs: Vec<Job>, budget: usize) -> Result<(), String> {
         // At most one job can ever be in flight (every weight is >= 1), so
         // stream each job's output live (no thread overhead) and still run
         // them all so the failure report is complete.
-        let failures: Vec<String> = jobs.into_iter().filter_map(run_streaming).collect();
+        let failures: Vec<String> = jobs
+            .into_iter()
+            .filter_map(|job| run_job(job, Shown::Live, runtime).err())
+            .collect();
         return aggregate(failures);
     }
 
     let results: Mutex<Vec<Option<Result<(), String>>>> =
         Mutex::new((0..total).map(|_| None).collect());
-    let stdio_lock = Mutex::new(());
     // Current sum of in-flight weights, guarded by a condvar the producer
     // waits on for capacity and each finished worker notifies.
     let in_flight = Mutex::new(0usize);
@@ -200,7 +300,6 @@ pub fn run(mut jobs: Vec<Job>, budget: usize) -> Result<(), String> {
     // can still be consumed after the scope); the per-iteration
     // `job`/`idx`/`weight` are moved into each worker instead.
     let results_ref = &results;
-    let stdio_ref = &stdio_lock;
     let in_flight_ref = &in_flight;
     let capacity_ref = &capacity;
 
@@ -218,23 +317,12 @@ pub fn run(mut jobs: Vec<Job>, budget: usize) -> Result<(), String> {
                 *flight += weight;
                 *flight
             };
-            // Announce the job at the moment it is *admitted*, with the
-            // resulting in-flight weight, so the log honestly reflects how much
-            // work is running concurrently. Without this, successful closure
-            // jobs print nothing on completion, so their worker-side start
-            // lines pile up into a wall that looks simultaneous and says
-            // nothing about admission. A whole-budget job now shows
-            // `admitted (N/N in flight)` with no further admission until it
-            // completes, making its isolation visible in the log itself.
-            {
-                let _guard = stdio_ref.lock().expect("stdio lock");
-                eprintln!(
-                    "xtask: [{}] admitted ({in_flight_now}/{budget} in flight)",
-                    job.label
-                );
-            }
+            runtime.say(&format!(
+                "xtask: [{}] admitted ({in_flight_now}/{budget} in flight)\n",
+                job.label
+            ));
             scope.spawn(move || {
-                let outcome = run_captured(job, stdio_ref);
+                let outcome = run_job(job, Shown::Captured, runtime);
                 results_ref.lock().expect("results lock")[idx] = Some(outcome);
                 let mut flight = in_flight_ref.lock().expect("in-flight lock");
                 *flight -= weight;
@@ -253,128 +341,156 @@ pub fn run(mut jobs: Vec<Job>, budget: usize) -> Result<(), String> {
     aggregate(failures)
 }
 
-/// Run one command job inheriting the parent's stdio (live output). Returns
-/// the failure message when the job fails, or `None` on success. Only used on
-/// the budget-one streaming path, where every job is run one at a time.
-fn run_streaming(job: Job) -> Option<String> {
+/// How a command job's output reaches the log.
+#[derive(Clone, Copy)]
+enum Shown {
+    /// As it is written, the job running alone.
+    Live,
+    /// Whole, as the job ends, others running beside it.
+    Captured,
+}
+
+/// Run one job: its check, then its work, a command's output [`Shown`] as
+/// asked.
+fn run_job(job: Job, shown: Shown, runtime: &Runtime<'_>) -> Result<(), String> {
     let Job {
         label,
         work,
         budget,
+        check,
         ..
     } = job;
+    let checked = check
+        .map(|check| run_check(&label, check, runtime))
+        .transpose()?;
     match work {
-        Work::Command(mut command) => {
-            let budget = match effective_timeout(budget) {
-                Ok(budget) => budget,
-                Err(err) => return Some(err),
-            };
-            eprintln!("xtask: [{label}] {command:?} (timeout {budget:?})");
-            let mut child = match spawn_in_own_group(&mut command) {
-                Ok(child) => child,
-                Err(err) => return Some(format!("{label} could not be spawned: {err}")),
-            };
-            let pid = child.id();
-            let started = Instant::now();
-            let outcome = await_within(&label, pid, budget, move || child.wait());
-            report_elapsed(
-                &label,
-                matches!(&outcome, Ok(status) if status.success()),
-                started.elapsed(),
-            );
-            match outcome {
-                Ok(status) if status.success() => None,
-                Ok(status) => Some(format!("{label} failed with {status}")),
-                Err(failure) => Some(failure.message),
+        Work::Closure(work) => run_closure(&label, work, runtime),
+        Work::Command(command) => {
+            // Refused before it starts, the work's step ends at once.
+            let budget = remaining(&label, runtime.children.raised(budget), checked)
+                .inspect_err(|why| runtime.say(&verdict(&label, Some(why), Duration::ZERO)))?;
+            match shown {
+                Shown::Live => run_live(&label, command, budget, runtime),
+                Shown::Captured => run_captured(&label, command, budget, runtime),
             }
-        }
-        Work::Closure(work) => {
-            eprintln!("xtask: [{label}] starting");
-            work().err()
         }
     }
 }
 
-/// Run one job with its output serialised into a single atomic block so
-/// concurrent jobs never interleave their lines.
-fn run_captured(job: Job, stdio_lock: &Mutex<()>) -> Result<(), String> {
-    let Job {
+/// Run a command job inheriting the parent's stdio, so its output is live.
+fn run_live(
+    label: &str,
+    mut command: Command,
+    budget: Duration,
+    runtime: &Runtime<'_>,
+) -> Result<(), String> {
+    runtime.say(&format!(
+        "xtask: [{label}] {command:?} (timeout {budget:?})\n"
+    ));
+    let started = Instant::now();
+    let outcome = run_within(
+        runtime.children,
         label,
-        work,
+        &mut command,
         budget,
-        ..
-    } = job;
-    match work {
-        Work::Command(mut command) => {
-            let budget = effective_timeout(budget)?;
-            {
-                let _guard = stdio_lock.lock().expect("stdio lock");
-                eprintln!("xtask: [{label}] starting: {command:?} (timeout {budget:?})");
-            }
-            // Piped explicitly because the job is spawned directly rather
-            // than through `Command::output`, which would set these itself —
-            // spawning it here is what puts it in its own process group, so a
-            // job that hangs can be killed along with everything it forked.
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            let child = match spawn_in_own_group(&mut command) {
-                Ok(child) => child,
-                Err(err) => return Err(format!("{label} could not be spawned: {err}")),
-            };
-            let pid = child.id();
-            let started = Instant::now();
-            let awaited = await_within(&label, pid, budget, move || child.wait_with_output());
-            let elapsed = started.elapsed();
-            // A killed job's output is printed like any other: it is what
-            // names the work its budget ran out on.
-            let (output, failure) = match awaited {
-                Ok(output) => {
-                    let failure = (!output.status.success())
-                        .then(|| format!("{label} failed with {}", output.status));
-                    (Some(output), failure)
-                }
-                Err(WaitFailure { message, reaped }) => (reaped, Some(message)),
-            };
+        |mut child| child.wait(),
+        |status| *status,
+    );
+    let failure = outcome.err().map(|failure| failure.message);
+    runtime.say(&verdict(label, failure.as_deref(), started.elapsed()));
+    failure.map_or(Ok(()), Err)
+}
 
-            {
-                let _guard = stdio_lock.lock().expect("stdio lock");
-                eprintln!("xtask: [{label}] ----- output -----");
-                if let Some(output) = &output {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    if !stdout.trim().is_empty() {
-                        eprint!("{stdout}");
-                    }
-                    if !stderr.trim().is_empty() {
-                        eprint!("{stderr}");
-                    }
-                }
-                // Closes the captured block as well as reporting the cost, so
-                // the output above it has an unambiguous end.
-                report_elapsed(&label, failure.is_none(), elapsed);
+/// Run a command job with its output captured, logged whole as it ends; a
+/// killed job's too, as it names the work the budget ran out on.
+fn run_captured(
+    label: &str,
+    mut command: Command,
+    budget: Duration,
+    runtime: &Runtime<'_>,
+) -> Result<(), String> {
+    runtime.say(&format!(
+        "xtask: [{label}] starting: {command:?} (timeout {budget:?})\n"
+    ));
+    let started = Instant::now();
+    let outcome = output_within(runtime.children, label, &mut command, budget);
+    let elapsed = started.elapsed();
+    let (output, failure) = match outcome {
+        Ok(output) => (Some(output), None),
+        Err(WaitFailure {
+            message, reaped, ..
+        }) => (reaped, Some(message)),
+    };
+    let mut block = format!("xtask: [{label}] ----- output -----\n");
+    for stream in output
+        .iter()
+        .flat_map(|output| [&output.stdout, &output.stderr])
+    {
+        let text = String::from_utf8_lossy(stream);
+        if !text.trim().is_empty() {
+            block.push_str(&text);
+            // A stream cut off mid-line, as a killed test binary's is, must
+            // not run into the line after it.
+            if !text.ends_with('\n') {
+                block.push('\n');
             }
-
-            failure.map_or(Ok(()), Err)
-        }
-        Work::Closure(work) => {
-            {
-                let _guard = stdio_lock.lock().expect("stdio lock");
-                eprintln!("xtask: [{label}] starting");
-            }
-            // The closure reports its own pass/fail; on failure it returns the
-            // full detail (e.g. a guest's serial log), which `aggregate`
-            // prints once at the end so nothing interleaves with a live job.
-            let started = Instant::now();
-            let outcome = work();
-            {
-                let _guard = stdio_lock.lock().expect("stdio lock");
-                report_elapsed(&label, outcome.is_ok(), started.elapsed());
-            }
-            outcome
         }
     }
+    // Closes the block as well as reporting the cost, so the output above it
+    // has an unambiguous end.
+    block.push_str(&verdict(label, failure.as_deref(), elapsed));
+    runtime.say(&block);
+    failure.map_or(Ok(()), Err)
+}
+
+/// Run a closure job as a step: its start line, then its closing line. Its
+/// failure's detail is not logged, as a guest's serial log is far too long to
+/// show twice: it goes back in the run's error, for its caller to show once
+/// the run is over.
+fn run_closure(label: &str, work: Task, runtime: &Runtime<'_>) -> Result<(), String> {
+    runtime.say(&format!("xtask: [{label}] starting\n"));
+    let started = Instant::now();
+    let outcome = work();
+    runtime.say(&elapsed_line(label, outcome.is_ok(), started.elapsed()));
+    outcome
+}
+
+/// Make a job's check, reported as a step of its own: the time it took, or
+/// the refusal that fails the job.
+fn run_check(label: &str, check: Task, runtime: &Runtime<'_>) -> Result<Duration, String> {
+    let label = format!("{label} check");
+    runtime.say(&format!("xtask: [{label}] starting\n"));
+    let started = Instant::now();
+    let outcome = check();
+    let elapsed = started.elapsed();
+    runtime.say(&verdict(
+        &label,
+        outcome.as_ref().err().map(String::as_str),
+        elapsed,
+    ));
+    outcome.map(|()| elapsed)
+}
+
+/// A step's closing line, after why where it failed, so the reason is logged
+/// as the step ends rather than only once the whole run does.
+fn verdict(label: &str, failure: Option<&str>, elapsed: Duration) -> String {
+    let closing = elapsed_line(label, failure.is_none(), elapsed);
+    match failure {
+        None => closing,
+        Some(why) => format!("xtask: [{label}] {why}\n{closing}"),
+    }
+}
+
+/// What is left of a command job's `budget` once its check, if it has one,
+/// took `checked`, refusing the job if the check took all of it.
+fn remaining(label: &str, budget: Duration, checked: Option<Duration>) -> Result<Duration, String> {
+    let Some(checked) = checked else {
+        return Ok(budget);
+    };
+    budget
+        .checked_sub(checked)
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| format!("{label}: its check took {checked:?}, its whole {budget:?} budget"))
 }
 
 /// Collapse the collected failures into one `Result`.
@@ -388,11 +504,27 @@ fn aggregate(failures: Vec<String>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_concurrency, host_parallelism, run, Job};
+    use super::{default_concurrency, host_parallelism, remaining, Job};
+    use crate::children::Children;
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    /// Run `jobs` with the log kept for the test to read and `floor` the
+    /// operator's, whatever the environment says.
+    fn recorded_with(
+        jobs: Vec<Job>,
+        budget: usize,
+        floor: Option<Duration>,
+    ) -> (Result<(), String>, String) {
+        super::run_recorded(jobs, budget, &Children::new(floor))
+    }
+
+    /// [`recorded_with`] with no operator floor.
+    fn recorded(jobs: Vec<Job>, budget: usize) -> (Result<(), String>, String) {
+        recorded_with(jobs, budget, None)
+    }
 
     fn ok_job(label: &str) -> Job {
         let mut cmd = Command::new("sh");
@@ -409,13 +541,13 @@ mod tests {
     /// A command job that would never finish on its own, budgeted so tightly
     /// that only a working kill can end it.
     ///
-    /// The sleep is minutes long against a sub-second budget, so the margin is
-    /// enormous in both directions: a busy host cannot make it pass by
-    /// accident, and it can only complete quickly if the job was really
+    /// It runs as long as this test does against a sub-second budget, so the
+    /// margin is enormous in both directions: a busy host cannot make it pass
+    /// by accident, and it can only complete quickly if the job was really
     /// killed.
     fn hung_job(label: &str) -> Job {
         let mut cmd = Command::new("sh");
-        cmd.args(["-c", "sleep 600"]);
+        cmd.args(["-c", crate::process::WHILE_ITS_PARENT_RUNS]);
         Job::new(label, cmd).with_budget(Duration::from_millis(200))
     }
 
@@ -425,34 +557,28 @@ mod tests {
     }
 
     #[test]
-    fn a_hung_job_is_killed_and_fails_when_jobs_run_concurrently() {
-        let started = std::time::Instant::now();
-        let err = run(vec![hung_job("stuck"), ok_job("fine")], 2)
-            .expect_err("a job that outlives its budget must fail the run");
-        assert!(err.contains("stuck"), "error should name the job: {err}");
-        assert!(err.contains("timeout"), "error should say why: {err}");
-        assert!(
-            started.elapsed() < Duration::from_secs(60),
-            "the runner must not wait out a hung job, took {:?}",
-            started.elapsed()
-        );
-    }
-
-    #[test]
-    fn a_hung_job_is_killed_and_fails_when_jobs_run_one_at_a_time() {
-        // A budget of one takes the streaming path, which is a separate
-        // implementation from the captured one above and so needs its own
-        // proof that it is bounded.
-        let started = std::time::Instant::now();
-        let err = run(vec![hung_job("stuck")], 1)
-            .expect_err("a job that outlives its budget must fail the run");
-        assert!(err.contains("stuck"), "error should name the job: {err}");
-        assert!(err.contains("timeout"), "error should say why: {err}");
-        assert!(
-            started.elapsed() < Duration::from_secs(60),
-            "the runner must not wait out a hung job, took {:?}",
-            started.elapsed()
-        );
+    fn a_hung_job_is_killed_and_fails_on_either_path() {
+        // A budget of one streams the job's output, two captures it: separate
+        // implementations, each needing its own proof that it is bounded.
+        for budget in [1, 2] {
+            let started = std::time::Instant::now();
+            let (outcome, log) = recorded(vec![hung_job("stuck"), ok_job("fine")], budget);
+            let err = outcome.expect_err("a job that outlives its budget must fail the run");
+            assert!(err.contains("stuck"), "error should name the job: {err}");
+            assert!(err.contains("timeout"), "error should say why: {err}");
+            assert!(
+                err.contains("killed"),
+                "and that it is not left running: {err}"
+            );
+            assert!(!err.contains("fine"), "{err}");
+            assert!(log.contains("[stuck] stuck exceeded its"), "{log}");
+            assert!(log.contains("[stuck] FAILED in"), "{log}");
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "the runner must not wait out a hung job, took {:?}",
+                started.elapsed()
+            );
+        }
     }
 
     #[test]
@@ -466,37 +592,208 @@ mod tests {
 
     #[test]
     fn an_empty_job_list_succeeds() {
-        assert!(run(Vec::new(), 4).is_ok());
+        assert_eq!(recorded(Vec::new(), 4).0, Ok(()));
     }
 
     #[test]
     fn all_successful_jobs_pass_in_parallel() {
         let jobs = vec![ok_job("a"), ok_job("b"), ok_job("c")];
-        assert!(run(jobs, 3).is_ok());
+        assert_eq!(recorded(jobs, 3).0, Ok(()));
     }
 
     #[test]
     fn all_successful_jobs_pass_when_forced_serial() {
         let jobs = vec![ok_job("a"), ok_job("b")];
-        assert!(run(jobs, 1).is_ok());
+        assert_eq!(recorded(jobs, 1).0, Ok(()));
     }
 
     #[test]
     fn a_single_failing_job_fails_closed() {
-        let err = run(vec![ok_job("a"), fail_job("bad"), ok_job("c")], 3)
-            .expect_err("a failing job must fail the run");
-        assert!(
-            err.contains("bad"),
-            "error should name the failed job: {err}"
-        );
+        for budget in [1, 3] {
+            let (outcome, log) = recorded(vec![ok_job("a"), fail_job("bad"), ok_job("c")], budget);
+            let err = outcome.expect_err("a failing job must fail the run");
+            assert!(
+                err.contains("bad"),
+                "error should name the failed job: {err}"
+            );
+            assert!(log.contains("[bad] bad failed with"), "{log}");
+            assert!(log.contains("[bad] FAILED in"), "{log}");
+        }
     }
 
     #[test]
     fn every_failure_is_reported_not_just_the_first() {
-        let err = run(vec![fail_job("first"), fail_job("second")], 2)
+        let err = recorded(vec![fail_job("first"), fail_job("second")], 2)
+            .0
             .expect_err("failures must propagate");
         assert!(err.contains("first"), "missing first failure: {err}");
         assert!(err.contains("second"), "missing second failure: {err}");
+    }
+
+    #[test]
+    fn a_command_that_cannot_be_spawned_ends_its_step_at_once() {
+        for budget in [1, 3] {
+            let job = Job::new("unspawnable", Command::new("/nonexistent/xtask-unit-test"));
+            let (outcome, log) = recorded(vec![job], budget);
+            let err = outcome.expect_err("there is nothing to run");
+            assert!(err.contains("unspawnable could not be spawned"), "{err}");
+            assert!(
+                log.contains("[unspawnable] unspawnable could not be spawned"),
+                "{log}"
+            );
+            assert!(log.contains("[unspawnable] FAILED in"), "{log}");
+        }
+    }
+
+    #[test]
+    fn a_captured_stream_cut_off_mid_line_ends_its_own_line() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf 'test cut::off ... '; printf started >&2"]);
+        let (outcome, log) = recorded(vec![Job::new("cut", cmd)], 2);
+        assert_eq!(outcome, Ok(()), "{log}");
+        assert!(
+            log.contains("test cut::off ... \nstarted\nxtask: [cut] done in"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn the_operators_floor_reaches_every_command_job() {
+        for budget in [1, 3] {
+            let jobs = vec![
+                ok_job("ordinary"),
+                ok_job("long").with_budget(Duration::from_hours(3)),
+            ];
+            let (outcome, log) = recorded_with(jobs, budget, Some(Duration::from_hours(2)));
+            assert_eq!(outcome, Ok(()), "{log}");
+            let started = |label: &str, budget: &str| {
+                log.lines().any(|line| {
+                    line.starts_with(&format!("xtask: [{label}] "))
+                        && line.ends_with(&format!("(timeout {budget})"))
+                })
+            };
+            assert!(started("ordinary", "7200s"), "raised to the floor: {log}");
+            assert!(started("long", "10800s"), "and never lowered by it: {log}");
+        }
+    }
+
+    #[test]
+    fn a_checked_job_runs_its_work_only_once_its_check_passes() {
+        for budget in [1, 3] {
+            let checks = Arc::new(AtomicUsize::new(0));
+            let worked = Arc::new(AtomicUsize::new(0));
+            let counted = |verdict: Result<(), String>| {
+                let checks = Arc::clone(&checks);
+                move || {
+                    checks.fetch_add(1, Ordering::SeqCst);
+                    verdict
+                }
+            };
+            let working = |label: &str| {
+                let worked = Arc::clone(&worked);
+                Job::closure(label, 1, move || {
+                    worked.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            };
+            let refused = working("refused").checked_by(counted(Err("stale skip".into())));
+            let passed = working("passed").checked_by(counted(Ok(())));
+            let err = recorded(vec![refused, passed], budget)
+                .0
+                .expect_err("the check fails it");
+            assert!(err.contains("stale skip"), "{err}");
+            assert!(!err.contains("passed"), "{err}");
+            assert_eq!(worked.load(Ordering::SeqCst), 1, "the refused work ran");
+            let chained = working("chained")
+                .checked_by(counted(Ok(())))
+                .checked_by(counted(Err("second".into())));
+            let err = recorded(vec![chained], budget)
+                .0
+                .expect_err("its second check fails it");
+            assert!(err.contains("second"), "{err}");
+            assert_eq!(worked.load(Ordering::SeqCst), 1, "the chained work ran");
+            assert_eq!(
+                checks.load(Ordering::SeqCst),
+                4,
+                "every check made, as its job starts"
+            );
+        }
+    }
+
+    #[test]
+    fn a_check_that_outlasts_its_jobs_budget_fails_the_job() {
+        for budget in [1, 3] {
+            let starved = ok_job("starved")
+                .with_budget(Duration::from_millis(50))
+                .checked_by(|| {
+                    std::thread::sleep(Duration::from_millis(200));
+                    Ok(())
+                });
+            let (outcome, log) = recorded(vec![starved], budget);
+            let err = outcome.expect_err("nothing is left for its work");
+            assert!(err.contains("starved: its check took"), "{err}");
+            assert!(log.contains("[starved] starved: its check took"), "{log}");
+            assert!(log.contains("[starved] FAILED in"), "{log}");
+        }
+    }
+
+    #[test]
+    fn a_checks_time_comes_out_of_its_jobs_budget() {
+        let budget = Duration::from_secs(10);
+        assert_eq!(remaining("j", budget, None), Ok(budget), "no check");
+        assert_eq!(
+            remaining("j", budget, Some(Duration::from_secs(4))),
+            Ok(Duration::from_secs(6))
+        );
+        for spent in [budget, Duration::from_secs(11)] {
+            let refusal = remaining("j", budget, Some(spent)).expect_err("nothing left");
+            assert!(refusal.contains("j: its check took"), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn a_checked_command_job_runs_once_its_check_passes() {
+        for budget in [1, 3] {
+            let (outcome, log) = recorded(vec![ok_job("passed").checked_by(|| Ok(()))], budget);
+            assert_eq!(outcome, Ok(()), "{log}");
+            assert!(log.contains("[passed check] done in"), "{log}");
+            assert!(log.contains("[passed] done in"), "{log}");
+        }
+    }
+
+    #[test]
+    fn a_refused_check_logs_its_reason_as_it_happens() {
+        for budget in [1, 3] {
+            let refused =
+                Job::closure("refused", 1, || Ok(())).checked_by(|| Err("stale skip".into()));
+            let (outcome, log) = recorded(vec![refused], budget);
+            assert!(outcome.is_err(), "{log}");
+            assert!(log.contains("[refused check] stale skip\n"), "{log}");
+            assert!(log.contains("[refused check] FAILED in"), "{log}");
+        }
+    }
+
+    #[test]
+    fn a_closure_job_reports_its_start_and_verdict_on_either_path() {
+        for budget in [1, 3] {
+            let jobs = vec![
+                Job::closure("fine", 1, || Ok(())),
+                Job::closure("broken", 1, || Err("the guest's serial log".into())),
+            ];
+            let (outcome, log) = recorded(jobs, budget);
+            for line in ["[fine] starting", "[fine] done in", "[broken] FAILED in"] {
+                assert!(
+                    log.contains(line),
+                    "{line} missing at budget {budget}: {log}"
+                );
+            }
+            assert_eq!(
+                outcome,
+                Err("the guest's serial log".into()),
+                "the detail in the run's error"
+            );
+            assert!(!log.contains("serial log"), "and only there: {log}");
+        }
     }
 
     #[test]
@@ -511,7 +808,7 @@ mod tests {
                 })
             })
             .collect();
-        assert!(run(jobs, 2).is_ok());
+        assert_eq!(recorded(jobs, 2).0, Ok(()));
         assert_eq!(ran.load(Ordering::SeqCst), 4);
     }
 
@@ -521,7 +818,9 @@ mod tests {
             Job::closure("good", 1, || Ok(())),
             Job::closure("weighty", 2, || Err("boom detail".to_string())),
         ];
-        let err = run(jobs, 4).expect_err("a failing closure must fail the run");
+        let err = recorded(jobs, 4)
+            .0
+            .expect_err("a failing closure must fail the run");
         assert!(err.contains("boom detail"), "missing detail: {err}");
     }
 
@@ -548,7 +847,7 @@ mod tests {
                 })
             })
             .collect();
-        assert!(run(jobs, budget).is_ok());
+        assert_eq!(recorded(jobs, budget).0, Ok(()));
         assert!(
             peak.load(Ordering::SeqCst) <= budget,
             "in-flight weight {} exceeded budget {budget}",
@@ -594,7 +893,7 @@ mod tests {
                 }));
             }
         }
-        assert!(run(jobs, budget).is_ok());
+        assert_eq!(recorded(jobs, budget).0, Ok(()));
         assert!(
             !overlapped.load(Ordering::SeqCst),
             "a whole-budget job ran concurrently with another job"
@@ -614,7 +913,7 @@ mod tests {
             }),
             ok_job("small"),
         ];
-        assert!(run(jobs, 4).is_ok());
+        assert_eq!(recorded(jobs, 4).0, Ok(()));
         assert_eq!(ran.load(Ordering::SeqCst), 1);
     }
 
@@ -638,7 +937,7 @@ mod tests {
             Ok(())
         }));
 
-        assert!(run(jobs, 8).is_ok());
+        assert_eq!(recorded(jobs, 8).0, Ok(()));
         let seen = order.lock().expect("order");
         assert_eq!(
             seen.first().copied(),
@@ -663,7 +962,7 @@ mod tests {
         }
         // Budget one takes the streaming path, which runs strictly one at a
         // time, so the recorded order is the admission order exactly.
-        assert!(run(jobs, 1).is_ok());
+        assert_eq!(recorded(jobs, 1).0, Ok(()));
         assert_eq!(
             *order.lock().expect("order"),
             vec!["first", "second", "third"]

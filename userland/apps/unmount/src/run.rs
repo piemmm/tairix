@@ -37,7 +37,7 @@ mod program {
 
     use alloc::string::String;
 
-    use tairix_abi::volume::{VolumeDetachRequest, VOLUME_DETACH_LEN, VOLUME_ID_LEN};
+    use tairix_abi::volume::{DetachMode, VolumeDetachRequest, VOLUME_DETACH_LEN, VOLUME_ID_LEN};
     use tairix_abi::{Errno, RealpathMode};
     use tairix_help::BundleHelp;
     use tairix_procinfo::IpcTransport;
@@ -57,7 +57,12 @@ mod program {
         }
 
         fn detach(&self, volume_id: [u8; VOLUME_ID_LEN], force: bool) -> Result<(), Errno> {
-            let request = VolumeDetachRequest { volume_id, force };
+            let mode = if force {
+                DetachMode::Force
+            } else {
+                DetachMode::Plain
+            };
+            let request = VolumeDetachRequest { volume_id, mode };
             let mut frame = [0u8; VOLUME_DETACH_LEN];
             let len = request.encode(&mut frame)?;
             let ret = tairix_rt::volume_detach(&frame[..len]);

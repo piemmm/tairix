@@ -23,8 +23,9 @@
 //!   Selection and Paste ([`plan_paste`](crate::clipboard::plan_paste)); the
 //!   selection's submenu holds Open
 //!   ([`activate_selected`](crate::Browser::activate_selected)), Open With…
-//!   (the [`open_with`](crate::open_with) chooser over a regular file), Get
-//!   Info… ([`Properties`](crate::properties::Properties)), Rename
+//!   (the [`open_with`](crate::open_with) chooser over a regular file), Mount
+//!   Read-Only and Eject ([`mount`](crate::mount)), Get Info…
+//!   ([`Properties`](crate::properties::Properties)), Rename
 //!   ([`prepare_rename`](crate::Browser::prepare_rename)), Cut/Copy
 //!   ([`clipboard`](crate::Browser::clipboard)) and Delete
 //!   ([`plan_delete`](crate::Browser::plan_delete)).
@@ -403,8 +404,8 @@ impl ManagerToolModel {
 /// [`ContextChoice::NewDocument`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ContextCommand {
-    /// Activate the selected entry — descend, launch a bundle, or open a file
-    /// ([`activate_selected`](Browser::activate_selected)).
+    /// Activate the selected entry — descend, launch a bundle, open a file, or
+    /// mount a disk image ([`activate_selected`](Browser::activate_selected)).
     Open,
     /// Choose an application to open the selected regular file with, from the
     /// installed bundles whose declared associations claim the file's type
@@ -494,8 +495,9 @@ impl ContextCommand {
     pub const fn shortcut(self) -> &'static str {
         match self {
             Self::Open => "Enter",
-            // Open With… binds no keyboard accelerator, so it advertises none;
-            // the menu's own traversal is how a keyboard reaches it.
+            // Open With…, Mount Read-Only and Eject bind no keyboard
+            // accelerator, so they advertise none; the menu's own traversal is
+            // how a keyboard reaches them.
             Self::OpenWith | Self::MountReadOnly | Self::Eject => "",
             Self::GetInfo => "Alt+Enter",
             Self::Rename => "F2",

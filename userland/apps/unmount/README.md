@@ -9,18 +9,24 @@ volumes could be meant or the listing keeps only its start) through the
 ungated `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries — whose records
 carry each mount's stable volume identity and
 availability — and asks the kernel's `volume_detach` path to take it
-out of service. A plain detach flushes first and fails closed; a
-surprise-removed (*unavailable-dirty*/*unavailable-lost*) volume
-refuses it, keeping its retained uncommitted writes for verified
-re-insert, and so does a volume a descriptor still holds a file of
-(`Busy`). `unmount --force NAME` is the audited force-unmount: the kernel
+out of service. A plain detach flushes first and fails closed: an
+*unavailable-dirty* volume refuses it, keeping its retained uncommitted
+writes for a verified re-insert; an *unavailable-lost* one refuses it so the
+loss of the writes it could not keep is acknowledged; a *recovery-conflict*
+one still holds its retained set; and a volume a descriptor still holds a
+file of refuses it too (`Busy`). Only the refusal a state's writes earn is
+told the `--force` consequence; any other is the kernel's errno alone. `unmount --force NAME` is the audited force-unmount: the kernel
 revokes the descriptors still open on it, discards the retained set,
 retracts the volume, and logs what it gave up — a device volume with its own
 event id (4179, `fs.hotplug.force_unmount`), a disk image with its detach's
 (4323, `fs.image.detached`, carrying the nodes revoked and whether it was
 left unflushed), a network share with its (4303, `fs.network.detached`,
 caused `forced`, or `forced_unflushed` when a flush was given up). A path is
-canonicalised as util-linux canonicalises a mount point; another user's
+matched against the mount points as spelled (`.` dropped, a relative one read
+from the working directory), as util-linux's `umount` matches one, and
+canonicalised only when it climbs with `..`, passes through a link, or matches
+none, so a volume that no longer answers is still named by where it is
+mounted; another user's
 private volume lists neither its file name nor its bindings, so a miss beside
 one says to name it by where it is mounted in `/Storage`. On a healthy volume `--force` still commits cleanly —
 nothing is discarded when a clean flush is possible.

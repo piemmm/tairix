@@ -34,37 +34,79 @@ fn the_flavour_is_the_best_save_the_cpu_offers() {
 
 #[test]
 fn the_park_mask_leaves_the_framed_sse_state_out() {
-    let config = Config::new(Flavour::Xsaveopt, X87 | SSE | AVX, 832);
+    let config = Config::new(Flavour::Xsaveopt, X87 | SSE | AVX, 832).unwrap();
     assert_eq!(config.park_mask(), X87 | AVX);
 }
 
 #[test]
 fn an_area_is_the_header_and_the_image_rounded_to_its_alignment() {
-    assert_eq!(
-        Config::new(Flavour::Fxsave, X87 | SSE, 0).area_bytes(),
-        64 + 512
-    );
+    let area = |flavour, xcr0, image_bytes| {
+        Config::new(flavour, xcr0, image_bytes).map(Config::area_bytes)
+    };
+    assert_eq!(area(Flavour::Fxsave, X87 | SSE, 0), Some(64 + 512));
     // XSAVE with AVX: 512 legacy + 64 header + 256 upper halves.
-    assert_eq!(
-        Config::new(Flavour::Xsave, X87 | SSE | AVX, 832).area_bytes(),
-        64 + 832
-    );
-    assert_eq!(
-        Config::new(Flavour::Xsave, X87 | SSE | AVX, 833).area_bytes(),
-        64 + 896
-    );
+    assert_eq!(area(Flavour::Xsave, X87 | SSE | AVX, 832), Some(64 + 832));
+    assert_eq!(area(Flavour::Xsave, X87 | SSE | AVX, 833), Some(64 + 896));
     // The AVX-512 standard-format image.
     assert_eq!(
-        Config::new(Flavour::Xsaveopt, X87 | SSE | AVX | AVX512, 2688).area_bytes(),
-        64 + 2688
+        area(Flavour::Xsaveopt, X87 | SSE | AVX | AVX512, 2688),
+        Some(64 + 2688)
     );
 }
 
 const CONFIGS: [Config; 3] = [
-    Config::new(Flavour::Fxsave, X87 | SSE, 0),
-    Config::new(Flavour::Xsave, X87 | SSE | AVX, 832),
-    Config::new(Flavour::Xsaveopt, X87 | SSE | AVX | AVX512, 2688),
+    Config::new(Flavour::Fxsave, X87 | SSE, 0).unwrap(),
+    Config::new(Flavour::Xsave, X87 | SSE | AVX, 832).unwrap(),
+    Config::new(Flavour::Xsaveopt, X87 | SSE | AVX | AVX512, 2688).unwrap(),
 ];
+
+/// An XSAVE image smaller than the legacy image and header would have every
+/// save write past the area, and one past sixteen bits would not survive the
+/// published word: leaf 2's `EBX`, which a limited CPU answers leaf 0xD with,
+/// is the case in point.
+#[test]
+fn an_xsave_image_too_small_for_a_save_or_too_large_to_publish_is_refused() {
+    for flavour in [Flavour::Xsave, Flavour::Xsaveopt] {
+        for image_bytes in [0, 0xF0, 575, 0x00F0_B5FF, 0x1_0000, u32::MAX] {
+            assert_eq!(
+                Config::new(flavour, X87 | SSE, image_bytes),
+                None,
+                "{flavour:?} with {image_bytes:#x} bytes"
+            );
+        }
+        for image_bytes in [576, 832, 2688, u32::from(u16::MAX)] {
+            let config = Config::new(flavour, X87 | SSE | AVX, image_bytes).unwrap();
+            assert_eq!(Config::unpacked(config.packed()), Some(config));
+        }
+    }
+    assert!(
+        Config::new(Flavour::Fxsave, X87 | SSE, 0x1_0000).is_some(),
+        "FXSAVE's image is fixed, whatever CPUID says"
+    );
+}
+
+/// Each enabled component past x87 and SSE must end inside the image, and
+/// only enabled ones are asked about.
+#[test]
+fn an_image_holds_each_enabled_component_whole() {
+    let standard = |component| match component {
+        2 => (576, 256),
+        5 => (1088, 64),
+        6 => (1152, 512),
+        7 => (1664, 1024),
+        other => panic!("component {other} is not enabled"),
+    };
+    assert!(holds_components(X87 | SSE, 576, standard));
+    assert!(holds_components(X87 | SSE | AVX, 832, standard));
+    assert!(!holds_components(X87 | SSE | AVX, 831, standard));
+    assert!(!holds_components(X87 | SSE | AVX, 576, standard));
+    assert!(holds_components(X87 | SSE | AVX | AVX512, 2688, standard));
+    assert!(!holds_components(X87 | SSE | AVX | AVX512, 2687, standard));
+    assert!(
+        !holds_components(X87 | SSE | AVX, u32::MAX, |_| (u32::MAX, u32::MAX)),
+        "an extent past 32 bits does not wrap into the image"
+    );
+}
 
 #[test]
 fn a_config_survives_its_packed_word_and_is_never_the_unset_zero() {
@@ -98,10 +140,10 @@ fn the_load_routine_reads_the_flavour_byte_and_the_scrub_bit_apart() {
 /// cannot name is not assumed not to.
 #[test]
 fn only_a_cpu_known_to_keep_the_x87_pointers_skips_the_scrub() {
-    assert!(keeps_x87_pointers(Some("Intel"), false));
-    assert!(keeps_x87_pointers(Some("AMD"), true));
+    assert!(keeps_x87_pointers(Some(Vendor::Intel), false));
+    assert!(keeps_x87_pointers(Some(Vendor::Amd), true));
     assert!(keeps_x87_pointers(None, true));
-    assert!(!keeps_x87_pointers(Some("AMD"), false));
+    assert!(!keeps_x87_pointers(Some(Vendor::Amd), false));
     assert!(!keeps_x87_pointers(None, false));
 }
 

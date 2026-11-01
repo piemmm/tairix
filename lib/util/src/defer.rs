@@ -229,10 +229,17 @@ impl<Req, Ans> JobQueue<Req, Ans> {
 
     /// Take the oldest waiting request, or `None` when there is nothing to do.
     pub fn next_job(&mut self) -> Option<Req> {
+        self.next_job_where(|_| true)
+    }
+
+    /// Take the oldest waiting request `mine` admits, passing over the others:
+    /// what a worker takes when its workers each serve their own share.
+    pub fn next_job_where(&mut self, mine: impl FnMut(&Req) -> bool) -> Option<Req> {
         if self.stopping {
             return None;
         }
-        let request = self.waiting.pop_front()?;
+        let at = self.waiting.iter().position(mine)?;
+        let request = self.waiting.remove(at)?;
         self.in_flight += 1;
         Some(request)
     }

@@ -55,7 +55,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tairix_devids::{textdb, DbKind, MAX_TABLE_BYTES, TABLE_SUFFIX};
 use tairix_visible::is_hidden;
 
-use crate::Context;
+use crate::children::Children;
+use crate::{output_or_reason, Context};
 
 /// The form a database is published in upstream.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -172,14 +173,14 @@ pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
         }
     }
     if let Some(databases) = fetch {
-        eprintln!("xtask: [devids --fetch] importing upstream databases");
+        noteln!("xtask: [devids --fetch] importing upstream databases");
         return run_fetch(ctx, &databases);
     }
     if write {
-        eprintln!("xtask: [devids --write] regenerating the compact tables");
+        noteln!("xtask: [devids --write] regenerating the compact tables");
         return run_write(ctx);
     }
-    eprintln!("xtask: [devids] verifying lib/devids snapshot/table sync");
+    noteln!("xtask: [devids] verifying lib/devids snapshot/table sync");
     run_verify(ctx)
 }
 
@@ -247,7 +248,7 @@ fn drifted(db: &Database) -> String {
 fn run_fetch(ctx: &Context, databases: &[&Database]) -> Result<(), String> {
     let today = utc_date_today()?;
     for db in databases {
-        let raw = download(db)?;
+        let raw = download(&ctx.children, db)?;
         let digest = tairix_crypto::sha256(&raw);
         let (downloaded, repaired) = promote_latin1(&raw);
         let (text, published, conversion) = match db.upstream {
@@ -322,7 +323,7 @@ fn run_fetch(ctx: &Context, databases: &[&Database]) -> Result<(), String> {
         let version = published
             .as_ref()
             .map_or("unversioned", |(version, _)| version.as_str());
-        eprintln!(
+        noteln!(
             "xtask: [devids --fetch] {}: {version}, {} vendors, {} devices, \
              {} class names ({encoding})",
             db.name(),
@@ -501,20 +502,17 @@ fn csv_records(text: &str) -> impl Iterator<Item = Result<Vec<String>, String>> 
 /// Download `db` with the system `curl`, failing closed on any transport or
 /// HTTP error. An external process like the QEMU/toolchain wrappers; used
 /// only by the developer-run `--fetch`.
-fn download(db: &Database) -> Result<Vec<u8>, String> {
-    let output = Process::new("curl")
-        .args(["--fail", "--silent", "--show-error", "--location"])
+fn download(children: &Children, db: &Database) -> Result<Vec<u8>, String> {
+    let mut curl = Process::new("curl");
+    curl.args(["--fail", "--silent", "--show-error", "--location"])
         .args(["--max-time", "120", "--output", "-"])
-        .arg(db.url)
-        .output()
-        .map_err(|e| format!("devids: cannot run curl: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "devids: fetching {} failed: {}",
-            db.url,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
+        .arg(db.url);
+    let output = output_or_reason(
+        children,
+        &format!("devids: fetching {}", db.url),
+        &mut curl,
+        children.ordinary_budget(),
+    )?;
     if output.stdout.is_empty() {
         return Err(format!("devids: fetching {} returned no data", db.url));
     }

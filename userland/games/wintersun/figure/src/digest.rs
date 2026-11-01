@@ -73,7 +73,7 @@ use crate::species::Species;
 /// change that moves it changes every figure anybody will ever see, and the
 /// new value is written down deliberately rather than pasted out of a
 /// failure.
-pub const REFERENCE_DIGEST: u64 = 0x5478_08C7_5CCA_E48F;
+pub const REFERENCE_DIGEST: u64 = 0xB42E_AE46_C6C5_4E2D;
 
 /// The stream the reference grid is folded into.
 pub const REFERENCE_SEED: u64 = 0x5749_4E54_4552_4647;

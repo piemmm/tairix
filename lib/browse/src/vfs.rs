@@ -109,6 +109,20 @@ pub fn spell_absolute_path<S: AsRef<str>>(components: &[S]) -> String {
     path
 }
 
+/// Spell root-first `components` as a message names the place: each name
+/// [`shown`] as a name from elsewhere is, so nothing in one can hide or turn
+/// the line around. Never a path to open, which [`spell_absolute_path`]
+/// spells byte-exact.
+#[must_use]
+pub fn spell_shown_path(components: &[String]) -> String {
+    spell_absolute_path(&shown_names(components))
+}
+
+/// Each of `components` as [`shown`] shows a name.
+fn shown_names(components: &[String]) -> Vec<Cow<'_, str>> {
+    components.iter().map(|name| shown(name)).collect()
+}
+
 /// The length [`spell_absolute_path`] spells non-empty `components` in.
 fn spelled_len<S: AsRef<str>>(components: &[S]) -> usize {
     components
@@ -138,7 +152,7 @@ fn spelled_len<S: AsRef<str>>(components: &[S]) -> usize {
 /// a real path to open.
 #[must_use]
 pub fn spell_title_location(components: &[String], budget: usize) -> String {
-    let names: Vec<Cow<'_, str>> = components.iter().map(|name| shown(name)).collect();
+    let names = shown_names(components);
     let full = spell_absolute_path(&names);
     if full.len() <= budget {
         return full;

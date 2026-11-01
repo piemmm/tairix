@@ -1,7 +1,8 @@
 //! Tests for the shared fallible allocation helpers.
 
 use super::{
-    boxed_array, collected, concatenated, filled, grow_to, push, read_snapshot, reserve, written,
+    boxed_array, collected, concatenated, filled, grow_to, push, read_snapshot, reserve, trim,
+    written,
 };
 use alloc::vec::Vec;
 use tairix_abi::Errno;
@@ -119,4 +120,39 @@ fn a_whole_read_keeps_a_buffer_already_grown() {
     let mut buffer = alloc::vec![0u8; 4096];
     let len = read_snapshot(&mut buffer, 16, |into| Ok(into.len()));
     assert_eq!(len, Ok(4096), "a reused buffer starts at its own size");
+}
+
+#[test]
+fn a_buffer_holds_the_bytes_of_its_capacity() {
+    let mut words: Vec<u32> = Vec::with_capacity(10);
+    words.push(1);
+    assert_eq!(
+        super::held(&words),
+        40,
+        "what was reserved, not what is used"
+    );
+    assert_eq!(super::held(&Vec::<u64>::new()), 0);
+}
+
+#[test]
+fn a_trimmed_buffer_holds_exactly_its_items() {
+    let mut words: Vec<u32> = Vec::with_capacity(64);
+    words.extend([3, 1, 4]);
+    trim(&mut words);
+    assert_eq!(
+        (words.as_slice(), words.capacity()),
+        ([3, 1, 4].as_slice(), 3)
+    );
+    let mut empty: Vec<u32> = Vec::with_capacity(8);
+    trim(&mut empty);
+    assert_eq!(empty.capacity(), 0, "an empty buffer lets its memory go");
+}
+
+#[test]
+fn an_exact_buffer_is_left_where_it_is() {
+    let mut words: Vec<u32> = Vec::with_capacity(3);
+    words.extend([2, 7, 1]);
+    let at = words.as_ptr();
+    trim(&mut words);
+    assert_eq!(words.as_ptr(), at, "nothing to trim is no copy");
 }

@@ -1,7 +1,7 @@
 //! The validator (`plans/SHADER.md` SH2); what an admitted module guarantees
 //! is the crate documentation's.
 
-mod allow;
+pub(crate) mod allow;
 mod binding;
 mod body;
 mod cfg;
@@ -9,7 +9,7 @@ mod declare;
 mod decorate;
 mod dominance;
 mod entry;
-mod glsl;
+pub(crate) mod glsl;
 mod group;
 mod image;
 mod interface;
@@ -17,7 +17,9 @@ mod layout;
 mod memory;
 mod ops;
 mod scan;
+mod specialize;
 mod types;
+mod view;
 
 #[cfg(test)]
 mod admit_tests;
@@ -31,13 +33,23 @@ mod refusal_tests;
 mod scale_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod view_tests;
 
 use alloc::vec::Vec;
 
-pub use binding::{Access, Binding, BindingKind, Component, Disagreement, ImageShape, Layout};
+pub use allow::CAPABILITIES;
+pub use binding::{
+    Access, Binding, BindingKind, Component, Disagreement, ImageShape, Layout, Stages,
+};
 pub use entry::{EntryPoint, Stage, Varying, WorkgroupSize};
+pub use specialize::{Constant, ConstantId, SpecError, SpecValue, Specialized, MAX_SPECIALIZED};
+pub use types::{MAX_MATRIX_COLUMNS, MAX_VECTOR_COMPONENTS};
+pub use view::{ImageType, Member, Scalar, Type, TypeId};
 
 use crate::enumerant::{Capability, Decoration, ExecutionMode, StorageClass};
+use tairix_util::fallible::held;
+
 use crate::{Id, Instruction, Kind, Module, Op};
 
 /// The most entry points a module may declare: each one's interface is
@@ -79,12 +91,15 @@ pub const MAX_LOCALS: usize = 524_287;
 /// The most execution modes an entry point may set.
 pub const MAX_MODES: usize = 255;
 
-/// A module the validator admitted, with what each of its entry points needs.
+/// A module the validator admitted, with what each of its entry points needs
+/// and the tables its meaning was resolved into: what every backend lowers
+/// from, so no backend reads it a second way.
 #[derive(Debug)]
 pub struct Admitted {
     module: Module,
     capabilities: Vec<Capability>,
     entry_points: Vec<EntryPoint>,
+    kept: view::Kept,
 }
 
 impl Admitted {
@@ -94,11 +109,12 @@ impl Admitted {
     ///
     /// The instruction the module was refused at and the rule it broke.
     pub fn new(module: Module) -> Result<Self, Refusal> {
-        let (capabilities, entry_points) = Validator::run(&module)?;
+        let (capabilities, entry_points, kept) = Validator::run(&module)?;
         Ok(Self {
             module,
             capabilities,
             entry_points,
+            kept,
         })
     }
 
@@ -119,6 +135,26 @@ impl Admitted {
     #[must_use]
     pub fn entry_points(&self) -> &[EntryPoint] {
         &self.entry_points
+    }
+
+    /// The bytes of memory it holds past its own size: the module's words
+    /// and tables, and every table the validator kept for it.
+    #[must_use]
+    pub fn held_bytes(&self) -> u64 {
+        let entries = self
+            .entry_points
+            .iter()
+            .fold(held(&self.entry_points), |total, e| {
+                total.saturating_add(e.held_bytes())
+            });
+        [
+            self.module.held_bytes(),
+            held(&self.capabilities),
+            entries,
+            self.kept.held_bytes(),
+        ]
+        .into_iter()
+        .fold(0, u64::saturating_add)
     }
 
     /// The entry point named `name` for `stage`.

@@ -117,7 +117,7 @@ fn main() -> ExitCode {
         spec = spec.with_virtio_keyboard(marker, key);
     }
 
-    report(Runner::run(&spec))
+    report(Runner::run(&spec, &tairix_qemu::Direct))
 }
 
 /// Translate a [`Runner::run`] result into a process exit code, printing

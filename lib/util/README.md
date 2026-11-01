@@ -33,9 +33,13 @@ nothing from here: the rule for a hidden character it needs is `lib/visible`'s.
   request handed back; `JobQueue`: every request answered, in turn).
 * `fallible` — reserving a data-sized buffer before filling it (`filled`,
   `collected`, `grow_to`, `reserve`, `read_snapshot`), so an allocation the
-  machine refuses is a typed refusal rather than an abort.
+  machine refuses is a typed refusal rather than an abort; `trim` moves a
+  buffer kept long after it was filled into an allocation of exactly its
+  length where one is granted, leaving it as it is otherwise; `held` counts
+  the bytes a buffer's allocation holds, for charging them to a budget.
 * `flags!` — a set of bit flags over one unsigned integer, as a field carries
-  it (`NONE`, `with`, `without`, `contains`, `from_bits`, `bits`).
+  it (`NONE`, `with`, `without`, `contains`, `intersects`, `from_bits`,
+  `bits`).
 * `getopt` — a command line read as GNU's `getopt_long` reads it (`Scan`
   over a tool's `Opt` table: short options clustered, a value attached or
   following, a long option by any unambiguous prefix, `--` ending the
@@ -52,7 +56,12 @@ nothing from here: the rule for a hidden character it needs is `lib/visible`'s.
 * `lanes` — finding a byte eight lanes of a word at a time.
 * `mathf` — bounded, total `f64` maths for `no_std` geometry, with no external
   libm and the same bits on every target, the one clamped `smoothstep` (with
-  its `f32` twin), and `Phasor`, a sine swept along a row a turn at a time.
+  its `f32` twin), `Phasor`, a sine swept along a row a turn at a time, the
+  half-precision conversions `to_half`, `from_half` and `quantized_to_half`,
+  and `float_of` and `float_bits`, a half, single or double read from its bits
+  and rounded once back to them, a `NaN` as its width's one quiet `NaN`. Its
+  transcendentals are fdlibm's, under the Sun Microsystems
+  notices `src/mathf.rs` preserves.
 * `mode` — a file mode as `chmod`, `mkdir -m` and the shell's `umask` spell it
   (`Mode::parse`: an octal value, or GNU's symbolic clauses with copies and
   octal operators), the bits it gives a node (`Mode::resolve`: a clause naming
@@ -60,7 +69,8 @@ nothing from here: the rule for a hidden character it needs is `lib/visible`'s.
   not name).
 * `output` — the byte stream a command engine writes through (`Output`: every
   byte or the stream's own refusal, a best-effort fd-3 advisory record, and
-  whether it is an attested terminal), `report_failure`'s one `tool: failure`
+  whether it is an attested terminal), `framed`, an advisory record as the
+  one line `Output::info` takes, `report_failure`'s one `tool: failure`
   line, and `Carried`, the run that reports each `Failure` it carries past —
   an operand or a walk's entry — remembers that one happened, and hands back
   the fatal ones.
@@ -92,8 +102,8 @@ nothing from here: the rule for a hidden character it needs is `lib/visible`'s.
   than in the input.
 * `utf8` — which bytes begin a UTF-8 sequence and how long it is
   (`sequence_len`, Unicode Table 3-7), a name as it is shown, as
-  `lib/visible` shows text from elsewhere (`shown`), whether a name mixes
-  scripts the way an impersonation needs (`mixes_scripts`), and the letters
+  `lib/visible` shows text from elsewhere (`shown`), the headline a refusal
+  quoting such a name is stated under (`refusal_headline`), and the letters
   and order a reader looks names up by (`fold`, `folded`, `reader_order`).
 
 Long-form documentation: `docs/src/lib/util.md`.

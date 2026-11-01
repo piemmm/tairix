@@ -63,6 +63,14 @@ pub fn shown(text: &str) -> alloc::borrow::Cow<'_, str> {
     alloc::borrow::Cow::Owned(out)
 }
 
+/// The headline a refusal of what `name` names is stated under: “`name`”
+/// could not be `undone`, the name as [`shown`] shows it, so nothing in it can
+/// hide, or turn the line around, in the text a refusal is stated in.
+#[must_use]
+pub fn refusal_headline(name: &str, undone: &str) -> alloc::string::String {
+    alloc::format!("\u{201c}{}\u{201d} could not be {undone}", shown(name))
+}
+
 /// Cut `text` to at most `most` bytes at a character boundary, ending it in
 /// `…` when anything was cut, so a cut always shows.
 pub fn cut(text: &mut alloc::string::String, most: usize) {
@@ -77,21 +85,30 @@ pub fn cut(text: &mut alloc::string::String, most: usize) {
     text.push('…');
 }
 
-/// Whether `text` mixes scripts the way an impersonation needs — Latin with
-/// Cyrillic or Greek, or any mixture no stricter UTS #39 restriction level
-/// admits — so a surface showing it can say it may not be what it looks like.
-#[must_use]
-pub fn mixes_scripts(text: &str) -> bool {
-    tairix_unicode::restriction_level(text)
-        == tairix_unicode::RestrictionLevel::MinimallyRestrictive
-}
-
 #[cfg(test)]
 mod tests {
     use alloc::borrow::Cow;
     use core::cmp::Ordering;
 
-    use super::{cut, fold, folded, mixes_scripts, reader_order, sequence_len, shown};
+    use super::{cut, fold, folded, reader_order, refusal_headline, sequence_len, shown};
+
+    #[test]
+    fn a_refused_name_is_quoted_with_what_hides_in_it_made_visible() {
+        assert_eq!(
+            refusal_headline("notes.txt", "opened"),
+            "\u{201c}notes.txt\u{201d} could not be opened"
+        );
+        assert_eq!(
+            refusal_headline("evil\u{202e}txt.exe", "saved"),
+            "\u{201c}evil\u{fffd}txt.exe\u{201d} could not be saved",
+            "a direction override could otherwise make the name read as another"
+        );
+        assert_eq!(
+            refusal_headline("a\u{1b}[2Jb", "shown in its folder"),
+            "\u{201c}a\u{fffd}[2Jb\u{201d} could not be shown in its folder",
+            "a control character never reaches the text it is stated in"
+        );
+    }
 
     /// A name shown as written is borrowed — a combining sequence within its
     /// limits and a replacement character it already holds included — and
@@ -117,24 +134,6 @@ mod tests {
                 matches!(shown(text), Cow::Owned(ref owned) if owned == seen),
                 "{text:?}"
             );
-        }
-    }
-
-    #[test]
-    fn a_name_mixing_scripts_to_impersonate_is_told_apart() {
-        for text in [
-            "paypal",
-            "caf\u{e9}",
-            "Ελληνικά",
-            "日本語abc",
-            "한국어abc",
-            "",
-        ] {
-            assert!(!mixes_scripts(text), "{text:?}");
-        }
-        // Cyrillic а and о among Latin; Greek Ο among Latin.
-        for text in ["p\u{430}yp\u{430}l", "g\u{43e}\u{43e}gle", "\u{39f}ffice"] {
-            assert!(mixes_scripts(text), "{text:?}");
         }
     }
 

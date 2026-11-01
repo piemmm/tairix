@@ -846,8 +846,8 @@ fn declares_access_tracking_supported() {
     use tairix_arch_api::mmu::{self, AccessTracking};
     static POOL: PageTablePool = PageTablePool::new();
     let space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
-    // aarch64 manages the Access Flag in software (cortex-a57/a72 lack
-    // HAFDBS), so the referenced bit is honestly Supported.
+    // aarch64 manages the Access Flag in software (`TCR_EL1.HA` clear on
+    // every part), so the referenced bit is honestly Supported.
     assert_eq!(
         mmu::AddressSpace::access_tracking(&space),
         AccessTracking::Supported
@@ -912,7 +912,7 @@ fn test_and_clear_accessed_drives_the_clock_round_trip() {
 }
 
 #[test]
-fn set_accessed_flag_in_root_only_touches_a_valid_cleared_leaf() {
+fn set_accessed_flag_in_root_retries_on_every_valid_leaf() {
     use tairix_arch_api::mmu::{self, PageFlags};
     static POOL: PageTablePool = PageTablePool::new();
     let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
@@ -932,13 +932,15 @@ fn set_accessed_flag_in_root_only_touches_a_valid_cleared_leaf() {
     // space, drawn from `POOL`.
     assert!(!unsafe { set_accessed_flag_in_root(&POOL, root, va + PAGE_SIZE as u64) });
 
-    // The leaf still carries AF (eager map), so setting is a no-op that
-    // reports false — the fault was not the referenced-bit mechanism.
+    // The leaf still carries AF (eager map): another CPU's fix-up got there
+    // first, so the access is retried and the leaf left as it is.
+    let eager = host_leaf_descriptor(&POOL, root, va).expect("mapped");
     // SAFETY: as above.
-    assert!(!unsafe { set_accessed_flag_in_root(&POOL, root, va) });
+    assert!(unsafe { set_accessed_flag_in_root(&POOL, root, va) });
+    assert_eq!(host_leaf_descriptor(&POOL, root, va), Some(eager));
 
-    // Clear AF, then setting it reports true exactly once; a second call
-    // finds AF already set and reports false.
+    // Clear AF: the first fix-up sets it, and the CPU that finds it set
+    // already retries too.
     assert_eq!(
         mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
         Ok(true)
@@ -946,9 +948,24 @@ fn set_accessed_flag_in_root_only_touches_a_valid_cleared_leaf() {
     // SAFETY: as above.
     assert!(unsafe { set_accessed_flag_in_root(&POOL, root, va) });
     // SAFETY: as above.
-    assert!(!unsafe { set_accessed_flag_in_root(&POOL, root, va) });
+    assert!(unsafe { set_accessed_flag_in_root(&POOL, root, va) });
     let leaf = host_leaf_descriptor(&POOL, root, va).expect("mapped");
     assert_ne!(leaf & attrs::AF, 0, "AF must be set after the fault fix-up");
+    assert!(retries_access(leaf) && !retries_access(0));
+}
+
+/// A leaf that faults on its Access flag is cached in no TLB, so the fix-up
+/// orders its store for the walkers and invalidates nothing.
+#[test]
+fn the_access_flag_fix_up_invalidates_nothing() {
+    let source = include_str!("paging.rs");
+    let start = source
+        .find("unsafe fn set_accessed_flag_in_root(")
+        .expect("the fix-up is defined");
+    let body = &source[start..];
+    let body = &body[..body.find("\n}\n").expect("the fix-up ends")];
+    assert!(body.contains("publish_table_update();"), "{body}");
+    assert!(!body.contains("invalidate_"), "{body}");
 }
 
 #[test]
@@ -1426,7 +1443,7 @@ fn an_access_flag_fix_up_never_restores_a_leaf_unmapped_after_its_walk() {
     // SAFETY: the space's root table, alive for the whole test.
     let walked = unsafe { leaf_in(&POOL, space.root_phys(), va) }.expect("the fault's walk");
     mmu::AddressSpace::unmap(&mut space, va).expect("unmap");
-    assert_eq!(walked.set_while(attrs::AF, access_flag_clear), None);
+    assert_eq!(walked.set_while(attrs::AF, retries_access), None);
     assert_eq!(
         mmu::AddressSpace::translate(&space, va),
         None,

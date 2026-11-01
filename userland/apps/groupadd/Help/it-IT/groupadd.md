@@ -15,9 +15,12 @@ rifiuta un chiamante privo della capacità di amministrazione degli
 utenti.
 
 Quando `-g` è omesso, l'identificatore del gruppo è assegnato
-automaticamente, uno sopra il più alto esistente. Un identificatore
-richiesto già occupato viene rifiutato; il registro è l'autorità sulle
-collisioni.
+automaticamente: uno sopra il più alto esistente pari o superiore a
+1000, oppure 1000 quando nessun gruppo ne ha uno. Gli identificatori
+inferiori a 1000 appartengono al sistema e non vengono mai assegnati, e,
+una volta che sopra il più alto non resta alcun identificatore, il
+gruppo non viene creato. Un identificatore richiesto già occupato viene
+rifiutato; il registro è l'autorità sulle collisioni.
 
 `--` termina l'analisi delle opzioni: ogni argomento successivo è un
 operando.
@@ -25,7 +28,8 @@ operando.
 ## OPTIONS
 
 - `-g, --gid GID` — identificatore numerico del gruppo; assegnato
-  automaticamente quando è omesso (uno sopra il più alto esistente).
+  automaticamente quando è omesso (uno sopra il più alto esistente pari
+  o superiore a 1000, altrimenti 1000).
 - `-h, -?, --help` — mostrare la guida breve di questo comando.
 
 ## EXAMPLES

@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use super::{
     AttachReply, FsserveCtl, NetworkAttach, NetworkOffer, OfferGrant, OfferId, Presentation,
-    ATTACH_REPLY_LEN, NETWORK_ATTACH_MAX, NETWORK_OFFER_MAX, OFFER_GRANT_LEN,
+    ATTACH_HEAD_LEN, ATTACH_REPLY_LEN, NETWORK_ATTACH_MAX, NETWORK_OFFER_MAX, OFFER_GRANT_LEN,
 };
 use crate::driver::filesystem::{NameMatching, NodeId, NodeIdentity};
 use crate::fsserve::{Lanes, ServeFrame, ServeGrant, ServeOffer};
@@ -285,7 +285,12 @@ fn an_attach_frame_out_of_shape_is_refused() {
         ("a mode on a private one", changed(12, 1), Errno::OutOfRange),
         ("an unknown flag", changed(3, 2), Errno::OutOfRange),
         ("a pad", changed(17, 1), Errno::OutOfRange),
-        ("a relative target", changed(25, b'x'), Errno::OutOfRange),
+        ("a word of its own", changed(20, 1), Errno::OutOfRange),
+        (
+            "a relative target",
+            changed(ATTACH_HEAD_LEN + "share".len(), b'x'),
+            Errno::OutOfRange,
+        ),
         ("a byte past the target", trailing, Errno::LengthOutOfRange),
         (
             "a short frame",

@@ -31,7 +31,9 @@ eingehängter Datenträger führt nie Programme aus.
 
 Ein `target` der Form `/Storage/name` hängt den Datenträger unter
 diesem Namen ein. Jedes andere `target`, ein leeres eigenes Verzeichnis
-unter `/Users`, zeigt den Datenträger zusätzlich dort.
+unter `/Users` oder auf einem Datenträger in `/Storage`, zeigt den
+Datenträger zusätzlich dort; ein Verzeichnis auf einem FAT32- oder
+ADFS-Datenträger kann ihn nicht zeigen.
 
 Der Datenträger bleibt eingehängt, bis Sie ihn mit `unmount` aushängen
 oder Ihre Anmeldesitzung endet. Ein Abbild, das eine partitionierte
@@ -46,13 +48,20 @@ wird nicht eingehängt, und `mount` nennt den Grund.
 - `-w, --rw, --read-write` — den Datenträger beschreibbar oder gar
   nicht einhängen: Ein Abbild, in das Sie nicht schreiben dürfen oder
   dessen Dateisystem das Schreiben nicht unterstützt, wird nicht
-  eingehängt. Von `-r`, `-w`, `-o ro` und `-o rw` gilt die letzte
-  Angabe.
-- `-t, --types <type>` — das Dateisystem, welches das Abbild enthalten
-  muss, benannt wie in der Einhängeliste (`iso9660`, `udf`, `adfs`,
-  `affs`, `fat32`), oder `auto` für das, was es enthält. Ein Abbild,
-  das ein anderes enthält, oder ein Typ, den kein Datenträgerabbild
-  enthält, wird nicht eingehängt.
+  eingehängt. Ein späteres `-r` nimmt dies zurück; ein späteres `-o ro`
+  oder `-o rw` tut dies nicht. Von `-r`, `-w`, `-o ro` und `-o rw`
+  entscheidet die letzte Angabe, ob er schreibgeschützt ist.
+- `-t, --types <list>` — die Dateisysteme, kommagetrennt, von denen das
+  Abbild eines enthalten muss, benannt wie in der Einhängeliste
+  (`iso9660`, `udf`, `adfs`, `affs`, `fat32`), oder `auto` für das, was
+  es enthält; eine Liste, die mit `no` beginnt, nennt diejenigen, die es
+  nicht enthalten darf. Was das Abbild enthält, wird an seinem Inhalt
+  erkannt, daher wählt die Reihenfolge nichts aus: Eine Disc, die sowohl
+  UDF als auch ISO 9660 enthält, wird als UDF eingehängt, es sei denn,
+  ihr ISO-9660-Dateisystem enthält Rock-Ridge- oder RISC-OS-Datensätze.
+  Enthält das Abbild keines dieser Dateisysteme oder nennt die Liste
+  keinen Typ, den ein Datenträgerabbild enthält, wird es nicht
+  eingehängt.
 - `-o, --options <list>` — eine kommagetrennte Liste aus `ro`, `rw`
   (beschreibbar, sofern das möglich ist; die Voreinstellung), `noexec`,
   `loop` und `name=name`, dem Namen, den der Datenträger erhalten soll.

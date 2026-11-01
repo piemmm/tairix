@@ -2,9 +2,9 @@
 
 Stability tier: **experimental**
 
-SPIR-V shader modules (`plans/SHADER.md` SH1, SH2): the checked model the
-builder and the GPU backends share, its decoder, its validator, and its
-encoder.
+SPIR-V shader modules (`plans/SHADER.md` SH1, SH2, SH8): the checked model the
+builder and the GPU backends share, its decoder, its validator, the lowering
+view backends read an admitted module through, and its encoder.
 
 ## What it provides
 
@@ -20,12 +20,21 @@ encoder.
 - `Admitted::new` — the validator: a module refused naming the word at fault
   and the `Rule` broken, or admitted with the capabilities a device must
   support and each `EntryPoint`'s stage, workgroup size, bindings, push
-  constants and stage interface; `EntryPoint::agree` decides a pipeline
-  layout against them.
+  constants, stage interface and the module-scope variables it names;
+  `EntryPoint::agree` decides a pipeline layout against them, the stages that
+  may see each binding included. `Admitted::held_bytes` states the host memory
+  an admitted module keeps.
+- The lowering view — an admitted module's resolved types (`TypeId`, `Type`,
+  `Member` with its explicit layout) and decorations, and `specialize`: every
+  constant evaluated, total over every bit pattern, once a pipeline's
+  `SpecValue`s are known, with each entry point's final workgroup size.
 - `Encoder` — instructions written out (`Arg`), ids issued densely, and an
   existing module rewritten instruction by instruction (`rewriting`, `copy`).
   It frames and packs only: what it writes is decoded before anything relies on
   it.
+- `assemble` (feature `test-support`, test scaffolding no build enables) —
+  SPIR-V assembly text to a module, each operand read as the kind its position
+  takes, so consumers' tests write shaders as text.
 
 ## Design notes
 
@@ -51,5 +60,6 @@ every refusal is exercised from a module that is otherwise valid. The
 validator's tests assemble modules from text: shaders of each stage admitted,
 each rule broken in a module otherwise admitted, and each bound reached and
 passed. `tests/fuzz_spirv.rs` mutates valid modules and holds both total, their
-refusals within the module, every accepted module to an exact re-encoding, and
-every admitted entry point to agreement with its own layout.
+refusals within the module, every accepted module to an exact re-encoding,
+every admitted entry point to agreement with its own layout, and every admitted
+module to a deterministic specialization.

@@ -13,16 +13,20 @@ Adds a single group to the group registry. The group name must match
 an administrative operation: the registry refuses a caller without the
 user-administration capability.
 
-When `-g` is omitted the group id is allocated automatically, one above
-the highest existing id. A requested id that is already taken is
-refused; the registry is the authority on collisions.
+When `-g` is omitted the group id is allocated automatically: one above
+the highest existing id of 1000 or more, or 1000 when no group has one.
+Ids below 1000 are the system's and are never allocated, and once no id
+is left above the highest the group is not created. A requested id that
+is already taken is refused; the registry is the authority on
+collisions.
 
 `--` ends option parsing: every later argument is an operand.
 
 ## OPTIONS
 
 - `-g, --gid GID` — numeric group id; allocated automatically when
-  omitted (one above the highest existing id).
+  omitted (one above the highest existing id of 1000 or more, else
+  1000).
 - `-h, -?, --help` — show this command's own short help.
 
 ## EXAMPLES

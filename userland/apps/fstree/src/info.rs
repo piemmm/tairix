@@ -90,16 +90,5 @@ fn omission_record(dir: &str, omitted: u64) -> Vec<u8> {
         Human::with_suggestion(&message, "Press H to show them."),
     )
     .with_ai(&ai);
-    // Sized to the payload (the directory path is the only unbounded
-    // part), so a deep path never truncates the frame.
-    let mut buf = alloc::vec![0u8; 512 + ai.len()];
-    match record.write_jsonl(&mut buf) {
-        Ok(len) => {
-            buf.truncate(len);
-            buf
-        }
-        // A record that cannot frame is dropped whole — fd 3 is advisory
-        // and never worth a partial or malformed line.
-        Err(_) => Vec::new(),
-    }
+    tairix_util::output::framed(&record)
 }

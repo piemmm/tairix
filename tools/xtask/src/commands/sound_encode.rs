@@ -36,7 +36,7 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             .map_err(|why| format!("sound-encode: {}: {why}", master.display()))?;
         let out = dir.join(format!("{}.flac", asset.name()));
         fs::write(&out, &flac).map_err(|err| format!("sound-encode: {}: {err}", out.display()))?;
-        eprintln!(
+        noteln!(
             "xtask: [sound-encode] {} -> {} ({} bytes)",
             master.display(),
             out.display(),

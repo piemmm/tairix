@@ -305,7 +305,7 @@ refusal to grow subsystems owned elsewhere.
   engine names the endpoint as displayed (`Activation::MountEndpoint`); a
   system with no client for its protocol says so and navigates nowhere.
 - **§28, absolutely.** Discovery is I/O and never runs on the event loop: the
-  session and catalogue are the reader thread's, reached through a latest-wins
+  session and catalogue are held by the reader on the services lane, reached through a latest-wins
   desk with one collect out at a time, and the service's doorbell is a member
   of the loop's wait-set. Only a process granted no reader thread makes the
   calls on the loop, as it makes every read. Records arrive continuously, so arrivals coalesce
@@ -336,8 +336,9 @@ refusal to grow subsystems owned elsewhere.
 Every name discovery surfaces — instance and host names, TXT values,
 WS-Discovery friendly names — is shown through the one display-safety policy,
 `tairix_util::utf8::shown` (`plans/SMB.md` SMB1, done): hidden characters as
-U+FFFD, combining sequences held to UTS #39's mark limits, and
-`utf8::mixes_scripts` marking a name whose scripts could impersonate another.
+U+FFFD and combining sequences held to UTS #39's mark limits; the network
+view marks a name whose scripts could impersonate another
+(`NetworkEndpoint::mixes_scripts`, over `tairix_unicode::restriction_level`).
 Discovery adds no filter of its own, and Z9 marks a mixed-script name in the
 Network view.
 

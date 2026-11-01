@@ -323,7 +323,7 @@ external = "1"
     /// core, the locks and the heap it instruments.
     #[test]
     fn the_debug_image_diagnostics_reach_the_core_and_its_locks() {
-        let ctx = crate::Context::discover().expect("workspace context");
+        let ctx = crate::Context::discover(None).expect("workspace context");
         let features: Vec<&str> = super::super::KERNEL_DIAGNOSTICS_FEATURES
             .split(',')
             .collect();
@@ -347,7 +347,7 @@ external = "1"
     /// its screensaver's.
     #[test]
     fn the_scene_tier_holds_the_ray_tracer_and_its_screensaver() {
-        let ctx = crate::Context::discover().expect("workspace context");
+        let ctx = crate::Context::discover(None).expect("workspace context");
         let feature = super::super::SCENE_TESTS_FEATURE;
         let tier = declared(&ctx.workspace_root, feature).expect("declared");
         for package in ["tairix-raytrace", "tairix-saver-raytrace"] {

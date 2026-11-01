@@ -13,9 +13,12 @@ gyfateb i `[a-z_][a-z0-9_-]*` a gwerth degol yw'r id. Gweithred
 weinyddol yw creu grŵp: mae'r gofrestr yn gwrthod galwr heb allu
 gweinyddu defnyddwyr.
 
-Pan hepgorir `-g`, dyrennir id y grŵp yn awtomatig, un uwchlaw'r id
-uchaf sy'n bodoli. Gwrthodir id y gofynnwyd amdano sydd eisoes wedi'i
-gymryd; y gofrestr yw'r awdurdod ar wrthdrawiadau.
+Pan hepgorir `-g`, dyrennir id y grŵp yn awtomatig: un uwchlaw'r id
+uchaf sy'n bodoli o 1000 neu fwy, neu 1000 pan nad oes gan unrhyw grŵp
+un. Mae idau islaw 1000 yn eiddo i'r system ac ni chânt byth eu
+dyrannu, ac unwaith na fydd id ar ôl uwchlaw'r uchaf, ni chaiff y grŵp
+ei greu. Gwrthodir id y gofynnwyd amdano sydd eisoes wedi'i gymryd; y
+gofrestr yw'r awdurdod ar wrthdrawiadau.
 
 Mae `--` yn gorffen dosrannu opsiynau: mae pob ymresymiad diweddarach
 yn operand.
@@ -23,7 +26,8 @@ yn operand.
 ## OPTIONS
 
 - `-g, --gid GID` — id rhifol y grŵp; fe'i dyrennir yn awtomatig pan
-  hepgorir (un uwchlaw'r id uchaf sy'n bodoli).
+  hepgorir (un uwchlaw'r id uchaf sy'n bodoli o 1000 neu fwy, neu 1000
+  fel arall).
 - `-h, -?, --help` — dangos cymorth byr y gorchymyn hwn ei hun.
 
 ## EXAMPLES

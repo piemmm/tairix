@@ -551,6 +551,36 @@ fn a_refused_drop_says_what_the_application_opens() {
     assert!(long.detail().ends_with(" and others."), "{}", long.detail());
 }
 
+/// A refusal names the item and the application as shown, so what hides in
+/// either cannot make the alert read as another's; so does the plate.
+#[test]
+fn a_refused_drop_names_what_hides_in_the_item_and_the_application() {
+    let refusal = DropRefusal::new("Pa\u{202e}int", "a\u{202e}b.txt", true, &[]);
+    let spec = refusal.spec().expect("an alert");
+    assert_eq!(
+        spec.headline(),
+        "Pa\u{fffd}int cannot open \u{201c}a\u{fffd}b.txt\u{201d}"
+    );
+    assert_eq!(spec.detail(), "Pa\u{fffd}int opens no files dropped on it.");
+    let folder = DropRefusal::new("Pa\u{202e}int", "a", false, &[])
+        .spec()
+        .expect("an alert");
+    assert!(folder.detail().starts_with("Pa\u{fffd}int opens one file"));
+    let named = DropRefusal::new("Pa\u{202e}int", "a", true, &[String::from("image/png")])
+        .spec()
+        .expect("an alert");
+    assert!(named
+        .detail()
+        .starts_with("Pa\u{fffd}int opens files ending"));
+    let items = DragItems::new(
+        DocumentName::new("a\u{202e}b.txt").expect("a name"),
+        1,
+        true,
+    )
+    .expect("items");
+    assert_eq!(super::plate_text(&items), "a\u{fffd}b.txt");
+}
+
 /// A window of another application takes a drop as its slot does: the file is
 /// handed to that application, or the drop is answered with why not — and the
 /// strip lights nothing, since the pointer is not over it.

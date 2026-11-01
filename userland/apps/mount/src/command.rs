@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::imageattach::ImageAccess;
-use tairix_abi::volume::{validate_volume_name, FormatName, VolumeFsType};
+use tairix_abi::volume::{validate_volume_name, FormatName, VolumeFsTypes};
 use tairix_abi::STORAGE_CATALOG;
 use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
 
@@ -32,9 +32,9 @@ pub struct MountRequest {
     pub name: Option<String>,
     /// The directory it is also to be shown at, as given.
     pub target: Option<String>,
-    /// The filesystem the image must hold (`-t`), or `None` for whatever it
-    /// is recognised as.
-    pub expects: Option<VolumeFsType>,
+    /// The filesystems the image must hold one of (`-t`), or `None` for
+    /// whatever it is recognised as.
+    pub expects: Option<VolumeFsTypes>,
     /// How writable it is to be: read-only (`-r`), read-write or not at all
     /// (`-w`), or read-write where it can be.
     pub access: ImageAccess,
@@ -42,48 +42,56 @@ pub struct MountRequest {
     pub verbose: bool,
 }
 
-/// The filesystem types a listing shows, as a util-linux `-t` list names
-/// them: comma-separated, compared without regard to ASCII case, a type
-/// spelled `no<type>` left out, and a list beginning `no` showing every type
-/// it does not name.
+/// The filesystem types a util-linux `-t` list names: comma-separated, a
+/// type spelled `no<type>` left out, and a list beginning `no` naming every
+/// type it does not. A listing's list is compared without regard to ASCII
+/// case; a mount's only as spelled, as the type reaches the kernel.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TypeFilter {
-    /// The list as given; empty shows every type.
+    /// The list as given; empty names every type.
     list: String,
+    exact: bool,
 }
 
 impl TypeFilter {
-    /// The filter `list` spells.
+    /// The filter `list` spells, matching as spelled where `exact`.
     ///
     /// # Errors
     ///
     /// [`MountError::BadOption`] for a list naming an empty type.
-    fn parse(list: &str) -> Result<Self, MountError> {
+    fn parse(list: &str, exact: bool) -> Result<Self, MountError> {
         let named = list.strip_prefix("no").unwrap_or(list);
         if !list.is_empty() && named.split(',').any(str::is_empty) {
             return Err(MountError::BadOption);
         }
         Ok(Self {
             list: String::from(list),
+            exact,
         })
     }
 
-    /// Whether a mount of `fstype` is listed.
+    /// Whether the list names `fstype`.
     #[must_use]
     pub fn shows(&self, fstype: &[u8]) -> bool {
         if self.list.is_empty() {
             return true;
         }
+        let same = |name: &str| {
+            if self.exact {
+                name.as_bytes() == fstype
+            } else {
+                name.as_bytes().eq_ignore_ascii_case(fstype)
+            }
+        };
         let (negated, named) = match self.list.strip_prefix("no") {
             Some(rest) => (true, rest),
             None => (false, self.list.as_str()),
         };
         for element in named.split(',') {
-            let excluded = element.strip_prefix("no");
-            if excluded.is_some_and(|name| name.as_bytes().eq_ignore_ascii_case(fstype)) {
+            if element.strip_prefix("no").is_some_and(same) {
                 return false;
             }
-            if element.as_bytes().eq_ignore_ascii_case(fstype) {
+            if same(element) {
                 return !negated;
             }
         }
@@ -130,9 +138,11 @@ const OPTIONS: &[Opt<Flag>] = &[
 /// * `IMAGE /Storage/NAME` — mount it as `NAME`.
 /// * `IMAGE DIRECTORY` — mount it, and show it at `DIRECTORY` too.
 /// * `-r`/`-w` — read-only or read-write; the last of them, and of `-o ro`
-///   and `-o rw`, wins. `-w` as util-linux's: read-write, or not mounted.
-/// * `-t TYPE` — the filesystem `IMAGE` must hold, as the mount table names
-///   it, or `auto` for whatever it holds.
+///   and `-o rw`, wins. `-w` as util-linux's: read-write, or not mounted,
+///   until a later `-r` takes it back.
+/// * `-t LIST` — the filesystems `IMAGE` must hold one of, as util-linux
+///   reads a list and the mount table names each, or `auto` for whatever it
+///   holds; what it holds is recognised, so the order chooses nothing.
 /// * `-o LIST` — a comma-separated subset of `ro`, `rw`, `noexec`, `loop`
 ///   and `name=NAME`.
 /// * `-v` — say where it was mounted.
@@ -143,10 +153,11 @@ const OPTIONS: &[Opt<Flag>] = &[
 /// * [`MountError::Option`] — an option `getopt` refuses, in its words.
 /// * [`MountError::Usage`] — more than two operands, `-r`, `-w` or `-o` with
 ///   nothing to mount, or two different names asked for.
-/// * [`MountError::BadOption`] — an unknown or empty `-o` element, or a
-///   listing's `-t` naming an empty type.
+/// * [`MountError::BadOption`] — an unknown or empty `-o` element, or a `-t`
+///   list naming an empty type.
 /// * [`MountError::BadName`] — a name no volume may take.
-/// * [`MountError::UnknownType`] — a `-t` value no disk image holds.
+/// * [`MountError::UnknownType`] — a `-t` list naming no filesystem a disk
+///   image holds.
 pub fn parse(args: &[&str]) -> Result<Command, MountError> {
     let mut read_only = false;
     let mut forced = false;
@@ -165,7 +176,10 @@ pub fn parse(args: &[&str]) -> Result<Command, MountError> {
         match arg {
             Arg::Operand(operand) => operands.push(operand),
             Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
-            Arg::Opt(Flag::ReadOnly, _) => read_only = true,
+            Arg::Opt(Flag::ReadOnly, _) => {
+                read_only = true;
+                forced = false;
+            }
             Arg::Opt(Flag::ReadWrite, _) => {
                 read_only = false;
                 forced = true;
@@ -187,7 +201,7 @@ pub fn parse(args: &[&str]) -> Result<Command, MountError> {
 
     let (image, target) = match operands.as_slice() {
         [] if asks_a_mount => return Err(MountError::Usage),
-        [] => return TypeFilter::parse(types.unwrap_or_default()).map(Command::List),
+        [] => return TypeFilter::parse(types.unwrap_or_default(), false).map(Command::List),
         [image] => (*image, None),
         [image, target] => (*image, Some(*target)),
         _ => return Err(MountError::Usage),
@@ -207,10 +221,12 @@ pub fn parse(args: &[&str]) -> Result<Command, MountError> {
     }
     let expects = match types {
         None | Some("auto") => None,
-        Some(asked) => Some(image_format(asked).ok_or_else(|| MountError::UnknownType {
-            image: String::from(image),
-            name: String::from(asked),
-        })?),
+        Some(asked) => Some(
+            image_formats(asked)?.ok_or_else(|| MountError::UnknownType {
+                image: String::from(image),
+                name: String::from(asked),
+            })?,
+        ),
     };
     let access = if read_only {
         ImageAccess::ReadOnly
@@ -258,10 +274,25 @@ impl<'a> MountOption<'a> {
     }
 }
 
-/// The filesystem `name` names, as the mount table spells it, for a disk
-/// image to hold: a network protocol is no image's filesystem.
-fn image_format(name: &str) -> Option<VolumeFsType> {
-    FormatName::from_name(name).and_then(FormatName::family)
+/// The filesystems a disk image may hold that the `-t` list `list` names,
+/// each as the mount table spells it, or `None` for none: a network protocol
+/// is no image's filesystem, and an element naming none is passed over, as
+/// util-linux tries the next type.
+///
+/// # Errors
+///
+/// [`MountError::BadOption`] for a list naming an empty type.
+fn image_formats(list: &str) -> Result<Option<VolumeFsTypes>, MountError> {
+    if list.is_empty() {
+        return Ok(None);
+    }
+    let filter = TypeFilter::parse(list, true)?;
+    Ok(VolumeFsTypes::of(
+        FormatName::ALL
+            .into_iter()
+            .filter(|format| filter.shows(format.as_str().as_bytes()))
+            .filter_map(FormatName::family),
+    ))
 }
 
 /// The name a `/Storage/NAME` target asks for, or `None` for any other
@@ -286,6 +317,7 @@ mod tests {
     use alloc::string::{String, ToString};
     use tairix_abi::imageattach::ImageAccess;
     use tairix_abi::volume::VolumeFsType;
+    use tairix_abi::volume::VolumeFsTypes;
 
     fn image(image: &str) -> MountRequest {
         MountRequest {
@@ -384,7 +416,7 @@ mod tests {
             ]),
             Ok(mounted(MountRequest {
                 name: Some(String::from("workbench")),
-                expects: Some(VolumeFsType::Affs),
+                expects: only(VolumeFsType::Affs),
                 access: ImageAccess::ReadOnly,
                 verbose: true,
                 ..image("wb.adf")
@@ -393,7 +425,7 @@ mod tests {
         assert_eq!(
             parse(&["--types=iso9660", "--verbose", "--read-only", "disc.iso"]),
             Ok(mounted(MountRequest {
-                expects: Some(VolumeFsType::Iso9660),
+                expects: only(VolumeFsType::Iso9660),
                 access: ImageAccess::ReadOnly,
                 verbose: true,
                 ..image("disc.iso")
@@ -425,18 +457,65 @@ mod tests {
             ImageAccess::Writable,
             "-w stays what it says once read-write wins again"
         );
+        for taken_back in [
+            &["-w", "-r", "-o", "rw", "i"][..],
+            &["--rw", "--read-only", "-o", "rw", "i"],
+        ] {
+            assert_eq!(
+                access(taken_back),
+                ImageAccess::WritableWherePossible,
+                "{taken_back:?}: a later -r takes -w back"
+            );
+        }
+    }
+
+    /// The set holding only `fstype`.
+    fn only(fstype: VolumeFsType) -> Option<VolumeFsTypes> {
+        VolumeFsTypes::of([fstype])
+    }
+
+    fn expects(list: &str) -> Option<VolumeFsTypes> {
+        match parse(&["-t", list, "i"]) {
+            Ok(Command::Mount(request)) => request.expects,
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
     fn every_generation_of_a_format_asks_for_its_family() {
-        let expects = |name: &str| match parse(&["-t", name, "i"]) {
-            Ok(Command::Mount(request)) => request.expects,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(expects("ext2"), Some(VolumeFsType::Ext4));
-        assert_eq!(expects("adfs"), Some(VolumeFsType::Adfs));
-        assert_eq!(expects("fat32"), Some(VolumeFsType::Fat32));
+        assert_eq!(expects("ext2"), only(VolumeFsType::Ext4));
+        assert_eq!(expects("adfs"), only(VolumeFsType::Adfs));
+        assert_eq!(expects("fat32"), only(VolumeFsType::Fat32));
         assert_eq!(expects("auto"), None, "whatever it holds");
+    }
+
+    /// util-linux's `mount -t udf,iso9660` mounts what the image holds of
+    /// those, and `-t noudf` anything else; a type no image holds is passed
+    /// over, and a list naming none is an unknown type.
+    #[test]
+    fn a_mount_takes_a_util_linux_type_list() {
+        use VolumeFsType::{Adfs, Affs, Ext4, Fat32, Iso9660, Udf, ARXFS};
+        assert_eq!(expects("udf,iso9660"), VolumeFsTypes::of([Udf, Iso9660]));
+        assert_eq!(
+            expects("noudf"),
+            VolumeFsTypes::of([ARXFS, Ext4, Fat32, Iso9660, Adfs, Affs])
+        );
+        assert_eq!(expects("udf,noiso9660"), only(Udf));
+        assert_eq!(expects("vfat,iso9660"), only(Iso9660));
+        for none in ["vfat,smb3", "ISO9660", "Udf,AFFS"] {
+            assert_eq!(
+                parse(&["-t", none, "i"]),
+                Err(MountError::UnknownType {
+                    image: String::from("i"),
+                    name: String::from(none),
+                }),
+                "{none}: as spelled, as the kernel names a type"
+            );
+        }
+        assert_eq!(
+            parse(&["-t", "udf,,iso9660", "i"]),
+            Err(MountError::BadOption)
+        );
     }
 
     #[test]
@@ -553,7 +632,7 @@ mod tests {
         assert_eq!(
             parse(&["--read-o", "--ty=affs", "i"]),
             Ok(mounted(MountRequest {
-                expects: Some(VolumeFsType::Affs),
+                expects: only(VolumeFsType::Affs),
                 access: ImageAccess::ReadOnly,
                 ..image("i")
             }))

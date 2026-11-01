@@ -82,10 +82,24 @@ pub fn machine(board: Board) -> (&'static str, &'static [&'static str]) {
     }
 }
 
-/// Default CPU model, unless the spec names another ([`Spec::with_cpu`]).
-/// `cortex-a72` is a widely-available ARMv8-A core (the Raspberry Pi 4's
-/// CPU) that QEMU's `virt` board models cleanly under TCG.
-pub const CPU: &str = "cortex-a72";
+/// Default CPU model, unless the spec names another ([`Spec::with_cpu`]): the
+/// Raspberry Pi 5's core, ARMv8.2, which offers PAN, so every vertical runs
+/// under the protection the kernel holds every CPU to.
+pub const CPU: &str = "cortex-a76";
+
+/// The Raspberry Pi 4's ARMv8.0 core, which lacks PAN and HAFDBS, for a run
+/// whose subject is a CPU without them.
+pub const BASELINE_CPU: &str = "cortex-a72";
+
+/// The `-cpu` a run on `board` boots with, which a vertical dumping its
+/// tree gives QEMU too.
+#[must_use]
+pub const fn cpu(board: Board) -> &'static str {
+    match board.cpu {
+        Some(cpu) => cpu,
+        None => CPU,
+    }
+}
 
 /// QEMU host-process exit status the semihosting `SYS_EXIT` success path
 /// produces. Like riscv64's `SiFive` Test finisher, success is a plain
@@ -110,7 +124,7 @@ pub fn outcome_from_status(status: i32, serial: String) -> Outcome {
 /// Push the aarch64 QEMU argv onto `cmd`.
 ///
 /// Emits the canonical `virt`-board invocation: `-M virt`,
-/// `-cpu cortex-a72`, headless display, serial over stdio,
+/// `-cpu` [`cpu`]'s model, headless display, serial over stdio,
 /// `-m {DEFAULT_RAM_MIB}M`, `-smp {spec.cpus}`, `-no-reboot`,
 /// `-semihosting-config enable=on,target=native` (the test-result
 /// channel), the kernel ELF via `-kernel`, and each backing image as a
@@ -140,7 +154,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push(unit.into());
     }
     argv.push("-cpu".into());
-    argv.push(spec.cpu.unwrap_or(CPU).into());
+    argv.push(cpu(spec.board()).into());
     argv.push("-no-reboot".into());
     // Pin the board's emulated real-time clock when the vertical asked for
     // a deterministic one, so a clock-chip driver's reading is a value the
@@ -248,6 +262,27 @@ mod tests {
     use crate::{Arch, AttachedDevices, SoundCard};
     use std::path::PathBuf;
     use std::time::Duration;
+
+    /// A run and the tree it dumps resolve the model through one rule: the
+    /// default offers PAN, and a board naming the baseline boots on it.
+    #[test]
+    fn a_spec_naming_a_cpu_boots_a_board_on_it() {
+        assert_eq!(fixture_spec(1).board().cpu, None);
+        assert_eq!(cpu(fixture_spec(1).board()), CPU);
+        let baseline = fixture_spec(1).with_cpu(BASELINE_CPU);
+        assert_eq!(baseline.board().cpu, Some(BASELINE_CPU));
+        assert_eq!(cpu(Board::default().with_cpu(BASELINE_CPU)), BASELINE_CPU);
+        let argv: Vec<String> = build_argv(&baseline, Path::new("/tmp/k.elf"))
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let at = argv
+            .iter()
+            .position(|arg| arg == "-cpu")
+            .expect("a CPU model");
+        assert_eq!(argv[at + 1], BASELINE_CPU);
+        assert_ne!(CPU, BASELINE_CPU);
+    }
 
     fn fixture_spec(cpus: u32) -> Spec {
         Spec {

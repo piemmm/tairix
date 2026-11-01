@@ -18,9 +18,13 @@
 //!   no new architecture-neutral surface is introduced.
 //!
 //! An AP starts on the start-up root (`paging::startup_root`), which maps
-//! the trampoline page as itself and the kernel's image window, and its
-//! first Rust code joins the kernel root before anything else runs. The
-//! consumer supplies what it runs then, through [`set_secondary_entry`].
+//! the trampoline page as itself and the kernel's image window. There it
+//! runs only the naked FPU enable and `tairix_arch_x86_64_ap_apic_mode`,
+//! which puts its local APIC in the boot CPU's mode; its entry,
+//! `tairix_arch_x86_64_ap_entry`, then lifts its `CPUID` limit and joins the
+//! kernel root before anything else runs, and answers the boot CPU, joined
+//! or refused for the protections it lacks. The consumer supplies what a
+//! joined AP runs, through [`set_secondary_entry`].
 //!
 //! # Why this lives in `kernel/arch/x86_64` and not `kernel/sched`
 //!
@@ -34,14 +38,14 @@
 //!
 //! Every `unsafe` block has a `// SAFETY:` justification. The payload
 //! install and the boot-slot write are plain slice copies, ordered against
-//! the SIPI by the caller's release fence; the `ready` rendezvous the two
-//! CPUs race on is an atomic reached through one shared view, never through
-//! the frame's exclusive one. Nothing about the trampoline page leaks
-//! across the crate boundary as a raw pointer.
+//! the SIPI by the caller's release fence; the answer the two CPUs race on
+//! is an atomic kernel static both of the AP's roots map, never a word of
+//! the frame. Nothing about the trampoline page leaks across the crate
+//! boundary as a raw pointer.
 
 use core::mem::offset_of;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // The caller-provided `ApStackPool` payload is held in an `UnsafeCell`
 // so its `static` lands in writable memory; only the freestanding
@@ -52,6 +56,10 @@ use core::cell::UnsafeCell;
 use tairix_arch_api::CpuId;
 
 use crate::apic::{DeliveryMode, Lapic, LapicMmio};
+use crate::protection::Protections;
+use tairix_arch_api::SmpError;
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+use tairix_arch_api::StartAnswer;
 use tairix_sync::FnCell;
 
 // --- Layout constants ------------------------------------------------
@@ -106,14 +114,13 @@ const SIPI_VECTOR_IN_RANGE: () = assert!((AP_TRAMPOLINE_PHYS >> 12) < 256);
 
 // --- ApBootSlot ------------------------------------------------------
 
-/// Bytes of [`ApBootSlot`] the trampoline actually reads: through `ready`
-/// at [`AP_BOOT_SLOT_READY_OFFSET`].
+/// Bytes of [`ApBootSlot`] the trampoline actually reads: through `cpu_id`.
 ///
 /// Deliberately not `size_of::<ApBootSlot>()`, which is larger: the struct
 /// carries tail padding up to its 8-byte alignment. That padding is not
 /// part of the contract with `ap_trampoline.s` and is uninitialised, so
 /// copying it out of the struct would be a read of uninitialised memory.
-const AP_BOOT_SLOT_WIRE_LEN: usize = AP_BOOT_SLOT_READY_OFFSET + core::mem::size_of::<u32>();
+const AP_BOOT_SLOT_WIRE_LEN: usize = offset_of!(ApBootSlot, cpu_id) + core::mem::size_of::<u32>();
 
 /// The wire image must fit inside the struct it is taken from, and inside
 /// the frame region reserved for it.
@@ -133,8 +140,8 @@ const AP_BOOT_SLOT_WIRE_FITS: () = {
 /// |  0x00  |  8   | `cr3`         — the start-up root               |
 /// |  0x08  |  8   | `stack_top`   — 16-byte-aligned RSP on entry    |
 /// |  0x10  |  4   | `cpu_id`      — scheduler CPU id (u32)          |
-/// |  0x14  | 44   | reserved (zero)                                 |
-/// |  0x40  |  4   | `ready`       — 1 once the AP has left the page |
+///
+/// The AP answers through a kernel static, never through the page.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApBootSlot {
@@ -145,18 +152,10 @@ pub struct ApBootSlot {
     pub stack_top: u64,
     /// Scheduler-visible CPU identifier the AP's entry receives.
     pub cpu_id: u32,
-    /// Reserved span so `ready` lands in its own cache line, at `0x40`.
-    /// Public because the struct is `#[repr(C)]` and its byte layout is
-    /// part of the wire contract with `ap_trampoline.s`, written out with
-    /// the rest of that contract by [`TrampolineFrame::write_slot`].
-    pub reserved: [u8; 44],
-    /// Initial value of the rendezvous flag. Always written as `0`; the AP
-    /// stores a `1` once it has left the trampoline page.
-    pub ready: u32,
 }
 
 impl ApBootSlot {
-    /// Build a fresh slot. The `ready` flag starts at `0`.
+    /// Build a fresh slot.
     ///
     /// # Errors
     ///
@@ -174,8 +173,6 @@ impl ApBootSlot {
             cr3,
             stack_top,
             cpu_id,
-            reserved: [0; 44],
-            ready: 0,
         })
     }
 }
@@ -194,10 +191,8 @@ pub enum SlotError {
 /// Errors raised by [`TrampolineFrame`] operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallError {
-    /// The slice's base was not 4 KiB aligned. The whole module reads the
-    /// frame at fixed sub-offsets — including the 4-byte-aligned `ready`
-    /// cell the two CPUs reach as an `AtomicU32` — so an unaligned base is
-    /// refused here rather than assumed downstream.
+    /// The slice's base was not 4 KiB aligned, so it is not a page the SIPI
+    /// can start an AP at.
     FrameMisaligned,
     /// The slice was not exactly 4 KiB.
     FrameWrongSize,
@@ -236,9 +231,6 @@ impl<'a> TrampolineFrame<'a> {
         if frame.len() != 4096 {
             return Err(InstallError::FrameWrongSize);
         }
-        // Checked, not assumed: the in-frame `ready` cell is reached as an
-        // `AtomicU32`, whose reference would be invalid at an unaligned
-        // address.
         if !frame.as_ptr().addr().is_multiple_of(4096) {
             return Err(InstallError::FrameMisaligned);
         }
@@ -292,14 +284,8 @@ impl<'a> TrampolineFrame<'a> {
         wire[offset_of!(ApBootSlot, stack_top)..][..8]
             .copy_from_slice(&slot.stack_top.to_ne_bytes());
         wire[offset_of!(ApBootSlot, cpu_id)..][..4].copy_from_slice(&slot.cpu_id.to_ne_bytes());
-        wire[offset_of!(ApBootSlot, reserved)..][..slot.reserved.len()]
-            .copy_from_slice(&slot.reserved);
-        wire[offset_of!(ApBootSlot, ready)..][..4].copy_from_slice(&slot.ready.to_ne_bytes());
     }
 }
-
-/// Offset of the `ready` field within `ApBootSlot`.
-const AP_BOOT_SLOT_READY_OFFSET: usize = offset_of!(ApBootSlot, ready);
 
 // --- INIT-SIPI-SIPI sequencer ---------------------------------------
 
@@ -401,10 +387,12 @@ pub enum StartCpuError {
     /// The kernel root and the start-up root were never built, so the AP
     /// would have no root to start on or to join.
     NoKernelRoot,
-    /// The AP never published its `ready` flag within the spin budget;
-    /// the trampoline frame must not be reused for the next AP, so the
-    /// bring-up fails closed rather than racing.
+    /// The AP did not answer within the spin budget, so it was sent back
+    /// to wait for a start-up.
     StartTimedOut,
+    /// The AP answered that it does not offer these protections in force,
+    /// so it did not join and was sent back to wait for a start-up.
+    LacksProtections(Protections),
 }
 
 impl StartCpuError {
@@ -416,6 +404,25 @@ impl StartCpuError {
             Self::NoEntryInstalled => "no_secondary_entry_installed",
             Self::NoKernelRoot => "no_kernel_root",
             Self::StartTimedOut => "ap_start_timed_out",
+            Self::LacksProtections(_) => "ap_lacks_protections",
+        }
+    }
+
+    /// Whether the CPU was started and then stopped, so it is to be dropped
+    /// from the map: no shootdown may wait on it, and nothing starts it again.
+    #[must_use]
+    pub const fn stops_cpu(self) -> bool {
+        matches!(self, Self::StartTimedOut | Self::LacksProtections(_))
+    }
+}
+
+impl From<StartCpuError> for SmpError {
+    fn from(err: StartCpuError) -> Self {
+        match err {
+            StartCpuError::CpuIdOutOfRange => Self::InvalidCpu,
+            StartCpuError::NoEntryInstalled | StartCpuError::NoKernelRoot => Self::NotReady,
+            StartCpuError::StartTimedOut => Self::StartRejected(0),
+            StartCpuError::LacksProtections(_) => Self::LacksProtection,
         }
     }
 }
@@ -452,11 +459,34 @@ fn clear_secondary_entry_for_tests() {
 
 // --- Bare-metal bring-up orchestration ------------------------------
 
-/// Spin budget the boot CPU waits for an AP's `ready` flag before
-/// declaring the start timed out. Generous: each iteration is a single
-/// acquire-load, and a healthy AP sets `ready` within a few thousand.
+/// Spin budget the boot CPU waits for an AP's answer before declaring the
+/// start timed out. Generous: each iteration is a single acquire-load, and
+/// a healthy AP answers within a few thousand.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-const AP_READY_SPIN_BUDGET: u64 = 10_000_000;
+const AP_ANSWER_SPIN_BUDGET: u64 = 10_000_000;
+
+/// The AP being started answers here: a kernel static, which the start-up
+/// root maps as the kernel root does, so a refused AP answers without
+/// joining, and the trampoline page is never written. Each start readies it
+/// for its own AP ([`tairix_arch_api::awaiting_answer`]) and is settled on it
+/// by one compare-and-swap, so an AP answering a start already given up on
+/// never runs.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+static AP_ANSWER: AtomicU64 = AtomicU64::new(0);
+
+/// What the boot CPU makes of an AP's `answer`: it joined, was refused for
+/// the protections it lacks, or gave no answer the boot CPU can read.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+fn outcome(answer: Option<StartAnswer>) -> Result<(), StartCpuError> {
+    match answer {
+        Some(StartAnswer::Joined) => Ok(()),
+        Some(StartAnswer::Refused(lacking)) => Err(Protections::from_bits(lacking.get()).map_or(
+            StartCpuError::StartTimedOut,
+            StartCpuError::LacksProtections,
+        )),
+        None => Err(StartCpuError::StartTimedOut),
+    }
+}
 
 /// Per-AP bootstrap stack, 16 KiB, aligned to 16 bytes per the System V
 /// AMD64 ABI.
@@ -605,35 +635,41 @@ unsafe fn trampoline_frame_mut() -> &'static mut [u8] {
     }
 }
 
-/// The boot slot's `ready` flag, through the direct map: the one view both
-/// the boot CPU and the AP it launches use, so no exclusive borrow of the
-/// frame is live while they race on it.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn ready_flag() -> &'static AtomicU32 {
-    let cell = AP_TRAMPOLINE_PHYS + (AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_READY_OFFSET) as u64;
-    // SAFETY: the boot floor maps the frame for the kernel's life, the cell
-    // is 4-byte aligned at a 4-byte-aligned offset of a page, and every
-    // access to it while an AP may run is atomic.
-    unsafe { &*(crate::paging::physmap_virt(cell) as *const AtomicU32) }
-}
-
-/// Rust side of the AP trampoline: join the kernel root, report the AP
-/// live, and run the installed entry.
+/// Rust side of the AP trampoline: lift the CPU's `CPUID` limit
+/// ([`crate::cpuid`]), join the kernel root, answer the boot CPU, and run the
+/// installed entry.
 ///
-/// Reporting comes after the join, which leaves the trampoline page behind,
-/// so the boot CPU never reuses the page under a CPU still executing it. An AP
-/// that cannot hold the kernel's protections never reports, so the boot CPU's
-/// wait for it times out and the kernel runs without it.
+/// The answer comes after the trampoline page is left behind — the join
+/// leaves it, a refusal never returns to it — so the boot CPU never reuses
+/// the page under a CPU still executing it. An AP that lacks a protection in
+/// force answers which, still on the start-up root and held to nothing,
+/// and stops: that root maps no user page, and it takes no interrupt.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn tairix_arch_x86_64_ap_entry(cpu: CpuId) -> ! {
+    // SAFETY: CPL 0. The AP has no IDT yet, but the lift touches its
+    // register only where the limit can be set, an Intel part, on which the
+    // register is architectural.
+    let uncapped = unsafe { crate::cpuid::lift_limit() };
     // SAFETY: an AP fresh from the trampoline: CPL 0 with interrupts
     // masked and `AC` clear since INIT, on the start-up root, whose image
     // window is the kernel root's, so this code and the AP's stack stay
     // mapped across the load. `start_secondary` refused to launch it before
     // the root was built.
-    if unsafe { crate::paging::join_kernel_root() } {
-        ready_flag().store(1, Ordering::Release);
+    let answer = match unsafe { crate::paging::join_kernel_root(&uncapped) } {
+        Ok(()) => StartAnswer::Joined,
+        Err(crate::paging::Refusal::Lacks(lacking)) => {
+            match core::num::NonZeroU8::new(lacking.bits()) {
+                Some(lacking) => StartAnswer::Refused(lacking),
+                // A refusal lacking nothing is no answer: the start times out.
+                None => crate::reset::park_cpu(),
+            }
+        }
+        // Unreachable: no AP starts before the root is built.
+        Err(crate::paging::Refusal::NoRoot) => crate::reset::park_cpu(),
+    };
+    let stands = tairix_arch_api::answer_start(&AP_ANSWER, cpu, answer);
+    if stands && answer == StartAnswer::Joined {
         if let Some(entry) = SECONDARY_ENTRY_FN.load() {
             entry(cpu);
         }
@@ -691,10 +727,12 @@ extern "C" fn tairix_arch_x86_64_ap_apic_mode() {
 ///
 /// Installs the trampoline payload, stamps a per-AP [`ApBootSlot`] (the
 /// start-up root, this AP's reserved stack, and `cpu` as the context id),
-/// drives the INIT-SIPI-SIPI handshake, then waits for the AP to publish
-/// its `ready` flag before returning — so the shared trampoline frame is
-/// safe to reuse for the next AP. The AP runs the installed
-/// [`set_secondary_entry`] entry on the kernel root.
+/// drives the INIT-SIPI-SIPI handshake, then waits for the AP's answer before
+/// returning — so the shared trampoline frame is safe to reuse for the next
+/// AP. A joined AP runs the installed [`set_secondary_entry`] entry on the
+/// kernel root; one refused, or whose start is withdrawn for want of an
+/// answer in time, is sent INIT, back to waiting for a start-up, and an AP
+/// answering a withdrawn start finds its answer refused and never runs.
 ///
 /// # Errors
 ///
@@ -744,8 +782,10 @@ pub unsafe fn start_secondary(target_apic_id: u32, cpu: CpuId) -> Result<(), Sta
         }
         frame.write_slot(&slot);
     }
+    AP_ANSWER.store(tairix_arch_api::awaiting_answer(cpu), Ordering::Relaxed);
 
-    // Every slot byte must be visible to the AP before the SIPI.
+    // Every slot byte, and the readied answer, must be visible to the AP
+    // before the SIPI.
     core::sync::atomic::fence(Ordering::Release);
 
     let mut lapic = Lapic::new(crate::apic::LocalApic);
@@ -754,20 +794,20 @@ pub unsafe fn start_secondary(target_apic_id: u32, cpu: CpuId) -> Result<(), Sta
     };
     init_sipi_sipi(&mut lapic, &mut delay, target_apic_id, sipi_vector());
 
-    // Wait for the AP's released `ready` flag before returning, so the
-    // shared frame can be reused for the next AP.
-    let mut spins: u64 = 0;
-    while ready_flag().load(Ordering::Acquire) == 0 {
+    // The answer comes once the AP has left the shared frame, so the next
+    // start may reuse it.
+    let mut spins = 0;
+    let answer = tairix_arch_api::settle_start(&AP_ANSWER, cpu, || {
         spins += 1;
-        if spins > AP_READY_SPIN_BUDGET {
-            // Back to waiting for a start-up, so a CPU that never answered
-            // cannot run late on the frame the next start reuses.
-            lapic.send_ipi(target_apic_id, DeliveryMode::Init, 0);
-            return Err(StartCpuError::StartTimedOut);
-        }
-        core::hint::spin_loop();
+        spins > AP_ANSWER_SPIN_BUDGET
+    });
+    let outcome = outcome(answer);
+    if outcome.is_err() {
+        // Back to waiting for a start-up, so a CPU that did not join cannot
+        // run late on the frame the next start reuses.
+        lapic.send_ipi(target_apic_id, DeliveryMode::Init, 0);
     }
-    Ok(())
+    outcome
 }
 
 // --- Tests -----------------------------------------------------------
@@ -835,7 +875,7 @@ mod tests {
     }
 
     /// The trampoline reads the slot at offsets of its own; they are the
-    /// struct's, and `ready` keeps a cache line of its own.
+    /// struct's.
     #[test]
     fn the_trampoline_reads_the_slot_where_rust_writes_it() {
         assert_eq!(
@@ -854,7 +894,6 @@ mod tests {
             trampoline_constant("AP_BOOT_SLOT_CPU_ID"),
             offset_of!(ApBootSlot, cpu_id)
         );
-        assert_eq!(AP_BOOT_SLOT_READY_OFFSET, 0x40);
         assert!(AP_BOOT_SLOT_OFFSET + core::mem::size_of::<ApBootSlot>() <= 4096);
     }
 
@@ -881,12 +920,10 @@ mod tests {
         assert_eq!(slot.cr3, 0x1000);
         assert_eq!(slot.stack_top, 0x0001_0000);
         assert_eq!(slot.cpu_id, 3);
-        assert_eq!(slot.ready, 0);
     }
 
     /// A 4 KiB-aligned stand-in for the real low physical frame at
-    /// `AP_TRAMPOLINE_PHYS`. The alignment is load-bearing, not cosmetic:
-    /// the in-frame `ready` cell is reached as an `AtomicU32`.
+    /// `AP_TRAMPOLINE_PHYS`, which `TrampolineFrame::new` requires.
     #[repr(C, align(4096))]
     struct FrameBuf([u8; 4096]);
 
@@ -905,9 +942,8 @@ mod tests {
         );
     }
 
-    /// The module reads the frame at fixed sub-offsets and reaches the
-    /// `ready` cell as an `AtomicU32`, so an unaligned base is refused at
-    /// construction rather than assumed by every later access.
+    /// The SIPI starts an AP at a page boundary, so an unaligned base is
+    /// refused at construction rather than assumed by every later access.
     #[test]
     fn frame_new_rejects_a_misaligned_base() {
         // One 4 KiB window inside a larger aligned buffer, started one
@@ -983,11 +1019,6 @@ mod tests {
             u32::from_le_bytes(field(offset_of!(ApBootSlot, cpu_id), 4).try_into().unwrap()),
             7
         );
-        assert_eq!(
-            u32::from_le_bytes(field(AP_BOOT_SLOT_READY_OFFSET, 4).try_into().unwrap()),
-            0,
-            "a launch starts with the AP not yet reported live"
-        );
     }
 
     /// The slot's byte image is the wire contract, not the struct's
@@ -1017,11 +1048,11 @@ mod tests {
             buf.0[tail..tail_end].iter().all(|&b| b == 0),
             "write_slot wrote past the wire contract into {tail:#x}..{tail_end:#x}"
         );
-        // And the last contract byte *was* written.
-        let ready_at = AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_READY_OFFSET;
+        // And the last contract field *was* written.
+        let cpu_at = AP_BOOT_SLOT_OFFSET + offset_of!(ApBootSlot, cpu_id);
         assert_eq!(
-            u32::from_le_bytes(buf.0[ready_at..ready_at + 4].try_into().unwrap()),
-            0
+            u32::from_le_bytes(buf.0[cpu_at..cpu_at + 4].try_into().unwrap()),
+            7
         );
     }
 
@@ -1106,5 +1137,50 @@ mod tests {
         );
         assert_eq!(StartCpuError::NoKernelRoot.as_str(), "no_kernel_root");
         assert_eq!(StartCpuError::StartTimedOut.as_str(), "ap_start_timed_out");
+        assert_eq!(
+            StartCpuError::LacksProtections(Protections::SMAP).as_str(),
+            "ap_lacks_protections"
+        );
+    }
+
+    #[test]
+    fn the_boot_cpu_reads_an_ap_s_answer_as_joined_refused_or_silent() {
+        let lacking = |bits| StartAnswer::Refused(core::num::NonZeroU8::new(bits).unwrap());
+        assert_eq!(outcome(Some(StartAnswer::Joined)), Ok(()));
+        for bits in 1..=Protections::ALL.bits() {
+            assert_eq!(
+                outcome(Some(lacking(bits))),
+                Err(StartCpuError::LacksProtections(
+                    Protections::from_bits(bits).unwrap()
+                )),
+                "{bits:#x}"
+            );
+        }
+        assert_eq!(
+            outcome(Some(lacking(1 << 3))),
+            Err(StartCpuError::StartTimedOut),
+            "a refusal naming no protection is no answer this port reads"
+        );
+        assert_eq!(outcome(None), Err(StartCpuError::StartTimedOut));
+    }
+
+    #[test]
+    fn a_refused_cpu_is_stopped_and_named_for_why() {
+        let refused = StartCpuError::LacksProtections(Protections::SMAP);
+        assert_eq!(SmpError::from(refused), SmpError::LacksProtection);
+        assert!(refused.stops_cpu());
+        assert_eq!(
+            SmpError::from(StartCpuError::StartTimedOut),
+            SmpError::StartRejected(0)
+        );
+        assert!(StartCpuError::StartTimedOut.stops_cpu());
+        for (err, neutral) in [
+            (StartCpuError::CpuIdOutOfRange, SmpError::InvalidCpu),
+            (StartCpuError::NoEntryInstalled, SmpError::NotReady),
+            (StartCpuError::NoKernelRoot, SmpError::NotReady),
+        ] {
+            assert_eq!(SmpError::from(err), neutral);
+            assert!(!err.stops_cpu(), "{err:?} started nothing");
+        }
     }
 }

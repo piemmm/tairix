@@ -247,3 +247,36 @@ OpReturn",
     ));
     assert_eq!(rule, Rule::OperandValue(2));
 }
+
+#[test]
+fn a_narrow_selectors_case_literals_are_admitted_only_as_its_type_holds_them() {
+    let module = |selector: &str, literal: &str| {
+        format!(
+            r#"
+OpCapability Shader
+OpCapability Int16
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%narrow = OpTypeInt 16 {selector}
+%s = OpConstant %narrow 5
+%main = OpFunction %void None %fn
+%entry = OpLabel
+OpSelectionMerge %m None
+OpSwitch %s %m {literal} %case
+%case = OpLabel
+OpBranch %m
+%m = OpLabel
+OpReturn
+OpFunctionEnd
+"#
+        )
+    };
+    admit(&module("1", "-1")).expect("sign-extended where signed");
+    admit(&module("1", "-32768")).expect("its least value");
+    assert_eq!(refused(&module("1", "0xffff")), Rule::OperandValue(2));
+    admit(&module("0", "65535")).expect("zero-extended where unsigned");
+    assert_eq!(refused(&module("0", "-1")), Rule::OperandValue(2));
+}

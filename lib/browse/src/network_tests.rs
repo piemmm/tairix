@@ -10,7 +10,8 @@ use tairix_discovery::OwnedMembership;
 use tairix_icon::IconKind;
 
 use super::{
-    carried, items, order, NetworkItem, MIXED_SCRIPTS_LABEL, NOT_LISTED_LABEL, TRUNCATED_LABEL,
+    carried, items, mixes_scripts, order, NetworkItem, MIXED_SCRIPTS_LABEL, NOT_LISTED_LABEL,
+    TRUNCATED_LABEL,
 };
 use crate::sort::{Folders, SortDirection, SortKey, SortMode};
 
@@ -820,5 +821,23 @@ mod location {
                 "the first row did not change, so it is not repainted"
             );
         }
+    }
+}
+
+#[test]
+fn a_name_mixing_scripts_to_impersonate_is_told_apart() {
+    for text in [
+        "paypal",
+        "caf\u{e9}",
+        "Ελληνικά",
+        "日本語abc",
+        "한국어abc",
+        "",
+    ] {
+        assert!(!mixes_scripts(text), "{text:?}");
+    }
+    // Cyrillic а and о among Latin; Greek Ο among Latin.
+    for text in ["p\u{430}yp\u{430}l", "g\u{43e}\u{43e}gle", "\u{39f}ffice"] {
+        assert!(mixes_scripts(text), "{text:?}");
     }
 }

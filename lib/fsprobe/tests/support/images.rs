@@ -17,11 +17,12 @@ use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
 use tairix_fsprobe::{adfs, affs, ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC, FAT_DIR_ENTRY_LEN};
 
-/// An in-memory device over a byte image.
+/// An in-memory device over a byte image, counting the transfers it serves.
 pub struct Image {
     pub block_size: u32,
     pub bytes: Vec<u8>,
     pub layout: Option<DiscLayout>,
+    pub reads: usize,
 }
 
 impl Block for Image {
@@ -33,6 +34,7 @@ impl Block for Image {
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.reads += 1;
         let at = lba as usize * self.block_size as usize;
         let src = self
             .bytes
@@ -67,6 +69,7 @@ pub fn device(
         block_size,
         bytes,
         layout,
+        reads: 0,
     })
     .expect("valid geometry")
 }
@@ -184,6 +187,44 @@ pub fn adfs_old_map(name: &[u8; 10]) -> Vec<u8> {
     image
 }
 
+/// The F format's disc record: 1600 KiB of 1024-byte sectors in four zones.
+pub fn adfs_f_record() -> adfs::DiscRecord {
+    let mut record = adfs::DiscRecord::parse(&[0; adfs::DISC_RECORD_SIZE]);
+    record.log2secsize = 10;
+    record.secspertrack = 10;
+    record.heads = 2;
+    record.density = 4;
+    record.idlen = 15;
+    record.log2bpmb = 6;
+    record.nzones = 4;
+    record.zone_spare = 0x640;
+    record.root = 0x200;
+    record.disc_size = 1600 * 1024;
+    record.disc_name = *b"FloppyF   ";
+    record
+}
+
+/// An image whose sealed boot block carries `record`, and nothing else.
+pub fn adfs_boot_block(record: &adfs::DiscRecord) -> Vec<u8> {
+    let at = adfs::BOOT_BLOCK_OFFSET as usize;
+    let mut image = vec![0u8; at + adfs::BOOT_BLOCK_SIZE];
+    let mut block = [0u8; adfs::BOOT_BLOCK_SIZE];
+    adfs::seal_boot_block(&mut block, record);
+    image[at..].copy_from_slice(&block);
+    image
+}
+
+/// Seal again the boot block `image` carries, where it reaches that far.
+pub fn seal_adfs_boot_block(image: &mut [u8]) {
+    let at = adfs::BOOT_BLOCK_OFFSET as usize;
+    if let Some(block) = image
+        .get_mut(at..at + adfs::BOOT_BLOCK_SIZE)
+        .and_then(|block| <&mut [u8; adfs::BOOT_BLOCK_SIZE]>::try_from(block).ok())
+    {
+        block[adfs::BOOT_BLOCK_SIZE - 1] = adfs::boot_block_checksum(block);
+    }
+}
+
 /// An AmigaDOS volume of `blocks` blocks of `block_size` bytes: a `DOS`
 /// boot block of type `flags` and a root block named `name` at the volume's
 /// middle.
@@ -214,14 +255,7 @@ pub fn write_affs_root(block: &mut [u8], name: &[u8]) {
     }
     .write(block, offsets.created());
     affs::put_be32(block, offsets.sec_type(), affs::ST_ROOT);
-    seal_affs(block);
-}
-
-/// Recompute `block`'s checksum at byte 20, where every header keeps it.
-pub fn seal_affs(block: &mut [u8]) {
-    affs::put_be32(block, 20, 0);
-    let sum = affs::checksum(block, 20);
-    affs::put_be32(block, 20, sum);
+    affs::seal(block, affs::CHECKSUM);
 }
 
 pub mod iso {

@@ -47,9 +47,13 @@ New work targets the CVE classes these do **not** yet hit.
 
 x86_64 holds every CPU to SMEP, SMAP and UMIP where the CPU offers them,
 aarch64 to PAN where it offers it, and riscv64 runs with `sstatus.SUM` clear,
-so on no port does the kernel reach a user page but through its validated
-copy (§5); KPTI/IBPB are `Pending` and tied to **Stage 6** (`sidechannel.rs`
-states this). A live ring-3 entry path exists —
+so where the hardware offers the protection the kernel cannot reach a user
+page but through its validated copy (§5). On a CPU that offers none — the
+Raspberry Pi 4's Cortex-A72, an x86 part without SMAP — only the discipline
+of reaching user memory through the direct map holds, and the boot records
+the absence at Warn (`KERNEL_BOOT_PROTECTIONS`, 4115); a software PAN for
+those parts is staged (`PLAN.md` SW-PAN, `plans/OPEN-DEFECTS.md` D1626). KPTI/IBPB are `Pending`
+and tied to **Stage 6** (`sidechannel.rs` states this). A live ring-3 entry path exists —
 the Arch HAL `EnterUser` `iretq` primitive
 (`kernel/arch/x86_64/src/userentry.rs`), exercised end-to-end by
 `enter_user_qemu_x86_64` — as does the per-access `copy_from_user` hardware
@@ -186,7 +190,10 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   `DF`, so each such stub clears it before Rust, as the boot entry does: host
   tests `every_asynchronous_entry_stub_clears_the_direction_flag_before_rust`,
   `the_boot_entries_clear_the_direction_flag_before_rust`, and
-  `every_naked_entry_is_classified`, which keeps a new stub from escaping them.
+  `every_entry_point_is_classified`, which keeps a new naked or assembly entry
+  point from escaping them; an assembly stub a gate reaches only pushes
+  immediates and jumps to a checked one
+  (`every_gate_entered_assembly_stub_only_forwards`).
 - **Stack-pivot / missing GS swap (CVE-2019-1125, `swapgs`).** *Landed:*
   `enter_user_qemu_x86_64` drops to ring 3 through the HAL `iretq` primitive
   and issues a genuine ring-3 → ring-0 `syscall`, exercising the entry stub's
@@ -207,7 +214,8 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
 - **Kernel W^X and `CR0.WP` (CWE-123 / CWE-787; write-what-where into kernel
   text).** *Landed on x86_64* (`plans/OPEN-DEFECTS.md` D1571): every CPU runs
   on the kernel root, which maps nothing physical as itself, maps the image per
-  section (text RX, read-only data R+NX, data RW+NX), keeps the direct map
+  section (text RX, read-only data and the boot stack's guard R+NX, data
+  RW+NX), keeps the direct map
   non-executable with its alias of the text and read-only data read only, and
   sets `CR0.WP` on joining, so a read-only leaf holds against the kernel.
   Host tests in `paging::kernel_root` cover the table builders over adversarial
@@ -218,24 +226,52 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   x86_64* (`plans/OPEN-DEFECTS.md` D1579): joining the kernel root holds every
   CPU to `CR0.WP` and, where the CPU offers them, `CR4.SMEP`, `CR4.SMAP` and
   `CR4.UMIP` (`kernel/arch/x86_64/src/protection.rs`); the boot CPU settles the
-  set and a CPU that cannot hold it does not join. The kernel reaches user
+  set and a CPU that cannot hold it does not join, but answers what it lacks
+  and is stopped (`smp_cpu_lacks_protection`, D1592). The kernel reaches user
   memory only through the direct map, so it never sets `AC`, and every entry
   clears the `AC` user code may set. Host tests: `protection::tests` (the
   CPUID decode, the `CR4` bits, the join rule),
   `every_asynchronous_entry_stub_clears_the_alignment_check_flag_under_smap`,
+  `every_shared_template_operand_is_bound_to_its_definition` (the `clac`
+  test's `{smap}`/`{in_force}` bound to the SMAP bit and the set in force),
   `the_boot_entry_writes_rflags_whole`, and the `IA32_FMASK` tests above.
   QEMU: every x86_64 vertical runs on a model offering all three (`tools/qemu`
   `CPU`); `uaccess_fault_qemu_x86_64` asserts the `CR4` bits and the boot's
   record of them, and that a guarded copy reading a mapped user page through
   its user address faults while the same bytes copy through the direct map;
-  `preempt_el0_qemu_x86_64` and one `cross_cpu_tlb_shootdown_qemu_x86_64`
-  enrolment run plain `qemu64`, so entries are taken, and an application
-  processor joins, where `clac` does not exist. A kernel instruction fetch from a user
+  `preempt_el0_qemu_x86_64` runs a model offering SMEP and UMIP without
+  SMAP, so its entries are taken where `clac` does not exist while a
+  protection is in force, and one `cross_cpu_tlb_shootdown_qemu_x86_64`
+  enrolment runs plain `qemu64`, so an application processor joins under an
+  empty set;
+  `tairix-test-ap-lacking-smap-qemu-x86-64` cold-plugs an AP with SMAP off
+  beside a boot CPU holding it and requires the start refused for exactly
+  that, the AP dropped from the map and never run. A kernel instruction fetch from a user
   page is not provoked on the metal: `CR4.SMEP` is asserted set instead.
+- **Firmware that hides the protections (CWE-693; D1591).** *Landed on
+  x86_64*: an Intel part's *Limit CPUID Maxval* hides every basic leaf past 2,
+  and with it SMEP, SMAP and UMIP, so each CPU lifts it before its offer is
+  read, the lift's proof gating the read (`kernel/arch/x86_64/src/cpuid.rs`);
+  every leaf goes through one max-leaf rule, and an XSAVE layout CPUID cannot
+  vouch for refuses the CPU rather than sizing a save past its stack. *XD Bit
+  Disable* would make `EFER.NXE` reserved: both trampolines clear it and arm
+  NXE only where execute-disable is offered, and the boot refuses a CPU
+  without it. Host tests: `cpuid::tests` (the lift touches only a limited
+  Intel part's register, clears the limit alone and reads it back),
+  `xstate::tests::an_xsave_image_too_small_for_a_save_or_too_large_to_publish_is_refused`,
+  `xstate::tests::an_image_holds_each_enabled_component_whole`,
+  `every_boot_entry_arms_execute_disable_only_where_it_is_offered`, and the
+  boot record's level. QEMU: `tairix-test-fp-isolation-capped-cpuid-qemu-x86-64`
+  runs an Intel model whose leaves stop at 2 and requires FXSAVE64. Neither
+  QEMU nor KVM models the two firmware controls, so their writes are proven
+  on the host alone.
 - **PAN and `SUM` (CWE-862; the SMAP-bypass class on aarch64 and riscv64).**
   *Landed* (`plans/OPEN-DEFECTS.md` D1584, D1585). aarch64: the boot CPU
   settles whether PAN is in force from `ID_AA64MMFR1_EL1`, each CPU sets
-  `PSTATE.PAN` as it starts and one that cannot does not join, and translation
+  `PSTATE.PAN` as it starts and one that cannot does not join, but answers so
+  and fails its start `smp_cpu_lacks_protection` (D1592); a core runs only on
+  the boot CPU's verdict taking its join, each answer and verdict alone in a
+  writeback granule of the core's own slot, and translation
   comes on with `SCTLR_EL1.SPAN` clear, so every exception taken to EL1 sets it
   again (`kernel/arch/aarch64/src/protection.rs`); a kernel-only Normal
   Non-Cacheable leaf is EL1's alone, and the watchdog's stack-link probe
@@ -243,9 +279,12 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   trap vector and nothing sets it again, so the first-use floating-point trap
   retries without reading the instruction. Host tests: `protection::tests`,
   `non_cacheable_leaves_reach_el0_only_when_asked`, `sum_tests` (the clear,
-  and every `sstatus` write in the port), and
+  and every `sstatus` write in every S-mode source, the port's and the kernel
+  binary's, by name or CSR number),
+  `only_hold_writes_pan_and_every_sctlr_write_is_a_known_value` (aarch64) and
+  `no_source_opens_user_pages_to_the_kernel` (x86_64, no `stac`), and
   `a_fault_is_retried_only_where_the_leaf_grants_the_access`. QEMU:
-  `uaccess_fault_qemu_aarch64` (on `cortex-a76`) and
+  `uaccess_fault_qemu_aarch64` and
   `uaccess_fault_qemu_riscv64` prove, through the check
   `uaccess_fault_qemu_x86_64` shares (`uaccess::conformance::reach_into`), a
   guarded copy reading a mapped user page through its user address faults
@@ -255,8 +294,11 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   core to hold PAN, and the probe to admit the core's own stack with
   translation off; `fp_isolation_qemu_riscv64` ends a task on an
   illegal instruction exactly once; and the boot's record
-  (`KERNEL_BOOT_PROTECTIONS`) names `pan`, at Warn on the default
-  `cortex-a72`, which lacks it.
+  (`KERNEL_BOOT_PROTECTIONS`) names `pan`: every aarch64 vertical but two
+  runs under PAN on the default `cortex-a76`. `kernel_arch_boot_aarch64`'s
+  GICv2 run boots on `cortex-a72` and requires the Warn record, and
+  `accessed_bit_qemu_aarch64` boots there for its lack of hardware
+  Access-flag updates.
 - **Lock-free page-table updates (CWE-362 / CWE-416; a race restoring a freed
   frame's mapping).** *Landed* (`plans/OPEN-DEFECTS.md` D1586): the aarch64
   and riscv64 fault-time access-bit fix-ups take no lock, so they set the bit
@@ -265,8 +307,8 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   live table is atomic: an unmap or permission change on another CPU is
   judged afresh, never written back over. Host tests: `frames::tests`, the
   per-port `*_never_restores_a_leaf_unmapped_after_its_walk`; loom:
-  `kernel/arch/api/tests/loom.rs` (the update racing an unmap, and a table
-  linked under a walk that follows it).
+  `kernel/arch/api/tests/loom.rs` (the update racing an unmap, two fix-ups
+  of one leaf, and a table linked under a walk that follows it).
 - **`copy_from_user` TOCTOU & non-canonical user pointers (CWE-367 / CWE-822).**
   *Host validator landed:* `syscall_entry.rs::validate_user_buffer` rejects a
   null, non-canonical, kernel-range, or wrapping user `(ptr, len)` buffer

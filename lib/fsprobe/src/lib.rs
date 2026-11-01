@@ -204,10 +204,8 @@ impl ProbedVolume {
 /// A device fault, or a refused allocation. A structure the extent is too
 /// small to hold is simply absent.
 pub fn recognise<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<Recognised>, DriverError> {
-    let mut head = heap_buf::<HEAD_LEN>()?;
-    let len = usize::try_from(dev.capacity()).map_or(HEAD_LEN, |capacity| capacity.min(HEAD_LEN));
-    let head = &mut head[..len];
-    dev.read(0, head)?;
+    let (head, len) = read_upto::<_, HEAD_LEN>(dev, 0)?;
+    let head = &head[..len];
     if let Some(array) = raid_member(head) {
         return Ok(Some(Recognised::RaidMember(array)));
     }
@@ -387,13 +385,10 @@ fn directory_label<B: Block>(
     let Some(root) = fat32_root_dir_byte(head) else {
         return Ok(None);
     };
-    let take = usize::try_from(dev.capacity().saturating_sub(root))
-        .map_or(FAT32_LABEL_SCAN_LEN, |left| left.min(FAT32_LABEL_SCAN_LEN));
+    let (entries, take) = read_upto::<_, FAT32_LABEL_SCAN_LEN>(dev, root)?;
     if take == 0 {
         return Ok(None);
     }
-    let mut entries = heap_buf::<FAT32_LABEL_SCAN_LEN>()?;
-    dev.read(root, &mut entries[..take])?;
     Ok(fat32_directory_label(&entries[..take]))
 }
 
@@ -599,6 +594,25 @@ pub(crate) fn read_present<B: Block>(
         Err(DriverError::LengthOutOfRange) => Ok(false),
         Err(err) => Err(err),
     }
+}
+
+/// Up to `N` bytes of `dev` from `offset`, in one read: all of them, or what
+/// the extent holds past `offset`, nothing being read at or past its end.
+/// Answers the buffer and how much of it was filled.
+///
+/// # Errors
+///
+/// A device fault, or a refused allocation.
+pub(crate) fn read_upto<B: Block, const N: usize>(
+    dev: &mut ByteDevice<B>,
+    offset: u64,
+) -> Result<(Box<[u8; N]>, usize), DriverError> {
+    let mut buf = heap_buf::<N>()?;
+    let len = usize::try_from(dev.capacity().saturating_sub(offset)).map_or(N, |left| left.min(N));
+    if len > 0 {
+        dev.read(offset, &mut buf[..len])?;
+    }
+    Ok((buf, len))
 }
 
 /// A zeroed `N`-byte buffer on the heap, refused rather than aborting when

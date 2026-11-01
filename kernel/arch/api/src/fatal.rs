@@ -134,39 +134,47 @@ impl Cause {
             Self::Stack(_) => "stack",
         }
     }
-}
 
-impl fmt::Display for Cause {
-    /// One line: the kind, then its fields under the keys a record uses.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.kind())?;
+    /// Hand `visit` each field a bare record carries for this cause, under
+    /// `keys`, its words spelled into `words`: the one spelling of a cause.
+    fn each_field<'b>(
+        &'b self,
+        keys: &CauseKeys,
+        words: &'b mut CauseWords,
+        visit: impl FnMut(Field<'b>),
+    ) {
         match self {
+            Self::Fault(fault) => fault.fields_under(keys, words).into_iter().for_each(visit),
+            Self::Stack(stack) => stack.fields_under(keys, words).into_iter().for_each(visit),
             Self::Panic {
                 file,
                 len,
                 line,
                 column,
             } => {
-                let file = file
+                let tail = file
                     .get(..usize::from(*len))
                     .and_then(|tail| core::str::from_utf8(tail).ok())
-                    .filter(|tail| !tail.is_empty())
-                    .unwrap_or("null");
-                let [file_key, line_key, column_key] = PANIC_KEYS;
-                write!(
-                    f,
-                    " {file_key}={file} {line_key}={line} {column_key}={column}"
-                )
-            }
-            Self::Fault(fault) => write!(f, " {fault}"),
-            Self::Stack(stack) => {
-                write!(f, " {}={}", OWN_KEYS.check, stack.check.label())?;
-                for (key, word) in OWN_KEYS.stack.iter().zip(stack.words()) {
-                    write!(f, " {key}={word:#018x}")?;
-                }
-                Ok(())
+                    .filter(|tail| !tail.is_empty());
+                let file = tail.map_or(FieldValue::Null, FieldValue::Str);
+                location_fields(keys.panic, file, *line, *column)
+                    .into_iter()
+                    .for_each(visit);
             }
         }
+    }
+}
+
+impl fmt::Display for Cause {
+    /// One line: the kind, then the fields a bare record carries for it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.kind())?;
+        let mut words = CauseWords::new();
+        let mut written = Ok(());
+        self.each_field(&OWN_KEYS, &mut words, |field| {
+            written = written.and_then(|()| write!(f, " {}={}", field.key, field.value));
+        });
+        written
     }
 }
 
@@ -557,6 +565,40 @@ pub const FAULT_KEYS: [&str; FAULT_WORDS] = ["syndrome", "fault_addr", "fault_pc
 /// The keys a panic's location is recorded under: its file, line and column.
 pub const PANIC_KEYS: [&str; 3] = ["file", "line", "column"];
 
+/// A location's fields under `keys`.
+fn location_fields<'a>(
+    keys: [&'static str; 3],
+    file: FieldValue<'a>,
+    line: u32,
+    column: u32,
+) -> [Field<'a>; 3] {
+    let [file_key, line_key, column_key] = keys;
+    [
+        Field {
+            key: file_key,
+            value: file,
+        },
+        Field {
+            key: line_key,
+            value: FieldValue::UnsignedInt(u64::from(line)),
+        },
+        Field {
+            key: column_key,
+            value: FieldValue::UnsignedInt(u64::from(column)),
+        },
+    ]
+}
+
+/// A full panic record's location fields: the whole path, or `<unknown>`
+/// where the panic named no location.
+#[must_use]
+pub fn panic_fields<'a>(location: Option<&'a Location<'_>>) -> [Field<'a>; 3] {
+    let (file, line, column) = location.map_or(("<unknown>", 0, 0), |at| {
+        (at.file(), at.line(), at.column())
+    });
+    location_fields(PANIC_KEYS, FieldValue::Str(file), line, column)
+}
+
 /// The keys one cause's fields are recorded under.
 struct CauseKeys {
     fault: [&'static str; FAULT_WORDS],
@@ -641,7 +683,15 @@ impl KernelFault {
     /// give is `null`, never a placeholder that reads as a value.
     #[must_use]
     pub fn fields<'b>(&self, words: &'b mut CauseWords) -> [Field<'b>; FAULT_WORDS] {
-        hex_fields(&FAULT_KEYS, self.words(), words)
+        self.fields_under(&OWN_KEYS, words)
+    }
+
+    fn fields_under<'b>(
+        &self,
+        keys: &CauseKeys,
+        words: &'b mut CauseWords,
+    ) -> [Field<'b>; FAULT_WORDS] {
+        hex_fields(&keys.fault, self.words(), words)
     }
 }
 
@@ -673,22 +723,6 @@ impl StackCorruption {
             base,
             top,
         ]
-    }
-}
-
-impl fmt::Display for KernelFault {
-    /// One line, in the field order and spelling the fatal record uses, so a
-    /// prose report and the record read alike.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut separator = "";
-        for (key, word) in FAULT_KEYS.iter().zip(self.words()) {
-            match word {
-                Some(value) => write!(f, "{separator}{key}={value:#018x}")?,
-                None => write!(f, "{separator}{key}=null")?,
-            }
-            separator = " ";
-        }
-        Ok(())
     }
 }
 
@@ -770,30 +804,7 @@ impl Reporter {
             format_args!("{} panic on {on}: {message}", self.port),
             guard,
         );
-        let (file, line, column) = location.map_or(("<unknown>", 0, 0), |at| {
-            (at.file(), at.line(), at.column())
-        });
-        let [file_key, line_key, column_key] = PANIC_KEYS;
-        record(
-            w,
-            KERNEL_PANIC,
-            on,
-            &[
-                Field {
-                    key: file_key,
-                    value: FieldValue::Str(file),
-                },
-                Field {
-                    key: line_key,
-                    value: FieldValue::UnsignedInt(u64::from(line)),
-                },
-                Field {
-                    key: column_key,
-                    value: FieldValue::UnsignedInt(u64::from(column)),
-                },
-            ],
-            guard,
-        );
+        record(w, KERNEL_PANIC, on, &panic_fields(location), guard);
     }
 
     /// Write the report of a fatal exception on `on` that no handler claimed,
@@ -965,45 +976,6 @@ impl<'b> NestedFields<'b> {
             self.len += 1;
         }
     }
-
-    fn push_cause(&mut self, cause: &'b Cause, keys: &CauseKeys, words: &'b mut CauseWords) {
-        match cause {
-            Cause::Fault(fault) => {
-                for field in hex_fields(&keys.fault, fault.words(), words) {
-                    self.push(field);
-                }
-            }
-            Cause::Stack(stack) => {
-                for field in stack.fields_under(keys, words) {
-                    self.push(field);
-                }
-            }
-            Cause::Panic {
-                file,
-                len,
-                line,
-                column,
-            } => {
-                let tail = file.get(..usize::from(*len)).unwrap_or(&[]);
-                let [file_key, line_key, column_key] = keys.panic;
-                self.push(Field {
-                    key: file_key,
-                    value: match core::str::from_utf8(tail) {
-                        Ok(tail) if !tail.is_empty() => FieldValue::Str(tail),
-                        _ => FieldValue::Null,
-                    },
-                });
-                self.push(Field {
-                    key: line_key,
-                    value: FieldValue::UnsignedInt(u64::from(*line)),
-                });
-                self.push(Field {
-                    key: column_key,
-                    value: FieldValue::UnsignedInt(u64::from(*column)),
-                });
-            }
-        }
-    }
 }
 
 /// The fields of the bare record an entry on `on` for `own` writes when a
@@ -1021,13 +993,13 @@ pub fn nested_fields<'b>(
         len: 0,
     };
     fields.push(on.field());
-    fields.push_cause(own, &OWN_KEYS, &mut words.own);
+    own.each_field(&OWN_KEYS, &mut words.own, |field| fields.push(field));
     fields.push(Field {
         key: "first",
         value: first.map_or(FieldValue::Null, |first| FieldValue::Str(first.kind())),
     });
     if let Some(first) = first {
-        fields.push_cause(first, &FIRST_KEYS, &mut words.first);
+        first.each_field(&FIRST_KEYS, &mut words.first, |field| fields.push(field));
     }
     fields
 }
@@ -1063,7 +1035,9 @@ fn record<const CAUSE: usize>(
             key: "boot_stack_guard",
             value: FieldValue::Str(verdict.label()),
         });
-        if let BootStackGuard::BelowStack { bytes, .. } = verdict {
+        if let BootStackGuard::BelowStack { bytes, .. } | BootStackGuard::Faulted { bytes, .. } =
+            verdict
+        {
             push(Field {
                 key: "boot_stack_overrun_bytes",
                 value: FieldValue::Str(format_hex_word(bytes, &mut overrun)),

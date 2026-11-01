@@ -21,7 +21,7 @@ use tairix_discovery::OwnedMembership;
 use tairix_icon::IconKind;
 use tairix_net::addr::needs_zone;
 use tairix_net::dns::WireName;
-use tairix_util::utf8::{mixes_scripts, shown};
+use tairix_util::utf8::shown;
 
 use crate::sort::{name_cmp, SortDirection, SortKey, SortMode};
 
@@ -84,6 +84,14 @@ pub fn items(listing: Listing) -> Vec<NetworkItem> {
         items.push(NetworkItem::Truncated);
     }
     items
+}
+
+/// Whether `text` mixes scripts the way an impersonation needs — Latin with
+/// Cyrillic or Greek, or any mixture no stricter UTS #39 restriction level
+/// admits — so the view can say it may not be what it looks like.
+fn mixes_scripts(text: &str) -> bool {
+    tairix_unicode::restriction_level(text)
+        == tairix_unicode::RestrictionLevel::MinimallyRestrictive
 }
 
 impl NetworkEndpoint {

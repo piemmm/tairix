@@ -891,19 +891,35 @@ unsafe fn start_each_secondary<A: KernelArch + 'static>(
                 audit_sink,
                 Level::Warn,
                 AuditEvent::SecondaryCpuStartFailed,
-                &[
-                    Field {
-                        key: "cpu",
-                        value: tairix_log::FieldValue::Str(cpu_str),
-                    },
-                    Field {
-                        key: "cause",
-                        value: tairix_log::FieldValue::Str(err.as_str()),
-                    },
-                ],
+                &start_refusal(cpu_str, err),
             ),
         }
     }
+}
+
+/// A refused start's record: the CPU, the cause, and the port's raw status
+/// where the platform's start mechanism gave one (`Null` elsewhere).
+fn start_refusal(cpu: &str, err: tairix_arch_api::SmpError) -> [Field<'_>; 3] {
+    let status = match err {
+        tairix_arch_api::SmpError::StartRejected(status) => {
+            tairix_log::FieldValue::SignedInt(status)
+        }
+        _ => tairix_log::FieldValue::Null,
+    };
+    [
+        Field {
+            key: "cpu",
+            value: tairix_log::FieldValue::Str(cpu),
+        },
+        Field {
+            key: "cause",
+            value: tairix_log::FieldValue::Str(err.as_str()),
+        },
+        Field {
+            key: "status",
+            value: status,
+        },
+    ]
 }
 
 /// Wait — **bounded** — for secondary `cpu` to acknowledge it has fully
@@ -3462,6 +3478,45 @@ mod tests {
     use alloc::sync::Arc;
     use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
     use tairix_log::Level;
+
+    /// A refusal keeps the raw status the port's start mechanism gave, which
+    /// the HAL promises the audit log, and names none where it gave none.
+    #[test]
+    fn a_refused_start_keeps_the_ports_raw_status() {
+        use tairix_arch_api::SmpError;
+        fn value<'a>(fields: &[Field<'a>], key: &str) -> Option<tairix_log::FieldValue<'a>> {
+            fields
+                .iter()
+                .find(|field| field.key == key)
+                .map(|field| field.value)
+        }
+        let rejected = start_refusal("1", SmpError::StartRejected(-4));
+        assert_eq!(
+            value(&rejected, "cpu"),
+            Some(tairix_log::FieldValue::Str("1"))
+        );
+        assert_eq!(
+            value(&rejected, "cause"),
+            Some(tairix_log::FieldValue::Str("smp_start_rejected"))
+        );
+        assert_eq!(
+            value(&rejected, "status"),
+            Some(tairix_log::FieldValue::SignedInt(-4))
+        );
+        let lacking = start_refusal("2", SmpError::LacksProtection);
+        assert_eq!(
+            value(&lacking, "cause"),
+            Some(tairix_log::FieldValue::Str("smp_cpu_lacks_protection"))
+        );
+        assert_eq!(
+            value(&lacking, "status"),
+            Some(tairix_log::FieldValue::Null)
+        );
+        assert_eq!(
+            value(&start_refusal("3", SmpError::InvalidCpu), "status"),
+            Some(tairix_log::FieldValue::Null)
+        );
+    }
 
     fn make_memory_map() -> BootMemoryMap {
         let mut map = BootMemoryMap::new();

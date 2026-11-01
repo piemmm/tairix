@@ -27,7 +27,8 @@ type, hash-table size and checksum all hold. A directory-cache volume reads
 through its hash chains, which are what its caches summarise, so it reads
 whole; writing it would leave the caches stale (`plans/DISK-IMAGES.md` DI8).
 An Amiga disk partitioned by a Rigid Disk Block is a partition table, not a
-volume, and is not opened (DI10).
+volume, and is not opened (`plans/DISK-IMAGES.md` DI10 for an image, DI20
+for a device).
 
 A volume whose root says its bitmap is not validated — one a system stopped
 writing before it finished — opens read-only (`NeedsCheck`): AmigaDOS
@@ -42,11 +43,23 @@ owner, sequence number and byte count; a bitmap block's checksum. A mismatch
 is `BadMagic`, never a guess. Every chain — hash chains, extension chains,
 links, the bitmap's extensions, a directory's ancestry — is walked under a
 bound with Brent's loop check, so a damaged volume cannot hold the driver.
+A change that frees or fills what a file's extension chain names first walks
+the chain on to the block that ends it: a chain that returns to a block it
+passed never ends, so it is damage found before anything is written, and
+nothing a cut frees is also kept. A data block two of a file's tables name,
+or another file's tables name too, is found only by validating the tree
+(`plans/DISK-IMAGES.md` DI11).
+The root and the bitmap's own blocks are named once each, every bitmap block
+the volume needs is named, and none is ever written or freed as anything
+else. A bitmap that names a live object as one of its pages, or marks one
+free, is lying in a way only validating the tree finds.
 
 ## Names and links
 
-Names are ISO 8859-1 on disk and UTF-8 above, one to 30 bytes; `:`, `/` and
-control characters are refused. A plain volume folds ASCII
+Names are ISO 8859-1 on disk and UTF-8 above, one to 30 bytes. A name a
+change gives an entry (a create's, a link's, a rename's) refuses `:`, `/` and
+control characters; a lookup, a removal and a rename's source find an entry
+by any name the volume records. A plain volume folds ASCII
 (`NameMatching::AsciiCaseInsensitive`); an international one folds Latin-1
 letters too (`NameMatching::Latin1CaseInsensitive`), the same fold the
 directory hash is computed with.
@@ -71,7 +84,11 @@ bitmap, changed in memory, is written back at the commit, which
 `lib/writeback`'s `CommitScheduler` paces (eager with no host); the device
 is flushed, and only then is the root marked valid. A crash in between
 leaves a volume AmigaDOS revalidates. A change that fails before it writes a
-block or moves one in the bitmap is a refusal and writes nothing. One that
+block or moves one in the bitmap is a refusal and writes nothing, and a heap
+running short is one: the block buffers a change takes once it has written
+are held before it, a walk handing each step's back, the bitmap's page
+buffers are taken as it loads, before any write, and the commit reads and
+allocates nothing. One that
 fails after, or that finds a structure damaged, leaves the bitmap invalid and
 refuses further writes (`Damaged`); its in-memory bitmap is dropped, and the
 next flush still forces the device's cache. A new extension block is written
@@ -86,12 +103,25 @@ after its last, and a listing counts each hard-linked file's names once
 between changes.
 
 A removed object the kernel holds — a file, a directory, a link to a
-directory — keeps its blocks until its last unpin, and while one does the
-root stays marked invalid, so a crash before that unpin has AmigaDOS reclaim
-them. A read keeps the file's header and current extension block, so a
-sequential read reads only its data; FFS data runs that are contiguous on
-disk move in one transfer, and a listing resolves only the entries it hands
-over.
+directory — keeps its blocks until its last unpin, and while one does — or a
+free at that unpin failed — the root stays marked invalid, so AmigaDOS reclaims
+them. A free the heap refuses at that unpin stays owed, and is made when the
+mount's pins are released.
+
+A file's extension chain — the blocks walked or linked — is kept for the
+eight files most recently reached, and every growth and cut keeps it in step,
+so no read or write walks a chain from its header again: a sequential read
+reads each extension block once, and a call after a change reads only the
+extension block it starts in. A read also keeps the file's header and current
+extension block. FFS data runs that are contiguous on disk move in one
+transfer, as do the zeros a growth lays down. A cut checks everything it
+frees before its first write and reads each extension block it frees again
+to give back what that names, so it holds no list of what it frees. A listing
+keeps the bucket a call stopped in until the next change, so a listing
+resumed an entry at a time, after the entry it stopped on or at it, reads
+each entry once, and it resolves only the
+entries it hands over. An allocation on a volume found full is refused
+without searching the bitmap again.
 
 ## Metadata
 
@@ -127,21 +157,36 @@ independent walker of the raw blocks that proves the tree and the bitmap
 agree. It covers files across every block and extension boundary,
 overwrites, appends, sparse writes and truncates against a model, tails
 zeroed on regrowth, removal reclaiming space, name validation and both
-folds, listings resumed after every entry and across changes, renames and
-their refusals, the transaction's bitmap protocol with and without a host,
-unvalidated, directory-cache and long-filename volumes, hard links and
+folds, entries recorded under names no new entry may take, listings resumed
+after every entry and across changes, renames and their refusals, the
+transaction's bitmap protocol with and without a host, unvalidated,
+directory-cache and long-filename volumes, hard links and
 promotion, soft and directory links, pins of files and directories,
 attributes, date stamps, a full volume, and damaged headers, data blocks,
 chains and bitmaps, removing a hard link filed after its file or in the
 directory it names, held directory links, the commit's write and flush order,
 extension blocks written before they are linked, refused changes writing
-nothing, and what sequential reads and listings read. Growths and cuts are
-replayed cut short after every one of their writes, each state reopened and
-read; a write failing part-way, a read failing before any write, and a
-damaged volume counting its space are each driven through a faulting device.
-A randomized model test drives hundreds of changes and reopens the result.
+nothing, and what sequential reads and listings read. Every kind of change,
+on an eager and a deferred transaction and across a long file, meets a heap
+that refuses each of its allocations in turn, and is refused before it writes
+or lands whole; a commit and a walk made once a change has written take
+nothing from the heap, and an orphan whose free meets a shortage is freed when
+the pins are released. It measures what
+appends, overwrites, two files read in turn and a copy within the volume read
+of the extension chains, what a cut holds, what a growth over a gap writes,
+what a listing resumed an entry at a time reads, and what an allocation on a
+full volume reads; a chain that returns to a block it passed is refused to a
+cut, a growth and a removal, and a damaged soft link fails only the listing
+call that reaches it. Growths, zero growths and cuts are replayed cut short
+after every one of their writes, each state reopened and read; a write
+failing part-way, a read failing before any write, and a damaged volume
+counting its space are each driven through a faulting device. Randomized
+model tests drive hundreds of changes — one across more long files than the
+chains kept, read cold beside it — and reopen the result.
 `tests/fuzz_affs_mount.rs` mutates populated OFS and FFS images and a volume
 past the root's bitmap pointers — byte flips, and sealed mutations that shape
 a metadata block's pointers, counts, kinds and lengths and re-seal its
 checksum, a bitmap extension block's unsealed — and walks, reads and changes
-whatever opens.
+whatever opens: two files read in turn, a long file cut and grown again, each
+directory listed again an entry a call and some reads made again, both
+required to agree with the first answer where each is whole.

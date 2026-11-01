@@ -27,11 +27,7 @@
 //! What a transaction holds is therefore always the ceiling the write-back bound
 //! sets (`plans/ARXFS-WRITEBACK.md` WB5), never the file.
 
-use std::alloc::System;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-use core::alloc::{GlobalAlloc, Layout};
 
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
@@ -39,6 +35,7 @@ use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, SeekRegion};
 use tairix_drv_fs_arxfs::{
     EntropySource, Keying, PassVerdict, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN,
 };
+use tairix_fuzzseed::meter::{metered, Metered};
 use tairix_log::{Event, Sink};
 use tairix_reclaim::{PinnedAccounting, PressureBand, ReportedPressure};
 use tairix_writeback::RUN_BYTES;
@@ -54,69 +51,14 @@ fn publish_boot_hash_key() {
     ));
 }
 
-/// A pass-through allocator that tracks live bytes and their high-water mark
-/// while counting is armed, so a measured window can be asserted to hold a
-/// bounded footprint.
-struct CountingAlloc;
-
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
-static ARMED: AtomicBool = AtomicBool::new(false);
-
-fn note_alloc(bytes: usize) {
-    if !ARMED.load(Ordering::Relaxed) {
-        return;
-    }
-    ALLOCS.fetch_add(1, Ordering::Relaxed);
-    let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
-    PEAK.fetch_max(live, Ordering::Relaxed);
-}
-
-fn note_free(bytes: usize) {
-    if ARMED.load(Ordering::Relaxed) {
-        LIVE.fetch_sub(bytes.min(LIVE.load(Ordering::Relaxed)), Ordering::Relaxed);
-    }
-}
-
-// SAFETY: every method forwards to the system allocator unchanged; the added
-// behaviour is relaxed atomic counters, which cannot affect memory safety.
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        note_alloc(layout.size());
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        note_free(layout.size());
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        note_alloc(layout.size());
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        note_alloc(new_size.saturating_sub(layout.size()));
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
 #[global_allocator]
-static ALLOCATOR: CountingAlloc = CountingAlloc;
+static ALLOCATOR: Metered = Metered;
 
-/// Run `op` with the counters armed, returning its result, the peak live bytes
-/// the window reached above where it started, and how many allocations it made.
+/// Run `op`, returning its result, the peak bytes it held above where it
+/// started, and how many allocations it made.
 fn measure<T>(op: impl FnOnce() -> T) -> (T, usize, usize) {
-    LIVE.store(0, Ordering::Relaxed);
-    PEAK.store(0, Ordering::Relaxed);
-    ALLOCS.store(0, Ordering::Relaxed);
-    ARMED.store(true, Ordering::Relaxed);
-    let out = op();
-    ARMED.store(false, Ordering::Relaxed);
-    (
-        out,
-        PEAK.load(Ordering::Relaxed),
-        ALLOCS.load(Ordering::Relaxed),
-    )
+    let (out, metering) = metered(op);
+    (out, metering.peak, metering.allocations)
 }
 
 const BLOCK_SIZE: u32 = 512;

@@ -156,10 +156,11 @@ invariant — a boot entered by an unknown loader, a syscall taken before the
 kernel installed its dispatcher — which states the reason and parks rather
 than halting silently or leaving through QEMU's debug-exit port. The
 production kernel's own handlers, before boot has published its arch
-handle, fall back to these same reports. The register snapshot and
-backtrace are the kernel's post-mortem to add. Every fatal report therefore
-ends on one of the two records, and the QEMU harness ends a run the moment
-either lands rather than waiting out its inactivity budget.
+handle, fall back to these same reports, a corrupt kernel stack's ending on
+`4012`. The register snapshot and backtrace are the kernel's post-mortem to
+add. Every fatal report therefore ends on one of the records
+`tairix_arch_api::fatal::FATAL_RECORDS` lists, and the QEMU harness ends a run
+the moment one lands rather than waiting out its inactivity budget.
 
 `cpu` always means the kernel's dense CPU id. A port's own report names the
 processor that way only where it holds the id — aarch64 seeds the boot
@@ -219,10 +220,10 @@ Reporting a fault does **not** make it survivable. The report ends in
 
 ## Stopping the world
 
-A kernel-mode panic or fault means a kernel invariant is already broken and
-the reporting CPU cannot resume. Leaving the other CPUs running is therefore
-not a smaller failure, it is a worse one: they either deadlock on a guard the
-dying core abandoned — one core's fault becoming a system-wide wedge with no
+A kernel-mode panic, fault or corrupt kernel stack means a kernel invariant is
+already broken and the reporting CPU cannot resume. Leaving the other CPUs
+running is therefore not a smaller failure, it is a worse one: they either
+deadlock on a guard the dying core abandoned — one core's fault becoming a system-wide wedge with no
 diagnosis — or they proceed over half-updated shared state, which is silent
 corruption. So the report stops the world.
 
@@ -235,7 +236,7 @@ differs, which is why there are two initiators:
 | Initiator | Caller | On an unresponsive peer |
 | --- | --- | --- |
 | `quiesce_others` | The pre-boot Supervisor's whole-RAM takeover | Fails closed after a long budget; the machine is left running and recoverable. |
-| `stop_others_best_effort` | A panic or fatal-fault report | Gives up promptly and *names the peer in the record*; the report proceeds. |
+| `stop_others_best_effort` | A fatal report: a panic, a fault or a corrupt stack | Gives up promptly and *names the peer in the record*; the report proceeds. |
 
 A fatal report cannot fail closed — the kernel is already dying — and must not
 stall the one diagnosis the machine will ever produce behind a core that
@@ -381,9 +382,8 @@ never read outside the bounds it was given, for any adversarial input.
 
 ## The boot stack's guard
 
-The boot stack is in use before the MMU is on, so no page below it can be
-unmapped and an overrun cannot be turned into a fault. The linker reserves
-a guard immediately beneath it instead, the boot stub fills that guard with
+The boot stack is in use before the MMU is on, so the guard beneath it is
+poison rather than a hole: the linker reserves it, the boot stub fills it with
 `tairix_memguard`'s sentinel — the same byte the slab and kthread-stack
 guards use — and the report reads it back through
 `CpuStateCapture::boot_stack_guard`, emitting a `boot_stack_guard` field.
@@ -397,9 +397,14 @@ reasons. A frame larger than the guard steps over it without disturbing it,
 so only the stack pointer catches that case; and a stack pointer that has
 descended into the guard means those bytes are live frames, which the check
 must not read as though they were poison. So a stack pointer below the
-stack's lowest byte reports `sp_below_stack` with the overrun's extent, and
-only a stack pointer above it is judged on the canary — `intact`, or
-`disturbed` when something wrote through.
+stack's lowest byte reports `sp_below_stack` with the overrun's extent.
+Next comes the address a faulting access could not reach: once x86_64's boot
+CPU joins the kernel root, the root maps the guard read-only, so an overrun
+faults on its first byte — as a `#DF`, since delivering the fault needs the
+same stack — and writes nothing. That fault's address (`CR2`, kept only when
+it lies inside the guard) reports `faulted` with the overrun's extent, where
+the canary alone would read intact. Only then is the canary decisive —
+`intact`, or `disturbed` when something wrote through.
 
 Which stack pointer matters: for a panic, the captured one; for a fault, the
 one the faulting code ran on (`fault_sp`), never the handler's own — a

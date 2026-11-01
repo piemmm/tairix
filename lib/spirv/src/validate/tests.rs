@@ -11,7 +11,7 @@ use crate::{
     Access, Binding, BindingKind, Component, Disagreement, ImageShape, Layout, Rule, Stage,
     Varying, Version, WorkgroupSize,
 };
-use crate::{Kind, Module, Op};
+use crate::{Kind, Module, Op, Stages};
 
 /// A compute shader doubling each float of a storage buffer.
 pub(crate) const COMPUTE: &str = r#"
@@ -134,6 +134,7 @@ fn a_compute_shader_is_admitted_with_its_storage_buffer() {
             kind: BindingKind::StorageBuffer,
             count: 1,
             access: Access::READ.with(Access::WRITE),
+            stages: Stages::COMPUTE,
         }]
     );
     assert_eq!(entry.push_constants(), None);
@@ -163,6 +164,7 @@ fn a_fragment_shader_is_admitted_with_its_texture_and_locations() {
             kind: BindingKind::CombinedImageSampler(shape),
             count: 1,
             access: Access::READ,
+            stages: Stages::FRAGMENT,
         }]
     );
     let varying = |components| Varying {
@@ -191,6 +193,7 @@ fn layout(bindings: &[Binding]) -> Layout<'_> {
     Layout {
         bindings,
         push_constants: 0,
+        push_constant_stages: Stages::ALL,
     }
 }
 
@@ -206,8 +209,17 @@ fn a_layout_providing_each_binding_agrees_and_one_missing_it_does_not() {
         kind: BindingKind::StorageBuffer,
         count: 1,
         access: Access::READ.with(Access::WRITE),
+        stages: Stages::COMPUTE.with(Stages::FRAGMENT),
     };
     assert_eq!(entry.agree(&layout(&[buffer])), Ok(()));
+    let hidden = Binding {
+        stages: Stages::VERTEX,
+        ..buffer
+    };
+    assert_eq!(
+        entry.agree(&layout(&[hidden])),
+        Err(Disagreement::Stage(0, 0))
+    );
     assert_eq!(entry.agree(&layout(&[])), Err(Disagreement::Missing(0, 0)));
     let read_only = Binding {
         access: Access::READ,
@@ -359,4 +371,91 @@ fn a_conditional_branch_without_a_merge_is_refused() {
         "%float = OpTypeFloat 32\n%bool = OpTypeBool",
     );
     assert_eq!(refused(&module), Rule::Merge);
+}
+
+/// A compute shader narrowing a float to a half twice, the first conversion
+/// rounded, and storing both into a storage buffer.
+const ROUNDED: &str = r#"
+OpCapability Shader
+OpCapability Float16
+OpCapability StorageBuffer16BitAccess
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %buf
+OpExecutionMode %main LocalSize 1 1 1
+OpDecorate %buf DescriptorSet 0
+OpDecorate %buf Binding 0
+OpDecorate %block Block
+OpMemberDecorate %block 0 Offset 0
+OpDecorate %halves ArrayStride 2
+OpDecorate %narrow FPRoundingMode RTE
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%half = OpTypeFloat 16
+%halves = OpTypeRuntimeArray %half
+%block = OpTypeStruct %halves
+%sb_block = OpTypePointer StorageBuffer %block
+%buf = OpVariable %sb_block StorageBuffer
+%sb_half = OpTypePointer StorageBuffer %half
+%fn_half = OpTypePointer Function %half
+%zero = OpConstant %uint 0
+%third = OpConstant %float 0.333
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%local = OpVariable %fn_half Function
+%p = OpAccessChain %sb_half %buf %zero %zero
+%narrow = OpFConvert %half %third
+%other = OpFConvert %half %third
+OpStore %p %narrow
+OpStore %p %other
+OpReturn
+OpFunctionEnd
+"#;
+
+#[test]
+fn a_rounded_conversion_is_only_ever_stored_into_memory_others_read() {
+    admit(ROUNDED).expect("admitted");
+    let reused = with(
+        ROUNDED,
+        "OpStore %p %other\n",
+        "%sum = OpFAdd %half %other %narrow\nOpStore %p %sum\n",
+    );
+    assert_eq!(
+        refused(&reused),
+        Rule::DecorationTarget(crate::enumerant::Decoration::FP_ROUNDING_MODE)
+    );
+    let kept_private = with(ROUNDED, "OpStore %p %narrow\n", "OpStore %local %narrow\n");
+    assert_eq!(
+        refused(&kept_private),
+        Rule::DecorationTarget(crate::enumerant::Decoration::FP_ROUNDING_MODE)
+    );
+}
+
+#[test]
+fn an_unrounded_conversion_beside_a_rounded_one_is_used_freely() {
+    let used = with(
+        ROUNDED,
+        "OpStore %p %other\n",
+        "%sum = OpFAdd %half %other %other\nOpStore %local %sum\n",
+    );
+    admit(&used).expect("only the rounded value is held to its stores");
+}
+
+#[test]
+fn rounding_names_a_conversion_to_a_half_and_nothing_else() {
+    let wide = with(
+        ROUNDED,
+        "%other = OpFConvert %half %third\n",
+        "%other = OpFConvert %half %third\n%wide = OpFConvert %float %narrow\n",
+    );
+    let moved = with(
+        &wide,
+        "OpDecorate %narrow FPRoundingMode RTE",
+        "OpDecorate %wide FPRoundingMode RTE",
+    );
+    assert_eq!(
+        refused(&moved),
+        Rule::DecorationTarget(crate::enumerant::Decoration::FP_ROUNDING_MODE)
+    );
 }

@@ -33,6 +33,7 @@
 use std::path::Path;
 
 use super::source_tree;
+use crate::children::Children;
 
 /// Directory prefixes (workspace-relative, `/`-separated) where
 /// target-conditional compilation is permitted by.
@@ -92,9 +93,9 @@ pub struct Violation {
 
 /// Scan the workspace rooted at `root` and return every violation
 /// outside the allow-list and grandfather list.
-pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
+pub fn scan(root: &Path, children: &Children) -> Result<Vec<Violation>, String> {
     let mut out = Vec::new();
-    source_tree::for_each_file(root, "cfg-check", |path, rel, name| {
+    source_tree::for_each_file(root, children, "cfg-check", |path, rel, name| {
         if !source_tree::is_rust(name) || rel.starts_with(INTERPRETER_GATE_EXEMPT) {
             return Ok(());
         }
@@ -257,9 +258,9 @@ fn is_grandfathered(rel: &str) -> bool {
 
 /// Run the check, printing a report and returning an error if any
 /// non-grandfathered violation remains.
-pub fn run(root: &Path) -> Result<(), String> {
+pub fn run(root: &Path, children: &Children) -> Result<(), String> {
     use std::fmt::Write as _;
-    let violations = scan(root)?;
+    let violations = scan(root, children)?;
     if violations.is_empty() {
         return Ok(());
     }
@@ -310,7 +311,7 @@ mod tests {
     #[test]
     fn workspace_is_clean_modulo_grandfathered() {
         let root = workspace_root();
-        let violations = scan(&root).expect("scan");
+        let violations = scan(&root, &Children::default()).expect("scan");
         assert!(
             violations.is_empty(),
             "unexpected cfg-check violations: {violations:#?}"

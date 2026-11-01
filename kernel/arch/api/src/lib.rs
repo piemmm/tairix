@@ -226,7 +226,11 @@ pub use uaccess::{
 
 pub use xtlb::{conformance as xtlb_conformance, CpuMask, CrossCpuTlbShootdown};
 
-pub use smp::{conformance as smp_conformance, SecondaryBringup, SmpError};
+pub use smp::{
+    answer_start, await_start_answer, await_start_verdict, awaiting_answer,
+    conformance as smp_conformance, settle_start, SecondaryBringup, SmpError, StartAnswer,
+    StartVerdict, StartWord,
+};
 
 pub use tags::{conformance as tags_conformance, AddressTag, AddressTags, ParkRoot, MAX_USER_TAGS};
 pub use takeover::{conformance as takeover_conformance, MachineTakeover, TakeoverError};

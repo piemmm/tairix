@@ -46,8 +46,7 @@ const PROBE_CAP: u64 = CapabilityId::DRV_KERNEL.as_u16() as u64;
 /// `CLOCK_SENTINEL`), exercising full 64-bit result marshalling.
 const CLOCK_SENTINEL: u64 = 0x0123_4567_89ab_cdef;
 
-/// Gigabytes of identity map (kernel + the `virt` board's low MMIO + RAM).
-const IDENTITY_GIGABYTES: usize = 4;
+use tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES;
 
 /// User stack base (1 MiB into the high user region) and size. crt0 carves a
 /// 1 MiB scratch span off the stack, so the stack must comfortably exceed it.
@@ -192,7 +191,7 @@ pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
     // 1. Sv39 address space identity-mapping the kernel + MMIO, then activate it
     //    and install the trap vector before any user mapping is added.
     let Some(arch) =
-        paging::AddressSpace::new_identity_gigapages(&PAGE_TABLE_POOL, IDENTITY_GIGABYTES)
+        paging::AddressSpace::new_identity_gigapages(&PAGE_TABLE_POOL, KERNEL_IDENTITY_GIGAPAGES)
     else {
         note(TEST_FAIL, "page-table pool exhausted (identity map)");
         qemu_exit::exit_failure(FAIL_POOL);
@@ -219,8 +218,8 @@ pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
     // `kernel/mem` façade drives it with no per-test adapter (the Stage W5b-2 wiring removed the old `PageTableOps` shim).
     let mut space = AddressSpace::new(arch);
     // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::identity(u64::from(u32::MAX) + 1) }
-        .expect("the boot direct map addresses its window"); // 4 GiB
+    let physmap = unsafe { DirectPhysMap::identity((KERNEL_IDENTITY_GIGAPAGES as u64) << 30) }
+        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image: &image,
         image_bytes: PROGRAM_RXE,

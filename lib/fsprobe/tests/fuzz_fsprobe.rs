@@ -9,9 +9,11 @@
 //! match. The run aborting *is* the failure.
 //!
 //! A per-run-seeded `Prng` mutates a valid image of every recognised format,
-//! biased towards the bytes that carry structure, serves each through every
-//! device block size and with and without a disc layout, truncates them,
-//! and feeds pure noise. A plain `cargo test` runs the fixed
+//! biased towards the bytes that carry structure — half of a sealed seed's
+//! mutations sealed again behind its checksum, so what lies behind it is
+//! reached — serves each through every device block size and with and
+//! without a disc layout, truncates them, and feeds pure noise. Every ADFS
+//! disc record the probe admits has the geometry it promises evaluated. A plain `cargo test` runs the fixed
 //! [`SMOKE_ITERATIONS`] sweep; `cargo xtask fuzz` extends the loop to a
 //! wall-clock budget.
 
@@ -26,15 +28,21 @@ use tairix_fuzzseed::Prng;
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 4_000;
 
-/// A seed image, its block size, and the offsets that carry structure.
+/// A seed image, its block size, the offsets that carry structure, and what
+/// seals a mutation of it behind its checksum.
 struct Seed {
     bytes: Vec<u8>,
     block_size: u32,
     hot: Vec<usize>,
+    reseal: fn(&mut [u8]),
 }
 
 impl Seed {
     fn new(bytes: Vec<u8>, block_size: u32) -> Self {
+        Self::sealed(bytes, block_size, |_| {})
+    }
+
+    fn sealed(bytes: Vec<u8>, block_size: u32, reseal: fn(&mut [u8])) -> Self {
         let hot = bytes
             .iter()
             .enumerate()
@@ -45,6 +53,7 @@ impl Seed {
             bytes,
             block_size,
             hot,
+            reseal,
         }
     }
 }
@@ -95,6 +104,11 @@ fn corpus() -> Vec<Seed> {
         Seed::new(hsf, 2048),
         Seed::new(udf, 512),
         Seed::new(images::adfs_old_map(b"Acorn     "), 512),
+        Seed::sealed(
+            images::adfs_boot_block(&images::adfs_f_record()),
+            512,
+            images::seal_adfs_boot_block,
+        ),
         // Small enough that the root at the volume's middle lies within the
         // reach of the noise phase too.
         Seed::new(images::affs_volume(3, 512, 40, b"Workbench"), 512),
@@ -135,6 +149,13 @@ fn exercise(bytes: Vec<u8>, block_size: u32, layout: Option<DiscLayout>) {
     }
     if let Ok(Some(layout)) = adfs::identify(&mut dev) {
         let _ = (layout.name(), layout.identity());
+        if let adfs::Layout::NewMap { record, .. } = layout {
+            let _ = record.map_offset();
+            let nzones = u32::from(record.nzones);
+            for zone in [0, 1, nzones >> 1, nzones - 1, nzones] {
+                let _ = (record.zone_start_block(zone), record.zone_stream_bits(zone));
+            }
+        }
     }
     if let Ok(Some(layout)) = affs::identify(&mut dev) {
         let _ = (layout.name(), layout.identity(), layout.form());
@@ -164,6 +185,9 @@ fn recognising_any_extent_never_panics() {
                 *rng.pick(&seed.hot)
             };
             bytes[at] ^= rng.next_u8();
+        }
+        if rng.below(2) == 0 {
+            (seed.reseal)(&mut bytes);
         }
         let served = if rng.below(2) == 0 {
             seed.block_size

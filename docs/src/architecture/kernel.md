@@ -131,21 +131,15 @@ in `kernel/tairix-kernel/src/x86_64/dispatch.rs`: a normal `static` (not
 
 ## Panic policy
 
-The arch port owns the `#[panic_handler]` attribute (host-test builds
-cannot define one because `std` already does). It is a one-liner that
-delegates to `handle_panic`:
-
-```rust,ignore
-#[panic_handler]
-fn tairix_panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    tairix_kernel_core::handle_panic(info, &PANIC_CTX)
-}
-```
-
-`PANIC_CTX: PanicContext` is stored in the per-CPU bootstrap area the
-arch port owns. Building it once at boot and never mutating it is the
-only global-mutable-state exception called out by `AGENTS.md` §2; the
-arch port documents it there.
+Three causes end the kernel: a Rust `panic!`, a CPU exception taken in kernel
+mode that the port's vector has no fix-up for, and a task's kernel stack the
+dispatcher finds corrupt. Each binary owns the `#[panic_handler]` attribute
+(host-test builds cannot define one because `std` already does) and forwards
+to its port's `handle_panic_via_kernel_core`, which calls
+`tairix_kernel::fatal_bridge::report_panic`. The bridge assembles the
+`PanicContext` for each report from the arch handle boot published, the
+port's serial sink, its register and unwind handle, and its console list.
+Before boot has published the handle, the port's own report runs instead.
 
 `handle_panic` emits exactly one `KERNEL_PANIC` record (`EventId(4010)`,
 `Level::Error`) with the fields below, then calls `KernelArch::halt`.
@@ -164,11 +158,20 @@ sp }` in place of the source position and recorded as `KERNEL_FAULT`
 each `null` where the CPU gave none. The port's trap path reaches it through
 the handler `tairix_kernel::fatal_bridge` installs at boot in the one slot
 every port shares (`tairix_arch_api::fault`); with the slot empty the port
-writes its own report instead. Both causes share the register snapshot, the
-bounded backtrace, and the fatal latch every report path enters first — see
+writes its own report instead.
+
+A task's kernel stack the dispatcher finds corrupt — its saved stack pointer
+off the stack before the switch in, or its guard canary disturbed once it
+switched back — enters it through `stack_corruption_dump`, recorded as
+`KERNEL_STACK_CORRUPT` (`EventId(4012)`) with `check` / `task` / `task_sp` /
+`stack_base` / `stack_top`. The dispatcher reaches it through the report
+`tairix_kernel::fatal_bridge` installs with `set_stack_corruption_report`.
+
+All three causes share the register snapshot, the bounded backtrace, and the
+fatal latch every report path enters first — see
 `docs/src/architecture/panic-diagnostics.md`.
 
-Both causes additionally **stop the world** before the record is written:
+All three causes additionally **stop the world** before the record is written:
 a kernel invariant is already broken and this CPU cannot resume, so peers
 left running would either deadlock on a guard it abandoned or advance over
 half-updated state. The report reuses the one cross-CPU stop protocol
@@ -177,8 +180,8 @@ half-updated state. The report reuses the one cross-CPU stop protocol
 answer a pending IPI is wedged with interrupts masked, so naming it is part
 of the diagnosis.
 
-Neither handler allocates: every formatting buffer is stack-resident, so
-both paths survive a wedged heap.
+No report allocates: every formatting buffer is stack-resident, so every path
+survives a wedged heap.
 
 ## `BootInfo` schema
 
@@ -206,9 +209,10 @@ record under the `log` phase and halts.
 
 ## Audit event catalogue
 
-`kernel/core` owns the `4_000..5_000` event-id range. A `diag` sink means the
-record goes to the diagnostic (log/UART) stream rather than the tamper-evident
-audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
+`kernel/core`'s events (`AuditEvent`), in the `4_000..5_000` range `lib/log`'s
+registry gives the kernel. A `diag` sink means the record goes to the
+diagnostic (log/UART) stream rather than the tamper-evident audit trail, and is
+compiled in only under the `watchdog-diagnostics` feature:
 
 | ID   | Level | Name                    | Sink   |
 |-----:|-------|-------------------------|--------|
@@ -221,10 +225,10 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4006 | Info/Warn | `KERNEL_HEAP_GROWTH`    | log    |
 | 4010 | Error | `KERNEL_PANIC`          | audit  |
 | 4011 | Error | `KERNEL_FAULT`          | audit  |
-| 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  |
+| 4012 | Error | `KERNEL_STACK_CORRUPT`      | audit  |
 | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT`   | audit  |
 | 4030 | Info  | `PROCESS_SPAWNED`            | audit  |
-| 4031 | Error | `PROCESS_SPAWN_DENIED`       | audit  |
+| 4031 | Warn/Error | `PROCESS_SPAWN_DENIED`  | audit  |
 | 4032 | Error | `PROCESS_SPAWN_FAILED`       | audit  |
 | 4033 | Info  | `DRIVER_UNLOADED`            | audit  |
 | 4034 | Warn  | `TASK_FAULT_KILLED`          | audit  |
@@ -245,6 +249,7 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4052 | Warn  | `SEAT_LEASE_REVOKED`        | audit  |
 | 4053 | Info  | `SEAT_CREATED`              | audit  |
 | 4054 | Warn  | `SEAT_DESTROYED`            | audit  |
+| 4055 | Warn  | `SEAT_LEASE_RECLAIMED`      | audit  |
 | 4060 | Info  | `ENTROPY_RESERVE_SEEDED`    | audit  |
 | 4061 | Info  | `ENTROPY_RESERVE_UNSEEDED`  | audit  |
 | 4062 | Info  | `BOOT_ID_MINTED`            | audit  |
@@ -253,7 +258,7 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4065 | Info  | `HASH_KEY_UNAVAILABLE`      | audit  |
 | 4069 | Warn  | `LOCK_RELEASED_LATE`        | audit  |
 | 4070 | Info  | `SECONDARY_CPU_STARTED`     | audit  |
-| 4071 | Error | `SECONDARY_CPU_START_FAILED`| audit  |
+| 4071 | Warn/Error | `SECONDARY_CPU_START_FAILED`| audit  |
 | 4072 | Info  | `SECONDARY_CPU_ONLINE`      | audit  |
 | 4073 | Warn  | `IRQ_WAKE_LATE`             | audit  |
 | 4074 | Warn  | `IRQ_COMPLETION_OVERDUE`    | audit  |
@@ -269,9 +274,16 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4084 | Warn  | `CPU_LOCKUP_RECOVERY`       | audit  |
 | 4085 | Error | `CPU_LOCKUP_DIAGNOSTIC`     | diag   |
 | 4086 | Info  | `CPU_WATCHDOG_SELF_SAMPLE`  | diag   |
+| 4087 | Warn  | `DMA_TRANSLATION_BYPASS`    | audit  |
+| 4088 | Warn  | `DMA_TRANSLATION_FAULT`     | audit  |
+| 4089 | Error | `DMA_TRANSLATION_STORM`     | audit  |
 | 4090 | Warn  | `IRQ_LINE_QUARANTINED`      | audit  |
 | 4091 | Warn  | `DMA_QUARANTINED`           | audit  |
 | 4092 | Info  | `DMA_QUARANTINE_RELEASED`   | audit  |
+| 4093 | Info/Warn | `HW_NODE_GRANTS_REVOKED`    | audit  |
+| 4094 | Info/Warn/Error | `DMA_TRANSLATION_UNIT`      | audit  |
+| 4095 | Error | `DMA_TRANSLATION_UNCONFIRMED`| audit  |
+| 4104 | Warn/Error | `DMA_UNITS_MALFORMED`       | audit  |
 | 4110 | Info  | `SYSTEM_CONFIG_APPLIED`     | audit  |
 | 4111 | Warn  | `SYSTEM_CONFIG_REJECTED`    | audit  |
 | 4120 | Info  | `CPU_OPS_ROUTINE_SELECTED`  | audit  |
@@ -279,15 +291,33 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4130 | Warn  | `VOLUME_DEGRADED`           | audit  |
 | 4131 | Warn  | `VOLUME_RECOVERING`         | audit  |
 | 4132 | Info  | `VOLUME_RECOVERED`          | audit  |
+| 4147 | Info/Warn | `DMA_BUS_MASTER`            | audit  |
+| 4148 | Warn  | `DMA_GROUP_REFUSED`         | audit  |
+| 4158 | Warn  | `PORT_IO_REFUSED`           | audit  |
+| 4159 | Info/Warn | `INTERRUPT_REMAPPING`       | audit  |
+| 4190 | Warn  | `SERVED_REPLY_MALFORMED`    | audit  |
+| 4191 | Warn  | `SERVED_CALL_STALLED`       | audit  |
+| 4250 | Warn  | `DMA_FREES_UNBATCHED`       | audit  |
 | 4260 | Info  | `FS_NODE_MUTATED`           | audit  |
 | 4261 | Warn  | `FS_MUTATION_DENIED`        | audit  |
 | 4262 | Info  | `SYSTEM_POWER`              | audit  |
 | 4263 | Error | `VOLUME_WRITEBACK_FAILED`   | audit  |
 | 4264 | Info  | `HW_NODE_REMOVED`           | audit  |
 | 4265 | Warn  | `HW_NODE_REMOVE_REFUSED`    | audit  |
+| 4266 | Warn  | `TASK_LATENCY_OVERRUN`      | diag   |
 | 4267 | Warn  | `VOLUME_RESERVE_ENTERED`    | audit  |
 | 4268 | Info  | `VOLUME_RESERVE_LEFT`       | audit  |
 | 4269 | Warn  | `WALL_CLOCK_SET_REFUSED`    | audit  |
+| 4310 | Info  | `VIEW_BOUND`                | audit  |
+| 4311 | Warn  | `VIEW_BIND_REFUSED`         | audit  |
+| 4312 | Info  | `VIEW_UNBOUND`              | audit  |
+| 4313 | Warn  | `VIEW_UNBIND_REFUSED`       | audit  |
+
+`SECONDARY_CPU_START_FAILED` is at Warn for a CPU that did not come up — a
+start the port refused (`cpu`, `cause`, and `status`, the port's raw
+PSCI/SBI status where its start mechanism gave one, else null) or a started
+CPU that never checked in (`no_online_ack`) — and at Error where the bring-up
+was never wired.
 
 `PROCESS_SIGNAL_CROSS_PRINCIPAL` is the `signal` syscall's cross-principal
 authority decision (`plans/NEW-TASKBAR.md` T11). `signal` first tries the

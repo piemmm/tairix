@@ -94,11 +94,11 @@ pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
     let generated = generate(&ctx.workspace_root)?;
     let path = ctx.workspace_root.join(TABLES);
     if write {
-        eprintln!("xtask: [unicode --write] {TABLES}");
+        noteln!("xtask: [unicode --write] {TABLES}");
         return std::fs::write(&path, generated)
             .map_err(|e| format!("unicode: cannot write {}: {e}", path.display()));
     }
-    eprintln!("xtask: [unicode] {TABLES}");
+    noteln!("xtask: [unicode] {TABLES}");
     match std::fs::read(&path) {
         Ok(committed) if committed == generated.as_bytes() => Ok(()),
         _ => Err(format!(

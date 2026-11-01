@@ -27,8 +27,9 @@
 //! SHA-256 therefore waits on a vetted, driveable audited backend
 //! (`plans/OPEN-DEFECTS.md` D363), and until then this module records the
 //! honest `Software` answer rather than a backend that does not run. Only a
-//! hosted `x86_64` build — the crate's own host tests — offers the hardware
-//! candidate, because only there does the crate's detection run.
+//! build where the crate's own detection runs offers the hardware candidate:
+//! a hosted `x86_64` one with SHA-NI, or an `aarch64` Linux, Android or Apple
+//! one with the ARMv8 extension.
 //!
 //! So this module does **not** fork the crypto computation (that lives inside
 //! the audited crate). What it owns is the part TAIRiX must own to be *better*
@@ -138,12 +139,12 @@ fn reference(kat: &Sha256Kat) -> Sha256Digest {
 }
 
 /// The accelerated-availability candidate on this build: present only where the
-/// audited crate's own detection can select a hardware backend (a hosted
-/// `x86_64` build, via the `crypto_hw_sha256` build cfg). It requires the exact
-/// feature bits `sha2` gates its SHA-NI path on — SHA-NI plus the SSSE3/SSE4.2
-/// (which implies SSE4.1) prerequisites — so the recorded availability matches
-/// what the crate will actually run.
-#[cfg(crypto_hw_sha256)]
+/// audited crate's own detection can select a hardware backend, as the build
+/// script decides it. It requires the exact feature bits `sha2` gates that
+/// backend on — SHA-NI with the SSSE3/SSE4.2 (which implies SSE4.1)
+/// prerequisites, or the ARMv8 SHA-256 instructions — so the recorded
+/// availability matches what the crate will actually run.
+#[cfg(crypto_sha256_shani)]
 const CANDIDATES: &[Candidate<CryptoBackend>] = &[Candidate {
     name: SHA256_HW_NAME,
     requires: &[
@@ -152,6 +153,12 @@ const CANDIDATES: &[Candidate<CryptoBackend>] = &[Candidate {
         CpuFeature::Ssse3,
         CpuFeature::Sse2,
     ],
+    impl_: CryptoBackend::Hardware,
+}];
+#[cfg(crypto_sha256_armv8)]
+const CANDIDATES: &[Candidate<CryptoBackend>] = &[Candidate {
+    name: SHA256_HW_NAME,
+    requires: &[CpuFeature::Sha2],
     impl_: CryptoBackend::Hardware,
 }];
 #[cfg(not(crypto_hw_sha256))]
@@ -266,13 +273,17 @@ mod tests {
     /// The feature set that admits this build's hardware candidate (empty on a
     /// build without one, so the assertion above degrades to the baseline).
     fn hw_feature_set() -> CpuFeatureSet {
-        #[cfg(crypto_hw_sha256)]
+        #[cfg(crypto_sha256_shani)]
         {
             CpuFeatureSet::new()
                 .with(CpuFeature::ShaNi)
                 .with(CpuFeature::Sse42)
                 .with(CpuFeature::Ssse3)
                 .with(CpuFeature::Sse2)
+        }
+        #[cfg(crypto_sha256_armv8)]
+        {
+            CpuFeatureSet::new().with(CpuFeature::Sha2)
         }
         #[cfg(not(crypto_hw_sha256))]
         {

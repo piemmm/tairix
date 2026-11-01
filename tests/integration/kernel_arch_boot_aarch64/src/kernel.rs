@@ -5,11 +5,13 @@ use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+use tairix_arch_aarch64::{
+    handle_panic_via_serial, protection, qemu_exit, SerialSink, SERIAL_SINK,
+};
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap, BOOT_HEAP_BYTES};
 use tairix_kernel::aarch64::boot as boot_aarch64;
-use tairix_log::{Event, EventId, Sink};
+use tairix_log::{Event, EventId, FieldValue, Level, Sink};
 use tairix_test_kheap_growth as kheap_growth;
 
 // The board's device tree, embedded at build time: the boot pipeline
@@ -39,6 +41,10 @@ const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
 /// degrade to tolerate. Pinned by `event_ids_are_unique`.
 const SECONDARY_START_FAILED_EVENT_ID: EventId = EventId(4071);
 
+/// `EventId` of the boot's record of the supervisor protections every core
+/// runs the kernel under (`KERNEL_BOOT_PROTECTIONS`).
+const PROTECTIONS_EVENT_ID: EventId = tairix_kernel::KERNEL_BOOT_PROTECTIONS;
+
 /// `EventId` of `AuditEvent::SecondaryCpuOnline` — each started
 /// secondary core's own attestation that it reached the kernel
 /// dispatch loop. Pinned by `event_ids_are_unique`.
@@ -55,6 +61,13 @@ const FAIL_KHEAP_GROWTH: NonZeroU16 = fail_point!(3);
 /// Failure finisher code for a boot that left the fatal-fault slot
 /// empty, so a kernel-mode exception would park the CPU mutely.
 const FAIL_NO_FAULT_HANDLER: NonZeroU16 = fail_point!(4);
+/// Failure finisher code for a core, or the boot's record of it, not held
+/// to PAN as the run's model says it is.
+const FAIL_PROTECTIONS: NonZeroU16 = fail_point!(5);
+
+/// Set once the boot recorded PAN as the run's model has it, at the level
+/// that says so.
+static PROTECTIONS_RECORDED: AtomicBool = AtomicBool::new(false);
 
 /// Set once `BootCompleted` was observed (with the video console
 /// active); the PASS finisher additionally requires every secondary
@@ -88,6 +101,29 @@ static SECONDARIES_ONLINE: AtomicU32 = AtomicU32::new(0);
 struct BootCompletedExitSink;
 
 impl BootCompletedExitSink {
+    /// Fail unless the calling core holds PAN exactly as the run's model
+    /// says.
+    fn require_pan_as_modelled() {
+        if protection::held_here() != crate::PAN_HELD {
+            qemu_exit::exit_failure(FAIL_PROTECTIONS);
+        }
+    }
+
+    /// Whether `event` records PAN as the run's model has it, at Info where
+    /// it is held and Warn where not.
+    fn records_pan_as_modelled(event: &Event<'_>) -> bool {
+        let level = if crate::PAN_HELD {
+            Level::Info
+        } else {
+            Level::Warn
+        };
+        event.level == level
+            && event
+                .fields
+                .iter()
+                .any(|field| field.key == "pan" && field.value == FieldValue::Bool(crate::PAN_HELD))
+    }
+
     /// Fire the PASS finisher iff boot completed and every
     /// secondary attested.
     fn exit_if_complete() {
@@ -104,7 +140,15 @@ impl Sink for BootCompletedExitSink {
         // Replay through the serial sink so the QEMU transcript
         // records the full boot timeline.
         SerialSink::new().write_event(event);
-        if event.id == BOOT_COMPLETED_EVENT_ID {
+        if event.id == PROTECTIONS_EVENT_ID && Self::records_pan_as_modelled(event) {
+            PROTECTIONS_RECORDED.store(true, Ordering::SeqCst);
+        } else if event.id == BOOT_COMPLETED_EVENT_ID {
+            if !PROTECTIONS_RECORDED.load(Ordering::SeqCst)
+                || protection::pan_in_force() != crate::PAN_HELD
+            {
+                qemu_exit::exit_failure(FAIL_PROTECTIONS);
+            }
+            Self::require_pan_as_modelled();
             if !tairix_kernel::console_layout::CONSOLE.is_active() {
                 qemu_exit::exit_failure(FAIL_VIDEO_INACTIVE);
             }
@@ -122,6 +166,8 @@ impl Sink for BootCompletedExitSink {
             BOOT_COMPLETED.store(true, Ordering::SeqCst);
             Self::exit_if_complete();
         } else if event.id == SECONDARY_ONLINE_EVENT_ID {
+            // Written on the core it attests, so this reads that core.
+            Self::require_pan_as_modelled();
             SECONDARIES_ONLINE.fetch_add(1, Ordering::SeqCst);
             Self::exit_if_complete();
         } else if event.id == SECONDARY_START_FAILED_EVENT_ID {
@@ -152,7 +198,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     boot_aarch64::boot(
         dtb,
         &ALLOCATOR,
-        &SERIAL_SINK,
+        &AUDIT_SINK,
         &AUDIT_SINK,
         tairix_log::Level::Info,
         &tairix_kernel::hwtree_store::HW_TREE_SOURCE,

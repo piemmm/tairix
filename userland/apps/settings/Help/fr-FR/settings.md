@@ -33,8 +33,8 @@ la liste de la catégorie sous le curseur. Une fenêtre trop étroite abandonne 
 barre latérale, et la première miette du fil de navigation liste alors les
 catégories.
 
-Il se lance depuis la ligne *Settings…* du menu système du bureau, depuis la
-Bibliothèque de programmes, ou par son nom depuis un shell. Il exige une
+Il se lance depuis la ligne *Settings…* du menu système du bureau, ou depuis
+un shell par son chemin, `/System/Components/settings.app`. Il exige une
 session graphique en cours : sans elle, le canal de fenêtre est inaccessible et
 il signale le refus sur le flux d'erreur standard puis se termine.
 
@@ -67,6 +67,14 @@ température du processeur et si le ventilateur tourne. Quand *Automatic* ne peu
 pas lire la température, le ventilateur tourne jusqu'à ce qu'il le puisse. Comme
 les autres réglages de la machine, une modification attend *Apply*, qui demande
 un compte autorisé à les modifier.
+
+**Storage** répertorie chaque volume monté, sauf celui qu'un autre utilisateur
+garde privé : où il est monté, son système de fichiers, son périphérique et son
+support, son taux de remplissage et s'il est en bon état. C'est un rapport, pas
+un contrôle — le montage et le démontage relèvent du gestionnaire de fichiers et
+de la commande `mount` — et un volume dont le format ne prévoit aucune capacité
+fixe le dit plutôt que d'afficher une barre. `df` rapporte les mêmes chiffres
+dans un shell.
 
 ## EXIT STATUS
 

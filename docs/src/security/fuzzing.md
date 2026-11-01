@@ -3,9 +3,9 @@
 Every decoder that ingests bytes from a possibly hostile peer is an
 attack surface. `AGENTS.md` §19.6 requires that every IPC endpoint,
 every syscall, every parser of untrusted input, and every public
-`lib/abi` decoder carry a fuzz target, that each target run for at least
-5 s on every pull request, and that the nightly soak run each for at
-least 24 h. Any crash, hang, or sanitiser report blocks the next
+`lib/abi` decoder carry a fuzz target, that `ci` run each target once on
+every pull request and the definition of done for at least 5 s, and that
+the nightly soak run each to the close of its seven-hour window. Any crash, hang, or sanitiser report blocks the next
 release. The short per-PR budget is a deliberate practicality
 concession; the nightly soak is where the real coverage comes from.
 
@@ -69,7 +69,10 @@ with a one-line description each. The families are:
   ext4 mount decoders (`fuzz_mount`, `fuzz_adfs_mount`, `fuzz_ext4_mount` —
   the last replaying a hostile journal too, and shaping half its inputs as
   whole coordinated values in a superblock, a logged superblock or an extent
-  header, checksums re-sealed, which byte flips almost never reach),
+  header, checksums re-sealed, which byte flips almost never reach, as
+  `fuzz_adfs_mount` shapes the disc record's geometry behind its re-sealed
+  boot block or zone check; each base's share of the budget is
+  `tairix_fuzzseed::budget_slices`'),
   `fuzz_compress` (the
   first-party LZ decoder), `fuzz_svg`, `fuzz_virtqueue` (the hostile
   device-written used ring), `fuzz_vt`, `fuzz_fdt`, and the partition
@@ -87,11 +90,11 @@ the same harnesses into wall-clock runs:
 ```text
 cargo xtask fuzz --once     # one iteration per harness (the `ci` gate)
 cargo xtask fuzz            # --quick: ≥ 5 s per harness
-cargo xtask fuzz --soak     # ≥ 24 h per harness (nightly)
+cargo xtask fuzz --soak     # ≥ 24 h per harness
 cargo xtask fuzz --list     # list the registered harnesses
 cargo xtask fuzz --target fuzz_decode   # run one harness
 cargo xtask fuzz --secs 5   # custom budget (local iteration / tests)
-cargo xtask fuzz --until T  # run to T (Unix seconds), a soak window's close
+cargo xtask fuzz --target fuzz_decode --until T  # one harness to T (Unix seconds)
 cargo xtask fuzz --seed 42  # reproduce a logged run's input stream
 ```
 
@@ -101,7 +104,9 @@ and, when it is a positive value, keeps drawing fresh inputs from the
 the harness runs its smoke sweep exactly once. Under `--until` it also
 exports the close as `TAIRIX_SOAK_UNTIL`, and the harness stops there
 however long it waited to be built — or, reaching a window already shut,
-runs its smoke sweep once.
+runs its smoke sweep once. `--until` soaks one harness: a window over the
+registry would start the later ones past the close, so `tools/ci/soak.sh
+--window` gives every harness a process of its own.
 
 ## Seeding: fresh per run, logged for replay
 
@@ -151,14 +156,13 @@ for any such generator.
 
 ## CI integration
 
-`cargo xtask fuzz --once` is part of `cargo xtask ci`, running right
-after the supply-chain gate: `ci` runs each harness a single time (a
-fresh, logged seed) rather than for a budget, so it stays fast and
+`cargo xtask fuzz --once` is a `cargo xtask ci` stage: `ci` runs each
+harness a single time (a fresh, logged seed) rather than for a budget, so it stays fast and
 exercises new inputs each run. It **fails closed**: a crash, hang, or
 invariant failure in any harness fails the pipeline, so a regression in
 a decoder cannot merge. The time-limited soaks — the per-push parallel
-`tools/ci/soak.sh` step and the nightly soak (the seven-hour window
-`soak.yml` runs, or a standalone builder's 24-hour `--soak`) — run
+`tools/ci/soak.sh` step and the scheduled seven-hour soak
+(`soak.sh --scheduled`, which `soak.yml` and every standalone builder run) — run
 outside the `ci` pipeline and carry the wall-clock fuzzing budget.
 
 ## Regression corpus

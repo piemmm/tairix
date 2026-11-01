@@ -69,10 +69,19 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   needs — the hardware tree — doubling its buffer from a starting size on
   each `BufferTooSmall`, so the device manager, the System Information
   service and the cooling service read a tree of any size the one way.
+  `held` counts the bytes a buffer's allocation holds — its capacity, not
+  its length — so the GPU seam charges a context for the host memory its
+  objects keep, and the validator reports what an admitted module keeps,
+  through one count. `trim` gives such a buffer, kept long after it was
+  filled, back its growth room by moving it into an allocation of exactly
+  its length where the allocator grants one, and leaves it as it is where
+  none is: unlike `Vec::shrink_to_fit`, a refusal never aborts. A lowered
+  GPU program and the tables an admitted SPIR-V module keeps are trimmed so.
 * `flags!` — a set of bit flags over one unsigned integer: the named flags,
-  the empty set, and setting, clearing and testing them. `lib/smb`'s header,
-  negotiation, session and file fields and `lib/gpu`'s memory, buffer and
-  queue kinds are declared through it.
+  the empty set, and setting, clearing and testing them, whole or for any
+  flag in common. `lib/smb`'s header, negotiation, session and file fields
+  and `lib/gpu`'s memory, buffer, image, format and queue kinds are declared
+  through it.
 * `fmt` — no-allocation numeric formatters that render identifiers, counts,
   addresses and byte runs into `lib/log`'s structured field values without
   touching an allocator on the hot path: the kernel's audit and syscall
@@ -123,8 +132,9 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   signing keys, the network services' cookie keys — and every cache a later
   holder must not read erases through this one implementation rather than
   its own. Its volatile stores are why `cargo xtask miri` interprets the crate's
-  suite, bar the four tests that hold `mathf` to the host's libm, whose results
-  the interpreter perturbs on purpose.
+  library tests, bar the four tests that hold `mathf` to the host's libm, whose
+  results the interpreter perturbs on purpose; the `trim_refusal` binary runs
+  interpreted beside them, for `trim` under an allocator that refuses its copy.
 * `defer` — the one way an interactive surface hands a piece of slow work to
   a worker: `JobDesk<Req, Ans>` holds one request waiting, one in flight, and
   one answer landed, and nothing about it blocks, locks, or performs I/O (the
@@ -147,7 +157,9 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   it serves grows and shrinks the capacity (`grow`, `shrink`), withdraws
   requests it no longer awaits (`retain_waiting`), lands the answer of a
   job it carried out itself (`carry_out`), and counts the answers a pass is to
-  collect (`landed_for_collection`). A delivery owes the loop a wake when it is
+  collect (`landed_for_collection`). A worker serving one share of the work
+  takes the oldest request it admits (`next_job_where`), leaving the others
+  for theirs. A delivery owes the loop a wake when it is
   the first since the loop last counted or collected, so one landing once a
   pass has counted — before or while it collects — is never left without one.
   The desk is only the
@@ -195,13 +207,34 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   runtime's routine (the SSE2 `x86_64` baseline has no rounding instruction)
   — so IEEE 754 fixes their answer; the transcendentals are fdlibm's range
   reductions and minimax kernels in one fixed order with no fused
-  multiply-add, within an ulp of the true value. An angle past 2^20 quarter
+  multiply-add, each within an ulp of the true value but the tangent and the
+  hyperbolic functions, within three, and `atan2`, within two — the
+  hyperbolic ones taking `e^x - 1` and `ln(1 + x)` through fdlibm's `expm1`
+  and `log1p`, so they lose nothing to cancellation near zero. `power` and
+  `exp2` are fdlibm's `pow`, which carries `p·log2(x)` in two parts so an
+  integer to an integer power comes out exact wherever a double holds it;
+  its `1/ln(2)` head is cut from 24 bits to the 21 its own comment states,
+  since at 24 the product it relies on being exact rounds, and a power past
+  2^31 magnifies that into hundreds of ulps. `log2` is FreeBSD's form of
+  fdlibm's `log`, at half the cost of `pow`'s logarithm. An angle past 2^20 quarter
   turns is reduced by Payne and Hanek's method in integers, so every finite
   angle reduces exactly, however large. Every function returns a finite
-  answer for every finite input, so no caller guards against a `NaN`: an
-  argument past the double's range saturates, and `ln` of zero, a negative
-  or a `NaN` answers `f64::MIN`. `smoothstep` is the one clamped easing
-  every consumer ramps with; `smoothstepf` is its `f32` twin. `Phasor` sweeps
+  answer for every finite input, so no caller guards against a `NaN`: a
+  result past the double's range saturates at `f64::MAX` or `f64::MIN`, one
+  under half its least subnormal is zero, and `ln` and `log2` of zero, a
+  negative or a `NaN` answer `f64::MIN`. `smoothstep` is the one clamped easing
+  every consumer ramps with; `smoothstepf` is its `f32` twin. `to_half` and
+  `from_half` convert between a single and an IEEE 754 half, rounding to
+  nearest even one way and exactly the other (`lib/gpu`'s 16-bit texels and
+  arithmetic). `float_of` reads a half, single or double from its bits as a
+  double, exactly, and `float_bits` rounds a double once to any of the three
+  as its bits, a half through a single rounded to odd, where rounding to
+  nearest twice would land some values just past a tie on it, and a `NaN` as
+  its width's one quiet `NaN`, since the sign and payload a cast keeps differ
+  between targets. `quantized_to_half` rounds a single to the nearest half
+  and back, flushing what no normal half holds to zero of its sign. The three
+  serve `lib/spirv`'s specialization and test assembler and `lib/gpu`'s
+  shader arithmetic. `Phasor` sweeps
   a sine along a row by turning its phase one rotation a step, so a row of
   samples pays one four-multiply rotation a sample rather than a series; the ribbon of
   light (`lib/ribbon`) and the retro games screensaver's floor both sweep
@@ -280,7 +313,9 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   diagnostics through, so a host test captures exactly what it renders and a
   refused write is an ordinary result: `write_all` takes every byte or answers
   the stream's own refusal, and `info` emits a best-effort advisory record on
-  fd 3, dropped by default. `lib/rt` implements it for `Stdout` and `Stderr`,
+  fd 3, dropped by default; `framed` turns a record into the one JSONL line
+  `info` takes, in a buffer its own length sizes, or nothing where the heap
+  refuses it, since a partial advisory is worth none. `lib/rt` implements it for `Stdout` and `Stderr`,
   keeping the kernel's reason for a refused write and routing either stream's
   advisory to fd 3, so a `Run` binary hands its engine the standard streams
   themselves. `lib/procinfo` reads every byte stream as a line sink.
@@ -350,11 +385,10 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   canonical decompositions so `é` then U+0301 is a doubled acute — and
   borrowed where nothing needs showing: the rows `procinfo::field_lossy`
   decodes (process names, volume labels, mount targets) and the names the file
-  manager and the document host show pass through it. `mixes_scripts` says
-  when a name mixes scripts the way an impersonation needs (UTS #39's
-  minimally restrictive level: Latin with Cyrillic or Greek among others), so
-  a surface can mark it — the file manager's Network view draws such an
-  endpoint with a caution in place of its picture. `fold` and `folded` are
+  manager, the document host, View and Music show pass through it, and every refusal that
+  quotes such a name is headlined by `refusal_headline` — “name” could not
+  be opened, saved, mounted — so what hides in it is shown there too. `fold`
+  and `folded` are
   the letters a reader looks a name up by — a Latin-1 letter folded to the
   letter it is written on, every letter in lower case — and `reader_order`
   the order a list of names is read in: the folded letters, then the bytes,

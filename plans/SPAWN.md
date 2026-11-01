@@ -237,10 +237,10 @@ next dispatch — **no separate EL0-frame save area and no new HAL trait**
   on a `SleepLock` whose holder parked across a block-device completion
   wait parks too instead of spinning in-kernel and starving the dispatch
   loop. New `spawn_user_kthread[_with_stack]` carry the hook.
-- Known follow-up: a kthread stack-guard violation detected at
-  `dispatch_step`'s switch-back still fails the task closed **silently**
-  (no log — the dispatcher has no sink seam); the termination must reach
-  the system log per the fail-loud rule once a logging seam exists there.
+- Either kernel-stack check — a guard violation found as the task switches
+  back, or a suspension point off its own stack found before the switch-in —
+  stops the kernel with its fatal record, `4012` `kernel stack corrupt`
+  (`plans/OPEN-DEFECTS.md` D1573).
 - `tairix-kernel::dispatch_core::dispatch_via_slot`: the `Reschedule` arm
   (suspend via `reschedule_current`, then encode the result on resume).
 - **Tests:** `kernel/core` host tests (publish→suspend records the

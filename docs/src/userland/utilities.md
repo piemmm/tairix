@@ -393,7 +393,7 @@ short help.
 ### Grammar
 
 ```
-mount [-lrvw] [-t TYPE] [-o OPTIONS] [--] [IMAGE [TARGET]]
+mount [-lrvw] [-t LIST] [-o OPTIONS] [--] [IMAGE [TARGET]]
 
   (no operands)            list the mounted filesystems, of the types -t names
   IMAGE                    mount the disk image IMAGE, at /Storage/NAME
@@ -401,7 +401,7 @@ mount [-lrvw] [-t TYPE] [-o OPTIONS] [--] [IMAGE [TARGET]]
   IMAGE DIRECTORY          mount it, and show it at DIRECTORY too
   -r, --read-only          mount read-only (as -o ro)
   -w, --rw, --read-write   mount read-write, or not at all
-  -t, --types TYPE         the filesystem IMAGE must hold, or auto
+  -t, --types LIST         the filesystems IMAGE must hold one of, or auto
   -o, --options LIST       comma-separated: ro,rw,noexec,loop,name=NAME
   -v, --verbose            say where it was mounted
   -l, --show-labels        accepted for the listing, which carries no labels
@@ -410,13 +410,22 @@ mount [-lrvw] [-t TYPE] [-o OPTIONS] [--] [IMAGE [TARGET]]
 
 The options follow util-linux's `mount`: the last of `-r`, `-w`, `-o ro` and
 `-o rw` wins, `noexec` and `loop` are what an image is mounted as anyway, and
-`--` ends option parsing. `-w` never falls back to read-only: an image the user
-may not write, or whose filesystem is not written, is not mounted
+`--` ends option parsing. `-w` never falls back to read-only unless a later
+`-r` takes it back, as util-linux's `-r` does: an image the user may not
+write, or whose filesystem is not written, is not mounted
 (`ImageAccess::Writable`), where `-o rw` and no option mount read-write where
-they can. `-t` takes a filesystem as the mount table names it
-(`tairix_abi::volume::FormatName`), or `auto` for whatever the image holds; an
-image holding another is refused `NotExpected`, and a type no disk image holds
-— a network protocol (`smb3`) among them — is an unknown filesystem type. `nosuid`,
+they can. `-t` takes a util-linux type list read with the listing's grammar
+(`TypeFilter`), but as spelled — a type reaches the kernel as it names it —
+each element a filesystem as the mount table names it
+(`tairix_abi::volume::FormatName`), a list beginning `no` naming the ones the
+image may not hold, or `auto` for whatever it holds. The list is the set the
+attach expects (`VolumeFsTypes`): what the image holds is recognised from its
+contents, so the order chooses nothing, and a disc holding both UDF and
+ISO 9660 is mounted as UDF unless its ISO 9660 keeps Rock Ridge or RISC OS
+records. An image holding none of them is refused `NotExpected`; an element no
+disk image holds is passed over, as util-linux tries the next type, and a list
+naming no type a disk image holds — a network protocol (`smb3`) among them —
+is an unknown filesystem type. `nosuid`,
 `nodev` and `exec` are refused: there are no setuid programs or device files to
 restrict, and an image never runs programs. `name=NAME` is TAIRiX's own, for
 the catalog name. With no operands `-t` filters the listing as util-linux's
@@ -433,9 +442,11 @@ user may only read it, unless `-w` asked for it read-write
 (`tairix_rt::image_attach_path`) — and attached with the `Private`
 presentation. A `TARGET` of `/Storage/NAME` asks for that catalog
 name; any other is bound as well, first resolved through `realpath` as
-util-linux canonicalises a mount point, and refused as itself where it does
-not resolve or is longer than a binding is listed with
-(`tairix_abi::volume::is_binding_path`). The kernel answers a directory that
+util-linux canonicalises a mount point, and refused as itself — named as
+resolved, as util-linux names it, or as given where it does not resolve —
+where it does not resolve, is longer than a binding is listed with
+(`LengthOutOfRange`), or holds a character no binding is listed with
+(`OutOfRange`, `tairix_abi::volume::is_binding_path`). The kernel answers a directory that
 would not take the volume as such (`ImageAttachReply::TargetRefused`), and a
 name asked that the volume may not take (`ImageAttachReply::NameRefused`), so
 each refusal names the directory or the catalog entry, never the image: a name
@@ -492,8 +503,12 @@ ungated `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries the other tools use
 it, never one above it. A file name two users' images share resolves to the
 caller's own; one two of either could mean, or one the listing keeps only the
 start of (`MountRecord::source_cut`), names no volume and says to name it by
-where it is mounted. A path — any name holding a slash, relative or ending in
-one — is canonicalised first, as `mount` resolves one. Another user's private
+where it is mounted. A path — any name holding a slash, `.` or `..` — is
+matched against the mount points as spelled (`.` dropped, a relative one read
+from the working directory), as util-linux's `umount` matches one, and
+canonicalised only when it climbs with `..`, passes through a link, or matches
+none, so a volume that no longer answers — a mount point named while its
+volume does not answer — is still named by where it is mounted. Another user's private
 volume lists neither its file name nor the directories it is bound at, so it
 is named by its catalog entry, and a miss beside one says so rather than
 "not mounted". The resolved identity is handed to the kernel's
@@ -539,10 +554,19 @@ as a device's force-unmount.
 A verified re-insert needs no tool at all: a re-attached volume whose
 non-mutation is proven has its retained writes replayed by the kernel
 and returns to full service (`fs.hotplug.reinsert_replayed`).
-When a plain detach is refused because the volume is unavailable, the
-tool spells out the `--force` consequence on standard error and emits
-an fd-3 `suggestion` record (`fs.volume_unavailable_force_required`,
-`safe_to_autorun: false` — `AGENTS.md` §20.1), additive and ignorable.
+The refusal a plain detach earns from a volume's writes is defined once
+(`MountAvailability::plain_detach_refusal`): `DeviceFault` for
+`unavailable-dirty` and `unavailable-lost`, `NotEmpty` for
+`recovery-conflict`. For that refusal alone the tool spells out the `--force`
+consequence on standard error — discard for writes held, acknowledge for
+writes lost — and emits an fd-3 `suggestion` record
+(`fs.volume_force_required`, `safe_to_autorun: false` — `AGENTS.md` §20.1),
+additive and ignorable, whose `refusal` carries the listed `availability` and
+`retained_data_would_be_discarded`, true only for writes still held. The
+command line names the volume by its catalog entry, or else as a shell reads
+it back, with `--` before a name beginning `-`. Any other refusal
+(`PermissionDenied`, `Busy`), and any refused `--force`, is the kernel's errno
+alone.
 
 ### Fail closed
 

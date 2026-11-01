@@ -45,7 +45,7 @@ fn report_panic(message: &dyn fmt::Display, location: Option<&Location<'_>>) -> 
         processor(),
         message,
         location,
-        || Backtracer.boot_stack_verdict(Some(Backtracer.capture().sp)),
+        || Backtracer.boot_stack_verdict(Some(Backtracer.capture().sp), None),
     );
     crate::reset::park_cpu()
 }
@@ -63,7 +63,7 @@ pub fn report_unclaimed_fault(fault: &KernelFault) -> ! {
         processor(),
         fault,
         format_args!("{}", crate::fault::Decoded(fault)),
-        || Backtracer.boot_stack_verdict(fault.sp),
+        || Backtracer.boot_stack_verdict(fault.sp, fault.address),
     );
     crate::reset::park_cpu()
 }
@@ -72,7 +72,7 @@ pub fn report_unclaimed_fault(fault: &KernelFault) -> ! {
 pub fn report_stack_corruption(corruption: &StackCorruption) -> ! {
     let entry = fatal::enter(&Cause::Stack(*corruption));
     REPORTER.stack_corruption(&mut fatal_com1(), entry, processor(), corruption, || {
-        Backtracer.boot_stack_verdict(Some(Backtracer.capture().sp))
+        Backtracer.boot_stack_verdict(Some(Backtracer.capture().sp), None)
     });
     crate::reset::park_cpu()
 }
@@ -96,8 +96,7 @@ fn processor() -> Processor {
 /// which are only an x2APIC id's low byte.
 fn initial_apic_id() -> u32 {
     const EXTENDED_TOPOLOGY: u32 = 0x0B;
-    if core::arch::x86_64::__cpuid(0).eax >= EXTENDED_TOPOLOGY {
-        let topology = core::arch::x86_64::__cpuid_count(EXTENDED_TOPOLOGY, 0);
+    if let Some(topology) = crate::cpuid::leaf(EXTENDED_TOPOLOGY, 0) {
         // A leaf with no logical processors at its first level is one the
         // CPU does not implement.
         if topology.ebx & 0xFFFF != 0 {

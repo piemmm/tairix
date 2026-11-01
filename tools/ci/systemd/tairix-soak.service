@@ -1,8 +1,15 @@
-# systemd service — TAIRiX nightly 24 h soaks (parallel).
+# systemd service — TAIRiX scheduled soak (parallel).
 #
-# Runs tools/ci/soak.sh all, which fans every §19.6 fuzz harness, §19.7
-# proptest model, and the §7 repeated-test matrix out into parallel processes
-# sharing one 24 h wall clock. Pair it with tairix-soak.timer.
+# Runs tools/ci/soak.sh all --scheduled, which fans every fuzz harness,
+# proptest model, filesystem and generator soak, and the repeated-test matrix
+# out into parallel processes, each soaking to the close of the scheduled
+# window (the nightly workflow's seven hours). Pair it with tairix-soak.timer.
+#
+# It runs from a checkout of its own, so the gate's unit, which resets its
+# checkout every 30 minutes, never changes the tree under a running soak.
+# Make it once:
+#
+#   git clone <repository> ~/RustroverProjects/tairix-soak
 #
 # Install (user unit; see tairix-ci.service for the full sequence):
 #
@@ -11,11 +18,11 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now tairix-soak.timer
 #
-# A 24 h soak must not be killed for "taking too long": TimeoutStartSec is
-# disabled. Edit the absolute ExecStart path to match your checkout.
+# xtask bounds every job, so TimeoutStartSec is disabled. Edit the absolute
+# ExecStart path to match the soak's checkout.
 
 [Unit]
-Description=TAIRiX nightly soaks (fuzz/proptest/test --soak, parallel)
+Description=TAIRiX scheduled soak (fuzz/proptest/fssoak/rngsoak/test, parallel)
 After=network-online.target
 Wants=network-online.target
 
@@ -23,4 +30,4 @@ Wants=network-online.target
 Type=oneshot
 TimeoutStartSec=infinity
 Environment=TAIRIX_CI_SYNC=1
-ExecStart=%h/RustroverProjects/tairix/tools/ci/soak.sh all
+ExecStart=%h/RustroverProjects/tairix-soak/tools/ci/soak.sh all --scheduled

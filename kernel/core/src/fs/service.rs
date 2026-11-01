@@ -362,8 +362,10 @@ pub trait FilesystemService: Send + Sync {
     ///
     /// The stable [`Errno`] for the VFS refusal, [`Errno::NotFound`] when
     /// `mode` requires a component that does not exist, [`Errno::LinkLoop`]
-    /// for a cycle or an over-budget chain, or [`Errno::NotImplemented`]
-    /// when no filesystem is mounted.
+    /// for a cycle or an over-budget chain, [`Errno::OutOfRange`] for an
+    /// answer holding a name no caller could spell back (one a link stores or
+    /// a foreign volume holds), or [`Errno::NotImplemented`] when no
+    /// filesystem is mounted.
     fn realpath(
         &self,
         uid: u32,

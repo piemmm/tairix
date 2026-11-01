@@ -7,7 +7,7 @@
 //! ceiling is chosen here, once, from what the worker parses, so no caller
 //! picks a number of its own.
 
-use crate::imagerender::MAX_DOCUMENT_BYTES;
+use crate::imagerender::{MAX_DOCUMENT_BYTES, MAX_THUMBNAIL_PEAK_BYTES};
 use crate::proto::MAX_FRAME;
 
 /// What a worker needs whatever it parses: its heap's bookkeeping and the
@@ -21,6 +21,11 @@ pub const MESSAGE_WORKER_BYTES: u64 = 2 * MAX_FRAME as u64 + WORKER_BASELINE_BYT
 /// whole document beside a message worker's frames.
 pub const DOCUMENT_WORKER_FLOOR_BYTES: u64 = MESSAGE_WORKER_BYTES + MAX_DOCUMENT_BYTES as u64;
 
+/// The ceiling of a worker drawing pictures at a tile's size: one whole
+/// document beside a message worker's frames, and the most a thumbnail's
+/// decode may cost.
+pub const ARTWORK_WORKER_BYTES: u64 = DOCUMENT_WORKER_FLOOR_BYTES + MAX_THUMBNAIL_PEAK_BYTES;
+
 /// What a sandbox worker parses, which decides how much it may map.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WorkerMemory {
@@ -33,6 +38,9 @@ pub enum WorkerMemory {
     /// One document held whole and read where it lies, building nothing that
     /// grows with it: a structure report.
     HeldDocument,
+    /// Icons and thumbnails: pictures drawn at a tile's size, whose decode is
+    /// refused past a fixed peak on any machine.
+    Artwork,
 }
 
 impl WorkerMemory {
@@ -40,7 +48,8 @@ impl WorkerMemory {
     /// `ram_bytes` (zero where unknown): a message parser its frames and
     /// baseline; a document decoder a quarter of the machine, so one parse
     /// leaves the rest to everything else, and never less than
-    /// [`DOCUMENT_WORKER_FLOOR_BYTES`].
+    /// [`DOCUMENT_WORKER_FLOOR_BYTES`]; an artwork decoder
+    /// [`ARTWORK_WORKER_BYTES`].
     #[must_use]
     pub const fn ceiling(self, ram_bytes: u64) -> u64 {
         match self {
@@ -54,13 +63,27 @@ impl WorkerMemory {
                 }
             }
             Self::HeldDocument => DOCUMENT_WORKER_FLOOR_BYTES,
+            Self::Artwork => ARTWORK_WORKER_BYTES,
         }
+    }
+
+    /// How many workers of this kind fit in what one document decoder may map
+    /// on a machine of `ram_bytes`: the most a program pooling them runs at
+    /// once, so a pool's ceilings together leave the machine what one decoder
+    /// would. Never fewer than one, so where none fits the one a pool runs
+    /// may map its own ceiling, beyond a document decoder's.
+    #[must_use]
+    pub fn pooled(self, ram_bytes: u64) -> usize {
+        let fit = Self::Documents.ceiling(ram_bytes) / self.ceiling(ram_bytes);
+        usize::try_from(fit).unwrap_or(usize::MAX).max(1)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkerMemory, DOCUMENT_WORKER_FLOOR_BYTES, MESSAGE_WORKER_BYTES};
+    use super::{
+        WorkerMemory, ARTWORK_WORKER_BYTES, DOCUMENT_WORKER_FLOOR_BYTES, MESSAGE_WORKER_BYTES,
+    };
 
     #[test]
     fn a_message_worker_is_held_to_its_frames_on_any_machine() {
@@ -84,5 +107,34 @@ mod tests {
                 DOCUMENT_WORKER_FLOOR_BYTES
             );
         }
+    }
+
+    #[test]
+    fn an_artwork_worker_is_held_to_a_document_and_a_thumbnail_on_any_machine() {
+        for ram in [0, 1 << 30, 64 << 30] {
+            assert_eq!(WorkerMemory::Artwork.ceiling(ram), ARTWORK_WORKER_BYTES);
+        }
+    }
+
+    /// A pool of more than one keeps its ceilings together within one document
+    /// decoder's, and a pool always has one, even where none fits.
+    #[test]
+    fn a_pool_of_artwork_workers_fits_one_document_decoders_share() {
+        for ram in [0, 256 << 20, 1 << 30, 8 << 30, 64 << 30] {
+            let pooled = WorkerMemory::Artwork.pooled(ram);
+            let together = u64::try_from(pooled).unwrap() * ARTWORK_WORKER_BYTES;
+            assert!(
+                pooled == 1 || together <= WorkerMemory::Documents.ceiling(ram),
+                "{ram}"
+            );
+            assert!(pooled >= 1);
+        }
+        assert_eq!(
+            WorkerMemory::Artwork.pooled(0),
+            1,
+            "a machine that cannot say"
+        );
+        assert_eq!(WorkerMemory::Artwork.pooled(1 << 30), 2);
+        assert_eq!(WorkerMemory::Artwork.pooled(8 << 30), 16);
     }
 }

@@ -32,10 +32,12 @@ identifies a volume or which tree of a disc is mounted.
   fixes, descriptor tags and their CRC, the prevailing volume descriptors,
   OSTA Compressed Unicode, and the allocation descriptors the UDF driver reads.
 - `adfs` — the boot block, disc record and old map ADFS volumes are recognised
-  by, shared with `drivers/filesystem/adfs`.
+  by, and the zone layout and geometry a record it admits describes, shared
+  with `drivers/filesystem/adfs`.
 - `affs` — the AmigaDOS boot block, the checksummed root block at the volume's
-  middle for every block size the format allows, and the Rigid Disk Block,
-  shared with `drivers/filesystem/affs`.
+  middle for every block size the format allows, the Rigid Disk Block, and the
+  checksum seal every AmigaDOS structure is written with, shared with
+  `drivers/filesystem/affs`.
 - `Fat32Bpb`, `fat32_identity_from_boot` and the FAT32 directory-label
   helpers, shared with `drivers/filesystem/fat32`.
 - `fingerprint(identity)` — the lowercase Crockford-base32 display

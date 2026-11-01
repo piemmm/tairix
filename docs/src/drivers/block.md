@@ -1011,7 +1011,9 @@ client (hostile geometry refused at connect, `write_blocks` refuses by
 construction), the layout probe (whole-device filesystem signature first
 — a superfloppy — else the GPT/MBR table via `lib/partition`, each
 present partition's head probed by content through `lib/fsprobe`;
-declared partition types are hints the probe ignores), and the naming
+declared partition types are hints the probe ignores, and a disk an Amiga
+Rigid Disk Block partitions attaches nothing and is never offered as
+blank), and the naming
 policy, which names a volume from itself: its own label in kebab case
 (`My Backup Disk` is `my-backup-disk`; FAT32's read from the root-directory
 label entry), else `<transport>_<fingerprint>` (`usb_25cm`); a label

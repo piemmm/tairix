@@ -27,8 +27,9 @@ which `mount` warns of. A volume mounted from an image never runs
 programs.
 
 A `target` of `/Storage/name` mounts the volume under that name. Any
-other `target`, an empty directory of your own under `/Users`, shows the
-volume there as well.
+other `target`, an empty directory of your own under `/Users` or on a
+volume in `/Storage`, shows the volume there as well; a directory on a
+FAT32 or ADFS volume cannot show it.
 
 The volume stays mounted until you detach it with `unmount`, or your
 login session ends. An image that holds a partitioned disk, one disk of
@@ -40,12 +41,18 @@ a RAID array, or a filesystem whose recorded owners are always honoured
 - `-r, --read-only` — mount the volume read-only (as `-o ro`).
 - `-w, --rw, --read-write` — mount the volume read-write, or not at
   all: an image you may not write, or whose filesystem cannot be
-  written, is not mounted. The last of `-r`, `-w`, `-o ro` and `-o rw`
-  wins.
-- `-t, --types <type>` — the filesystem the image must hold, as the
-  mount listing names it (`iso9660`, `udf`, `adfs`, `affs`, `fat32`),
-  or `auto` for whatever it holds. An image holding another, or a type
-  no disk image holds, is not mounted.
+  written, is not mounted. A later `-r` takes this back; a later
+  `-o ro` or `-o rw` does not. The last of `-r`, `-w`, `-o ro` and
+  `-o rw` decides whether it is read-only.
+- `-t, --types <list>` — the filesystems, comma-separated, one of which
+  the image must hold, as the mount listing names them (`iso9660`,
+  `udf`, `adfs`, `affs`, `fat32`), or `auto` for whatever it holds; a
+  list beginning `no` names the ones it may not hold. What the image
+  holds is recognised from its contents, so the order chooses nothing:
+  a disc holding both UDF and ISO 9660 is mounted as UDF, unless its
+  ISO 9660 keeps Rock Ridge or RISC OS records. An image holding none
+  of them, or a list naming no type a disk image holds, is not
+  mounted.
 - `-o, --options <list>` — a comma-separated list of `ro`, `rw`
   (read-write where it can be, the default), `noexec`, `loop`, and
   `name=name`, the name the volume is to take. `noexec` and `loop` are

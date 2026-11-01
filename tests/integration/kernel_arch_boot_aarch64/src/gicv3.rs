@@ -10,6 +10,10 @@
 #[path = "kernel.rs"]
 mod kernel;
 
+/// Whether every core is held to PAN: the default model offers it.
+#[cfg(itest_aarch64)]
+const PAN_HELD: bool = true;
+
 /// The GICv3 `virt` board's tree.
 #[cfg(itest_aarch64)]
 mod tree {

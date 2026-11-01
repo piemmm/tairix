@@ -161,6 +161,104 @@ fn two_busy_consumers_are_served_in_turn() {
     );
 }
 
+/// A worker serving its own share takes only the directories it admits,
+/// and one it passes over is still there for the worker whose it is.
+#[test]
+fn a_worker_takes_only_the_directories_it_admits() {
+    let mut desk = ListingDesk::new();
+    let _ = desk.take(Consumer::Pinboard, &path(&["Storage", "stick"]));
+    let _ = desk.take(Consumer::Picker, &path(&["Users", "ada"]));
+    let on_the_stick = |target: &[String]| target.first().is_some_and(|root| root == "Storage");
+    let job = desk.next_job_where(on_the_stick).expect("the stick's read");
+    assert_eq!(job.client(), Consumer::Pinboard);
+    assert!(
+        desk.next_job_where(on_the_stick).is_none(),
+        "the stick's read is under way and the other is not the stick's"
+    );
+    assert_eq!(
+        handed_out(&mut desk),
+        Some((Consumer::Picker, path(&["Users", "ada"]))),
+        "the read passed over is still handed out"
+    );
+    assert!(desk.deliver(job, Ok(entries(&["x"]))));
+}
+
+/// A consumer that moves on while its read hangs on one device is read where
+/// it went, and the hung read lands for nobody.
+#[test]
+fn a_consumer_that_moves_on_is_read_where_it_went_while_its_old_read_hangs() {
+    let mut desk = ListingDesk::new();
+    let stick = path(&["Storage", "stick", "DCIM"]);
+    let home = path(&["Users", "ada"]);
+    let _ = desk.take(Sole::Browser, &stick);
+    let hung = desk.next_job().expect("the stick's read");
+    assert_eq!(desk.take(Sole::Browser, &home), Ok(Listing::Pending));
+    assert!(desk.has_work(), "the move is owed a read");
+    let moved = desk
+        .next_job()
+        .expect("the move is read beside the hung read");
+    assert_eq!(moved.target(), home.as_slice());
+    assert!(desk.next_job().is_none(), "the move is read once");
+    assert!(
+        !desk.deliver(hung, Ok(entries(&["IMG_0001.JPG"]))),
+        "the hung read lands for nobody"
+    );
+    assert!(desk.deliver(moved, Ok(entries(&["notes"]))));
+    assert_eq!(
+        desk.take(Sole::Browser, &home),
+        Ok(Listing::Ready(entries(&["notes"])))
+    );
+}
+
+/// Going back to a directory whose read is still under way waits for that
+/// read rather than starting a second.
+#[test]
+fn returning_to_a_directory_being_read_starts_no_second_read() {
+    let mut desk = ListingDesk::new();
+    let stick = path(&["Storage", "stick"]);
+    let _ = desk.take(Sole::Browser, &stick);
+    let read = desk.next_job().expect("the stick's read");
+    let _ = desk.take(Sole::Browser, &path(&["Users", "ada"]));
+    let _ = desk.take(Sole::Browser, &stick);
+    assert!(!desk.has_work(), "the stick is owed a second read");
+    assert!(desk.next_job().is_none(), "the stick is read twice");
+    assert!(desk.deliver(read, Ok(entries(&["a"]))));
+    assert_eq!(
+        desk.take(Sole::Browser, &stick),
+        Ok(Listing::Ready(entries(&["a"])))
+    );
+}
+
+/// A take counts a read only where it gives the workers one to take: asking
+/// again for a directory queued or under way, as a consumer still waiting
+/// does each turn, records nothing, while a new directory and every refresh
+/// do.
+#[test]
+fn asking_again_for_a_read_queued_or_under_way_records_nothing() {
+    let mut desk = ListingDesk::new();
+    let stick = path(&["Storage", "stick"]);
+    let _ = desk.take(Sole::Browser, &stick);
+    assert_eq!(desk.recorded(), 1, "a new directory");
+    let _ = desk.take(Sole::Browser, &stick);
+    assert_eq!(desk.recorded(), 1, "queued");
+    let read = desk.next_job().expect("the stick's read");
+    let _ = desk.take(Sole::Browser, &stick);
+    assert_eq!(desk.recorded(), 1, "under way");
+    let home = path(&["Users", "ada"]);
+    let _ = desk.take(Sole::Browser, &home);
+    assert_eq!(desk.recorded(), 2, "another directory");
+    let _ = desk.take(Sole::Browser, &stick);
+    assert_eq!(desk.recorded(), 2, "back to the one under way");
+    desk.refresh(Sole::Browser, &stick);
+    assert_eq!(desk.recorded(), 3, "a fresh read of it");
+    desk.refresh(Sole::Browser, &stick);
+    assert_eq!(desk.recorded(), 4, "and another");
+    assert!(
+        !desk.deliver(read, Ok(entries(&["a"]))),
+        "a read begun before the refreshes"
+    );
+}
+
 #[test]
 fn stopping_hands_out_no_more_work() {
     let mut desk = ListingDesk::new();

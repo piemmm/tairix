@@ -5,6 +5,8 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use tairix_util::fallible::trim;
+
 use super::allow::{self, class, Class, Enabled, Section};
 use super::body::{Access, Facts, Root, Typing};
 use super::cfg::Scratch;
@@ -12,6 +14,7 @@ use super::declare::Deco;
 use super::entry::EntryPoint;
 use super::layout::Layouts;
 use super::types::{Scalar, TypeInfo, TypeKey};
+use super::view::Kept;
 use super::{
     push, with_capacity, Def, Limit, Refusal, Rule, What, MAX_ENTRY_POINTS, MAX_GLOBALS,
     MAX_LOCALS, MAX_STRING, NONE,
@@ -123,8 +126,8 @@ pub(crate) struct Validator<'m> {
     pub(crate) facts: Vec<Facts>,
     /// Each pointer's, and each image loaded through one's, root, by slot.
     pub(crate) roots: Vec<Root>,
-    /// Whether any id is decorated `FPRoundingMode`.
-    pub(crate) rounded: bool,
+    /// The ids decorated `FPRoundingMode`, ascending.
+    pub(crate) rounded: Vec<Id>,
     /// `OpEntryPoint` instructions, by index.
     pub(crate) entry_points: Vec<u32>,
     /// `OpExecutionMode` and `OpExecutionModeId` instructions, by the id
@@ -141,8 +144,11 @@ pub(crate) struct Validator<'m> {
 }
 
 impl<'m> Validator<'m> {
-    /// Run every pass over `module`.
-    pub(crate) fn run(module: &'m Module) -> Result<(Vec<Capability>, Vec<EntryPoint>), Refusal> {
+    /// Run every pass over `module`, answering what an admitted module keeps:
+    /// its capabilities, its entry points and its resolved tables.
+    pub(crate) fn run(
+        module: &'m Module,
+    ) -> Result<(Vec<Capability>, Vec<EntryPoint>, Kept), Refusal> {
         let enabled = Enabled::collect(module)?;
         if enabled.version < allow::OLDEST {
             return Err(Rule::Version.module());
@@ -164,7 +170,7 @@ impl<'m> Validator<'m> {
             function_ids: Vec::new(),
             facts: Vec::new(),
             roots: Vec::new(),
-            rounded: false,
+            rounded: Vec::new(),
             entry_points: Vec::new(),
             modes: Vec::new(),
             workgroup: None,
@@ -203,7 +209,29 @@ impl<'m> Validator<'m> {
             v.function(function)?;
         }
         let entry_points = v.entry_points()?;
-        Ok((v.enabled.capabilities().to_vec(), entry_points))
+        let capabilities = super::collect(v.enabled.capabilities().iter().copied())?;
+        let types_by_id = v.types_by_id()?;
+        trim(&mut v.types);
+        trim(&mut v.lists);
+        let kept = Kept {
+            types: core::mem::take(&mut v.types),
+            lists: core::mem::take(&mut v.lists),
+            decorations: core::mem::take(&mut v.decorations),
+            types_by_id,
+        };
+        Ok((capabilities, entry_points, kept))
+    }
+
+    /// Each declared type's id and type index, in id order since the
+    /// definition slots are.
+    fn types_by_id(&self) -> Result<Vec<(Id, u32)>, Refusal> {
+        let mut list = with_capacity(self.types.len())?;
+        for (&(id, _), def) in self.m.definitions.iter().zip(&self.defs) {
+            if def.what == What::Type && def.ty != NONE {
+                push(&mut list, (id, def.ty))?;
+            }
+        }
+        Ok(list)
     }
 
     /// The function index `id` names.

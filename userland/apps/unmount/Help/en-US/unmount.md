@@ -24,9 +24,12 @@ nor the directories it is bound at, so it is named by where it is
 mounted in `/Storage`.
 
 A volume whose device was removed while it still held uncommitted
-writes stays visible as `unavailable-dirty` (or `unavailable-lost`)
-in the mount listing, and a plain `unmount` refuses: its retained
-data is held for a verified re-insert. A volume with files still open
+writes stays visible as `unavailable-dirty` in the mount listing, and a
+plain `unmount` refuses: its retained data is held for a verified
+re-insert. So does a volume put back that could not be shown unchanged
+(`recovery-conflict`), which still holds that data, and one whose
+uncommitted writes could not be kept (`unavailable-lost`), so their
+loss is acknowledged rather than passed over. A volume with files still open
 on it, or that a program has as its working directory, refuses a plain
 `unmount` too. `--force` is the deliberate exit — files still open on
 the volume are cut off, a program working in it is left in a directory

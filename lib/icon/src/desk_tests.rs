@@ -38,7 +38,7 @@ fn is_pending(resolved: &Resolved) -> bool {
 #[test]
 fn a_first_ask_records_the_decode_and_answers_pending() {
     let mut desk = ArtworkDesk::new();
-    assert!(is_pending(&desk.collect(&asset("/a.png"), 32)));
+    assert!(is_pending(&desk.collect(&asset("/a.png"), 32).0));
     assert!(desk.has_work());
     assert_eq!(desk.next_job(), Some(job("/a.png", 32)));
 }
@@ -46,8 +46,8 @@ fn a_first_ask_records_the_decode_and_answers_pending() {
 #[test]
 fn asking_again_for_the_same_asset_starts_no_second_decode() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 32);
-    let _ = desk.collect(&asset("/a.png"), 32);
+    let _ = desk.collect(&asset("/a.png"), 32).0;
+    let _ = desk.collect(&asset("/a.png"), 32).0;
     assert!(desk.next_job().is_some());
     assert!(
         desk.next_job().is_none(),
@@ -61,8 +61,8 @@ fn asking_again_for_the_same_asset_starts_no_second_decode() {
 #[test]
 fn the_same_asset_at_a_different_side_is_a_different_decode() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 32);
-    let _ = desk.collect(&asset("/a.png"), 48);
+    let _ = desk.collect(&asset("/a.png"), 32).0;
+    let _ = desk.collect(&asset("/a.png"), 48).0;
     assert_eq!(desk.next_job(), Some(job("/a.png", 32)));
     assert_eq!(desk.next_job(), Some(job("/a.png", 48)));
 }
@@ -71,7 +71,7 @@ fn the_same_asset_at_a_different_side_is_a_different_decode() {
 fn decodes_are_handed_out_in_the_order_they_were_asked_for() {
     let mut desk = ArtworkDesk::new();
     for name in ["/c.png", "/a.png", "/b.png"] {
-        let _ = desk.collect(&asset(name), 16);
+        let _ = desk.collect(&asset(name), 16).0;
     }
     assert_eq!(desk.next_job(), Some(job("/c.png", 16)));
     assert_eq!(desk.next_job(), Some(job("/a.png", 16)));
@@ -81,7 +81,7 @@ fn decodes_are_handed_out_in_the_order_they_were_asked_for() {
 #[test]
 fn a_delivered_decode_is_collected_once_and_reports_a_landing() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 8);
+    let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))).kept());
     assert!(
@@ -93,12 +93,12 @@ fn a_delivered_decode_is_collected_once_and_reports_a_landing() {
         "the landing is reported once"
     );
 
-    match desk.collect(&asset("/a.png"), 8) {
+    match desk.collect(&asset("/a.png"), 8).0 {
         Resolved::Done(Some(art)) => assert_eq!(art.surface().width(), 8),
         _ => panic!("the delivered picture was not served"),
     }
     assert!(
-        is_pending(&desk.collect(&asset("/a.png"), 8)),
+        is_pending(&desk.collect(&asset("/a.png"), 8).0),
         "the answer is moved out to the cache, never served twice"
     );
 }
@@ -133,7 +133,7 @@ fn a_want_never_consumes_an_answer_a_draw_is_about_to_collect() {
         "a delivered answer was queued for a second decode"
     );
     assert!(matches!(
-        desk.collect(&asset("/a.png"), 8),
+        desk.collect(&asset("/a.png"), 8).0,
         Resolved::Done(Some(_))
     ));
 }
@@ -160,7 +160,7 @@ fn a_want_for_a_key_already_handed_over_starts_a_decode_again() {
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))).kept());
     assert!(matches!(
-        desk.collect(&asset("/a.png"), 8),
+        desk.collect(&asset("/a.png"), 8).0,
         Resolved::Done(_)
     ));
 
@@ -182,11 +182,11 @@ fn a_stopping_desk_warms_nothing() {
 #[test]
 fn a_refusal_is_delivered_and_collected_like_a_picture() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/broken.png"), 8);
+    let _ = desk.collect(&asset("/broken.png"), 8).0;
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, None).kept());
     assert!(matches!(
-        desk.collect(&asset("/broken.png"), 8),
+        desk.collect(&asset("/broken.png"), 8).0,
         Resolved::Done(None)
     ));
 }
@@ -199,18 +199,18 @@ fn a_refusal_is_delivered_and_collected_like_a_picture() {
 #[test]
 fn a_key_the_cache_dropped_is_decoded_again() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 8);
+    let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))).kept());
     assert!(matches!(
-        desk.collect(&asset("/a.png"), 8),
+        desk.collect(&asset("/a.png"), 8).0,
         Resolved::Done(_)
     ));
 
     // The cache took that answer and then dropped it under its budget, so the
     // next paint misses on the very same key.
-    assert!(is_pending(&desk.collect(&asset("/a.png"), 8)));
-    assert!(is_pending(&desk.collect(&asset("/a.png"), 8)));
+    assert!(is_pending(&desk.collect(&asset("/a.png"), 8).0));
+    assert!(is_pending(&desk.collect(&asset("/a.png"), 8).0));
     assert_eq!(
         desk.next_job(),
         Some(job("/a.png", 8)),
@@ -229,25 +229,25 @@ fn a_key_the_cache_dropped_is_decoded_again() {
 #[test]
 fn a_declined_answer_is_not_offered_again_until_the_band_moves() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 8);
+    let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))).kept());
     assert!(matches!(
-        desk.collect(&asset("/a.png"), 8),
+        desk.collect(&asset("/a.png"), 8).0,
         Resolved::Done(_)
     ));
     desk.decline(&asset("/a.png"), 8);
 
     // Every later paint asks for nothing: the draw takes its glyph.
     for _ in 0..3 {
-        assert!(is_pending(&desk.collect(&asset("/a.png"), 8)));
+        assert!(is_pending(&desk.collect(&asset("/a.png"), 8).0));
         assert!(!desk.has_work(), "a declined key queues no decode");
         assert!(desk.next_job().is_none());
     }
 
     // The band moving is what makes the answer worth having again.
     desk.retry_declined();
-    assert!(is_pending(&desk.collect(&asset("/a.png"), 8)));
+    assert!(is_pending(&desk.collect(&asset("/a.png"), 8).0));
     assert_eq!(desk.next_job(), Some(job("/a.png", 8)));
 }
 
@@ -260,14 +260,14 @@ fn declining_a_key_the_collect_forgot_still_records_the_refusal() {
     let mut desk = ArtworkDesk::new();
     desk.decline(&asset("/gone.png"), 8);
     assert!(!desk.has_work());
-    assert!(is_pending(&desk.collect(&asset("/gone.png"), 8)));
+    assert!(is_pending(&desk.collect(&asset("/gone.png"), 8).0));
     assert!(
         desk.next_job().is_none(),
         "a refused key was offered for decoding again"
     );
 
     desk.retry_declined();
-    assert!(is_pending(&desk.collect(&asset("/gone.png"), 8)));
+    assert!(is_pending(&desk.collect(&asset("/gone.png"), 8).0));
     assert_eq!(desk.next_job(), Some(job("/gone.png", 8)));
 }
 
@@ -277,7 +277,7 @@ fn declining_a_key_the_collect_forgot_still_records_the_refusal() {
 #[test]
 fn declining_a_key_in_flight_leaves_the_decode_to_land() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 8);
+    let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
 
     desk.decline(&asset("/a.png"), 8);
@@ -286,7 +286,7 @@ fn declining_a_key_in_flight_leaves_the_decode_to_land() {
         "the decode in flight was stranded"
     );
     assert!(matches!(
-        desk.collect(&asset("/a.png"), 8),
+        desk.collect(&asset("/a.png"), 8).0,
         Resolved::Done(Some(_))
     ));
 }
@@ -297,21 +297,21 @@ fn declining_a_key_in_flight_leaves_the_decode_to_land() {
 #[test]
 fn asking_again_keeps_work_in_flight_and_answers_not_yet_collected() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/done.png"), 8);
-    let _ = desk.collect(&asset("/running.png"), 8);
+    let _ = desk.collect(&asset("/done.png"), 8).0;
+    let _ = desk.collect(&asset("/running.png"), 8).0;
     let done = desk.next_job().expect("the first job");
     let running = desk.next_job().expect("the second job");
     assert!(desk.deliver(&done, Some(picture(8))).kept());
 
     assert!(
         matches!(
-            desk.collect(&asset("/done.png"), 8),
+            desk.collect(&asset("/done.png"), 8).0,
             Resolved::Done(Some(_))
         ),
         "an uncollected answer was discarded"
     );
     assert!(
-        is_pending(&desk.collect(&asset("/running.png"), 8)),
+        is_pending(&desk.collect(&asset("/running.png"), 8).0),
         "a decode in flight was re-recorded rather than awaited"
     );
     assert!(!desk.has_work(), "and it was not queued a second time");
@@ -324,15 +324,15 @@ fn asking_again_keeps_work_in_flight_and_answers_not_yet_collected() {
 #[test]
 fn a_key_re_asked_after_its_answer_is_handed_out_exactly_once() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 8);
+    let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))).kept());
     assert!(matches!(
-        desk.collect(&asset("/a.png"), 8),
+        desk.collect(&asset("/a.png"), 8).0,
         Resolved::Done(_)
     ));
 
-    let _ = desk.collect(&asset("/a.png"), 8);
+    let _ = desk.collect(&asset("/a.png"), 8).0;
     assert_eq!(desk.next_job(), Some(job("/a.png", 8)));
     assert!(desk.next_job().is_none());
 }
@@ -343,13 +343,13 @@ fn a_key_re_asked_after_its_answer_is_handed_out_exactly_once() {
 #[test]
 fn teardown_releases_a_decode_it_is_still_holding() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 4);
+    let _ = desk.collect(&asset("/a.png"), 4).0;
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(4))).kept());
 
     desk.stop();
     assert!(
-        matches!(desk.collect(&asset("/a.png"), 4), Resolved::Pending),
+        matches!(desk.collect(&asset("/a.png"), 4).0, Resolved::Pending),
         "a torn-down desk still holding an answer would serve wiped pixels"
     );
 }
@@ -359,7 +359,7 @@ fn teardown_releases_a_decode_it_is_still_holding() {
 #[test]
 fn an_answer_the_desk_is_not_holding_is_dropped() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 8);
+    let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     desk.stop();
     assert!(!desk.deliver(&running, Some(picture(8))).kept());
@@ -369,12 +369,12 @@ fn an_answer_the_desk_is_not_holding_is_dropped() {
 #[test]
 fn a_stopping_desk_records_nothing_and_hands_out_nothing() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 8);
+    let _ = desk.collect(&asset("/a.png"), 8).0;
     desk.stop();
     assert!(desk.stopping());
     assert!(!desk.has_work());
     assert!(desk.next_job().is_none());
-    assert!(is_pending(&desk.collect(&asset("/b.png"), 8)));
+    assert!(is_pending(&desk.collect(&asset("/b.png"), 8).0));
     assert!(
         !desk.has_work(),
         "a stopping desk recorded a decode nobody will run"
@@ -386,17 +386,21 @@ fn a_stopping_desk_records_nothing_and_hands_out_nothing() {
 #[test]
 fn a_bundle_and_an_asset_of_the_same_spelling_are_different_decodes() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(
-        &ArtworkKey::Asset(String::from("/System/Applications/E.app")),
-        8,
-    );
-    let _ = desk.collect(
-        &ArtworkKey::Bundle {
-            dir: String::from("/System/Applications/E.app"),
-            stamp: None,
-        },
-        8,
-    );
+    let _ = desk
+        .collect(
+            &ArtworkKey::Asset(String::from("/System/Applications/E.app")),
+            8,
+        )
+        .0;
+    let _ = desk
+        .collect(
+            &ArtworkKey::Bundle {
+                dir: String::from("/System/Applications/E.app"),
+                stamp: None,
+            },
+            8,
+        )
+        .0;
     assert!(desk.next_job().is_some());
     assert!(desk.next_job().is_some());
     assert!(desk.next_job().is_none());
@@ -479,7 +483,7 @@ fn a_batch_of_decodes_owes_one_wake_on_the_last_of_them() {
 #[test]
 fn a_lone_decode_owes_its_wake_at_once() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 16);
+    let _ = desk.collect(&asset("/a.png"), 16).0;
     let job = desk.next_job().expect("a job");
     assert!(desk.deliver(&job, Some(picture(16))).wake());
 }
@@ -513,6 +517,215 @@ fn a_delivery_that_keeps_nothing_still_discharges_an_outstanding_debt() {
     );
 }
 
+/// The share a decode's path puts it in: the stick's, or home's.
+fn share_of(job: &ArtworkJob) -> &'static str {
+    let on_the_stick = job
+        .key
+        .read_path()
+        .is_some_and(|path| path.starts_with("/Storage/"));
+    if on_the_stick {
+        "stick"
+    } else {
+        "home"
+    }
+}
+
+fn home(share: &&str) -> bool {
+    *share == "home"
+}
+
+fn stick(share: &&str) -> bool {
+    *share == "stick"
+}
+
+/// Producers serving their own shares take only what they admit, and a job
+/// passed over keeps its place for its own producer.
+#[test]
+fn a_producer_takes_only_the_decodes_its_share_admits() {
+    let mut desk = ArtworkDesk::new();
+    for name in [
+        "/Storage/stick/a.png",
+        "/Users/b.png",
+        "/Storage/stick/c.png",
+    ] {
+        desk.want(&asset(name), 16);
+    }
+    assert_eq!(
+        desk.next_job_where(share_of, home),
+        Some(("home", job("/Users/b.png", 16)))
+    );
+    assert_eq!(desk.next_job_where(share_of, home), None);
+    assert_eq!(
+        desk.next_job_where(share_of, |_| true),
+        Some(("stick", job("/Storage/stick/a.png", 16)))
+    );
+    assert_eq!(
+        desk.next_job_where(share_of, stick),
+        Some(("stick", job("/Storage/stick/c.png", 16)))
+    );
+}
+
+/// Across the shares a producer admits, the decode asked for first goes first.
+#[test]
+fn across_the_shares_admitted_the_first_asked_goes_first() {
+    let mut desk = ArtworkDesk::new();
+    for name in ["/Users/x.png", "/Storage/stick/a.png", "/Users/y.png"] {
+        desk.want(&asset(name), 16);
+    }
+    let taken: Vec<_> = core::iter::from_fn(|| desk.next_job_where(share_of, |_| true)).collect();
+    assert_eq!(
+        taken,
+        [
+            ("home", job("/Users/x.png", 16)),
+            ("stick", job("/Storage/stick/a.png", 16)),
+            ("home", job("/Users/y.png", 16)),
+        ]
+    );
+}
+
+/// A share's batch wakes the loop once that share has none left, whatever
+/// another share's producer, held up on its own device, still has queued.
+#[test]
+fn a_share_drained_owes_its_wake_beside_another_shares_queue() {
+    let mut desk = ArtworkDesk::new();
+    for name in ["/Storage/stick/a.png", "/Users/b.png", "/Users/c.png"] {
+        desk.want(&asset(name), 16);
+    }
+    let (_, first) = desk
+        .next_job_where(share_of, home)
+        .expect("the first home icon");
+    assert!(
+        !desk
+            .deliver_where(&first, Some(picture(16)), share_of, &"home")
+            .wake(),
+        "the home share still has an icon queued"
+    );
+    let (_, last) = desk
+        .next_job_where(share_of, home)
+        .expect("the last home icon");
+    assert!(
+        desk.deliver_where(&last, Some(picture(16)), share_of, &"home")
+            .wake(),
+        "the stick's queued icon holds no wake of the home share's back"
+    );
+    assert_eq!(
+        desk.next_job_where(share_of, stick),
+        Some(("stick", job("/Storage/stick/a.png", 16))),
+        "the stick's icon still waits for its own producer"
+    );
+}
+
+/// Only the ask that records a decode says so: it alone is owed a worker's
+/// wake, so a paint asking again for what is already queued wakes nobody.
+#[test]
+fn only_the_ask_that_records_a_decode_says_so() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new();
+    assert!(desk.want(&asset("/a.png"), 8), "the first ask records it");
+    assert!(!desk.want(&asset("/a.png"), 8));
+    let (answer, recorded) = desk.collect(&asset("/a.png"), 8);
+    assert!(
+        is_pending(&answer) && !recorded,
+        "a queued decode is asked again"
+    );
+    let (answer, recorded) = desk.collect(&asset("/b.png"), 8);
+    assert!(is_pending(&answer) && recorded);
+    let running = desk.next_job().expect("a job");
+    assert!(!desk.want(&running.key, running.side), "a decode under way");
+    assert!(desk.deliver(&running, Some(picture(8))).kept());
+    let (answer, recorded) = desk.collect(&running.key, running.side);
+    assert!(matches!(answer, Resolved::Done(Some(_))) && !recorded);
+    desk.hold_under("/held");
+    assert!(
+        !desk.want(&asset("/held/c.png"), 8),
+        "nothing is recorded under a held tree"
+    );
+    desk.stop();
+    assert!(
+        !desk.want(&asset("/d.png"), 8),
+        "a stopping desk records nothing"
+    );
+}
+
+/// Each decode is routed to its share once, however many takes pass it over,
+/// and again only after a reroute, which keeps the order asked.
+#[test]
+fn a_decode_is_routed_once_however_often_it_is_passed_over() {
+    let mut desk = ArtworkDesk::new();
+    for name in [
+        "/Storage/stick/a.png",
+        "/Storage/stick/b.png",
+        "/Users/c.png",
+    ] {
+        desk.want(&asset(name), 16);
+    }
+    let routed = core::cell::Cell::new(0);
+    let route = |job: &ArtworkJob| {
+        routed.set(routed.get() + 1);
+        share_of(job)
+    };
+    for _ in 0..3 {
+        assert_eq!(desk.next_job_where(&route, |_| false), None);
+    }
+    let (_, last) = desk.next_job_where(&route, home).expect("home's icon");
+    assert!(desk.deliver_where(&last, None, &route, &"home").wake());
+    assert_eq!(routed.get(), 3, "each decode routed once");
+    desk.reroute();
+    assert_eq!(
+        desk.next_job_where(&route, |_| true),
+        Some(("stick", job("/Storage/stick/a.png", 16)))
+    );
+    assert_eq!(routed.get(), 5, "a reroute routes both decodes waiting");
+    assert_eq!(
+        desk.next_job_where(&route, |_| true),
+        Some(("stick", job("/Storage/stick/b.png", 16))),
+        "the order asked survives the reroute"
+    );
+    assert_eq!(routed.get(), 5);
+}
+
+/// Past the bound the thumbnail asked for longest ago goes, whichever share
+/// it was routed to.
+#[test]
+fn the_oldest_thumbnail_goes_past_the_bound_whatever_its_share() {
+    let mut desk = ArtworkDesk::new();
+    desk.want(&thumbnail_at("/Storage/stick/first.png"), 64);
+    desk.want(&thumbnail("second.png"), 64);
+    assert_eq!(desk.next_thumbnail_where(share_of, |_| false), None);
+    for n in 2..=MAX_WANTED_THUMBNAILS {
+        desk.want(&thumbnail(&alloc::format!("{n}.png")), 64);
+    }
+    assert_eq!(
+        desk.next_thumbnail_where(share_of, stick),
+        None,
+        "the oldest, the stick's, was withdrawn"
+    );
+    assert_eq!(
+        desk.next_thumbnail_where(share_of, home)
+            .map(|(_, job)| job.key),
+        Some(thumbnail("second.png"))
+    );
+}
+
+/// A job declined while it waited is no icon still to come: it holds no
+/// batch's wake back, and is dropped from the hand-out order as it is passed.
+#[test]
+fn a_job_declined_while_queued_is_passed_and_holds_no_wake() {
+    let mut desk = ArtworkDesk::new();
+    desk.want(&asset("/Users/a.png"), 16);
+    desk.want(&asset("/Users/b.png"), 16);
+    let first = desk.next_job().expect("the first job");
+    desk.decline(&asset("/Users/b.png"), 16);
+    assert!(
+        desk.deliver(&first, Some(picture(16))).wake(),
+        "the batch's last icon to come has landed"
+    );
+    assert_eq!(desk.next_job(), None);
+    assert!(
+        desk.queue.is_empty(),
+        "the declined job was dropped as it was passed"
+    );
+}
+
 /// Teardown discards the debt with the answers it would have shown.
 #[test]
 fn a_stopped_desk_owes_no_wake_for_what_it_wiped() {
@@ -531,8 +744,8 @@ fn a_stopped_desk_owes_no_wake_for_what_it_wiped() {
 #[test]
 fn a_landing_names_only_what_it_answered() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 8);
-    let _ = desk.collect(&asset("/b.png"), 8);
+    let _ = desk.collect(&asset("/a.png"), 8).0;
+    let _ = desk.collect(&asset("/b.png"), 8).0;
     let running = desk.next_job().expect("a job");
     let _ = desk.deliver(&running, Some(picture(8)));
 
@@ -553,7 +766,7 @@ fn a_landing_names_only_what_it_answered() {
 #[test]
 fn a_refusal_lands_like_a_picture() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 8);
+    let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     let _ = desk.deliver(&running, None);
     assert!(desk.take_landed().resolves(request("/a.png"), 8));
@@ -564,7 +777,9 @@ fn a_refusal_lands_like_a_picture() {
 #[test]
 fn a_landed_class_picture_names_the_request_that_falls_back_to_it() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&ArtworkKey::Raster(crate::IconKind::AppBundle), 8);
+    let _ = desk
+        .collect(&ArtworkKey::Raster(crate::IconKind::AppBundle), 8)
+        .0;
     let running = desk.next_job().expect("a job");
     let _ = desk.deliver(&running, Some(picture(8)));
 
@@ -584,7 +799,7 @@ fn a_landed_class_picture_names_the_request_that_falls_back_to_it() {
 #[test]
 fn a_teardown_drops_the_unreported_batch() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 8);
+    let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     let _ = desk.deliver(&running, Some(picture(8)));
     desk.stop();
@@ -592,8 +807,12 @@ fn a_teardown_drops_the_unreported_batch() {
 }
 
 fn thumbnail(name: &str) -> ArtworkKey {
+    thumbnail_at(&alloc::format!("/Users/ann/Home/Pictures/{name}"))
+}
+
+fn thumbnail_at(path: &str) -> ArtworkKey {
     ArtworkKey::Thumbnail(crate::Thumbnail {
-        path: alloc::format!("/Users/ann/Home/Pictures/{name}"),
+        path: String::from(path),
         stamp: crate::DocumentStamp {
             size: 1,
             modified: tairix_abi::time::Time64::UNIX_EPOCH,
@@ -617,14 +836,14 @@ fn a_sweep_withdraws_the_thumbnails_no_surface_asked_for() {
     desk.want(&scrolled, 64);
     desk.want(&shown, 64);
     desk.sweep_thumbnails();
-    assert!(is_pending(&desk.collect(&shown, 64)));
+    assert!(is_pending(&desk.collect(&shown, 64).0));
     desk.sweep_thumbnails();
     assert_eq!(
         desk.next_thumbnail().map(|job| job.key),
         Some(shown.clone())
     );
     assert_eq!(desk.next_thumbnail(), None, "the unasked one was withdrawn");
-    assert!(is_pending(&desk.collect(&scrolled, 64)));
+    assert!(is_pending(&desk.collect(&scrolled, 64).0));
     assert_eq!(
         desk.next_thumbnail().map(|job| job.key),
         Some(scrolled),
@@ -647,7 +866,7 @@ fn an_uncollected_thumbnail_goes_at_the_next_sweep() {
     assert!(desk.deliver(&first, Some(picture(64))).kept());
     desk.sweep_thumbnails();
     assert!(
-        is_pending(&desk.collect(&landed, 64)),
+        is_pending(&desk.collect(&landed, 64).0),
         "the picture went with the sweep"
     );
     assert!(
@@ -719,7 +938,7 @@ fn keeping_spares_a_thumbnail_from_the_sweep_and_records_nothing_new() {
 /// shows is already on screen.
 #[test]
 fn retrying_the_declined_names_them_as_landed() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk: ArtworkDesk = ArtworkDesk::new();
     assert!(!desk.retry_declined(), "nothing was declined");
     desk.decline(&asset("/a.png"), 8);
     assert!(desk.retry_declined());
@@ -728,7 +947,7 @@ fn retrying_the_declined_names_them_as_landed() {
         !desk.retry_declined(),
         "a retried decline was retried again"
     );
-    assert!(is_pending(&desk.collect(&asset("/a.png"), 8)));
+    assert!(is_pending(&desk.collect(&asset("/a.png"), 8).0));
     assert!(
         desk.has_work(),
         "the retried decode was not asked for again"
@@ -761,7 +980,7 @@ fn nothing_under_a_held_tree_is_run_or_recorded() {
     desk.hold_under("/Storage/B/One.app");
     for stamp in 1..=64 {
         assert!(is_pending(
-            &desk.collect(&listed("/Storage/B/One.app", stamp), 32)
+            &desk.collect(&listed("/Storage/B/One.app", stamp), 32).0
         ));
     }
     desk.want(&asset("/Storage/B/One.app/Resources/icon.png"), 32);
@@ -788,7 +1007,7 @@ fn releasing_a_tree_names_it_for_every_item_drawn_from_inside() {
     let mut desk = ArtworkDesk::new();
     desk.hold_under("/Storage/B/One.app");
     let current = listed("/Storage/B/One.app", 2);
-    let _ = desk.collect(&current, 32);
+    let _ = desk.collect(&current, 32).0;
 
     assert!(desk.release_under("/Storage/B/One.app"));
     let landed = desk.take_landed();
@@ -805,7 +1024,7 @@ fn releasing_a_tree_names_it_for_every_item_drawn_from_inside() {
         "a released decode ran before it was asked for"
     );
 
-    assert!(is_pending(&desk.collect(&current, 32)));
+    assert!(is_pending(&desk.collect(&current, 32).0));
     assert_eq!(
         desk.next_job(),
         Some(ArtworkJob {
@@ -821,18 +1040,18 @@ fn releasing_a_tree_names_it_for_every_item_drawn_from_inside() {
 /// released itself.
 #[test]
 fn a_tree_inside_a_held_tree_stays_held_until_both_are_released() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk: ArtworkDesk = ArtworkDesk::new();
     desk.hold_under("/Storage/B/Apps");
     desk.hold_under("/Storage/B/Apps/One.app");
     let inner = listed("/Storage/B/Apps/One.app", 1);
 
     assert!(desk.release_under("/Storage/B/Apps/One.app"));
     let _ = desk.take_landed();
-    let _ = desk.collect(&inner, 32);
+    let _ = desk.collect(&inner, 32).0;
     assert!(!desk.has_work(), "the outer tree's hold was lost");
 
     assert!(desk.release_under("/Storage/B/Apps"));
-    let _ = desk.collect(&inner, 32);
+    let _ = desk.collect(&inner, 32).0;
     assert!(desk.has_work());
 }
 
@@ -840,7 +1059,7 @@ fn a_tree_inside_a_held_tree_stays_held_until_both_are_released() {
 /// reports no release.
 #[test]
 fn a_tree_never_held_releases_nothing_and_a_stop_drops_every_hold() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk: ArtworkDesk = ArtworkDesk::new();
     assert!(!desk.release_under("/Storage/B/One.app"));
     desk.hold_under("/Storage/B/One.app");
     assert!(desk.release_under("/Storage/B/One.app"));
@@ -856,9 +1075,11 @@ fn a_tree_never_held_releases_nothing_and_a_stop_drops_every_hold() {
 /// The root holds everything named by a path.
 #[test]
 fn holding_the_root_holds_every_path() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk: ArtworkDesk = ArtworkDesk::new();
     desk.hold_under("/");
-    let _ = desk.collect(&asset("/System/Graphics/Icons/file.png"), 32);
+    let _ = desk
+        .collect(&asset("/System/Graphics/Icons/file.png"), 32)
+        .0;
     assert!(!desk.has_work());
     assert!(desk.release_under("/"));
     assert!(desk

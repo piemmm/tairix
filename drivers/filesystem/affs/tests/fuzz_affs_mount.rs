@@ -8,7 +8,7 @@
 //! machine. The single invariant: no image makes the driver panic, loop or
 //! read outside the volume — it opens a valid volume and refuses everything
 //! else — and a volume that opens is walked, read and changed, every call
-//! answering a `Result`.
+//! answering a `Result`, and still opens once changed.
 //!
 //! A per-run-seeded `Prng` mutates real formatted images, one OFS and one
 //! FFS, carrying files long enough to need extension blocks, a nested
@@ -26,18 +26,19 @@
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{
-    DirVisit, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite, NodeKind,
-    NodeSecurity,
+    DirEntry, DirVisit, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite, NodeId,
+    NodeKind, NodeSecurity,
 };
 use tairix_abi::DriverError;
 use tairix_drv_fs_affs::{Affs, FormatOptions};
 use tairix_fsprobe::affs::{
-    be32, checksum, put_be32, root_block, DateStamp, Offsets, BITMAP_PAGES, ST_FILE, ST_LINKDIR,
-    ST_LINKFILE, ST_ROOT, ST_SOFTLINK, ST_USERDIR, TABLE, T_DATA, T_HEADER, T_LIST,
+    be32, put_be32, root_block, seal, DateStamp, Offsets, BITMAP_CHECKSUM, BITMAP_PAGES, CHECKSUM,
+    ST_FILE, ST_LINKDIR, ST_LINKFILE, ST_ROOT, ST_SOFTLINK, ST_USERDIR, TABLE, T_DATA, T_HEADER,
+    T_LIST,
 };
 use tairix_fuzzseed::Prng;
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const BLOCK_SIZE: u32 = 512;
 
@@ -50,6 +51,13 @@ const VOLUME_BYTES: usize = 160 * 1024;
 /// A volume needing more bitmap blocks than the root holds, so its bitmap
 /// chains extension blocks.
 const EXTENDED_VOLUME_BYTES: usize = 56 * 1024 * 1024;
+
+/// The most entries a walk takes from one directory.
+const LISTED_MAX: usize = 4096;
+
+/// The file reads a walk makes again once it has read the rest, to find a
+/// chain kept across other files' reads reading differently.
+const READS_AGAIN: usize = 32;
 
 /// PRNG-image count for the quick smoke pass (no budget set).
 const SMOKE_ITERATIONS: u64 = 128;
@@ -109,23 +117,31 @@ impl Block for MemBlock {
 }
 
 /// Walk every reachable directory (bounded), resolving each name, reading
-/// each file and link and probing the metadata surfaces.
+/// each file and link and probing the metadata surfaces. Each directory is
+/// listed again an entry a call, and some file reads are made again once the
+/// rest are done: where both answers are whole, they must agree.
 fn walk(fs: &mut Affs<MemBlock>) {
     let mut stack = vec![(fs.root(), 0u32)];
     let mut visits = 0u32;
+    let mut read: Vec<(NodeId, u64, Vec<u8>)> = Vec::new();
     while let Some((dir, depth)) = stack.pop() {
         visits += 1;
         if visits > 256 {
             break;
         }
         let mut entries = Vec::new();
-        let _ = fs.read_dir(dir, 0, &[], &mut |entry, name| {
-            if entries.len() > 4096 {
+        let mut whole = true;
+        let listing = fs.read_dir(dir, 0, &[], &mut |entry, name| {
+            if entries.len() >= LISTED_MAX {
+                whole = false;
                 return DirVisit::Stop;
             }
             entries.push((*entry, name.to_vec()));
             DirVisit::Take
         });
+        if listing.is_ok() && whole {
+            listed_again_an_entry_a_call(fs, dir, &entries);
+        }
         let _ = fs.parent(dir);
         for (entry, name) in entries {
             let _ = fs.lookup(dir, &name);
@@ -136,9 +152,15 @@ fn walk(fs: &mut Affs<MemBlock>) {
             match entry.info.kind {
                 NodeKind::Directory if depth < 8 => stack.push((entry.node, depth + 1)),
                 NodeKind::RegularFile => {
-                    let mut buf = vec![0u8; 4096];
-                    let _ = fs.read_at(entry.node, 0, &mut buf);
-                    let _ = fs.read_at(entry.node, entry.info.size.saturating_sub(100), &mut buf);
+                    for at in [0, entry.info.size.saturating_sub(4096)] {
+                        let mut buf = vec![0u8; 4096];
+                        if let Ok(got) = fs.read_at(entry.node, at, &mut buf) {
+                            buf.truncate(got);
+                            if read.len() < READS_AGAIN {
+                                read.push((entry.node, at, buf));
+                            }
+                        }
+                    }
                 }
                 NodeKind::Symlink => {
                     let _ = fs.read_link(entry.node, &mut [0u8; 512]);
@@ -147,13 +169,69 @@ fn walk(fs: &mut Affs<MemBlock>) {
             }
         }
     }
+    for (node, at, first) in read {
+        let mut again = vec![0u8; 4096];
+        if let Ok(got) = fs.read_at(node, at, &mut again) {
+            assert!(
+                again[..got] == first[..],
+                "a read made again after others reads differently"
+            );
+        }
+    }
 }
 
-/// Change the volume every way the kernel can: create, write past a gap,
-/// link, rename, truncate, comment, remove — a pinned file across its
-/// removal included — and flush.
+/// List `dir` again, stopping at each entry and resuming from its cursor, for
+/// at most one entry more than `listed`, which one call handed over whole:
+/// run to its end, it hands over the same entries in the same order.
+fn listed_again_an_entry_a_call(
+    fs: &mut Affs<MemBlock>,
+    dir: NodeId,
+    listed: &[(DirEntry, Vec<u8>)],
+) {
+    let mut names: Vec<Vec<u8>> = Vec::new();
+    let (mut cursor, mut after) = (0, Vec::new());
+    while names.len() <= listed.len() {
+        let mut next = None;
+        let resumed = fs.read_dir(dir, cursor, &after, &mut |entry, name| {
+            next = Some((entry.next_cursor, name.to_vec()));
+            DirVisit::Stop
+        });
+        match (resumed, next) {
+            (Ok(()), Some((at, name))) => {
+                cursor = at;
+                after.clone_from(&name);
+                names.push(name);
+            }
+            (Ok(()), None) => {
+                assert!(
+                    names.iter().eq(listed.iter().map(|(_, name)| name)),
+                    "a listing resumed an entry at a time hands over what one call does"
+                );
+                return;
+            }
+            (Err(_), _) => return,
+        }
+    }
+}
+
+/// Change the volume every way the kernel can: cut and grow a long file, create,
+/// write past a gap, link, rename, truncate, comment, remove — a pinned file
+/// across its removal included — and flush.
 fn change(fs: &mut Affs<MemBlock>) {
     let root = fs.root();
+    // Two files read in turn, then the long one cut into its second extension
+    // block, grown again past a gap and read, so its kept chain is walked,
+    // shortened and lengthened.
+    if let (Ok(big), Ok(one)) = (fs.lookup(root, b"big"), fs.lookup(root, b"one")) {
+        let mut buf = [0u8; 4096];
+        for at in [0, 60_000, 4_096, 110_000] {
+            let _ = fs.read_at(big, at, &mut buf);
+            let _ = fs.read_at(one, 0, &mut buf);
+        }
+        let _ = fs.truncate(big, 75_000);
+        let _ = fs.write_all(big, 110_000, &[0x5C; 2_000]);
+        let _ = fs.read_at(big, 100_000, &mut buf);
+    }
     if let Ok(file) = fs.create(root, b"New", NodeKind::RegularFile, &RECORD) {
         let _ = fs.write_all(file, 5_000, &[0x5A; 1_500]);
         let _ = fs.link(root, b"NewLink", file);
@@ -165,6 +243,10 @@ fn change(fs: &mut Affs<MemBlock>) {
             let _ = fs.read_at(pinned, 0, &mut [0u8; 64]);
             let _ = fs.unpin(pinned);
         }
+    }
+    // An overwrite in place, through every data pointer the file has.
+    if let Ok(one) = fs.lookup(root, b"one") {
+        let _ = fs.write_all(one, 0, &[0x3C; 700]);
     }
     let _ = fs.remove(root, b"one");
     // A link filed right after its file in one bucket, and one elsewhere.
@@ -192,6 +274,10 @@ fn exercise(image: &[u8]) {
     if let Ok(mut fs) = open() {
         change(&mut fs);
         walk(&mut fs);
+        assert!(
+            Affs::open(fs.into_device()).is_ok(),
+            "a change left a volume that opened unopenable"
+        );
     }
 }
 
@@ -215,7 +301,8 @@ fn formatted_image(dos_type: u8, bytes: usize) -> Vec<u8> {
         .expect("create dir");
     for (dir, name, len) in [
         (root, &b"one"[..], 700),
-        (root, b"big", 40_000),
+        // Three extension blocks on either format.
+        (root, b"big", 120_000),
         (sub, b"three", 1_200),
     ] {
         let file = fs
@@ -247,7 +334,7 @@ fn sealed_at(image: &[u8], block: usize) -> Option<usize> {
     matches!(be32(at, 0), T_HEADER | T_LIST | T_DATA)
         .then(|| tairix_fsprobe::affs::sums_to_zero(at))
         .filter(|&sums| sums)
-        .map(|_| 20)
+        .map(|_| CHECKSUM)
 }
 
 /// The bitmap blocks `image`'s root names, and the bitmap extension blocks
@@ -284,7 +371,7 @@ fn metadata_blocks(image: &[u8]) -> Vec<(usize, Option<usize>)> {
     (2..image.len() / BLOCK_SIZE as usize)
         .filter_map(|block| {
             if pages.contains(&block) {
-                Some((block, Some(0)))
+                Some((block, Some(BITMAP_CHECKSUM)))
             } else if extensions.contains(&block) {
                 Some((block, None))
             } else {
@@ -332,7 +419,16 @@ fn sealed_mutation(
     for _ in 0..mutations {
         match rng.below(8) {
             0 | 1 => {
-                let field = pointers[rng.below(pointers.len())];
+                // The root's bitmap pointers are aimed too, so a bitmap naming
+                // a structural block twice, or a gap, meets the driver.
+                let field = if block == root && rng.below(2) == 0 {
+                    match rng.below(BITMAP_PAGES + 1) {
+                        0 => at.bm_ext(),
+                        slot => at.bm_pages() + 4 * (slot - 1),
+                    }
+                } else {
+                    pointers[rng.below(pointers.len())]
+                };
                 let target = aim(rng);
                 put_be32(region, field, target);
             }
@@ -381,9 +477,7 @@ fn sealed_mutation(
         }
     }
     if let Some(sum_at) = sum_at {
-        put_be32(region, sum_at, 0);
-        let sum = checksum(region, sum_at);
-        put_be32(region, sum_at, sum);
+        seal(region, sum_at);
     }
 }
 
@@ -402,14 +496,10 @@ fn sealed_round(base: &[u8], count: u64, deadline: Option<Instant>, rng: &mut Pr
     }
 }
 
-/// The phases a budgeted run shares its budget between: each base image's
-/// sealed round and byte sweep, and the extended volume's sealed round.
-const BUDGET_PHASES: u32 = 5;
-
-/// The deadline of one phase of a run whose phases each take `slice`.
-fn phase(slice: Option<Duration>) -> Option<Instant> {
-    slice.map(|slice| Instant::now() + slice)
-}
+/// The phases a budgeted run shares its budget between: the extended
+/// volume's sealed round, then each base image's sealed round, byte sweep
+/// and stream.
+const BUDGET_PHASES: u32 = 7;
 
 #[test]
 fn fuzz_affs_mount() {
@@ -418,19 +508,19 @@ fn fuzz_affs_mount() {
         "fuzz_affs_mount",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
-    let slice = deadline.map(|end| end.saturating_duration_since(Instant::now()) / BUDGET_PHASES);
+    let slices = tairix_fuzzseed::budget_slices(deadline, BUDGET_PHASES);
     let extended = formatted_image(1, EXTENDED_VOLUME_BYTES);
     let (pages, extensions) = bitmap_blocks(&extended);
     assert!(
         pages.len() > BITMAP_PAGES && !extensions.is_empty(),
         "the extended volume chains bitmap extension blocks"
     );
-    sealed_round(&extended, SMOKE_SEALED_EXTENDED, phase(slice), &mut rng);
+    sealed_round(&extended, SMOKE_SEALED_EXTENDED, slices(1), &mut rng);
     drop(extended);
-    for dos_type in [0, 3] {
+    for (at, dos_type) in (0u32..).zip([0, 3]) {
         let base = formatted_image(dos_type, VOLUME_BYTES);
-        sealed_round(&base, SMOKE_SEALED, phase(slice), &mut rng);
-        if let Some(sweep_until) = phase(slice) {
+        sealed_round(&base, SMOKE_SEALED, slices(2 + 3 * at), &mut rng);
+        if let Some(sweep_until) = slices(3 + 3 * at) {
             tairix_fuzzseed::budgeted_sweep(base.len(), rng.next_u64(), sweep_until, |i| {
                 let mut image = base.clone();
                 image[i] ^= 0xFF;
@@ -460,7 +550,8 @@ fn fuzz_affs_mount() {
                 exercise(&noise);
             }
             iteration += 1;
-            if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+            if !tairix_fuzzseed::within_budget(slices(4 + 3 * at)) && iteration >= SMOKE_ITERATIONS
+            {
                 break;
             }
         }

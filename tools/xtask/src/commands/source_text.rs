@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use super::source_tree;
+use crate::children::Children;
 
 /// The file types scanned: code, build and CI glue, and the documents.
 const SOURCE_SUFFIXES: [&str; 11] = [
@@ -61,9 +62,9 @@ fn scan_bytes(rel: &str, bytes: &[u8], out: &mut Vec<Violation>) {
 }
 
 /// Scan the workspace rooted at `root` and return every control byte found.
-pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
+pub fn scan(root: &Path, children: &Children) -> Result<Vec<Violation>, String> {
     let mut out = Vec::new();
-    source_tree::for_each_file(root, "source-text", |path, rel, name| {
+    source_tree::for_each_file(root, children, "source-text", |path, rel, name| {
         if SOURCE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix)) && !is_planning_document(rel)
         {
             let bytes = std::fs::read(path)
@@ -77,15 +78,17 @@ pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
 }
 
 /// Run the check, printing each control byte and failing when any remains.
-pub fn run(root: &Path) -> Result<(), String> {
-    let violations = scan(root)?;
+pub fn run(root: &Path, children: &Children) -> Result<(), String> {
+    let violations = scan(root, children)?;
     if violations.is_empty() {
         return Ok(());
     }
     for v in &violations {
-        eprintln!(
+        noteln!(
             "xtask: [source-text] {}:{}: control byte 0x{:02x}; write it as an escape",
-            v.path, v.line, v.byte
+            v.path,
+            v.line,
+            v.byte
         );
     }
     Err(format!(
@@ -97,6 +100,7 @@ pub fn run(root: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{is_planning_document, scan, scan_bytes, Violation};
+    use crate::children::Children;
 
     fn violations(bytes: &[u8]) -> Vec<(usize, u8)> {
         let mut out = Vec::new();
@@ -154,7 +158,7 @@ mod tests {
         std::fs::write(root.join("LICENCE.txt"), b"vendored\r\n").expect("write");
         std::fs::create_dir_all(root.join("plans")).expect("scratch tree");
         std::fs::write(root.join("plans/X.md"), b"\0").expect("write");
-        let found = scan(&root).expect("scan");
+        let found = scan(&root, &Children::default()).expect("scan");
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(
             found,

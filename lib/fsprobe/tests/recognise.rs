@@ -358,6 +358,7 @@ fn a_joliet_tree_is_mounted_and_labelled_in_ucs2() {
         block_size: 2048,
         bytes: image,
         layout: None,
+        reads: 0,
     })
     .expect("geometry");
     let volume = iso9660::identify(&mut dev, None)
@@ -381,6 +382,7 @@ fn rock_ridge_or_risc_os_records_keep_the_primary_tree() {
             block_size: 2048,
             bytes: image,
             layout: None,
+            reads: 0,
         })
         .expect("geometry");
         let volume = iso9660::identify(&mut dev, None)
@@ -788,7 +790,7 @@ fn amiga_root_lies_are_refused() {
         let block = &mut bad[root..root + 512];
         corrupt(block);
         if what != "a broken checksum" {
-            images::seal_affs(block);
+            affs::seal(block, affs::CHECKSUM);
         }
         assert_eq!(fstype(&bad), None, "{what}");
     }
@@ -860,4 +862,154 @@ fn a_rigid_disk_block_is_partitions_not_a_volume() {
         None,
         "past the blocks it is looked for in"
     );
+}
+
+/// The Rigid Disk Block is looked for in one read of its window, whatever the
+/// device's block size, and in all of a device smaller than the window.
+#[test]
+fn the_rigid_disk_block_is_looked_for_in_one_read() {
+    for block_size in [512, 2048, 4096] {
+        for (disk, found) in [(vec![0u8; 64 * 1024], false), (rdb_disk(16, 15), true)] {
+            let mut dev = device(disk, block_size, None);
+            assert_eq!(affs::rigid_disk_block(&mut dev), Ok(found), "{block_size}");
+            assert_eq!(
+                dev.device().reads,
+                1,
+                "one transfer at {block_size}-byte blocks"
+            );
+        }
+    }
+    let mut small = device(rdb_disk(3, 2), 512, None);
+    assert_eq!(affs::rigid_disk_block(&mut small), Ok(true));
+    assert_eq!(small.device().reads, 1);
+}
+
+/// A sealed AmigaDOS block sums to zero whatever its checksum slot held, and
+/// sealing it again changes nothing.
+#[test]
+fn a_sealed_amiga_block_sums_to_zero_whatever_its_checksum_slot_held() {
+    for size in affs::BLOCK_SIZES {
+        for at in [affs::BITMAP_CHECKSUM, 8, affs::CHECKSUM] {
+            let mut block: Vec<u8> = (0..size as usize)
+                .map(|i| (i.wrapping_mul(31) ^ (i >> 3)) as u8)
+                .collect();
+            affs::put_be32(&mut block, at, 0xDEAD_BEEF);
+            affs::seal(&mut block, at);
+            assert!(affs::sums_to_zero(&block), "{size} at {at}");
+            let sealed = block.clone();
+            affs::seal(&mut block, at);
+            assert_eq!(block, sealed, "{size} at {at}");
+        }
+    }
+}
+
+/// A record `log2secsize` 9 and `idlen` 15 with `zone_spare` and `nzones`.
+fn crafted_record(zone_spare: u16, nzones: u16) -> adfs::DiscRecord {
+    let mut record = adfs::DiscRecord::parse(&[0; adfs::DISC_RECORD_SIZE]);
+    record.log2secsize = 9;
+    record.idlen = 15;
+    record.log2bpmb = 7;
+    record.zone_spare = zone_spare;
+    record.nzones = nzones;
+    record.disc_size = 1 << 20;
+    record.root = 0x200;
+    record
+}
+
+/// A record whose zone 0 cannot hold it is no volume: a driver given it
+/// would compute where its map lies by subtracting past zero.
+#[test]
+fn a_disc_record_whose_first_zone_cannot_hold_it_is_no_adfs_volume() {
+    for nzones in [2, 1] {
+        let record = crafted_record(4048, nzones);
+        assert_eq!(
+            record.validate(),
+            Err(DriverError::BadMagic),
+            "{nzones} zones"
+        );
+        let image = images::adfs_boot_block(&record);
+        assert_eq!(
+            adfs::identify(&mut device(image.clone(), 512, None)),
+            Ok(None)
+        );
+        assert_eq!(recognise_with(image, 512, None), None);
+    }
+    // Zone 0 holds the record and exactly one fragment of 16 bits.
+    assert_eq!(crafted_record(3600, 2).validate(), Ok(()));
+    assert_eq!(
+        crafted_record(3601, 2).validate(),
+        Err(DriverError::BadMagic)
+    );
+    // A spare smaller than the zone header puts every zone's stream past its
+    // sector.
+    for spare in [0, 31] {
+        assert_eq!(
+            crafted_record(spare, 2).validate(),
+            Err(DriverError::BadMagic),
+            "{spare}"
+        );
+    }
+    assert_eq!(crafted_record(32, 2).validate(), Ok(()));
+}
+
+/// Every record the validator admits has a zone geometry: each zone's stream
+/// inside its sector, zone 0's holding a fragment, and where every zone and
+/// the map lie computed without overflow. The admitted boundary is pinned at
+/// each sector size and id width, so a validator refusing everything fails.
+#[test]
+fn every_disc_record_validate_admits_has_a_zone_geometry() {
+    let mut admitted = 0u64;
+    for log2secsize in 8..=10u8 {
+        let sector_bits = 8u32 << log2secsize;
+        for format_version in [0, 1] {
+            let max_idlen = if format_version == 0 { 16 } else { 19 };
+            for idlen in log2secsize + 3..=max_idlen {
+                let record = |zone_spare: u32, nzones, log2bpmb| {
+                    let mut record = adfs::DiscRecord::parse(&[0; adfs::DISC_RECORD_SIZE]);
+                    record.log2secsize = log2secsize;
+                    record.format_version = format_version;
+                    record.idlen = idlen;
+                    record.zone_spare = u16::try_from(zone_spare).unwrap_or(u16::MAX);
+                    record.nzones = nzones;
+                    record.log2bpmb = log2bpmb;
+                    record.root = 0x200;
+                    record.disc_size = 1 << 20;
+                    record
+                };
+                let fits = sector_bits - adfs::DISC_RECORD_BITS - 1 - u32::from(idlen);
+                assert_eq!(
+                    record(fits, 2, 6).validate(),
+                    Ok(()),
+                    "{log2secsize} {idlen}"
+                );
+                assert_eq!(
+                    record(fits + 1, 2, 6).validate(),
+                    Err(DriverError::BadMagic),
+                    "{log2secsize} {idlen}"
+                );
+                for zone_spare in (0..=sector_bits).chain([u32::from(u16::MAX)]) {
+                    for nzones in [1, 2, 3, 4, 255, 256, 511, 512, u16::MAX] {
+                        for log2bpmb in [6, 16] {
+                            let record = record(zone_spare, nzones, log2bpmb);
+                            if record.validate().is_err() {
+                                continue;
+                            }
+                            admitted += 1;
+                            assert!(record.zone_stream_bits(0) > u32::from(idlen));
+                            assert!(
+                                adfs::ZONE_HEADER_SIZE_U32 * 8 + record.zone_bits() <= sector_bits
+                            );
+                            let _ = record.map_offset();
+                            let nzones = u32::from(nzones);
+                            for zone in [0, 1, nzones >> 1, nzones - 1, nzones] {
+                                let _ = record.zone_start_block(zone);
+                                let _ = record.zone_stream_bits(zone);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(admitted > 0);
 }

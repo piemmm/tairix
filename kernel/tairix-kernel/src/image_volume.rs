@@ -2,8 +2,9 @@
 //! attached for the principal that handed the kernel the file.
 //!
 //! The file is the volume's device: whole 512-byte blocks, read and written
-//! through the caller's own descriptor of it as the caller's identity frozen
-//! at the attach. The kernel recognises it with the probe every volume goes
+//! through the caller's own descriptor of it, held through the volume it lies
+//! on rather than a bind it was opened through, as the caller's identity
+//! frozen at the attach. The kernel recognises it with the probe every volume goes
 //! through, locks it, publishes the volume's node under the image-volume node
 //! for `devmgr` to load the format's driver, and waits for that driver to serve
 //! or refuse it. The volume is presented as its attacher's, never executes, and
@@ -25,7 +26,7 @@ use tairix_abi::fsserve::{ServeOffer, SERVED_IDLE_NS};
 use tairix_abi::imageattach::{ImageAccess, ImageAttach, ImageAttachReply, ImageRefusal};
 use tairix_abi::netattach::AttachReply;
 use tairix_abi::sysinfo::{MountAvailability, VolumeClass};
-use tairix_abi::volume::{FormatName, ViewBindRequest, VolumeFsType, VOLUME_NAME_MAX};
+use tairix_abi::volume::{DetachMode, FormatName, ViewBindRequest, VolumeFsType, VOLUME_NAME_MAX};
 use tairix_abi::{
     DriverError, DriverHandle, Errno, FileId, FileStat, HwDeviceClass, HwNode, LockRange, ProcId,
     FS_NAME_MAX, HW_NODE_ROOT_ID,
@@ -55,7 +56,7 @@ use tairix_util::fallible::concatenated;
 
 use super::{
     mount_flags, reattach, record, record_retired, records_owners, storage_path, take_down,
-    volume_node, GivenUp, RuntimeVolumeService, Wiring,
+    volume_node, GivenUp, RuntimeVolumeService, Wiring, Writes,
 };
 use crate::hwtree_node_ids::IMAGE_VOLUMES_NODE_ID;
 use crate::served_volume::{Granted, ServedVolume};
@@ -356,6 +357,8 @@ struct Custody {
     answering: bool,
     /// The teardown it owes, which a settling task does once nothing holds
     /// it: never the task that found it owed, which may be its driver's own.
+    /// An attach that gave up takes its own volume back first, unless it is
+    /// being killed or something holds the volume.
     owed: Owed,
     /// A settling task could not do what it owes, nothing else having let go
     /// of an image volume while it tried: the [`Registry::releases`] it
@@ -603,11 +606,14 @@ impl ImageVolumes {
     }
 
     /// What the principal and file behind `id` have attached already. When
-    /// the attach would `adopt` it, the volume is taken up for `session` too,
-    /// living until that session has ended as well and owing no teardown it
-    /// owed: the decision is made under the guard its teardown is claimed
-    /// under, and the attach then answers for it until [`Self::answered`].
-    /// One owing its teardown is leaving to an attach that would not.
+    /// `attach` would adopt it — a volume as writable as it asks — the volume
+    /// is taken up for `session` too, living until that session has ended as
+    /// well and owing no teardown it owed: the decision is made under the
+    /// guard its teardown is claimed under, and the attach then answers for it
+    /// until [`Self::answered`]. One owing its teardown is leaving to an
+    /// attach that would not. How writable it is is read under the same
+    /// guard, with no operation claiming the volume, so no resumed serve
+    /// changes it meanwhile.
     ///
     /// # Errors
     ///
@@ -617,17 +623,19 @@ impl ImageVolumes {
         &self,
         id: &[u8; 16],
         session: ProcId,
-        adopt: bool,
+        attach: &ImageAttach<'_>,
     ) -> Result<Option<Attached>, Errno> {
         let mut registry = self.registry.lock();
         let volumes = &mut registry.volumes;
         let Some(entry) = volumes.iter_mut().find(|v| v.id == *id) else {
             return Ok(None);
         };
+        let read_only = entry.served.read_only();
+        let adopting = attach.adopt && attach.access.accepts(read_only);
         let name = match &entry.stage {
             _ if entry.custody.answering => return Ok(Some(Attached::Busy("attach_in_progress"))),
             _ if entry.custody.claimed() => return Ok(Some(Attached::Busy("volume_busy"))),
-            _ if !adopt && entry.custody.owed != Owed::Nothing => {
+            _ if !adopting && entry.custody.owed != Owed::Nothing => {
                 return Ok(Some(Attached::Busy("volume_leaving")))
             }
             // What its writes were is lost until its owner ejects it.
@@ -637,8 +645,8 @@ impl ImageVolumes {
             }
             Stage::Mounted { name, .. } => name,
         };
-        let reply = AttachReply::new(*id, name, entry.served.read_only())?;
-        if !adopt {
+        let reply = AttachReply::new(*id, name, read_only)?;
+        if !adopting {
             return Ok(Some(Attached::Mounted { reply, taken: None }));
         }
         let added = !entry.sessions.contains(&session);
@@ -897,15 +905,35 @@ fn server_gone(entry: &ImageVolume) -> Option<u64> {
 struct Building<'a> {
     service: &'a RuntimeVolumeService,
     volume: u64,
-    stands: bool,
+    end: BuildEnd,
+}
+
+/// How an attach's hold on the volume it builds ends.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum BuildEnd {
+    /// It gave up before telling anyone the volume's name.
+    Abandoned,
+    /// Its answer was delivered.
+    Stands,
+    /// It took the volume back itself.
+    TakenBack,
+}
+
+impl Building<'_> {
+    /// Take the volume back on the attaching `task` before the attach answers
+    /// that it gave up ([`RuntimeVolumeService::take_back`]).
+    fn take_back(mut self, task: u64, audit: &'static (dyn Sink + Sync)) {
+        self.service.take_back(self.volume, task, audit);
+        self.end = BuildEnd::TakenBack;
+    }
 }
 
 impl Drop for Building<'_> {
     fn drop(&mut self) {
-        if self.stands {
-            self.service.images.answered(self.volume, None);
-        } else {
-            self.service.abandon(self.volume);
+        match self.end {
+            BuildEnd::Stands => self.service.images.answered(self.volume, None),
+            BuildEnd::Abandoned => self.service.abandon(self.volume),
+            BuildEnd::TakenBack => {}
         }
     }
 }
@@ -933,7 +961,7 @@ struct Claimed<'a> {
     id: [u8; 16],
     handle: DriverHandle,
     name: ArrayString<VOLUME_NAME_MAX>,
-    lost: bool,
+    writes: Writes,
 }
 
 impl<'a> Claimed<'a> {
@@ -958,7 +986,12 @@ impl<'a> Claimed<'a> {
             handle: entry.handle,
             // A catalog name is at most this long, so nothing is cut.
             name: ArrayString::from_str_truncating(entry.name().unwrap_or_default()),
-            lost: matches!(entry.stage, Stage::Lost { .. }),
+            writes: match entry.stage {
+                Stage::Lost { .. } => Writes::Lost,
+                // The loss of what the driver held was audited as it went.
+                Stage::Mounted { server: None, .. } => Writes::Gone,
+                _ => Writes::Served,
+            },
         }
     }
 }
@@ -1078,6 +1111,29 @@ enum Unprepared {
 }
 
 impl RuntimeVolumeService {
+    /// Tell `answer` the caller's attach took up the volume `reply` names,
+    /// attached already: the session hold `taken` added stays only once the
+    /// answer is delivered.
+    fn answer_adopted(
+        &self,
+        reply: AttachReply,
+        taken: Option<Taken>,
+        session: ProcId,
+        answer: AnswerSink<'_>,
+    ) -> Result<(), Errno> {
+        let mut adopted = taken.map(|taken| Adopted {
+            images: &self.images,
+            taken,
+            session,
+            delivered: false,
+        });
+        answer(&ImageAttachReply::AlreadyAttached(reply))?;
+        if let Some(adopted) = &mut adopted {
+            adopted.delivered = true;
+        }
+        Ok(())
+    }
+
     /// Attach the volume the image file `source` holds for `caller`, as
     /// `attach` asks, and hand the answer to `answer`.
     ///
@@ -1112,18 +1168,9 @@ impl RuntimeVolumeService {
             Ok(entry) => entry,
             Err(Unprepared::Refused(why)) => return answer(&refused_reply(audit, label, why)),
             Err(Unprepared::AlreadyAttached { reply, taken }) => {
-                let mut adopted = taken.map(|taken| Adopted {
-                    images: &self.images,
-                    taken,
-                    session,
-                    delivered: false,
-                });
-                answer(&ImageAttachReply::AlreadyAttached(reply))
-                    .map_err(|errno| refused("answer_undelivered", errno))?;
-                if let Some(adopted) = &mut adopted {
-                    adopted.delivered = true;
-                }
-                return Ok(());
+                return self
+                    .answer_adopted(reply, taken, session, answer)
+                    .map_err(|errno| refused("answer_undelivered", errno));
             }
             Err(Unprepared::Name(cause, errno)) => {
                 refused(cause, errno);
@@ -1145,7 +1192,7 @@ impl RuntimeVolumeService {
         let mut building = Building {
             service: self,
             volume,
-            stands: false,
+            end: BuildEnd::Abandoned,
         };
         // An unprivileged principal asks for it, so it may not spend the ids
         // devices need.
@@ -1180,18 +1227,32 @@ impl RuntimeVolumeService {
             Waited::TimedOut => return Err(refused("driver_silent", Errno::TimedOut)),
             Waited::Gone => return Err(refused(GONE.0, GONE.1)),
         }
+        // Mounted now, so a volume the attach gives up on is taken back
+        // before the caller hears why.
         let reply = match self.finish_image(caller, attach, id, task) {
             Ok(reply) => reply,
             Err(Unfinished::Target(errno)) => {
                 refused("target_refused", errno);
+                building.take_back(task, audit);
                 return answer(&ImageAttachReply::TargetRefused(errno));
             }
-            Err(Unfinished::Failed(cause, errno)) => return Err(refused(cause, errno)),
+            Err(Unfinished::Failed(cause, errno)) => {
+                let errno = refused(cause, errno);
+                building.take_back(task, audit);
+                return Err(errno);
+            }
         };
-        answer(&ImageAttachReply::Attached(reply))
-            .map_err(|errno| refused("answer_undelivered", errno))?;
-        building.stands = true;
-        Ok(())
+        match answer(&ImageAttachReply::Attached(reply)) {
+            Ok(()) => {
+                building.end = BuildEnd::Stands;
+                Ok(())
+            }
+            Err(errno) => {
+                let errno = refused("answer_undelivered", errno);
+                building.take_back(task, audit);
+                Err(errno)
+            }
+        }
     }
 
     /// Recognise the file `source` holds, judge it and `caller`'s attach of
@@ -1217,7 +1278,7 @@ impl RuntimeVolumeService {
         let file_volume = Arc::clone(source.file.node.volume());
         let (mut block, file, probed) = recognised(source.file, attach)?;
         let id = identity(caller.uid, &file, &probed.identity);
-        match self.images.attached_as(&id, source.session, attach.adopt) {
+        match self.images.attached_as(&id, source.session, attach) {
             Ok(Some(Attached::Mounted { reply, taken })) => {
                 return Err(Unprepared::AlreadyAttached { reply, taken });
             }
@@ -1418,6 +1479,38 @@ impl RuntimeVolumeService {
             Stage::Mounted { .. } | Stage::Lost { .. } => Some(Waited::Mounted),
         };
         (outcome, false)
+    }
+
+    /// Take out image volume `volume`, whose attach gave up after mounting it,
+    /// on that attach's own `task`: a plain detach, so nothing written to it
+    /// meanwhile is discarded. A caller being killed, a volume something holds,
+    /// or a refused detach leaves it owed to the settling tasks, which force
+    /// it ([`Self::abandon`]).
+    fn take_back(&self, volume: u64, task: u64, audit: &'static (dyn Sink + Sync)) {
+        // Asked before the registry lock: the gates' lock never nests in it.
+        let here = !tairix_kernel_core::procsignal::kill_pending(task);
+        let claimed = {
+            let mut registry = self.images.registry.lock();
+            let since = registry.releases;
+            let Some(at) = position(&registry.volumes, volume) else {
+                return;
+            };
+            let entry = &mut registry.volumes[at];
+            let mounted = matches!(entry.stage, Stage::Mounted { .. } | Stage::Lost { .. });
+            (here && mounted && !entry.custody.claimed()).then(|| {
+                entry.custody.answering = false;
+                entry.sessions.clear();
+                entry.custody.owed = Owed::Abandoned;
+                Claimed::of(self, entry, Holder::Operation, since)
+            })
+        };
+        match claimed {
+            // A refusal leaves it owed, unclaimed, as its claim lets go.
+            Some(claimed) => {
+                let _ = self.detach_claimed(audit, claimed, false, "abandoned");
+            }
+            None => self.abandon(volume),
+        }
     }
 
     /// Take out image volume `volume`, whose attach gave up without telling
@@ -1714,7 +1807,7 @@ impl RuntimeVolumeService {
         let read_only = target.served.read_only() || offer.write_refusal.is_some();
         // The attach's own contract; a driver serving it again keeps it
         // mounted, read-only or not.
-        if read_only && target.access == ImageAccess::Writable && target.mounted_as.is_none() {
+        if !target.access.accepts(read_only) && target.mounted_as.is_none() {
             return Err(("write_protected", Errno::ReadOnly));
         }
         let vfs = LATE_FILESYSTEM
@@ -1845,8 +1938,9 @@ impl RuntimeVolumeService {
 
     /// Detach the image volume published as `id`: for `caller`, its owner or
     /// a holder of the mount authority, or for the kernel itself when there is
-    /// none, for `cause`. A force revokes its descriptors and detaches the
-    /// image volumes on it first.
+    /// none, for `cause`. A force — `mode` forcing the volume as it stands
+    /// once claimed — revokes its descriptors and detaches the image volumes
+    /// on it first.
     ///
     /// # Errors
     ///
@@ -1859,11 +1953,11 @@ impl RuntimeVolumeService {
         &self,
         audit: &'static (dyn Sink + Sync),
         id: &[u8; 16],
-        force: bool,
+        mode: DetachMode,
         caller: Option<&Principal<'_>>,
         cause: &'static str,
     ) -> Result<(), Errno> {
-        self.detach_held(audit, id, force, caller, cause, Holder::Operation)
+        self.detach_held(audit, id, mode, caller, cause, Holder::Operation)
     }
 
     /// [`Self::detach_image`], the volume held `by` the holder named.
@@ -1871,7 +1965,7 @@ impl RuntimeVolumeService {
         &self,
         audit: &'static (dyn Sink + Sync),
         id: &[u8; 16],
-        force: bool,
+        mode: DetachMode,
         caller: Option<&Principal<'_>>,
         cause: &'static str,
         by: Holder,
@@ -1905,6 +1999,7 @@ impl RuntimeVolumeService {
             }
             Claimed::of(self, entry, by, since)
         };
+        let force = mode.forces(claimed.writes == Writes::Lost);
         self.detach_claimed(audit, claimed, force, cause)
     }
 
@@ -1921,7 +2016,7 @@ impl RuntimeVolumeService {
             id,
             handle,
             name,
-            lost,
+            writes,
         } = claimed;
         let refused = |why: &'static str, errno: Errno| {
             record(
@@ -1937,13 +2032,13 @@ impl RuntimeVolumeService {
         self.clear_dependents(handle, force, audit, claim.by.beneath())
             .map_err(|(why, errno)| refused(why, errno))?;
         let given_up =
-            take_down(handle, id, force, lost).map_err(|(why, errno)| refused(why, errno))?;
+            take_down(handle, id, force, writes).map_err(|(why, errno)| refused(why, errno))?;
         let taken = self.images.take(claim.volume);
         drop(claim);
         if let Some(entry) = taken {
             self.retire_served(Some(&entry.served), image_node(entry.node));
         }
-        audit_detached(audit, name.as_str(), cause, given_up);
+        audit_detached(audit, name.as_str(), cause, force, given_up);
         // One that entered as it was detached is stranded with it.
         self.retire_images_on(handle);
         Ok(())
@@ -1992,7 +2087,7 @@ impl RuntimeVolumeService {
             let Some(id) = next else {
                 return Ok(());
             };
-            self.detach_held(audit, &id, true, None, "backing_detached", by)
+            self.detach_held(audit, &id, DetachMode::Force, None, "backing_detached", by)
                 .map_err(|errno| ("image_detach_refused", errno))?;
         }
     }
@@ -2265,10 +2360,24 @@ impl SessionObserver for RuntimeVolumeService {
 /// The image `file` as a device, read-only until the volume it holds is known
 /// not to be attached already, the file's identity, and the volume it holds,
 /// as `attach` expects it: or why it goes no further.
+///
+/// The file is held through its own volume, never a bind it was opened
+/// through, so the image leaves only with its eject, its session or that
+/// volume.
 fn recognised(
     file: NodeHandle,
     attach: &ImageAttach<'_>,
 ) -> Result<(ImageBlock, FileId, ProbedVolume), Unprepared> {
+    let projection = LATE_FILESYSTEM
+        .vfs()
+        .map_err(|errno| Unprepared::Failed("no_mount_table", errno))?
+        .mounts()
+        .kept_through(&file.projection)
+        .map_err(|err| match err {
+            VfsError::NotSupported => Unprepared::Failed("file_unanchored", Errno::NotSupported),
+            other => Unprepared::Failed("file_unreadable", other.to_errno()),
+        })?;
+    let file = NodeHandle { projection, ..file };
     let (mut block, stat) = ImageBlock::new(file, false)
         .map_err(|errno| Unprepared::Failed("file_unreadable", errno))?;
     if stat.id.volume == FileId::NONE.volume {
@@ -2277,7 +2386,7 @@ fn recognised(
     let probed = probe(&mut block).map_err(Unprepared::Refused)?;
     if attach
         .expects
-        .is_some_and(|expects| expects != probed.fstype)
+        .is_some_and(|expects| !expects.contains(probed.fstype))
     {
         return Err(Unprepared::Refused(ImageRefusal::NotExpected));
     }
@@ -2389,16 +2498,22 @@ const DETACH_REFUSED: &str = "image-volume: detach refused";
 /// The message of a retirement.
 const RETIRED: &str = "image-volume: retired";
 
-/// Record that the image volume `name` was detached for `cause`, and what a
-/// force gave up for it.
-fn audit_detached(audit: &'static (dyn Sink + Sync), name: &str, cause: &str, given_up: GivenUp) {
+/// Record that the image volume `name` was detached for `cause`, whether by
+/// a force, and what the force gave up for it.
+fn audit_detached(
+    audit: &'static (dyn Sink + Sync),
+    name: &str,
+    cause: &str,
+    forced: bool,
+    given_up: GivenUp,
+) {
     log(
         audit,
         &Event {
-            level: if given_up == GivenUp::default() {
-                Level::Info
-            } else {
+            level: if forced || given_up != GivenUp::default() {
                 Level::Warn
+            } else {
+                Level::Info
             },
             id: IMAGE_VOLUME_DETACHED,
             message: "image-volume: detached",
@@ -2410,6 +2525,10 @@ fn audit_detached(audit: &'static (dyn Sink + Sync), name: &str, cause: &str, gi
                 Field {
                     key: "cause",
                     value: FieldValue::Str(cause),
+                },
+                Field {
+                    key: "outcome",
+                    value: FieldValue::Str(if forced { "forced" } else { "clean" }),
                 },
                 Field {
                     key: "revoked_nodes",
@@ -2426,6 +2545,14 @@ fn audit_detached(audit: &'static (dyn Sink + Sync), name: &str, cause: &str, gi
 
 #[cfg(test)]
 impl RuntimeVolumeService {
+    /// Run `during` while network volume `id` is held as an attach or detach
+    /// holds it, then let it go: one retired meanwhile takes what lies on it.
+    pub(super) fn while_share_held<T>(&self, id: &[u8; 16], during: impl FnOnce() -> T) -> T {
+        let audit = self.wiring().expect("wired").audit;
+        self.network
+            .while_held(id, audit, &|gone| self.retire_images_on(gone), during)
+    }
+
     /// Run `during` while image volume `id` is held as a slow eject or serve
     /// holds it, then let it go.
     pub(super) fn while_image_held<T>(&self, id: &[u8; 16], during: impl FnOnce() -> T) -> T {

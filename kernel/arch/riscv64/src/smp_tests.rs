@@ -49,6 +49,23 @@ fn hartid_validity_tracks_the_registered_pool() {
     assert!(!is_valid_hartid(0));
 }
 
+/// A `static` pool lies in writable memory: a started hart's first push, at
+/// the end of its slice, writes through a pointer carrying the pool's own
+/// provenance, as the base the trampoline reads does.
+#[test]
+fn a_static_pool_takes_a_harts_stack_writes() {
+    static POOL: SecondaryStackPool<2> = SecondaryStackPool::new();
+    let base = POOL.stacks.as_ptr().cast::<u8>().cast_mut();
+    // SAFETY: hart 1's slice ends two slots into the two-slot pool.
+    let top = unsafe { base.add(2 * core::mem::size_of::<SecondaryStackSlot>() - 1) };
+    // SAFETY: `top` is the last byte of hart 1's slice, and nothing else
+    // reaches it.
+    unsafe {
+        top.write(0xA5);
+        assert_eq!(top.read(), 0xA5);
+    }
+}
+
 #[test]
 fn secondary_entry_round_trips_and_is_set_once() {
     clear_secondary_entry_for_tests();

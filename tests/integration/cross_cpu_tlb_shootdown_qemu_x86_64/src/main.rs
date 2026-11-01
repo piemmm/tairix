@@ -14,5 +14,9 @@ mod vertical;
 #[cfg(itest_x86_64)]
 const AP_PAST_XAPIC: bool = false;
 
+/// The run's AP lacks a protection the boot CPU holds, and must be refused.
+#[cfg(itest_x86_64)]
+const AP_REFUSED: bool = false;
+
 #[cfg(not(itest_x86_64))]
 fn main() {}

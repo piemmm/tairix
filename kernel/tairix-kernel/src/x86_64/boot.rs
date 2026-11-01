@@ -57,6 +57,7 @@ use tairix_arch_x86_64::apic::{IoApic, Lapic, LocalApic, VolatileIoApicMmio};
 use tairix_arch_x86_64::apic_timer::{self, Calibration, PolledPit, Rdtsc};
 use tairix_arch_x86_64::bootinfo::BootData;
 use tairix_arch_x86_64::bootmemory;
+use tairix_arch_x86_64::cpuid::CpuidLimit;
 use tairix_arch_x86_64::gdt::PerCpuGdt;
 use tairix_arch_x86_64::irq as arch_irq;
 use tairix_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch, X86_64ArchStorage};
@@ -549,6 +550,11 @@ pub fn bring_up_bsp(
     // 1b. Arm the guarded user copy the `#PF` entry redirects into and
     //     publish the one fatal policy before anything further can fault.
     install_fault_entries();
+    match tairix_arch_x86_64::cpuid::boot_cpu_limit() {
+        Some(CpuidLimit::Lifted) => crate::protections::log_cpuid_limit(log_sink, true),
+        Some(CpuidLimit::Held) => crate::protections::log_cpuid_limit(log_sink, false),
+        Some(CpuidLimit::Unset) | None => {}
+    }
     let held = tairix_arch_x86_64::protection::in_force();
     crate::protections::log(
         log_sink,

@@ -139,8 +139,8 @@ over a resolution-independent design grid, so the same glyph is
   thread, or syscall, so its whole policy is host-tested, and it lives here
   beside the contract it implements because two processes drive it — the
   desktop session from a worker thread behind the runtime's futex mutex
-  (`plans/FIX-DESKTOP.md` DESK-8), the file manager from the reader thread its
-  listings share (`plans/NEW-FILEMANAGER.md`), and `userland/apps/*` may not depend on
+  (`plans/FIX-DESKTOP.md` DESK-8), the file manager from the readers serving
+  its volumes, one share each (`plans/NEW-FILEMANAGER.md`), and `userland/apps/*` may not depend on
   `userland/gui/*` (`AGENTS.md` §17.4). An answer handed over is forgotten —
   the cache owns it, so a later miss is a genuine one and is produced again.
   A decode the cache *refused* is held as declined instead, which is what stops

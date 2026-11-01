@@ -26,7 +26,7 @@ use tairix_drvhost::{
 };
 use tairix_fwcfg::{FwCfg, RamfbConfig, DRM_FORMAT_XRGB8888};
 use tairix_kernel::SERIAL_SINK;
-use tairix_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
+use tairix_kernel_mem::{AddressSpace, HostPageTable, MmioMap, VirtAddr};
 use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::KernelMmioMapper;
@@ -312,20 +312,11 @@ fn drive_lifecycle(block: &[u8], phys_base: u64) {
     grants.insert(CapabilityId::MMIO_MAP);
     grants.insert(CapabilityId::DRV_LOAD);
     let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK);
-    // SAFETY: every root carries the direct map over its live extent, and
-    // nothing tears it down.
-    let phys = unsafe {
-        DirectPhysMap::new(
-            tairix_arch_x86_64::paging::PHYSMAP_VMA_BASE,
-            tairix_arch_x86_64::paging::physmap_bytes(),
-        )
-    }
-    .expect("the boot direct map addresses its window");
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(MMIO_VBASE),
         MMIO_CAP_PAGES,
-        &phys,
+        &tairix_kernel::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP,
     ) else {
         fail("MMIO map construct");
     };

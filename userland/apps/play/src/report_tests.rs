@@ -110,6 +110,20 @@ fn a_file_left_out_or_cut_short_is_an_omission_with_its_reason() {
     assert!(cut.contains("\"whole_file\":false"), "{cut}");
 }
 
+/// A file name every character of which the record escapes still reaches
+/// fd 3: the line is sized by the record's own length, not the name's.
+#[test]
+fn a_name_the_record_escapes_throughout_is_framed_whole() {
+    let name = "\"".repeat(130);
+    for line in [
+        opened(&name, 0, &info(Some(144_000))),
+        left_out(&name, Skip::StartsPastEnd, true),
+        left_out(&name, Skip::DecoderGaveUp, false),
+    ] {
+        assert!(text(&line).ends_with("}\n"), "{} bytes", line.len());
+    }
+}
+
 #[test]
 fn the_summary_counts_what_was_heard_and_what_ran_short() {
     let status = Status {

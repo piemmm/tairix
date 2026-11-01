@@ -136,8 +136,9 @@ cross-volume move copies-then-deletes, a copy streams in bounded chunks),
 `Delete` removes it after a modal confirmation, and `Alt+Enter` shows its
 properties — every write the launching user's own permission-checked VFS
 call, no new capability. None of them waits on the window's loop: a one-shot
-write rides the reader thread, and a delete, paste or move to Trash runs on
-an operations worker one bounded unit at a time, with a progress panel (only
+write rides the reader serving its volume, and a delete, paste or move to Trash
+runs on an operations worker one bounded unit at a time — those sharing a
+volume in the order asked, those on volumes apart side by side — with a progress panel (only
 the panel is repainted as its count moves) and a cancel. Where the machine
 grants no worker, the operation runs on the loop in half-frame slices, still
 cancellable. The first refusal stops it and is stated in the window, naming the
@@ -155,12 +156,18 @@ with a reserved code and a stated reason on `stderr`.
 Opening a **disk image** (`.iso`, `.adf`, `.adl`, `.adm`, `.ads`, `.hdf`)
 mounts the volume it holds, privately, and opens a window onto it at
 `/Storage/<name>`; *Mount Read-Only* in the context menu mounts it read-only
-however the file may be written. *Eject*, in the context menu and on a rail
-row's own menu, detaches a disk image's or a share's volume the user attached.
+however the file may be written, and one of an image no path can name says
+why, as Open does. *Eject*, in the context menu and on a rail row's own menu,
+detaches a disk image's or a share's volume the user attached; one that went
+away with what was written to it unsaved has no rail row, and *Eject* on its
+catalog entry asks first, as the window's one question
+(`files::question`), before a detach that takes the lost.
 A mount runs on a mount worker of its own (`tairix_browse::mount::MountWorker`),
-since an attach waits for the volume's driver; an eject runs on the app's
-reader, after the read under way, so no read or watch of the app's own still
-holds the volume (`plans/DISK-IMAGES.md`). A refusal of either is stated in an
+since an attach waits for the volume's driver; an eject runs on the reader
+serving the volume's lane, after the read under way there, so no read or watch
+of the app's own routed to it still holds the volume — one routed before the
+mount table was re-read can, and the eject is then refused as busy
+(`plans/DISK-IMAGES.md`). A refusal of either is stated in an
 alert in the words the desktop uses too. The mount is
 the kernel's decision, made on the user's own open of the file
 (`CAP_FS_ACCESS`); no capability is added for it.
@@ -239,7 +246,7 @@ wedges or blanks the window.
 
 A newly attached volume appears **on its own**: the app holds the kernel's
 `Mounts` notice in its wait-set, and an attach, a re-backing, or a removal
-wakes it to re-read the rail off the event loop, through the reader, and
+wakes it to re-read the rail off the event loop, on a reader, and
 redraw every window's rail when the answer lands. `F5` or the toolbar's
 Refresh asks for the same read in the same gesture that re-lists the
 directory. No polling loop and no timer stand in for the event.
@@ -282,8 +289,10 @@ view.
 The decode is also never **inside** the paint, nor on the event loop. A tile
 that misses records the decode on the shared deferred-decode desk
 (`tairix_icon::ArtworkDesk`, the same policy the desktop session's worker
-thread drives) and draws its built-in glyph; the app's reader thread decodes
-it in the sandbox and wakes the loop once its batch drains — so a folder of
+thread drives) and draws its built-in glyph; the reader serving the artwork's
+volume decodes it in a sandboxed decoder, no more decoding at once than the
+machine leaves room for, and wakes the loop once that volume's batch drains —
+so a folder of
 picture-bearing bundles neither freezes the first frame nor stalls a scroll,
 and a key or a click waits on no decode. Each window then repaints only the
 slots drawn through what landed: an application copied into one window
@@ -318,15 +327,18 @@ any folder. The `netbrowse` module (host-tested) decides when the reader is
 asked to collect from or close the discovery session: it is open only while a
 window shows the network or is on its way there, the service's doorbell is a
 member of the event wait-set, and at most one collect is out at a time. Every
-call to `discoveryd` is made on the reader thread; where the kernel grants no
-reader thread they are made on the loop, as every read then is. Opening
+call to `discoveryd` is made on a reader, on the lane of work that touches
+no volume; where the kernel grants no reader thread they are made on the loop,
+as every read then is. Opening
 an endpoint states that connecting to network shares is not available, since
 this system has no SMB client to mount one with (`plans/ZEROCONF.md` Z11).
 
 ## Capabilities
 
-`CAP_CONSOLE_WRITE` (fail-loud diagnostics), `CAP_FS_ACCESS` (its
-directory listings and the shipped icon assets it reads — every read
+`CAP_CONSOLE_WRITE` (fail-loud diagnostics), `CAP_FS_ACCESS` (what it
+does with the user's files — listing, opening, copying, moving, renaming and
+removing them, and mounting the disk images among them, which an image
+attach asks of its caller — and the shipped icon assets it reads, every call
 still permission-checked per inode under the launching user's identity),
 `CAP_SHM` (the granted window frame region), `CAP_PROC_SPAWN`,
 `CAP_LOG_EMIT` (the record a crashed decode worker leaves), and `CAP_NET`,

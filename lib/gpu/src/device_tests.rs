@@ -6,19 +6,21 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::Duration64;
 
+use tairix_parallel::Serial;
+
 use crate::{
     Allocation, AllocationDesc, Buffer, BufferDesc, BufferUsage, CommandBuffer, Context,
-    ContextDesc, CopyRegion, Device, Error, Fence, Loss, Queue, Submission, SubmitError,
-    MAX_UPDATE_BYTES,
+    ContextDesc, CopyRegion, Device, Error, Fence, Loss, NoThreads, Queue, SoftwareDesc, Spawn,
+    Submission, SubmitError, DEFAULT_SUBGROUP_SIZE, MAX_UPDATE_BYTES,
 };
 
 /// A clock a test sets, advancing by `step` at every reading, which it
 /// counts.
 #[derive(Default)]
-struct Clock {
-    now: AtomicU64,
-    step: AtomicU64,
-    readings: AtomicU64,
+pub(crate) struct Clock {
+    pub(crate) now: AtomicU64,
+    pub(crate) step: AtomicU64,
+    pub(crate) readings: AtomicU64,
 }
 
 impl MonotonicClock for Clock {
@@ -38,27 +40,97 @@ impl MonotonicClock for HostClock {
     }
 }
 
-const RAM: u64 = 4 << 20;
+/// The trap that asks the kernel to wake waiters, as the host's seam
+/// records it.
+pub(crate) const FUTEX_WAKE: u64 = tairix_abi::SyscallNumber::FUTEX_WAKE.as_u16() as u64;
+
+/// How many of `calls` asked the kernel to wake at most `count` waiters.
+pub(crate) fn wakes(calls: &[tairix_abi_trap::seam::Trap], count: u32) -> usize {
+    calls
+        .iter()
+        .filter(|(number, args)| *number == FUTEX_WAKE && args.get(1) == Some(&u64::from(count)))
+        .count()
+}
+
+/// Whether `done` holds within a minute, another thread's progress being what
+/// it waits on: answered rather than asserted, so a failing test can let that
+/// thread go before it fails, and leaves nothing running.
+pub(crate) fn until(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !done() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::yield_now();
+    }
+    true
+}
+
+pub(crate) const RAM: u64 = 4 << 20;
 const MEBIBYTE: u64 = 1 << 20;
 const SECOND: Duration64 = Duration64::from_secs(1);
 
-fn device() -> (Device, Arc<Clock>) {
+/// A software device of `memory` bytes whose work runs on the thread whose
+/// act made it ready, so a test sees it done when the call returns.
+pub(crate) fn software(memory: u64, clock: Arc<dyn MonotonicClock + Send + Sync>) -> Device {
+    software_on(memory, clock, Arc::new(Serial))
+}
+
+/// [`software`], its commands' work shared across `runner`.
+pub(crate) fn software_on(
+    memory: u64,
+    clock: Arc<dyn MonotonicClock + Send + Sync>,
+    runner: Arc<dyn tairix_parallel::JobRunner + Send>,
+) -> Device {
+    Device::software(&SoftwareDesc {
+        memory_bytes: memory,
+        clock,
+        runner,
+        threads: &NoThreads,
+        subgroup_size: DEFAULT_SUBGROUP_SIZE,
+    })
+    .expect("a software device")
+}
+
+/// A spawner that keeps the worker's body and never runs it: a worker that
+/// is never parked, and work that queues and is never run.
+#[derive(Default)]
+pub(crate) struct Unstarted(std::sync::Mutex<Vec<alloc::boxed::Box<dyn FnOnce() + Send>>>);
+
+impl Spawn for Unstarted {
+    fn spawn(&self, body: alloc::boxed::Box<dyn FnOnce() + Send>) -> bool {
+        self.0.lock().expect("unpoisoned").push(body);
+        true
+    }
+}
+
+pub(crate) fn unstarted(threads: &Unstarted) -> Device {
+    Device::software(&SoftwareDesc {
+        memory_bytes: RAM,
+        clock: Arc::new(Clock::default()),
+        runner: Arc::new(Serial),
+        threads,
+        subgroup_size: DEFAULT_SUBGROUP_SIZE,
+    })
+    .expect("a software device")
+}
+
+pub(crate) fn device() -> (Device, Arc<Clock>) {
     let clock = Arc::new(Clock::default());
-    let device = Device::software(
+    let device = software(
         RAM,
         Arc::clone(&clock) as Arc<dyn MonotonicClock + Send + Sync>,
-    )
-    .expect("a software device");
+    );
     (device, clock)
 }
 
-fn context(device: &Device) -> Context {
+pub(crate) fn context(device: &Device) -> Context {
     device
         .create_context(&ContextDesc::default())
         .expect("a context")
 }
 
-fn memory(context: &Context, size: u64) -> Allocation {
+pub(crate) fn memory(context: &Context, size: u64) -> Allocation {
     context
         .allocate(&AllocationDesc {
             size,
@@ -67,7 +139,7 @@ fn memory(context: &Context, size: u64) -> Allocation {
         .expect("an allocation")
 }
 
-fn over(context: &Context, allocation: &Allocation, offset: u64, size: u64) -> Buffer {
+pub(crate) fn over(context: &Context, allocation: &Allocation, offset: u64, size: u64) -> Buffer {
     context
         .create_buffer(
             allocation,
@@ -80,17 +152,17 @@ fn over(context: &Context, allocation: &Allocation, offset: u64, size: u64) -> B
         .expect("a buffer")
 }
 
-fn buffer(context: &Context, size: u64) -> (Allocation, Buffer) {
+pub(crate) fn buffer(context: &Context, size: u64) -> (Allocation, Buffer) {
     let allocation = memory(context, size);
     let buffer = over(context, &allocation, 0, size);
     (allocation, buffer)
 }
 
-fn queue(context: &Context) -> Queue {
+pub(crate) fn queue(context: &Context) -> Queue {
     context.queue(0, 0).expect("the transfer queue")
 }
 
-fn submit(queue: &Queue, commands: &CommandBuffer) -> Result<Fence, SubmitError> {
+pub(crate) fn submit(queue: &Queue, commands: &CommandBuffer) -> Result<Fence, SubmitError> {
     queue.submit(&Submission {
         command_buffers: &[commands],
         waits: &[],
@@ -99,7 +171,7 @@ fn submit(queue: &Queue, commands: &CommandBuffer) -> Result<Fence, SubmitError>
     })
 }
 
-fn contents(allocation: &Allocation) -> Vec<u8> {
+pub(crate) fn contents(allocation: &Allocation) -> Vec<u8> {
     let mut out = vec![0u8; usize::try_from(allocation.size()).expect("small")];
     allocation.read(0, &mut out).expect("readable");
     out
@@ -235,12 +307,37 @@ fn memory_is_reached_from_another_context_only_once_it_is_imported() {
         .expect("recorded");
     submit(&queue(&reader), &commands).expect("admitted");
     assert_eq!(contents(&copy), [7; 64]);
-    assert_eq!(owner.memory_used(), 64);
-    assert_eq!(reader.memory_used(), 64);
+    assert_eq!(owner.memory_used().allocations, 64);
+    assert_eq!(reader.memory_used().allocations, 64);
     drop(shared);
-    assert_eq!(owner.memory_used(), 64, "the importer still holds it");
+    assert_eq!(
+        owner.memory_used().allocations,
+        64,
+        "the importer still holds it"
+    );
     drop((src, imported));
-    assert_eq!(owner.memory_used(), 0);
+    assert_eq!(owner.memory_used().allocations, 0);
+}
+
+#[test]
+fn a_released_context_s_budget_stays_charged_to_the_heap_while_its_memory_is_held() {
+    let (device, _) = device();
+    let keeper = context(&device);
+    let heap = || keeper.shared.model.lock().work_heap_taken();
+    let owner = context(&device);
+    let shared = memory(&owner, 64);
+    let imported = keeper
+        .import(shared.export().expect("exported"))
+        .expect("imported");
+    drop((shared, owner));
+    let pinned = heap();
+    drop(imported);
+    assert_eq!(
+        pinned - heap(),
+        64 + crate::memory::Memory::overhead(64)
+            + crate::model::shared_bytes::<crate::memory::Budget>(),
+        "the memory, and the budget it is charged to"
+    );
 }
 
 #[test]
@@ -401,6 +498,23 @@ fn a_buffer_must_fit_its_allocation_at_an_aligned_offset() {
 }
 
 #[test]
+fn a_copy_of_part_of_a_word_is_refused() {
+    let (device, _) = device();
+    let context = context(&device);
+    let (_, src) = buffer(&context, 64);
+    let (_, dst) = buffer(&context, 64);
+    let verdict = |regions: &[CopyRegion]| {
+        let mut commands = context.command_buffer();
+        commands.copy_buffer(&src, &dst, regions).expect("recorded");
+        submit(&queue(&context), &commands).err().map(|e| e.error)
+    };
+    assert_eq!(verdict(&[region(1, 0, 4)]), Some(Error::Misaligned));
+    assert_eq!(verdict(&[region(0, 2, 4)]), Some(Error::Misaligned));
+    assert_eq!(verdict(&[region(0, 0, 6)]), Some(Error::Misaligned));
+    assert_eq!(verdict(&[region(4, 8, 12)]), None);
+}
+
+#[test]
 fn a_copy_that_writes_a_byte_twice_or_reads_what_it_writes_is_refused() {
     let (device, _) = device();
     let context = context(&device);
@@ -435,9 +549,17 @@ fn a_copy_that_writes_a_byte_twice_or_reads_what_it_writes_is_refused() {
 #[test]
 fn memory_past_a_context_s_limit_or_its_heap_is_refused() {
     let (device, _) = device();
+    // What a fresh context keeps, and what one allocation adds past its
+    // bytes: its memory's own and its table's first room.
+    let (base, extra) = {
+        let probe = context(&device);
+        let base = probe.memory_used().total();
+        let _held = memory(&probe, 4096);
+        (base, probe.memory_used().total() - base - 4096)
+    };
     let small = device
         .create_context(&ContextDesc {
-            memory_limit: Some(4096),
+            memory_limit: Some(base + 4096 + extra),
         })
         .expect("a context");
     let held = memory(&small, 4096);
@@ -447,15 +569,23 @@ fn memory_past_a_context_s_limit_or_its_heap_is_refused() {
     });
     assert_eq!(past.err(), Some(Error::OverLimit));
     drop(held);
-    assert_eq!(small.memory_used(), 0);
+    assert_eq!(small.memory_used().allocations, 0);
     let again = memory(&small, 4096);
-    assert_eq!(small.memory_used(), 4096);
+    assert_eq!(
+        small.memory_used().allocations,
+        4096,
+        "the table's room is kept, so the same allocation fits again"
+    );
     drop(again);
+    drop(small);
 
     let heap = crate::software::heap_bytes(RAM);
     let first = context(&device);
     let second = context(&device);
-    let most = memory(&first, heap - 64);
+    // All of the heap but 64 bytes, past what the device and both contexts
+    // already keep.
+    let taken = first.shared.model.lock().work_heap_taken();
+    let most = memory(&first, heap - taken - extra - 64);
     let refused = second.allocate(&AllocationDesc {
         size: 128,
         memory_type: 0,
@@ -495,10 +625,112 @@ fn memory_past_a_context_s_limit_or_its_heap_is_refused() {
     );
 }
 
+/// All of the device's heap but a few bytes, fewer than any request takes,
+/// held by an allocation of a context of its own.
+pub(crate) fn fill_heap(device: &Device) -> (Context, Allocation) {
+    // What a context's first allocation adds past its bytes.
+    let extra = {
+        let probe = context(device);
+        let base = probe.memory_used().total();
+        let _held = memory(&probe, 4096);
+        probe.memory_used().total() - base - 4096
+    };
+    let hog = context(device);
+    let taken = hog.shared.model.lock().work_heap_taken();
+    let most = memory(
+        &hog,
+        (crate::software::heap_bytes(RAM) - taken - extra - 8) / 4 * 4,
+    );
+    (hog, most)
+}
+
+/// A context whose limit leaves one byte short of what `request` charges
+/// once `setup` is made, as a fresh context's own probe of both measured.
+pub(crate) fn short_of<S, R>(
+    device: &Device,
+    setup: impl Fn(&Context) -> S,
+    request: impl Fn(&Context, &S) -> R,
+) -> (Context, S) {
+    let (made, asked) = {
+        let probe = context(device);
+        let held = setup(&probe);
+        let made = probe.memory_used().total();
+        let _made = request(&probe, &held);
+        (made, probe.memory_used().total() - made)
+    };
+    let short = device
+        .create_context(&ContextDesc {
+            memory_limit: Some(made + asked - 1),
+        })
+        .expect("a context");
+    let held = setup(&short);
+    (short, held)
+}
+
+#[test]
+fn a_request_past_both_its_context_s_limit_and_the_heap_is_refused_for_the_limit() {
+    let threads = Unstarted::default();
+    let device = unstarted(&threads);
+    let small = device
+        .create_context(&ContextDesc {
+            memory_limit: Some(64 << 10),
+        })
+        .expect("a context");
+    let (timelines, ()) = short_of(
+        &device,
+        |_| (),
+        |context, ()| context.create_timeline(0).expect("a timeline"),
+    );
+    let (submits, target) = short_of(
+        &device,
+        |context| buffer(context, 16),
+        |context, (_, target)| {
+            let mut commands = context.command_buffer();
+            commands.fill_buffer(target, 0, 16, 7).expect("recorded");
+            // Queued, as no worker runs it, so what it holds stays charged.
+            submit(&queue(context), &commands).expect("queued")
+        },
+    );
+    let _full = fill_heap(&device);
+    assert_eq!(
+        small
+            .allocate(&AllocationDesc {
+                size: MEBIBYTE,
+                memory_type: 0,
+            })
+            .err(),
+        Some(Error::OverLimit),
+        "an allocation, though its table's room is past the heap first"
+    );
+    assert_eq!(
+        timelines.create_timeline(0).err(),
+        Some(Error::OverLimit),
+        "an object, though its own bytes alone are within the limit"
+    );
+    let mut commands = submits.command_buffer();
+    commands.fill_buffer(&target.1, 0, 16, 7).expect("recorded");
+    assert_eq!(
+        submit(&queue(&submits), &commands)
+            .err()
+            .map(|refused| refused.error),
+        Some(Error::OverLimit),
+        "a submission, though its job's bytes alone are within the limit"
+    );
+    assert_eq!(
+        device
+            .create_context(&ContextDesc {
+                memory_limit: Some(64),
+            })
+            .err(),
+        Some(Error::OverLimit),
+        "a context, though its budget is past the heap first"
+    );
+}
+
 /// A device whose heap is far larger than the host can supply.
 fn vast_device() -> Device {
     let clock: Arc<dyn MonotonicClock + Send + Sync> = Arc::new(Clock::default());
-    Device::software(1 << 62, clock).expect("a software device")
+    software(1 << 62, clock)
 }
 
 #[test]
@@ -510,7 +742,7 @@ fn memory_the_machine_cannot_supply_is_refused_after_the_attempt() {
     });
     assert_eq!(unsuppliable.err(), Some(Error::OutOfMemory));
     assert_eq!(
-        context.memory_used(),
+        context.memory_used().allocations,
         0,
         "the charge went back with the attempt"
     );
@@ -538,7 +770,7 @@ fn freed_memory_stays_with_the_work_that_holds_it_until_that_work_is_done() {
         .expect("admitted");
     drop((commands, src, a));
     assert_eq!(
-        context.memory_used(),
+        context.memory_used().allocations,
         32,
         "the queued copy holds its source"
     );
@@ -546,9 +778,115 @@ fn freed_memory_stays_with_the_work_that_holds_it_until_that_work_is_done() {
     gate.signal(1).expect("advances");
     assert_eq!(fence.is_signalled(), Ok(true));
     assert_eq!(contents(&b), [5; 16]);
-    assert_eq!(context.memory_used(), 16);
+    assert_eq!(context.memory_used().allocations, 16);
     drop((dst, b));
-    assert_eq!(context.memory_used(), 0);
+    assert_eq!(context.memory_used().allocations, 0);
+}
+
+#[test]
+fn memory_whose_last_holder_is_a_buffer_goes_without_the_devices_lock() {
+    let (device, _) = device();
+    let context = context(&device);
+    let before = crate::fair::held::drops_under();
+    let (allocation, buffer) = buffer(&context, 64);
+    drop(allocation);
+    assert_eq!(context.memory_used().allocations, 64, "the buffer holds it");
+    drop(buffer);
+    assert_eq!(context.memory_used().allocations, 0);
+    assert_eq!(crate::fair::held::drops_under(), before);
+}
+
+#[test]
+fn memory_an_import_refused_for_its_tables_room_held_last_goes_without_the_devices_lock() {
+    let (device, _) = device();
+    let owner = context(&device);
+    let allocation = memory(&owner, 64);
+    let exported = allocation.export().expect("exported");
+    drop(allocation);
+    assert_eq!(owner.memory_used().allocations, 64, "the export holds it");
+    // A context whose table is full and has no room to grow.
+    let probe = context(&device);
+    let kept: Vec<Allocation> = (0..4).map(|_| memory(&probe, 4)).collect();
+    let full = probe.memory_used().total();
+    drop((kept, probe));
+    let tight = device
+        .create_context(&ContextDesc {
+            memory_limit: Some(full),
+        })
+        .expect("a context");
+    let _held: Vec<Allocation> = (0..4).map(|_| memory(&tight, 4)).collect();
+    let before = crate::fair::held::drops_under();
+    assert_eq!(tight.import(exported).err(), Some(Error::OverLimit));
+    assert_eq!(owner.memory_used().allocations, 0, "the refusal let it go");
+    assert_eq!(crate::fair::held::drops_under(), before);
+}
+
+#[test]
+fn memory_whose_last_holder_is_a_job_goes_without_the_devices_lock() {
+    let (device, _) = device();
+    let context = context(&device);
+    let (a, src) = buffer(&context, 16);
+    let (_b, dst) = buffer(&context, 16);
+    let gate = context.create_timeline(0).expect("timeline");
+    let mut commands = context.command_buffer();
+    commands
+        .copy_buffer(&src, &dst, &[region(0, 0, 16)])
+        .expect("recorded");
+    let fence = queue(&context)
+        .submit(&Submission {
+            command_buffers: &[&commands],
+            waits: &[(&gate, 1)],
+            signals: &[],
+            deadline: SECOND,
+        })
+        .expect("admitted");
+    drop((commands, src, a));
+    let before = crate::fair::held::drops_under();
+    gate.signal(1).expect("advances");
+    assert_eq!(fence.is_signalled(), Ok(true));
+    assert_eq!(context.memory_used().allocations, 16, "the job let it go");
+    assert_eq!(crate::fair::held::drops_under(), before);
+}
+
+#[test]
+fn memory_a_lost_contexts_queued_work_last_held_goes_without_the_devices_lock() {
+    let (device, clock) = device();
+    let context = context(&device);
+    let (_slow_memory, slow) = buffer(&context, MEBIBYTE);
+    let (a, src) = buffer(&context, 16);
+    let (_b, dst) = buffer(&context, 16);
+    let gate = context.create_timeline(0).expect("timeline");
+    let mut overrunning = context.command_buffer();
+    overrunning
+        .fill_buffer(&slow, 0, MEBIBYTE, 1)
+        .expect("recorded");
+    // Work after a check's worth, so the check stops it.
+    overrunning.fill_buffer(&slow, 0, 64, 1).expect("recorded");
+    let _overrun = queue(&context)
+        .submit(&Submission {
+            command_buffers: &[&overrunning],
+            waits: &[(&gate, 1)],
+            signals: &[],
+            deadline: SECOND,
+        })
+        .expect("admitted");
+    let mut queued = context.command_buffer();
+    queued
+        .copy_buffer(&src, &dst, &[region(0, 0, 16)])
+        .expect("recorded");
+    let _never = submit(&queue(&context), &queued).expect("admitted, behind it");
+    drop((queued, src, a));
+    let before = crate::fair::held::drops_under();
+    clock.step.store(2_000_000_000, Ordering::SeqCst);
+    gate.signal(1).expect("advances");
+    clock.step.store(0, Ordering::SeqCst);
+    assert_eq!(context.status(), Err(Error::Lost(Loss::Overran)));
+    assert_eq!(
+        context.memory_used().allocations,
+        MEBIBYTE + 16,
+        "the discarded copy let its source go"
+    );
+    assert_eq!(crate::fair::held::drops_under(), before);
 }
 
 #[test]
@@ -706,14 +1044,18 @@ fn an_overrunning_submission_loses_its_own_context_and_no_other() {
     submit(&queue(&bystander), &steady_work).expect("admitted");
     assert_eq!(bystander.status(), Ok(()));
     assert_eq!(contents(&b), [9; 16]);
-    assert_eq!(runaway.memory_used(), MEBIBYTE + 64);
+    assert_eq!(runaway.memory_used().allocations, MEBIBYTE + 64);
     drop((slow, also, runaway_memory, commands));
-    assert_eq!(runaway.memory_used(), 0, "the lost work let its memory go");
+    assert_eq!(
+        runaway.memory_used().allocations,
+        0,
+        "the lost work let its memory go"
+    );
     drop(fence);
 }
 
 #[test]
-fn work_of_small_commands_reads_the_clock_only_to_start_and_finish() {
+fn work_of_small_commands_reads_the_clock_only_to_start() {
     let (device, clock) = device();
     let context = context(&device);
     let (_, target) = buffer(&context, 4096);
@@ -727,15 +1069,15 @@ fn work_of_small_commands_reads_the_clock_only_to_start_and_finish() {
     submit(&queue(&context), &commands).expect("admitted");
     assert_eq!(
         clock.readings.load(Ordering::SeqCst),
-        2,
-        "one reading to start the work and one to find nothing more ready"
+        1,
+        "one reading to start the work, and none to find nothing more ready"
     );
 }
 
 #[test]
 fn a_wait_on_another_thread_returns_once_the_work_it_waits_for_completes() {
     let clock = Arc::new(HostClock(std::time::Instant::now()));
-    let device = Device::software(RAM, clock).expect("a software device");
+    let device = software(RAM, clock);
     let context = context(&device);
     let (b, dst) = buffer(&context, 16);
     let gate = context.create_timeline(0).expect("timeline");
@@ -768,7 +1110,7 @@ fn a_wait_on_another_thread_returns_once_the_work_it_waits_for_completes() {
 #[test]
 fn releasing_a_context_wakes_every_thread_waiting_on_it() {
     let clock = Arc::new(HostClock(std::time::Instant::now()));
-    let device = Device::software(RAM, clock).expect("a software device");
+    let device = software(RAM, clock);
     let context = context(&device);
     let timeline = Arc::new(context.create_timeline(0).expect("timeline"));
     let waiting = Arc::clone(&timeline);
@@ -814,4 +1156,185 @@ fn a_submission_with_no_commands_still_waits_and_signals_in_order() {
     gate.signal(2).expect("advances");
     assert_eq!(done.value(), Ok(1));
     fence.wait(Duration64::ZERO).expect("done");
+}
+
+/// Host threads, kept so a test can join them.
+#[derive(Default)]
+struct HostThreads {
+    started: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
+}
+
+impl Spawn for HostThreads {
+    fn spawn(&self, body: alloc::boxed::Box<dyn FnOnce() + Send>) -> bool {
+        let handle = std::thread::spawn(body);
+        self.started.lock().expect("unpoisoned").push(handle);
+        true
+    }
+}
+
+fn threaded(threads: &HostThreads) -> Device {
+    Device::software(&SoftwareDesc {
+        memory_bytes: RAM,
+        clock: Arc::new(HostClock(std::time::Instant::now())),
+        runner: Arc::new(Serial),
+        threads,
+        subgroup_size: DEFAULT_SUBGROUP_SIZE,
+    })
+    .expect("a software device")
+}
+
+#[test]
+fn a_device_with_a_worker_runs_its_work_there_and_completes_it() {
+    let threads = HostThreads::default();
+    let device = threaded(&threads);
+    let context = context(&device);
+    let (b, dst) = buffer(&context, 16);
+    let gate = context.create_timeline(0).expect("timeline");
+    let mut commands = context.command_buffer();
+    commands
+        .fill_buffer(&dst, 0, 16, 0x0909_0909)
+        .expect("recorded");
+    let fence = queue(&context)
+        .submit(&Submission {
+            command_buffers: &[&commands],
+            waits: &[(&gate, 1)],
+            signals: &[],
+            deadline: SECOND,
+        })
+        .expect("admitted");
+    gate.signal(1).expect("advances");
+    fence.wait(Duration64::from_secs(30)).expect("completed");
+    assert_eq!(contents(&b), [9; 16]);
+    for round in 0u32..32 {
+        let mut commands = context.command_buffer();
+        commands.fill_buffer(&dst, 0, 16, round).expect("recorded");
+        submit(&queue(&context), &commands)
+            .expect("admitted")
+            .wait(Duration64::from_secs(30))
+            .expect("completed");
+        assert_eq!(contents(&b)[..4], round.to_le_bytes());
+    }
+}
+
+#[test]
+fn a_devices_worker_ends_when_the_device_is_released() {
+    let threads = HostThreads::default();
+    let device = threaded(&threads);
+    let context = context(&device);
+    let (_, dst) = buffer(&context, 16);
+    let mut commands = context.command_buffer();
+    commands.fill_buffer(&dst, 0, 16, 1).expect("recorded");
+    submit(&queue(&context), &commands)
+        .expect("admitted")
+        .wait(Duration64::from_secs(30))
+        .expect("completed");
+    drop((commands, dst, context, device));
+    let started = core::mem::take(&mut *threads.started.lock().expect("unpoisoned"));
+    assert_eq!(started.len(), 1, "one worker");
+    for worker in started {
+        worker.join().expect("the worker returned");
+    }
+}
+
+#[test]
+fn an_allocation_is_charged_for_what_it_keeps_besides_its_bytes() {
+    let (device, _) = device();
+    let context = context(&device);
+    // The first makes the table's room; the second fits in it.
+    let _first = memory(&context, 1);
+    let before = context.memory_used();
+    let second = memory(&context, 1);
+    let after = context.memory_used();
+    assert_eq!(after.allocations - before.allocations, 1);
+    assert_eq!(
+        after.objects - before.objects,
+        crate::memory::Memory::overhead(1),
+        "its words rounded up and the memory itself"
+    );
+    drop(second);
+    assert_eq!(context.memory_used(), before);
+}
+
+#[test]
+fn a_table_s_room_stays_charged_after_its_objects_go() {
+    let (device, _) = device();
+    let context = context(&device);
+    let fresh = context.memory_used();
+    let held: Vec<_> = (0..1000).map(|_| memory(&context, 4)).collect();
+    drop(held);
+    let kept = context.memory_used();
+    assert_eq!(kept.allocations, 0);
+    assert!(
+        kept.objects >= fresh.objects + 1000 * 24,
+        "a thousand slots kept, and charged: {kept:?}"
+    );
+}
+
+#[test]
+fn an_update_submitted_many_times_is_charged_for_its_bytes_once() {
+    let (device, _) = device();
+    let context = context(&device);
+    let (_memory, target) = buffer(&context, 4096);
+    let gate = context.create_timeline(0).expect("a gate");
+    let mut commands = context.command_buffer();
+    let before = context.memory_used().objects;
+    commands
+        .update_buffer(&target, 0, &[7; 4096])
+        .expect("recorded");
+    let recorded = context.memory_used().objects - before;
+    assert!(
+        recorded >= 4096,
+        "the bytes are charged as they are recorded"
+    );
+    let queue = queue(&context);
+    let mut fences = Vec::new();
+    for _ in 0..64 {
+        fences.push(
+            queue
+                .submit(&crate::Submission {
+                    command_buffers: &[&commands],
+                    waits: &[(&gate, 1)],
+                    signals: &[],
+                    deadline: SECOND,
+                })
+                .expect("admitted"),
+        );
+    }
+    let queued = context.memory_used().objects - before;
+    assert!(
+        queued < recorded + 64 * 4096 / 8,
+        "sixty-four submissions share the bytes: {queued} past {recorded}"
+    );
+    drop(commands);
+    gate.signal(1).expect("opened");
+    for fence in fences {
+        fence.wait(SECOND).expect("ran");
+    }
+}
+
+#[test]
+fn a_fill_of_many_checks_work_reads_the_clock_as_it_goes() {
+    let clock = Arc::new(Clock::default());
+    let device = software(
+        64 << 20,
+        Arc::clone(&clock) as Arc<dyn MonotonicClock + Send + Sync>,
+    );
+    let context = context(&device);
+    let bytes = 8 * crate::software::WORK_PER_CHECK;
+    let (_memory, target) = buffer(&context, bytes);
+    let mut commands = context.command_buffer();
+    commands
+        .fill_buffer(&target, 0, bytes, 7)
+        .expect("recorded");
+    // The clock reads 0.6 seconds a check's work in, and 1.2 seconds at the
+    // next: past the deadline with six checks' work still to do.
+    clock.step.store(600_000_000, Ordering::SeqCst);
+    let ran = submit(&queue(&context), &commands);
+    clock.step.store(0, Ordering::SeqCst);
+    assert!(ran.is_ok(), "admitted");
+    assert_eq!(
+        context.status(),
+        Err(Error::Lost(Loss::Overran)),
+        "stopped within the fill, not after it"
+    );
 }

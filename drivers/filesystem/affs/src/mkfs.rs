@@ -5,12 +5,12 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
 use tairix_fsprobe::affs::{
-    put_be32, root_block, DateStamp, Offsets, BITMAP_PAGES, BITMAP_VALID, BLOCK_SIZES, BOOT_BLOCKS,
-    ST_ROOT, T_HEADER,
+    put_be32, root_block, seal, DateStamp, Offsets, BITMAP_CHECKSUM, BITMAP_PAGES, BITMAP_VALID,
+    BLOCK_SIZES, BOOT_BLOCKS, CHECKSUM, ST_ROOT, T_HEADER,
 };
 
 use crate::bitmap::bits_per_page;
-use crate::header::{low32, CHECKSUM};
+use crate::header::low32;
 use crate::name::Name;
 
 /// The fewest blocks a volume is laid out on: the boot blocks, a root, a
@@ -96,7 +96,7 @@ pub struct FormatOptions<'a> {
 ///
 /// [`DriverError::OutOfRange`] for a type past `DOS\3` — a directory-cache
 /// or long-filename volume this driver does not write — or a block size the
-/// format has not; the name's refusal; [`DriverError::LengthOutOfRange`] for
+/// format has not, or a name no volume may take; [`DriverError::LengthOutOfRange`] for
 /// a device too small or too large for a volume; the device's error.
 pub(crate) fn format_volume<B: Block>(
     device: B,
@@ -105,10 +105,9 @@ pub(crate) fn format_volume<B: Block>(
     if options.dos_type > 3 || !BLOCK_SIZES.contains(&options.block_size) {
         return Err(DriverError::OutOfRange);
     }
-    let name = Name::recorded(options.name)?;
-    if Name::encode(&utf8(options.name)?[..]).is_err() {
-        return Err(DriverError::OutOfRange);
-    }
+    let name = Name::recorded(options.name)
+        .map_err(|_| DriverError::OutOfRange)?
+        .given()?;
     let mut dev = ByteDevice::new(device)?;
     let at = Offsets::new(options.block_size as usize);
     let layout = Layout::of(dev.capacity(), at)?;
@@ -197,7 +196,7 @@ fn write_bitmap<B: Block>(
                 | span_bits(lo, layout.end(), layout.blocks);
             *long = free.to_be_bytes();
         }
-        seal(block, 0);
+        seal(block, BITMAP_CHECKSUM);
         dev.write((layout.first_page() + page) * layout.size, block)?;
     }
     Ok(())
@@ -236,23 +235,4 @@ fn write_extensions<B: Block>(
         dev.write((layout.first_extension() + extension) * layout.size, block)?;
     }
     Ok(())
-}
-
-/// Seal `block` with its checksum at `at`.
-fn seal(block: &mut [u8], at: usize) {
-    put_be32(block, at, 0);
-    let sum = tairix_fsprobe::affs::checksum(block, at);
-    put_be32(block, at, sum);
-}
-
-/// ISO 8859-1 `name` in UTF-8, for checking it as a name.
-fn utf8(name: &[u8]) -> Result<alloc::vec::Vec<u8>, DriverError> {
-    let mut out = alloc::vec::Vec::new();
-    out.try_reserve(2 * name.len())
-        .map_err(|_| DriverError::OutOfMemory)?;
-    let mut buf = [0u8; 2];
-    for &byte in name {
-        out.extend_from_slice(char::from(byte).encode_utf8(&mut buf).as_bytes());
-    }
-    Ok(out)
 }

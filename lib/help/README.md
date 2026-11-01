@@ -75,7 +75,10 @@ the one shared resolution policy (`lib/cmdres`), so a program's `-h` and
   no translation-only documents, cross-locale `OPTIONS` switch-key drift, and
   the closed content-policy screen (whole-word matching plus a substring
   screen, over the text as it renders, for the unsegmented CJK languages). Pure rows-in/violations-out;
-  never linked into a TAIRiX program.
+  never linked into a TAIRiX program. `options_entry_mentions` answers
+  whether one switch's `OPTIONS` entry mentions a phrase, for the per-app
+  help tests (`groupadd`, `useradd`) that hold every locale's id switch to
+  stating the first id the program allocates.
 
 ## Design
 

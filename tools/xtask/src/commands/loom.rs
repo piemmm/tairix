@@ -1,5 +1,5 @@
-//! `cargo xtask loom` — model-check the synchronisation primitives over every
-//! thread interleaving.
+//! `cargo xtask loom` — model-check the concurrent protocols [`TARGETS`]
+//! enrols over every thread interleaving.
 //!
 //! A test suite runs whichever interleaving the host scheduler happened to
 //! pick; it cannot say that *no* interleaving loses a wake-up or drops an
@@ -25,7 +25,7 @@ use std::process::Command;
 use crate::commands::parallel::{self, Job};
 use crate::Context;
 
-/// One crate whose primitives carry loom models.
+/// One crate whose protocols carry loom models.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Target {
     /// Workspace package (`cargo test -p`).
@@ -83,15 +83,18 @@ pub const TARGETS: &[Target] = &[
         harness: "loom",
         build: Build::Feature("loom"),
         description: "the lock-free page-table protocol: a table linked under a \
-                      walk that follows it, and a fault-time leaf update racing \
-                      an unmap",
+                      walk that follows it, a fault-time leaf update racing \
+                      an unmap, and two fix-ups of one leaf; and the \
+                      secondary-start handshake: an answer racing the \
+                      withdrawal on one compare-and-swap, and a core waiting \
+                      on the verdict that took its answer",
     },
 ];
 
-/// The cfg that swaps `core`'s atomics for the model checker's. Applied
-/// through `RUSTFLAGS`, so it forces a rebuild of the target crate and its
+/// The cfg that swaps `core`'s atomics for the model checker's. Applied with
+/// the caller's flags, so it forces a rebuild of the target crate and its
 /// dependents into a scratch profile of their own.
-const LOOM_CFG: &str = "--cfg loom";
+const LOOM_CFG: [&str; 2] = ["--cfg", "loom"];
 
 /// Parsed `loom` arguments.
 pub struct Options {
@@ -150,22 +153,28 @@ fn selected(opts: &Options) -> Result<Vec<&'static Target>, String> {
 /// Model-check every selected crate, failing closed.
 ///
 /// # Errors
-/// Any harness that fails to build, or whose model reports a counterexample.
+/// A usage error, a `--list` stdout cannot take, or any harness that fails to
+/// build or whose model reports a counterexample.
 pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let opts = parse(args)?;
     if opts.list {
         for target in TARGETS {
-            println!("{:<24} {}", target.package, target.description);
+            outln!("{:<24} {}", target.package, target.description)?;
         }
         return Ok(());
     }
     let jobs: Vec<Job> = selected(&opts)?.iter().map(|t| job_for(ctx, t)).collect();
     let concurrency = parallel::default_concurrency(jobs.len());
-    parallel::run(jobs, concurrency)
+    parallel::run(&ctx.children, jobs, concurrency)
 }
 
 /// One package's model-checked harness.
 fn job_for(ctx: &Context, target: &Target) -> Job {
+    Job::new(format!("loom {}", target.package), command_for(ctx, target))
+}
+
+/// The command that builds and runs one package's harness.
+fn command_for(ctx: &Context, target: &Target) -> Command {
     let mut cmd: Command = ctx.cargo();
     // Release: loom replays a model thousands of times, and a debug build
     // spends the stage's whole budget in the interpreter's own bookkeeping.
@@ -179,23 +188,48 @@ fn job_for(ctx: &Context, target: &Target) -> Job {
         "--locked",
     ]);
     match target.build {
-        Build::SwappedAtomics => {
-            cmd.env("RUSTFLAGS", LOOM_CFG);
-        }
+        Build::SwappedAtomics => crate::rustflags::add(&mut cmd, &LOOM_CFG),
         Build::Feature(feature) => {
             cmd.args(["--features", feature]);
         }
     }
-    Job::new(format!("loom {}", target.package), cmd)
+    cmd
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, selected, Build, TARGETS};
+    use super::{command_for, parse, selected, Build, TARGETS};
+    use crate::children::Children;
+    use crate::rustflags::tests::flags_of;
+    use crate::Context;
     use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
+    }
+
+    /// A harness whose atomics are swapped is built with `--cfg loom` after
+    /// the caller's flags, as cargo reads them: without it the harness builds
+    /// empty and the stage models nothing.
+    #[test]
+    fn a_swapped_harness_carries_the_loom_cfg_after_the_caller_s_flags() {
+        let ctx = Context {
+            workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            cargo: OsString::from("true"),
+            children: Arc::new(Children::new(None)),
+        };
+        let swapped = TARGETS
+            .iter()
+            .find(|target| matches!(target.build, Build::SwappedAtomics))
+            .expect("a swapped-atomics target");
+        let (encoded, removes_plain) = flags_of(&command_for(&ctx, swapped));
+        assert!(
+            encoded.is_some_and(|flags| flags.ends_with("--cfg\u{1f}loom")),
+            "the cfg closes the encoded flags"
+        );
+        assert!(removes_plain);
     }
 
     #[test]

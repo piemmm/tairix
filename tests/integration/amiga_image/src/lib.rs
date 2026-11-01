@@ -24,7 +24,7 @@ use tairix_abi::DriverError;
 use tairix_drv_fs_affs::{Affs, FormatOptions};
 /// The blocks of an 880 KiB double-density floppy, as the probe knows one.
 pub use tairix_fsprobe::affs::DD_FLOPPY_BLOCKS as FLOPPY_BLOCKS;
-use tairix_fsprobe::affs::{checksum, put_be32, DateStamp};
+use tairix_fsprobe::affs::{put_be32, seal, DateStamp};
 
 /// The bytes of a block on every disk here.
 pub const BLOCK_SIZE: u32 = 512;
@@ -78,8 +78,7 @@ pub fn rdb_disk(blocks: usize, at: usize) -> Vec<u8> {
     block[..4].copy_from_slice(b"RDSK");
     put_be32(block, 4, RDB_SUMMED_LONGS);
     put_be32(block, 16, BLOCK_SIZE);
-    let sum = checksum(&block[..RDB_SUMMED_LONGS as usize * 4], 8);
-    put_be32(block, 8, sum);
+    seal(&mut block[..RDB_SUMMED_LONGS as usize * 4], 8);
     disk
 }
 

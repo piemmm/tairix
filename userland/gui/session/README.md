@@ -769,9 +769,11 @@ the real seams end to end:
   icon-rasterisation service and nothing else, using its own image as the
   untrusted-decode host.
 
-The manifest (`AppInfo.toml`) requests exactly `CAP_DISPLAY`,
-`CAP_INPUT_READ`, and `CAP_SHM`. The bundle's image planting and the
-end-to-end QEMU vertical ride the D7d autoload world (`plans/DISPLAY.md`).
+The manifest (`AppInfo.toml`) requests `CAP_DISPLAY`, `CAP_INPUT_READ`,
+`CAP_SHM`, `CAP_PROC_SPAWN`, `CAP_FS_ACCESS`, `CAP_CONSOLE_WRITE` and
+`CAP_LOG_EMIT`; its comments say what each is for. The bundle's image
+planting and the end-to-end QEMU vertical ride the D7d autoload world
+(`plans/DISPLAY.md`).
 
 ## Dependencies and layering
 

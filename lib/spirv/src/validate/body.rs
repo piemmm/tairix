@@ -11,7 +11,7 @@ use super::cfg::{Cfg, Scratch};
 use super::types::{Holds, Ty};
 use super::{push, Refusal, Rule, Validator, What, MAX_INDEXES, NONE};
 use crate::enumerant::{FunctionControl, StorageClass};
-use crate::{Id, Instruction, Op, Operand, Value};
+use crate::{Id, Instruction, Kind, Op, Operand, Value};
 
 /// How an instruction of a block is checked.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -444,8 +444,8 @@ impl Validator<'_> {
             Some(Class::Variable) => self.local_variable(instruction),
             Some(Class::Undef) => self.undef_type(instruction).map(|_| ()),
             Some(Class::Body(typing)) => {
+                self.uses(body, index, instruction, typing)?;
                 let result = self.m.result(instruction);
-                self.uses(body, index, instruction, typing, result)?;
                 let result_type = match self.m.result_type(instruction) {
                     Some(ty) => self.type_index(ty)?,
                     None => NONE,
@@ -477,22 +477,19 @@ impl Validator<'_> {
         index: u32,
         instruction: &Instruction,
         typing: Typing,
-        result: Option<Id>,
     ) -> Result<(), Rule> {
         let phi = typing == Typing::Phi;
         for (position, operand) in self.m.operands(instruction).iter().enumerate() {
+            // The slot declaring the result is no use of it; any other is.
+            if operand.kind() == Kind::IdResult {
+                continue;
+            }
             let Value::Id(id) = self.m.value(operand) else {
                 continue;
             };
-            if Some(id) == result {
-                continue;
-            }
             let def = self.def(id)?;
             // A rounded conversion's only use is as a store's object.
-            if self.rounded
-                && self.decorated(id, crate::enumerant::Decoration::FP_ROUNDING_MODE)
-                && !(typing == Typing::Store && position == 1)
-            {
+            if self.rounded(id) && !(typing == Typing::Store && position == 1) {
                 return Err(Rule::DecorationTarget(
                     crate::enumerant::Decoration::FP_ROUNDING_MODE,
                 ));
@@ -696,8 +693,22 @@ impl Validator<'_> {
             }
             Typing::Switch => {
                 let selector = self.arg_type(args, 0)?;
-                if !matches!(self.ty(selector).ty, Ty::Scalar(s) if s.is_int()) {
+                let Ty::Scalar(scalar) = self.ty(selector).ty else {
                     return Err(args.wrong(0));
+                };
+                if !scalar.is_int() {
+                    return Err(args.wrong(0));
+                }
+                // Each case's literal is a value of the selector's type.
+                for (index, operand) in args.operands.iter().enumerate().skip(2).step_by(2) {
+                    let fits = matches!(
+                        self.m.value(operand),
+                        Value::Number(literal) if scalar.holds(literal)
+                    );
+                    if !fits {
+                        let at = usize::from(args.offset).saturating_add(index);
+                        return Err(Rule::OperandValue(u8::try_from(at).unwrap_or(u8::MAX)));
+                    }
                 }
                 Ok(())
             }

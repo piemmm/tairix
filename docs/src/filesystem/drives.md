@@ -251,7 +251,9 @@ another bind or a volume attached at run time, and while one does, what holds
 it is neither unbound nor detached (`NotEmpty`). A bind leaves with its volume,
 or by `view_unbind` from its binder or a holder; a forced detach, a medium that
 left, a lost server or a returning medium withdraws the binds standing within
-the volume with it. A descriptor opened through a bind that left answers stale.
+the volume with it. A descriptor opened through a bind that left answers stale;
+an image volume attached from one holds its file through the file's own
+volume, so it does not ([Disk images](./images.md)).
 `VIEW_LIST` reports each with its binder, and lists it as the volume it shows
 is listed.
 
@@ -555,7 +557,11 @@ never reaches a volume attached at the same name since; one of a volume held
 unavailable answers the device error until a recovery or a verified re-insert
 gives the volume a fresh registration. A plain detach is refused `Busy` while
 a descriptor holds a node of the volume; a force detach releases every pin,
-completing each deferred deletion, and revokes them.
+completing each deferred deletion, and revokes them. A detach names its mode
+(`DetachMode`): plain, force, or one that takes the lost — forced for a
+volume recorded lost, decided under the volume's claim, and plain for any
+other, so it never forces a healthy volume and never discards a dirty or
+conflicted one's retained set.
 
 A removal applies to every volume on the device, a partitioned stick carrying
 several over one endpoint. A volume whose driver holds writes it acknowledged

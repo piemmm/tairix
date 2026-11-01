@@ -13,7 +13,7 @@
 //! the engine itself (the browser's own transactional navigation); an
 //! application bundle is *named* for the caller to launch through the ordinary
 //! signed app-load gate; a regular file is *named* for the caller to open in
-//! the associated viewer. The engine holds no launch or open authority of its
+//! the associated viewer, or to mount where it holds a volume. The engine holds no launch or open authority of its
 //! own — it decides *what* the target is and *what should happen*, never *does*
 //! the spawn or the `fs_open`: those stay in the app's own capability-checked
 //! tail, under the launching user's identity, so composing this engine grants

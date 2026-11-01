@@ -466,7 +466,7 @@ pub fn run(workspace_root: &Path, write_pins: bool) -> Result<(), String> {
         let document = render_policy(&pins, &advisories);
         std::fs::write(&policy_path, document.as_bytes())
             .map_err(|e| format!("supply-chain: cannot write {}: {e}", policy_path.display()))?;
-        eprintln!(
+        noteln!(
             "xtask: [supply-chain] wrote {} pins and preserved {} advisories to {}",
             pins.len(),
             advisories.len(),
@@ -485,7 +485,7 @@ pub fn run(workspace_root: &Path, write_pins: bool) -> Result<(), String> {
     let policy = parse_policy(&text)?;
     check_source_pins(&locked, &policy.pins)?;
     evaluate_advisory_sla(&policy.advisories, today_days()?)?;
-    eprintln!(
+    noteln!(
         "xtask: [supply-chain] {} pins verified against Cargo.lock, {} advisories within SLA",
         policy.pins.len(),
         policy.advisories.len()

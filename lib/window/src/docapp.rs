@@ -24,8 +24,6 @@ use crate::document::SavedDocument;
 
 #[cfg(any(test, all(freestanding, feature = "rt")))]
 mod closing;
-#[cfg(any(test, all(freestanding, feature = "rt")))]
-mod headline;
 #[cfg(all(freestanding, feature = "rt"))]
 mod host;
 #[cfg(all(freestanding, feature = "rt"))]

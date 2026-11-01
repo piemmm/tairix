@@ -84,7 +84,7 @@ pub use folder::{DrawnCard, FolderSample, SampleCard};
 pub use glyph::{builtin_icon, disk_icon, IconKind};
 pub use load::{IconAssetSource, IconSet, ICON_KINDS};
 pub use picture::{Artwork, CastShadow, Fitted, IconPicture};
-pub use store::{StoreFile, StoreKey, ThumbnailStore};
+pub use store::{serve_thumbnail, StoreAccess, StoreFile, StoreKey, ThumbnailStore};
 pub use svg::decode as decode_svg;
 #[cfg(feature = "rt")]
 pub use thumbnail::RtDocument;

@@ -53,8 +53,9 @@ than a new HAL slice — see `plans/OPEN-DEFECTS.md` D13 for that decision and
 for why `MachineTakeover` is not the mechanism.
 
 The report also says whether the **boot stack overran**. That stack is in
-use before the MMU is on, so no page below it can be unmapped and an
-overrun cannot be made to fault; the linker reserves a poison guard
+use before the MMU is on, so until x86_64's kernel root maps the guard
+read-only (an overrun then faults, named from `CR2`) an overrun cannot be
+made to fault; the linker reserves a poison guard
 beneath it, the boot stub fills it (after the `.bss` clear that spans it,
 before any Rust frame exists above it, with `lib/memguard`'s sentinel
 handed in as a `global_asm!` const operand), and the slice reports it as

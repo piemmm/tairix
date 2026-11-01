@@ -21,12 +21,16 @@ ninguna puede adivinarse), exactamente como la herramienta GNU crea una
 cuenta deshabilitada. Establezca después una contraseña con el comando
 `passwd` de la herramienta `users`.
 
-Cuando se omite `-u`, el identificador se asigna automáticamente, uno
-por encima del más alto existente. Cuando se omite `-d`, el directorio
-personal sigue la disposición estándar `/Users/NAME`. La cuenta inicia
-el intérprete predeterminado del sistema y el techo de capacidades de
-sesión ordinario; un administrador lo amplía después con el comando
-`grant` de la herramienta `users`.
+Cuando se omite `-u`, el identificador se asigna automáticamente: uno
+por encima del más alto de los identificadores existentes de 1000 o
+más, o 1000 cuando ninguna cuenta tiene ninguno. Los identificadores
+inferiores a 1000 son del sistema y nunca se asignan, y una vez que no
+queda ningún identificador por encima del más alto, la cuenta no se
+crea. Cuando se omite `-d`, el directorio personal sigue la disposición
+estándar `/Users/NAME`. La cuenta inicia el intérprete predeterminado
+del sistema y el techo de capacidades de sesión ordinario; un
+administrador lo amplía después con el comando `grant` de la
+herramienta `users`.
 
 `--` termina el análisis de opciones: cada argumento posterior es un
 operando.
@@ -35,7 +39,7 @@ operando.
 
 - `-u, --uid UID` — identificador numérico de usuario; asignado
   automáticamente cuando se omite (uno por encima del más alto
-  existente).
+  existente de 1000 o más; si no lo hay, 1000).
 - `-g, --gid GID` — identificador numérico del grupo primario.
   Obligatorio: no hay una política de grupo predeterminado que adivinar.
 - `-G, --groups LIST` — identificadores numéricos de los grupos

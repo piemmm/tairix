@@ -322,8 +322,8 @@ pub enum PathError {
     /// A component contained a control character (including NUL).
     ControlCharacter,
     /// A component contained a `:`. The colon is a structural delimiter in the
-    /// path grammar, so it is never a literal filename character; a name that
-    /// needs one is escaped by the filesystem driver, not spelled here.
+    /// path grammar, so it is never a literal filename character: a foreign
+    /// volume's entry whose name holds one is listed, but no path names it.
     ColonInComponent,
     /// A single leaf name (a rename target, a new-folder name) was `.` or
     /// `..`: the navigation names, never a real file or directory name.

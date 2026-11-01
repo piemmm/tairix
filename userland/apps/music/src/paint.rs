@@ -16,6 +16,7 @@ use tairix_icon::{glyph_mask, IconKind};
 use tairix_player::{describe, EntryId, Span, Transport};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
+use tairix_util::utf8::shown;
 
 use crate::layout::Layout;
 use crate::view::{Player, Row};
@@ -77,7 +78,7 @@ fn paint_heard(
             surface,
             font,
             layout.title(),
-            &title,
+            &shown(&title),
             palette.on_surface.into(),
         );
     }
@@ -86,7 +87,7 @@ fn paint_heard(
             surface,
             font,
             layout.subtitle(),
-            &subtitle,
+            &shown(&subtitle),
             palette.on_surface_muted.into(),
         );
     }
@@ -248,8 +249,8 @@ fn table_row(index: usize, entry: EntryId, row: &Row, heard: Option<EntryId>) ->
         .map_or_else(String::new, Span::clock);
     TableRow::new(vec![
         TableCell::numeric(number),
-        TableCell::new(row.title()),
-        TableCell::new(row.artist()),
+        TableCell::new(shown(row.title())),
+        TableCell::new(shown(row.artist())),
         TableCell::numeric(length),
     ])
 }

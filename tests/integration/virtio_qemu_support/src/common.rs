@@ -47,16 +47,6 @@ use tairix_kernel_sec::captable::ProcessId;
 use tairix_virtio::{Transport, VirtioHost};
 use tairix_virtio_input::VirtioInput;
 
-/// Upper bound of the boot identity map the aarch64 and riscv64 kernels run
-/// on (`DirectPhysMap::identity(IDENTITY_LIMIT)`): the bottom 4 GiB. Every
-/// frame a DMA pool draws from the kernel's allocator must fall below it to
-/// be reachable through that identity map, so the verticals give their
-/// guests less RAM than that; a frame past it fails the pool closed. The
-/// riscv64 `virt` board's RAM (`0x8000_0000..`) sits well inside it. The
-/// x86_64 kernel maps nothing physical as itself, so its verticals reach
-/// frames through the kernel's direct map instead.
-pub const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
-
 /// A vertical's wait on its device's bound line: the shared wait loop over
 /// the binding, through the arch's own CPU park between polls. It records
 /// nothing; a vertical is bounded by its harness's progress budget.

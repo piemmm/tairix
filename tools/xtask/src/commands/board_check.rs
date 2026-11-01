@@ -15,6 +15,7 @@
 use std::path::Path;
 
 use super::source_tree;
+use crate::children::Children;
 
 /// The roots the rule binds.
 const SCANNED: &[&str] = &["lib/", "kernel/", "drivers/", "userland/"];
@@ -102,9 +103,9 @@ pub struct Violation {
 
 /// Scan the workspace rooted at `root` and return every violation outside
 /// the allow-list and grandfather list.
-pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
+pub fn scan(root: &Path, children: &Children) -> Result<Vec<Violation>, String> {
     let mut out = Vec::new();
-    source_tree::for_each_file(root, "board-check", |path, rel, name| {
+    source_tree::for_each_file(root, children, "board-check", |path, rel, name| {
         if !SCANNED.iter().any(|p| rel.starts_with(p))
             || is_listed(ALLOWED, rel)
             || is_listed(GRANDFATHERED, rel)
@@ -183,9 +184,9 @@ fn camel_parts(word: &str) -> impl Iterator<Item = &str> {
 
 /// Run the check, printing a report and returning an error if any
 /// non-grandfathered violation remains.
-pub fn run(root: &Path) -> Result<(), String> {
+pub fn run(root: &Path, children: &Children) -> Result<(), String> {
     use std::fmt::Write as _;
-    let violations = scan(root)?;
+    let violations = scan(root, children)?;
     if violations.is_empty() {
         return Ok(());
     }
@@ -212,7 +213,7 @@ mod tests {
 
     #[test]
     fn workspace_is_clean_modulo_grandfathered() {
-        let violations = scan(&workspace_root()).expect("scan");
+        let violations = scan(&workspace_root(), &Children::default()).expect("scan");
         assert!(
             violations.is_empty(),
             "unexpected board-check violations: {violations:#?}"
@@ -238,7 +239,7 @@ mod tests {
             path.strip_prefix("kernel/tairix-kernel/src/")
                 .is_some_and(|file| WIRING.contains(&file) || file.starts_with("floor_"))
         };
-        let violations: Vec<Violation> = scan(&workspace_root())
+        let violations: Vec<Violation> = scan(&workspace_root(), &Children::default())
             .expect("scan")
             .into_iter()
             .filter(|violation| in_wiring(&violation.path))
@@ -300,7 +301,7 @@ mod tests {
             "kernel/tairix-kernel/src/aarch64_messages.rs",
             "kernel/tairix-kernel/src/riscv64/boot.rs",
         ];
-        let violations: Vec<Violation> = scan(&workspace_root())
+        let violations: Vec<Violation> = scan(&workspace_root(), &Children::default())
             .expect("scan")
             .into_iter()
             .filter(|violation| NEUTRAL.contains(&violation.path.as_str()))

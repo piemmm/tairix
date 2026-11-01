@@ -203,7 +203,12 @@ Stability tier: **experimental**.
   worker parses (`WorkerMemory`), and the worker is spawned under that kind's
   `AddressSpaceBytes` ceiling, its stack included, on one thread: a message parser its two frames
   and a baseline, a document decoder a quarter of the machine's RAM and never
-  less than a whole document beside them. A decode that outgrows it ends with
+  less than a whole document beside them, and an icon and thumbnail decoder a
+  whole document and the most a thumbnail's decode may cost, on any machine. A
+  program pooling artwork decoders runs as many as fit in one document
+  decoder's share and never fewer than one (`WorkerMemory::pooled`), so a pool
+  of more than one leaves the machine what one decoder would; below 512 MiB of
+  RAM, where none fits, the one may map more. A decode that outgrows it ends with
   the runtime's memory-bound exit, which the host reports as
   `WorkerEnd::OverBound`: not a shortage, so not worth asking again. The worker side
   (`worker_role` + `serve_stdio`) serves over fd 0/1 — exactly the

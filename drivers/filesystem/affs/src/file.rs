@@ -2,16 +2,13 @@
 //! from each table's end, and the data blocks they name — bare on FFS, headed
 //! and chained on OFS.
 
-use alloc::vec::Vec;
-
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::NodeId;
 use tairix_abi::DriverError;
-use tairix_fsprobe::affs::{be32, put_be32, sums_to_zero, T_DATA};
+use tairix_fsprobe::affs::{be32, put_be32, seal, sums_to_zero, Offsets, CHECKSUM, T_DATA};
 
-use crate::guard::Guard;
-use crate::header::{low32, within, Extension, Header, Kind, CHECKSUM};
-use crate::{Affs, Chain};
+use crate::header::{low32, within, Extension, Header, Kind};
+use crate::{Affs, Disk};
 
 /// Bytes of an OFS data block's header: type, owner, sequence number, bytes
 /// held, next block, checksum.
@@ -19,6 +16,15 @@ pub(crate) const OFS_HEADER: usize = 24;
 
 /// The most blocks one transfer moves.
 const RUN_BLOCKS: usize = 128;
+
+/// Whole FFS data blocks a store writes in one transfer, contiguous on disk:
+/// from `data`, which covers each, or zeros a growth lays down.
+struct Run {
+    block: u64,
+    index: u64,
+    count: u64,
+    zeros: bool,
+}
 
 /// Where data block `index`'s pointer lies: in the header's table, or in
 /// extension block `.0`'s, at slot `.1`.
@@ -52,6 +58,28 @@ struct Cursor {
     taken: Option<(u64, u64)>,
 }
 
+/// A walk over the blocks a change frees: checked before its first write,
+/// then given back.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Check,
+    Free,
+}
+
+/// What reads the successor an extension block of `file` records.
+fn successor<B: Block>(
+    disk: &mut Disk<B>,
+    at: Offsets,
+    file: u64,
+) -> impl FnMut(u32) -> Result<u32, DriverError> + '_ {
+    move |block| {
+        let ext = disk.extension(at, file, u64::from(block))?;
+        let next = ext.next();
+        disk.recycle(ext.into_buf());
+        Ok(next)
+    }
+}
+
 /// One data block of a store: its index and block, the block an OFS chain
 /// takes it on to, and the file's data blocks and size before and its size
 /// after.
@@ -70,12 +98,12 @@ impl<B: Block> Affs<B> {
     }
 
     /// Data blocks a file of `size` bytes takes.
-    fn data_blocks(&self, size: u64) -> u64 {
+    pub(crate) fn data_blocks(&self, size: u64) -> u64 {
         size.div_ceil(self.data_size() as u64)
     }
 
     /// Extension blocks a file of `blocks` data blocks takes.
-    fn extension_blocks(&self, blocks: u64) -> u64 {
+    pub(crate) fn extension_blocks(&self, blocks: u64) -> u64 {
         blocks
             .saturating_sub(self.table_len())
             .div_ceil(self.table_len())
@@ -87,62 +115,21 @@ impl<B: Block> Affs<B> {
         low32(blocks.saturating_sub(first).min(self.table_len()))
     }
 
-    /// The block number of extension block `number` of `file`, walking its
-    /// chain from as far as an earlier call reached.
+    /// The block number of extension block `number` of `file`, from its held
+    /// chain, walked on from as far as an earlier call reached.
     fn extension_block(&mut self, file: &Header, number: u64) -> Result<u64, DriverError> {
-        if self
-            .chain
-            .as_ref()
-            .is_none_or(|chain| chain.file != file.block)
-        {
-            self.chain = Some(Chain {
-                file: file.block,
-                extensions: Vec::new(),
-                guard: Guard::new(file.block, self.disk.blocks),
-            });
-        }
-        loop {
-            let (known, last) = match &self.chain {
-                Some(chain) => (
-                    chain.extensions.len() as u64,
-                    chain.extensions.last().copied(),
-                ),
-                None => return Err(DriverError::BadMagic),
-            };
-            if number < known {
-                let at = usize::try_from(number).map_err(|_| DriverError::BadMagic)?;
-                return Ok(self
-                    .chain
-                    .as_ref()
-                    .map_or(0, |chain| u64::from(chain.extensions[at])));
-            }
-            let next = match last {
-                None => file.extension(),
-                Some(last) => self.read_extension(file, u64::from(last))?.next(),
-            };
-            if next == 0 {
-                return Err(DriverError::BadMagic);
-            }
-            let Some(chain) = self.chain.as_mut() else {
-                return Err(DriverError::BadMagic);
-            };
-            chain.guard.step(u64::from(next))?;
-            if !tairix_util::fallible::push(&mut chain.extensions, next) {
-                return Err(DriverError::OutOfMemory);
-            }
-        }
-    }
-
-    fn read_extension(&mut self, file: &Header, block: u64) -> Result<Extension, DriverError> {
-        let mut buf = self.disk.buffer()?;
-        self.disk.read(block, &mut buf)?;
-        Extension::parse(block, buf, self.at, file.block, self.disk.blocks)
+        let volume = self.disk.blocks;
+        let next_of = successor(&mut self.disk, self.at, file.block);
+        self.chains
+            .block(file.block, file.extension(), number, volume, next_of)
+            .map(u64::from)
     }
 
     /// Extension block `number` of `file`, checked to hold at least as many
     /// pointers as a file of `blocks` data blocks puts in it. A growth writes
     /// its extensions before the header that commits it, so one holding more
-    /// is read only as far as the header's size.
+    /// is read only as far as the header's size. The successor it records is
+    /// kept, so a walk on from it does not read it again.
     fn extension(
         &mut self,
         file: &Header,
@@ -150,12 +137,23 @@ impl<B: Block> Affs<B> {
         blocks: u64,
     ) -> Result<Extension, DriverError> {
         let block = self.extension_block(file, number)?;
-        let ext = self.read_extension(file, block)?;
+        let ext = self.disk.extension(self.at, file.block, block)?;
         let first = self.table_len() * (number + 1);
         if ext.high_seq() < self.table_count(first, blocks) {
             return Err(DriverError::BadMagic);
         }
+        self.chains.learned(file.block, number, ext.next());
         Ok(ext)
+    }
+
+    /// Walk `file`'s extension chain on to the block that ends it, as a change
+    /// must before it frees or fills what the chain holds: one that ends names
+    /// no block twice, so nothing it frees is also kept.
+    fn chain_ends(&mut self, file: &Header) -> Result<(), DriverError> {
+        let volume = self.disk.blocks;
+        let next_of = successor(&mut self.disk, self.at, file.block);
+        self.chains
+            .end(file.block, file.extension(), volume, next_of)
     }
 
     /// Check `file`'s header holds as many pointers as its size needs.
@@ -182,6 +180,9 @@ impl<B: Block> Affs<B> {
             None => file.table(slot),
             Some(number) => {
                 if held.as_ref().is_none_or(|(at, _)| *at != number) {
+                    if let Some((_, done)) = held.take() {
+                        self.disk.recycle(done.into_buf());
+                    }
                     *held = Some((number, self.extension(file, number, blocks)?));
                 }
                 held.as_ref().map_or(0, |(_, ext)| ext.table(slot))
@@ -318,8 +319,8 @@ impl<B: Block> Affs<B> {
     ///
     /// The blocks a growth needs are counted against the free space before
     /// anything is written. Each block the change reaches is then written
-    /// once, in order — a run of whole blocks the data covers in one
-    /// transfer — and the header last.
+    /// once, in order — on FFS a run of whole blocks the data covers, or of
+    /// new ones it leaves zero, in one transfer — and the header last.
     fn store(
         &mut self,
         file: &mut Header,
@@ -337,7 +338,6 @@ impl<B: Block> Affs<B> {
         if needed > 0 && self.with_bitmap(|bitmap, disk| bitmap.free(disk))? < needed {
             return Err(DriverError::NoSpace);
         }
-        self.chain = None;
         let ds = self.data_size() as u64;
         let fast = self.layout.dos_type.is_fast();
         let end = offset + data.len() as u64;
@@ -362,25 +362,41 @@ impl<B: Block> Affs<B> {
             old,
             taken: None,
         };
-        if old > 0 {
+        if blocks > old && old > 0 {
             // The file grows on from its last block, not from its first.
             cursor.near = self.pointer(file, old - 1, old, &mut cursor.held)? + 1;
+            self.chain_ends(file)?;
+        } else if let Some(last) = hi.saturating_add(1).min(old).checked_sub(1) {
+            // Every extension block the store reads it reaches before its
+            // first write, so the walk's own allocations come first.
+            if let (Some(number), _) = slot_of(last, self.table_len()) {
+                self.extension_block(file, number)?;
+            }
         }
         let mut scratch = self.disk.buffer()?;
-        let mut run: Option<(u64, u64, u64)> = None;
+        let mut run: Option<Run> = None;
         for index in lo..hi {
             let block = self.block_at(file, index, &mut cursor)?;
             let start = index * ds;
-            if fast && offset <= start && end >= start + ds {
+            let covered = offset <= start && end >= start + ds;
+            let zeros = index >= old && (end <= start || offset >= start + ds);
+            if fast && (covered || zeros) {
                 match &mut run {
-                    Some((first, _, count))
-                        if *first + *count == block && *count < RUN_BLOCKS as u64 =>
+                    Some(pending)
+                        if pending.zeros == zeros
+                            && pending.block + pending.count == block
+                            && pending.count < RUN_BLOCKS as u64 =>
                     {
-                        *count += 1;
+                        pending.count += 1;
                     }
                     _ => {
                         self.write_run(run.take(), offset, data)?;
-                        run = Some((block, index, 1));
+                        run = Some(Run {
+                            block,
+                            index,
+                            count: 1,
+                            zeros,
+                        });
                     }
                 }
                 continue;
@@ -407,7 +423,6 @@ impl<B: Block> Affs<B> {
                 self.put(filling.ext.block, filling.ext.sealed())?;
             }
         }
-        self.chain = None;
         file.set_high_seq(self.table_count(0, blocks));
         file.set_first_data(if blocks > 0 {
             file.table(self.at.table_len() - 1)
@@ -419,21 +434,18 @@ impl<B: Block> Affs<B> {
         self.write_header(file)
     }
 
-    /// Write a run of whole data blocks — its first block, first index and
-    /// length — from `data`, which covers each.
-    fn write_run(
-        &mut self,
-        run: Option<(u64, u64, u64)>,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<(), DriverError> {
-        let Some((block, index, count)) = run else {
+    /// Write `run`, its data taken from `data` written at `offset`.
+    fn write_run(&mut self, run: Option<Run>, offset: u64, data: &[u8]) -> Result<(), DriverError> {
+        let Some(run) = run else {
             return Ok(());
         };
+        if run.zeros {
+            return self.put_zeros(run.block, run.count);
+        }
         let ds = self.data_size() as u64;
-        let from = usize::try_from(index * ds - offset).map_err(|_| DriverError::OutOfRange)?;
-        let len = usize::try_from(count * ds).map_err(|_| DriverError::OutOfRange)?;
-        self.put(block, &data[from..from + len])
+        let from = usize::try_from(run.index * ds - offset).map_err(|_| DriverError::OutOfRange)?;
+        let len = usize::try_from(run.count * ds).map_err(|_| DriverError::OutOfRange)?;
+        self.put(run.block, &data[from..from + len])
     }
 
     /// Data block `index`'s number in a store: an existing block's pointer,
@@ -501,8 +513,16 @@ impl<B: Block> Affs<B> {
                 if done.dirty {
                     self.put(done.ext.block, done.ext.sealed())?;
                 }
+                self.disk.recycle(done.ext.into_buf());
             }
-            let mut ext = self.extension(file, number, cursor.old)?;
+            // The store's last pointer lookup may have read it already.
+            let mut ext = match cursor.held.take() {
+                Some((held, ext)) if held == number => ext,
+                other => {
+                    cursor.held = other;
+                    self.extension(file, number, cursor.old)?
+                }
+            };
             // A growth cut short may have left it holding more than the header
             // commits; the store counts on from what is committed.
             let committed = self.table_count(self.table_len() * (number + 1), cursor.old);
@@ -520,15 +540,19 @@ impl<B: Block> Affs<B> {
             Some(mut before) if before.number + 1 == number => {
                 before.ext.set_next(low32(block));
                 self.put(before.ext.block, before.ext.sealed())?;
+                self.disk.recycle(before.ext.into_buf());
             }
             Some(mut other) => {
                 if other.dirty {
                     self.put(other.ext.block, other.ext.sealed())?;
                 }
-                self.chain_extension(file, number, block)?;
+                self.disk.recycle(other.ext.into_buf());
+                self.chain_extension(file, number, block, cursor)?;
             }
-            None => self.chain_extension(file, number, block)?,
+            None => self.chain_extension(file, number, block, cursor)?,
         }
+        self.chains
+            .linked(file.block, number, low32(block), self.disk.blocks);
         cursor.filling = Some(Filling {
             number,
             ext: fresh,
@@ -538,21 +562,30 @@ impl<B: Block> Affs<B> {
     }
 
     /// Chain the new extension block `block`, numbered `number`, from the
-    /// header or from the extension block before it.
+    /// header or from the extension block before it, which the store's last
+    /// pointer lookup may have read already.
     fn chain_extension(
         &mut self,
         file: &mut Header,
         number: u64,
         block: u64,
+        cursor: &mut Cursor,
     ) -> Result<(), DriverError> {
         if number == 0 {
             file.set_extension(low32(block));
             return Ok(());
         }
-        let before = self.extension_block(file, number - 1)?;
-        let mut before = self.read_extension(file, before)?;
+        let mut before = match cursor.held.take() {
+            Some((held, ext)) if held + 1 == number => ext,
+            other => {
+                cursor.held = other;
+                self.extension(file, number - 1, cursor.old)?
+            }
+        };
         before.set_next(low32(block));
-        self.put(before.block, before.sealed())
+        self.put(before.block, before.sealed())?;
+        self.disk.recycle(before.into_buf());
+        Ok(())
     }
 
     /// Write data block `place` of a store: what it held kept where neither
@@ -596,58 +629,63 @@ impl<B: Block> Affs<B> {
             put_be32(scratch, 8, low32(place.index + 1));
             put_be32(scratch, 12, low32(stored));
             put_be32(scratch, 16, low32(place.next));
-            put_be32(scratch, CHECKSUM, 0);
-            let sum = tairix_fsprobe::affs::checksum(scratch, CHECKSUM);
-            put_be32(scratch, CHECKSUM, sum);
+            seal(scratch, CHECKSUM);
         }
         self.put(place.block, scratch)
     }
 
     /// Cut `file` to `size` bytes, freeing the blocks past it.
     ///
-    /// The shorter header is written first, so every state a change cut short
-    /// leaves reads as the shorter file: the extension and OFS block it then
-    /// trims hold more than it, which a read takes only as far as its size.
+    /// Everything the cut frees or rewrites is read and checked before its
+    /// first write, and the chain walked on to its end, so no block it frees is
+    /// also kept. The shorter header is written first, so every state a change
+    /// cut short leaves reads as the shorter file: the extension and OFS block
+    /// it then trims hold more than it, which a read takes only as far as its
+    /// size. The extension blocks it frees are read again to give back what
+    /// they name, so a cut holds no list of what it frees.
     fn shrink(&mut self, file: &mut Header, size: u64) -> Result<(), DriverError> {
         let old = self.check_header(file)?;
         let old_size = u64::from(file.byte_size());
         let blocks = self.data_blocks(size);
-        self.chain = None;
-        let mut freed: Vec<u64> = Vec::new();
         let table = self.table_len();
-        let mut held = None;
-        for index in blocks..old {
-            let block = self.pointer(file, index, old, &mut held)?;
-            if !tairix_util::fallible::push(&mut freed, block) {
-                return Err(DriverError::OutOfMemory);
-            }
-        }
-        // The extension blocks the shorter file still needs keep the pointers
-        // below the cut; the rest go.
         let keep = self.extension_blocks(blocks);
-        let mut last_kept = None;
-        for number in 0..self.extension_blocks(old) {
-            let block = self.extension_block(file, number)?;
-            if number >= keep {
-                if !tairix_util::fallible::push(&mut freed, block) {
-                    return Err(DriverError::OutOfMemory);
-                }
-            } else if number + 1 == keep {
-                last_kept = Some((number, block));
-            }
+        for index in blocks..old.min(table) {
+            self.freeable(u64::from(file.table(slot_of(index, table).1)))?;
         }
-        // OFS's new last block, read while the old size still describes it.
+        // The extension block the shorter file ends in loses its pointers past
+        // the cut.
+        let kept = table * keep;
+        let mut last = None;
+        if keep > 0 {
+            let ext = self.extension(file, keep - 1, old)?;
+            for index in blocks.max(kept)..(kept + table).min(old) {
+                self.freeable(u64::from(ext.table(slot_of(index, table).1)))?;
+            }
+            last = Some(ext);
+        }
+        self.extensions_from(file, keep, old, Pass::Check)?;
+        self.chain_ends(file)?;
+        // OFS's new last block, read while the old size still describes it: its
+        // pointer is in the table the shorter file ends in.
         let ofs_last = if !self.layout.dos_type.is_fast() && blocks > 0 {
-            let last = self.pointer(file, blocks - 1, old, &mut held)?;
+            let (_, slot) = slot_of(blocks - 1, table);
+            let pointer = last
+                .as_ref()
+                .map_or_else(|| file.table(slot), |last| last.table(slot));
+            let pointer = u64::from(pointer);
+            if !within(pointer, self.disk.blocks) {
+                return Err(DriverError::BadMagic);
+            }
             let mut scratch = self.disk.buffer()?;
-            self.disk.read(last, &mut scratch)?;
+            self.disk.read(pointer, &mut scratch)?;
             self.ofs_held(&scratch, file.block, blocks - 1, old_size)?;
-            Some((last, scratch))
+            Some((pointer, scratch))
         } else {
             None
         };
         for index in blocks..old.min(table) {
             let (_, slot) = slot_of(index, table);
+            self.release(u64::from(file.table(slot)))?;
             file.set_table(slot, 0);
         }
         if keep == 0 {
@@ -660,18 +698,17 @@ impl<B: Block> Affs<B> {
         file.set_byte_size(low32(size));
         file.set_date(self.now());
         self.write_header(file)?;
-        if let Some((number, block)) = last_kept {
-            let mut ext = self.read_extension(file, block)?;
-            let first = table * (number + 1);
-            for index in blocks.max(first)..(first + table).min(old) {
+        if let Some(mut ext) = last {
+            for index in blocks.max(kept)..(kept + table).min(old) {
                 let (_, slot) = slot_of(index, table);
+                self.release(u64::from(ext.table(slot)))?;
                 ext.set_table(slot, 0);
             }
-            ext.set_high_seq(self.table_count(first, blocks));
+            ext.set_high_seq(self.table_count(kept, blocks));
             ext.set_next(0);
-            self.put(block, ext.sealed())?;
+            self.put(ext.block, ext.sealed())?;
         }
-        if let Some((last, mut scratch)) = ofs_last {
+        if let Some((pointer, mut scratch)) = ofs_last {
             // It holds fewer bytes now and ends the chain.
             let held_now = size - (blocks - 1) * self.data_size() as u64;
             scratch
@@ -679,31 +716,81 @@ impl<B: Block> Affs<B> {
                 .fill(0);
             put_be32(&mut scratch, 12, low32(held_now));
             put_be32(&mut scratch, 16, 0);
-            put_be32(&mut scratch, CHECKSUM, 0);
-            let sum = tairix_fsprobe::affs::checksum(&scratch, CHECKSUM);
-            put_be32(&mut scratch, CHECKSUM, sum);
-            self.put(last, &scratch)?;
+            seal(&mut scratch, CHECKSUM);
+            self.put(pointer, &scratch)?;
         }
-        for block in freed {
-            self.release(block)?;
+        self.extensions_from(file, keep, old, Pass::Free)?;
+        self.chains.cut(file.block, keep, self.disk.blocks);
+        Ok(())
+    }
+
+    /// Free every data and extension block of `file`, each checked and the
+    /// chain walked on to its end before the first is given back.
+    pub(crate) fn free_data(&mut self, file: &Header) -> Result<(), DriverError> {
+        self.check_data(file)?;
+        self.give_data(file)
+    }
+
+    /// Check every data and extension block of `file` a free would give
+    /// back, walking its chain on to its end, as a change does before its
+    /// first write.
+    pub(crate) fn check_data(&mut self, file: &Header) -> Result<(), DriverError> {
+        self.data_pass(file, Pass::Check)?;
+        self.chain_ends(file)
+    }
+
+    /// Give back every data and extension block of `file`, which
+    /// [`Self::check_data`] checked.
+    pub(crate) fn give_data(&mut self, file: &Header) -> Result<(), DriverError> {
+        self.data_pass(file, Pass::Free)
+    }
+
+    fn data_pass(&mut self, file: &Header, pass: Pass) -> Result<(), DriverError> {
+        let blocks = self.check_header(file)?;
+        let table = self.table_len();
+        for index in 0..blocks.min(table) {
+            self.give(u64::from(file.table(slot_of(index, table).1)), pass)?;
+        }
+        self.extensions_from(file, 0, blocks, pass)
+    }
+
+    /// Check or give back what extension blocks `from` on of a file of `old`
+    /// data blocks name below `old`, and the blocks themselves.
+    fn extensions_from(
+        &mut self,
+        file: &Header,
+        from: u64,
+        old: u64,
+        pass: Pass,
+    ) -> Result<(), DriverError> {
+        let table = self.table_len();
+        for number in from..self.extension_blocks(old) {
+            let ext = self.extension(file, number, old)?;
+            let first = table * (number + 1);
+            for index in first..(first + table).min(old) {
+                self.give(u64::from(ext.table(slot_of(index, table).1)), pass)?;
+            }
+            self.give(ext.block, pass)?;
+            self.disk.recycle(ext.into_buf());
         }
         Ok(())
     }
 
-    /// Free every data and extension block of `file`.
-    pub(crate) fn free_data(&mut self, file: &Header) -> Result<(), DriverError> {
-        let blocks = self.check_header(file)?;
-        self.chain = None;
-        let mut held = None;
-        for index in 0..blocks {
-            let block = self.pointer(file, index, blocks, &mut held)?;
-            self.release(block)?;
+    fn give(&mut self, block: u64, pass: Pass) -> Result<(), DriverError> {
+        match pass {
+            Pass::Check => self.freeable(block),
+            Pass::Free => self.release(block),
         }
-        for number in 0..self.extension_blocks(blocks) {
-            let block = self.extension_block(file, number)?;
-            self.release(block)?;
+    }
+
+    /// Refuse a block no change may free: one outside the volume, the root,
+    /// or one of the bitmap's own.
+    fn freeable(&mut self, block: u64) -> Result<(), DriverError> {
+        let structural = within(block, self.disk.blocks)
+            && self.with_bitmap(|bitmap, _| Ok(bitmap.reserves(block, 1)))?;
+        if !within(block, self.disk.blocks) || structural {
+            return Err(DriverError::BadMagic);
         }
-        self.chain = None;
         Ok(())
     }
 
@@ -713,16 +800,14 @@ impl<B: Block> Affs<B> {
         let block = self
             .with_bitmap(|bitmap, disk| bitmap.find(disk, near))?
             .ok_or(DriverError::NoSpace)?;
-        self.begin()?;
-        self.mutated = true;
+        self.mutate()?;
         self.with_bitmap(|bitmap, disk| bitmap.take(disk, block))?;
         Ok(block)
     }
 
     /// Give `block` back.
     pub(crate) fn release(&mut self, block: u64) -> Result<(), DriverError> {
-        self.begin()?;
-        self.mutated = true;
+        self.mutate()?;
         self.with_bitmap(|bitmap, disk| bitmap.release(disk, block))
     }
 }

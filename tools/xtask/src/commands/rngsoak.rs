@@ -16,11 +16,12 @@
 //! both unset and runs a single fixed-seed smoke pass instead. A generator
 //! any statistic rejects fails the command — the soak fails closed.
 //!
-//! A soaking target is meant to occupy its whole budget, so each child is
-//! bounded by [`soak::child_deadline`], which outlasts what is left of it.
+//! Each target soaks in [`soak::job`], killed as hung an ordinary step's
+//! allowance after its budget.
 //!
 //! The per-target fan-out into parallel jobs is `tools/ci/soak.sh`'s job
-//! (like fuzz/proptest/fssoak); this command runs one target at a time.
+//! (like fuzz/proptest/fssoak); this command runs one target at a time, and
+//! soaks only one to a window's close.
 //!
 //! Adding a generator means adding a [`Target`] here, never teaching `ci`
 //! about it directly.
@@ -29,6 +30,7 @@ use std::ffi::OsString;
 
 use tairix_fuzzseed::{RNGSOAK_BUDGET_ENV, RNGSOAK_BYTES_ENV};
 
+use crate::commands::parallel::{self, Job};
 use crate::commands::soak::{self, Budget, Flags, Mode};
 use crate::Context;
 
@@ -125,7 +127,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
                 return Err(format!(
                     "rngsoak: unexpected argument {other:?}; usage: \
                      cargo xtask rngsoak [--quick | --soak] [--target NAME] \
-                     [--secs N | --until T] [--list]"
+                     [--secs N | --until T (with --target)] [--list]"
                 ));
             }
         }
@@ -143,54 +145,55 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
 /// # Errors
 /// Returns an error if `--target` names a generator that is not registered.
 pub fn selected(opts: &Options) -> Result<Vec<Target>, String> {
-    let Some(name) = opts.only.as_deref() else {
-        return Ok(TARGETS.to_vec());
+    let targets = match opts.only.as_deref() {
+        None => TARGETS.to_vec(),
+        Some(name) => match TARGETS.iter().find(|t| t.name == name) {
+            Some(t) => vec![*t],
+            None => {
+                return Err(format!(
+                    "rngsoak: unknown generator `{name}`; known: {}",
+                    TARGETS
+                        .iter()
+                        .map(|t| t.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            }
+        },
     };
-    match TARGETS.iter().find(|t| t.name == name) {
-        Some(t) => Ok(vec![*t]),
-        None => Err(format!(
-            "rngsoak: unknown generator `{name}`; known: {}",
-            TARGETS
-                .iter()
-                .map(|t| t.name)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    }
+    soak::one_target_per_window("rngsoak", opts.budget, targets.len())?;
+    Ok(targets)
 }
 
 /// Run the selected generators' batteries for their budget.
 pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
     if opts.list {
         for t in TARGETS {
-            println!("{:<8} {}", t.name, t.description);
+            outln!("{:<8} {}", t.name, t.description)?;
         }
         return Ok(());
     }
 
-    let targets = selected(opts)?;
-    for t in &targets {
-        let mut cmd = ctx.cargo();
-        cmd.args([
-            "test",
-            "-p",
-            PACKAGE,
-            "--test",
-            TEST_BIN,
-            "--locked",
-            "--",
-            "--exact",
-            t.test_fn,
-            "--nocapture",
-        ]);
-        if let Some(budget) = opts.budget {
-            budget.export(&mut cmd, RNGSOAK_BUDGET_ENV);
-        }
-        cmd.env(RNGSOAK_BYTES_ENV, SOAK_PASS_BYTES.to_string());
-        let label = format!("rngsoak {} ({})", t.name, soak::describe(opts.budget));
-        ctx.run_with_timeout(&label, cmd, soak::child_deadline(opts.budget))?;
-    }
-    Ok(())
+    let jobs: Vec<Job> = selected(opts)?
+        .iter()
+        .map(|t| {
+            let harness = soak::Harness {
+                package: PACKAGE,
+                test: TEST_BIN,
+                filter: &["--exact", t.test_fn],
+                budget_env: RNGSOAK_BUDGET_ENV,
+            };
+            let label = format!("rngsoak {} ({})", t.name, soak::describe(opts.budget));
+            soak::job(
+                ctx,
+                label,
+                &harness,
+                opts.budget,
+                &[(RNGSOAK_BYTES_ENV, SOAK_PASS_BYTES.to_string())],
+            )
+        })
+        .collect();
+    parallel::run(&ctx.children, jobs, 1)
 }
 
 #[cfg(test)]
@@ -220,13 +223,28 @@ mod tests {
     }
 
     #[test]
-    fn until_soaks_every_generator_to_the_window_close() {
+    fn until_names_the_window_close() {
         let opts = parse(&argv(&["--soak", "--until", "1700000000"])).expect("until parses");
         assert_eq!(
             opts.budget,
             Some(Budget::Until(
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000)
             ))
+        );
+    }
+
+    /// A window over the registry is refused, so no target queues past the
+    /// close to make one smoke iteration and pass; one named target soaks.
+    #[test]
+    fn a_window_over_the_registry_is_refused() {
+        let opts = parse(&argv(&["--until", "1700000000"])).expect("until parses");
+        assert!(selected(&opts).is_err_and(|why| why.contains("--target")));
+        let opts = parse(&argv(&["--until", "1700000000", "--target", "csprng"]))
+            .expect("until with a target parses");
+        let selected = selected(&opts).expect("one target soaks to the close");
+        assert_eq!(
+            selected.iter().map(|t| t.name).collect::<Vec<_>>(),
+            ["csprng"]
         );
     }
 

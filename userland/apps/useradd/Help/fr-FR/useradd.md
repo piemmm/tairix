@@ -21,12 +21,16 @@ ne peut être deviné), exactement comme l'outil GNU crée un compte
 désactivé. Définissez ensuite un mot de passe avec la commande `passwd`
 de l'outil `users`.
 
-Quand `-u` est omis, l'identifiant est alloué automatiquement, un
-au-dessus du plus haut identifiant existant. Quand `-d` est omis, le
-répertoire personnel suit la disposition standard `/Users/NAME`. Le
-compte démarre l'interpréteur par défaut du système et le plafond de
-capacités de session ordinaire ; un administrateur l'élargit ensuite avec
-la commande `grant` de l'outil `users`.
+Quand `-u` est omis, l'identifiant est alloué automatiquement : un
+au-dessus du plus haut des identifiants existants d'au moins 1000, ou
+1000 quand aucun compte n'en a. Les identifiants inférieurs à 1000
+appartiennent au système et ne sont jamais alloués, et dès qu'il ne
+reste aucun identifiant au-dessus du plus haut, le compte n'est pas
+créé. Quand `-d` est omis, le répertoire personnel suit la disposition
+standard `/Users/NAME`. Le compte démarre l'interpréteur par défaut du
+système et le plafond de capacités de session ordinaire ; un
+administrateur l'élargit ensuite avec la commande `grant` de l'outil
+`users`.
 
 `--` termine l'analyse des options : chaque argument ultérieur est un
 opérande.
@@ -34,7 +38,8 @@ opérande.
 ## OPTIONS
 
 - `-u, --uid UID` — identifiant numérique d'utilisateur ; alloué
-  automatiquement quand il est omis (un au-dessus du plus haut existant).
+  automatiquement quand il est omis (un au-dessus du plus haut existant
+  d'au moins 1000, sinon 1000).
 - `-g, --gid GID` — identifiant numérique du groupe principal.
   Obligatoire : il n'y a pas de politique de groupe par défaut à deviner.
 - `-G, --groups LIST` — identifiants numériques des groupes

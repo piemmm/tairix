@@ -59,6 +59,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
 use tairix_icon::NoArtwork;
 use tairix_theme::{TextRole, Theme};
+use tairix_util::utf8::shown;
 use tairix_wm::{Compositor, InputEvent, Point, PointerButton, Rect, Region, Surface, WindowId};
 
 use crate::choice::{question, Choice, ChoicePrompt};
@@ -351,14 +352,8 @@ impl SaveBand {
         compositor: &mut Compositor,
     ) {
         self.edit(None, shell, compositor);
-        let asked = question(
-            &format!("\u{201c}{name}\u{201d} already exists. Replace it?"),
-            "A file of that name is already in this folder. Replacing it \
-             overwrites what it holds.",
-            CANCEL_LABEL,
-            (REPLACE_LABEL, AlertButtonRole::Destructive),
-        )
-        .and_then(|spec| ChoicePrompt::open(&spec, Some(picker), shell, compositor));
+        let asked = replace_question(&name)
+            .and_then(|spec| ChoicePrompt::open(&spec, Some(picker), shell, compositor));
         match asked {
             Some(question) => {
                 self.replacing = Some(Replacing {
@@ -367,9 +362,7 @@ impl SaveBand {
                     question,
                 });
             }
-            None => self.name.set_message(Some(format!(
-                "Not saved: \u{201c}{name}\u{201d} already exists"
-            ))),
+            None => self.name.set_message(Some(already_exists(&name))),
         }
     }
 
@@ -1080,11 +1073,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                 if shown.as_deref() == Some(waiting.path.as_str()) {
                     band.ask_to_replace((waiting.name, waiting.path), active.wm, shell, compositor);
                 } else {
-                    band.edit(
-                        Some(format!("Not saved: “{}” already exists", waiting.name)),
-                        shell,
-                        compositor,
-                    );
+                    band.edit(Some(already_exists(&waiting.name)), shell, compositor);
                 }
                 redraw_band(active, shell, compositor);
                 None
@@ -1289,11 +1278,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                 } else {
                     "a shortcut"
                 };
-                band.edit(
-                    Some(format!("“{name}” is {what}; choose another name")),
-                    shell,
-                    compositor,
-                );
+                band.edit(Some(taken_by(&name, what)), shell, compositor);
                 redraw_band(active, shell, compositor);
                 None
             }
@@ -1852,3 +1837,35 @@ fn redraw_band<S: DirectorySource>(
     band.add(band_layout(compositor.scale(), shell.session().active_theme()).band);
     repaint(active, &band, shell, compositor);
 }
+
+/// The question whether to replace the file `name`, named as shown.
+fn replace_question(name: &str) -> Option<tairix_abi::window_ipc::AlertSpec> {
+    question(
+        &format!(
+            "\u{201c}{}\u{201d} already exists. Replace it?",
+            shown(name)
+        ),
+        "A file of that name is already in this folder. Replacing it \
+         overwrites what it holds.",
+        CANCEL_LABEL,
+        (REPLACE_LABEL, AlertButtonRole::Destructive),
+    )
+}
+
+/// What the band says of a save refused because `name` is taken.
+fn already_exists(name: &str) -> String {
+    format!("Not saved: \u{201c}{}\u{201d} already exists", shown(name))
+}
+
+/// What the band says of a name `what`, an application or a shortcut,
+/// already holds.
+fn taken_by(name: &str, what: &str) -> String {
+    format!(
+        "\u{201c}{}\u{201d} is {what}; choose another name",
+        shown(name)
+    )
+}
+
+#[cfg(test)]
+#[path = "picker_tests.rs"]
+mod tests;

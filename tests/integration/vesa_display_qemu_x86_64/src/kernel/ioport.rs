@@ -15,13 +15,16 @@
 //!
 //! The DMA target buffers and the staged control structure are kernel
 //! pointers, in the image (`KERNEL_VMA_BASE + phys`: statics and the boot
-//! stack) or in the direct map (`PHYSMAP_VMA_BASE + phys`). The
-//! [`DmaAddressRegister::to_physical`] override below maps either back to
-//! the physical address QEMU's DMA engine reads/writes.
+//! stack) or in the direct map. The [`DmaAddressRegister::to_physical`]
+//! override below maps either back to the physical address QEMU's DMA engine
+//! reads/writes, a direct-map address through the kernel's own map.
 
 use tairix_abi::PortIo;
+use tairix_arch_x86_64::paging::KERNEL_VMA_BASE;
 use tairix_arch_x86_64::pio::x86_port_io;
 use tairix_fwcfg::DmaAddressRegister;
+use tairix_kernel::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP;
+use tairix_kernel_mem::PhysMap;
 
 /// I/O port holding the most-significant half of the `fw_cfg` DMA address
 /// register.
@@ -35,15 +38,15 @@ pub struct IoPortDma;
 
 impl DmaAddressRegister for IoPortDma {
     fn to_physical(&self, virt: u64) -> u64 {
-        use tairix_arch_x86_64::paging::{physmap_bytes, KERNEL_VMA_BASE, PHYSMAP_VMA_BASE};
         if let Some(phys) = virt.checked_sub(KERNEL_VMA_BASE) {
             return phys;
         }
-        // Any other address names no frame by arithmetic; one no device can
+        // An address outside the direct map names no frame; one no device can
         // reach fails the transfer rather than aiming it elsewhere.
-        virt.checked_sub(PHYSMAP_VMA_BASE)
-            .filter(|phys| *phys < physmap_bytes())
-            .unwrap_or(u64::MAX)
+        usize::try_from(virt)
+            .ok()
+            .and_then(|virt| SPAWN_TABLE_PHYSMAP.reverse(virt))
+            .map_or(u64::MAX, |phys| phys.as_u64())
     }
 
     fn write_dma_address(&self, dma_phys: u64) {

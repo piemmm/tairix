@@ -180,3 +180,20 @@ fn vacated_slots_are_reused_most_recently_freed_first() {
     assert_eq!(map.try_insert(9).expect("room").index(), keys[0].index());
     assert_eq!(map.try_insert(9).expect("room").index(), 4);
 }
+
+#[test]
+fn an_exact_reservation_grows_the_storage_by_what_it_says_beforehand() {
+    let mut map = map();
+    assert_eq!(map.held_bytes(), 0);
+    let grows = map.reserve_bytes(3);
+    map.try_reserve_exact(3).expect("room");
+    assert_eq!(map.held_bytes(), grows, "three slots, and no more");
+    assert_eq!(map.capacity(), 3);
+    let keys: Vec<SlotKey> = (0..3).map(|v| map.try_insert(v).expect("room")).collect();
+    assert_eq!(map.held_bytes(), grows, "the insertions allocated nothing");
+    assert_eq!(map.reserve_bytes(2), grows / 3 * 2);
+    assert_eq!(map.remove(keys[1]), Some(1));
+    assert_eq!(map.reserve_bytes(1), 0, "a vacant slot is room already");
+    map.try_reserve_exact(1).expect("room");
+    assert_eq!(map.held_bytes(), grows, "nothing grew for a vacant slot");
+}

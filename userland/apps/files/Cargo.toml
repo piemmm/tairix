@@ -93,6 +93,10 @@ tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # (`src/preferences.rs`) are read, spelled and compared through; they are
 # host-tested.
 tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
+# The one namespace join: a piece of work runs on the lane of the volume the
+# binding covering its place shows (`src/lanes.rs`), by the rule `mount` and
+# `df` resolve a path with.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 
 [dev-dependencies]
 # The shared reclaimable-memory model: the icon pipeline's host tests build its
@@ -136,9 +140,9 @@ tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 # is decoded in a minimum-capability worker this binary re-enters itself as,
 # never in this process.
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
-# The System Information client's shared memory-pressure wake/prime helper,
-# so the artwork cache obeys the same band every other cache on the machine
-# does.
+# The System Information client's live transport and shared memory-pressure
+# wake/prime helper, added to the shared dependency above, so the artwork
+# cache obeys the same band every other cache on the machine does.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 # The production font-service transport, added to the shared dependency
 # above: the `Run` binary reaches the sandboxed font service over the runtime

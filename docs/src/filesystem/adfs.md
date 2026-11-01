@@ -33,7 +33,10 @@ Every ADFS on-disc format is supported, for reading and writing:
 The variant is identified by probing (boot block, then bare disc
 record, then old map), and every checksum is validated before the
 volume is accepted; corruption anywhere refuses the volume or directory
-rather than serving suspect data.
+rather than serving suspect data. A disc record is admitted only when its
+zone spare leaves room for the zone header and zone 0's map bits hold the
+record and one whole fragment, so a forged geometry is refused before any
+zone is read.
 
 ## RISC OS metadata
 
@@ -167,5 +170,7 @@ block, big-dir headers and heaps, entry pointers) and asserts the driver
 fails closed.
 `tests/fuzz_adfs_mount.rs` is the fuzz harness registered with
 `cargo xtask fuzz`: seed-logged byte sweeps over valid images of each
-map flavour plus PRNG mutations, with the invariant that `open`, the read
-surface and a file driven through a pin never panic.
+map flavour plus PRNG mutations, half of them shaping the disc record's
+geometry at its edges behind a re-sealed boot block or zone check, with the
+invariant that `open`, the read surface and a file driven through a pin
+never panic.

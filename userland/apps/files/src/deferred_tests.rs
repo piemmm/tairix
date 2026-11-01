@@ -5,7 +5,10 @@ use tairix_abi::time::Time64;
 use tairix_abi::{Errno, NodeTimes};
 use tairix_browse::{EntryKind, Properties};
 
-use super::{EjectDesk, FilesClients, PropertyJob, PropertyReads, ReadKind, READ_ORDER};
+use super::{
+    first_in_order, EjectDesk, FilesClients, PropertyJob, PropertyReads, ReadKind, WindowReads,
+    READ_ORDER,
+};
 
 /// Every browser window lists under a consumer of its own: sharing one, two
 /// windows discarded each other's answers and neither ever listed.
@@ -211,7 +214,7 @@ fn an_eject_keeps_its_room_until_its_outcome_lands() {
     desk.located(locating, ());
     let (located, ()) = desk.take_located().expect("located");
     desk.settle(located);
-    let settling = desk.next_settle().expect("to carry out");
+    let settling = desk.next_settle_where(|_| true).expect("to carry out");
     assert_eq!(settling, 1);
     assert_eq!(desk.admit(5), Err(5), "one being carried out still counts");
     desk.landed("ejected");
@@ -222,4 +225,80 @@ fn an_eject_keeps_its_room_until_its_outcome_lands() {
         "its outcome landed, so its room is free"
     );
     assert_eq!(desk.take_landed(), None);
+}
+
+/// An eject is carried out by the worker of its own volume's lane: one
+/// passed over keeps its place, behind none of the others.
+#[test]
+fn an_eject_is_carried_out_by_its_own_lanes_worker() {
+    let mut desk = EjectDesk::<u32, (), &str>::new(4);
+    for act in [1, 2, 3] {
+        assert_eq!(desk.admit(act), Ok(()));
+        let located = desk.next_locate().expect("located");
+        desk.settle(located);
+    }
+    assert_eq!(desk.next_settle_where(|act| *act == 2), Some(2));
+    assert_eq!(desk.next_settle_where(|act| *act == 2), None);
+    assert_eq!(
+        desk.next_settle_where(|_| true),
+        Some(1),
+        "the order settled holds"
+    );
+    assert_eq!(desk.next_settle_where(|_| true), Some(3));
+}
+
+/// A worker serving its own share of the windows' reads takes only what it
+/// admits, in the order asked, and leaves the rest waiting.
+#[test]
+fn a_worker_takes_only_the_window_reads_it_admits() {
+    let mut reads = WindowReads::<&str, ()>::new();
+    assert!(reads.submit(1, "stick"));
+    assert!(reads.submit(2, "home"));
+    assert!(reads.submit(3, "stick"));
+    let stick = |job: &&str| *job == "stick";
+    assert_eq!(reads.next_job_where(stick), Some((1, "stick")));
+    assert_eq!(reads.next_job_where(stick), Some((3, "stick")));
+    assert_eq!(reads.next_job_where(stick), None);
+    assert!(reads.has_work());
+    assert_eq!(reads.next_job(), Some((2, "home")));
+    assert!(
+        reads.deliver(1, ()),
+        "a read taken by share is answered as any is"
+    );
+}
+
+/// Of each kind a worker takes its last lane's work first, but a kind the
+/// order puts first is taken on another lane before a later kind on its own:
+/// a listing on a free volume never waits behind the decodes queued where the
+/// worker last read.
+#[test]
+fn a_kind_the_order_puts_first_is_taken_on_another_lane_before_a_later_on_the_last() {
+    let queued = [
+        (ReadKind::Thumbnail, 'a'),
+        (ReadKind::List, 'b'),
+        (ReadKind::Thumbnail, 'b'),
+    ];
+    let mut asked = Vec::new();
+    let found = first_in_order(Some('a'), |kind, only| {
+        asked.push((kind, only));
+        queued
+            .iter()
+            .find(|(each, lane)| *each == kind && only.is_none_or(|only| only == *lane))
+            .copied()
+    });
+    assert_eq!(found, Some((ReadKind::List, 'b')));
+    assert_eq!(
+        first_in_order(Some('a'), |kind, only| queued
+            .iter()
+            .find(|(each, lane)| *each == kind
+                && *each != ReadKind::List
+                && only.is_none_or(|only| only == *lane))
+            .copied()),
+        Some((ReadKind::Thumbnail, 'a')),
+        "of one kind, the last lane's goes first"
+    );
+    assert!(
+        asked.starts_with(&[(ReadKind::Write, Some('a')), (ReadKind::Write, None)]),
+        "each kind is asked of the last lane, then of any"
+    );
 }

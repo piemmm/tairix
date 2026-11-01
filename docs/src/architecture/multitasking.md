@@ -106,7 +106,11 @@ alone, and no kernel code uses x87 or MMX. That splits the state in two
   AVX-512 opmask — lives in an area at the top of each user task's kernel
   stack, directly above `RSP0`, so a ring-3 entry finds it at its frame top.
   `XCR0` enables x87, SSE, AVX and, when all three are present, the AVX-512
-  trio; AMX, MPX and PKRU stay off. A park saves the area with XSAVEOPT, XSAVE
+  trio; AMX, MPX and PKRU stay off. The area's size is CPUID leaf 0xD's for
+  the components enabled, accepted only where it holds the legacy image, the
+  header and each enabled component's extent and fits sixteen bits, or the CPU
+  is refused; a CPU offering XSAVE but reporting no leaf 0xD names no layout
+  and saves with FXSAVE64. A park saves the area with XSAVEOPT, XSAVE
   or FXSAVE64, unless a load is still pending; a resume marks a load pending
   unless this CPU's owner is the area and the area last lived here; and the
   load itself runs in each
@@ -247,10 +251,14 @@ The arch-neutral half lives in `kernel/core` and is host-proven:
   (D1560).
 * **A suspension point is proven to be the task's own.** Before switching in,
   `dispatch_step` checks the saved kernel stack pointer against the task's own
-  stack (`KernelStack::carries`, over `KernelStack::usable_bytes`) and fails the
-  task closed — exactly as a stack-guard violation does — rather than switching
-  into a foreign continuation. The fail-closed backstop for the class above, so
-  a mispairing can never become silent cross-task corruption (§2.17).
+  stack (`KernelStack::carries`, over `KernelStack::usable_bytes`). One off it
+  stops the kernel with the corrupt-stack report (`KERNEL_STACK_CORRUPT`, 4012,
+  `check=suspension`), as a disturbed guard canary does once the task switches
+  back, rather than switching into a foreign continuation: another task's
+  context is already lost. The check precedes the switch-in hook and every
+  per-CPU publication, so nothing on the CPU names the task when the report
+  reads it. The fail-closed backstop for the class above, so a mispairing can
+  never become silent cross-task corruption (§2.17).
 * **Discovered-sized per-CPU state + `pre_resume` hook.** Scheduler
   initialization fallibly allocates one `cpu_state` slot per validated
   discovered CPU; there is no compile-time CPU ceiling. Each slot owns the

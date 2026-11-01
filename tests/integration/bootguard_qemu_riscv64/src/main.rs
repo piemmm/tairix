@@ -49,7 +49,7 @@ mod kernel {
         // SAFETY: the linker script reserves `[low, bottom)` as this hart's
         // boot-stack guard and nothing else claims it; this kernel is the
         // only thing running, so the checks' write-and-restore is unraced.
-        match unsafe { check(bt.boot_stack_guard(), low, bottom, sp) } {
+        match unsafe { check(bt.boot_stack_guard(), low, bottom, sp, bottom) } {
             Ok(()) => {
                 let _ = writeln!(w, "[bootguard] riscv64 boot-stack guard verified");
                 qemu_exit::exit_success()

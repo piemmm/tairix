@@ -44,11 +44,11 @@ computador, por isso um nome nunca prova que computador está a ver. A
 ligação às partilhas de um computador não está disponível neste sistema, e
 abrir um di-lo.
 
-Iniciado pelo nome a partir de uma shell (ou aberto numa pasta a partir do
-ambiente de trabalho), é antes uma aplicação normal: uma janela, que termina
-quando a fecha. Em qualquer dos casos, precisa de uma sessão gráfica em
-curso: sem ela, o canal de janelas fica inalcançável, e o explorador
-comunica a recusa no fluxo de erro padrão e termina.
+Iniciado a partir de uma shell pelo seu caminho,
+`/System/Components/files.app`, é antes uma aplicação normal: uma janela,
+e termina quando a fecha. Em qualquer dos casos, precisa de uma sessão
+gráfica em curso: sem ela, o canal de janelas fica inalcançável, e o
+explorador comunica a recusa no fluxo de erro padrão e termina.
 
 A janela é conduzida pelo teclado: `Baixo` e `Cima` movem a seleção, `Enter`
 abre o diretório selecionado e `Backspace` sobe ao diretório superior. `F5`
@@ -108,12 +108,16 @@ Seguem-se *Novo*, depois *Selecionar tudo* e *Limpar seleção*, e por fim
 pelo que o submenu do item fica a cinzento.
 
 Abrir uma imagem de disco — um ficheiro `.iso`, `.adf`, `.hdf` e afins —
-monta-a para si em `/Storage`, gravável onde o ficheiro o é, e abre a sua
-janela; *Montar só de leitura* monta-a só de leitura. Fica montada até a
-ejetar ou a sua sessão terminar. *Ejetar* retira um volume que montou, a
-partir do seu ícone ou da sua linha na barra de locais, cujo menu de
-contexto próprio contém *Abrir* e *Ejetar*; as suas janelas nele passam
-primeiro para `/Storage`.
+monta-a para si em `/Storage`, gravável onde tanto o ficheiro como o seu
+formato o permitem, e abre a sua janela; *Montar só de leitura* monta-a,
+em vez disso, só de leitura. Fica montada até a ejetar ou a sua sessão
+terminar. *Ejetar* retira um volume que montou, a partir do seu ícone ou da
+sua linha na barra de locais, cujo menu de contexto próprio contém *Abrir*
+e *Ejetar*; as suas janelas nele passam primeiro para `/Storage`. Um volume
+que desapareceu — removido o seu disco, ou perdido o seu servidor — antes
+de tudo o que nele escreveu ter sido guardado sai da barra, mas mantém o
+seu ícone em `/Storage`, e o que não foi guardado perde-se; *Ejetar* nesse
+ícone pergunta antes de o deixar ir.
 
 O submenu *Novo* do menu de contexto cria uma pasta, ou um documento vazio
 de cada tipo que um editor instalado escreve, e abre o seu nome para edição.

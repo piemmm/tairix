@@ -35,7 +35,7 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::BlkMedium;
 use tairix_abi::fs::STORAGE_CATALOG;
 use tairix_abi::home::{HOME_DESKTOP_DIR, HOME_FILES_DIR};
-use tairix_abi::sysinfo::{MountAvailability, MountRecord};
+use tairix_abi::sysinfo::{MountAvailability, MountRecord, VOLUME_ID_LEN, VOLUME_ID_UNPUBLISHED};
 use tairix_icon::{disk_icon, IconKind};
 use tairix_procinfo::list::field_lossy;
 use tairix_procinfo::VolumeBytes;
@@ -170,8 +170,9 @@ pub struct VolumeFacts {
     /// The principal it was attached for — a network share's or a disk
     /// image's — who may eject it, or `None` for one no one owns.
     pub owner: Option<u32>,
-    /// The identity a detach names it by, all-zero for one it cannot name.
-    pub volume_id: [u8; 16],
+    /// The identity a detach names it by, the reserved unpublished identity
+    /// for one it cannot name.
+    pub volume_id: [u8; VOLUME_ID_LEN],
 }
 
 impl VolumeFacts {
@@ -186,7 +187,8 @@ impl VolumeFacts {
     /// or `None` where no one may, or a detach could not name it.
     #[must_use]
     pub fn ejector(&self) -> Option<u32> {
-        self.owner.filter(|_| self.volume_id != [0; 16])
+        self.owner
+            .filter(|_| self.volume_id != VOLUME_ID_UNPUBLISHED)
     }
 }
 

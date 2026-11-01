@@ -493,7 +493,10 @@ impl<S: DirectorySource> Desktop<S> {
         let name = chosen.name().as_str();
         if let Err(err) = tairix_path::validate_file_name(name) {
             return DesktopAction::Refuse(GestureRefusal::new(
-                format!("\u{201c}{name}\u{201d} cannot name a shortcut"),
+                format!(
+                    "\u{201c}{}\u{201d} cannot name a shortcut",
+                    tairix_util::utf8::shown(name)
+                ),
                 format!("A shortcut is a file, and {err}."),
             ));
         }
@@ -1284,7 +1287,7 @@ impl<S: DirectorySource> Desktop<S> {
                     return DesktopOutcome::acting(DesktopAction::Refuse(GestureRefusal::new(
                         format!(
                             "The shortcut \u{201c}{}\u{201d} names nothing",
-                            entry.name()
+                            tairix_util::utf8::shown(entry.name())
                         ),
                         "It holds no target to open.",
                     )));
@@ -1325,7 +1328,7 @@ impl<S: DirectorySource> Desktop<S> {
                     None => DesktopOutcome::acting(DesktopAction::Refuse(GestureRefusal::new(
                         format!(
                             "No installed application opens \u{201c}{}\u{201d}",
-                            entry.name()
+                            tairix_util::utf8::shown(entry.name())
                         ),
                         "No program installed here claims files of this kind.",
                     ))),
@@ -1337,7 +1340,7 @@ impl<S: DirectorySource> Desktop<S> {
                 DesktopOutcome::acting(DesktopAction::Refuse(GestureRefusal::new(
                     format!(
                         "The shortcut \u{201c}{}\u{201d} points at something that is not there",
-                        entry.name()
+                        tairix_util::utf8::shown(entry.name())
                     ),
                     "What it named has been moved or deleted.",
                 )))

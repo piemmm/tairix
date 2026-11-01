@@ -247,8 +247,9 @@ pub enum Presentation {
 /// The head every attach frame opens with, ahead of its name and then its
 /// target: the version (2), the presentation (1), the flags (1), the explicit
 /// owner (4), group (4), directory mode (2) and file mode (2), the name's
-/// length (1), a byte the frame's own (1), and the target's length (2).
-pub const ATTACH_HEAD_LEN: usize = 20;
+/// length (1), a zero pad (1), the target's length (2), and a word the frame's
+/// own (4), each field aligned as a C struct lays it out.
+pub const ATTACH_HEAD_LEN: usize = 24;
 
 /// The largest attach frame: a name at [`VOLUME_NAME_MAX`] and a target at
 /// [`MOUNT_TARGET_MAX`].
@@ -272,8 +273,8 @@ pub(crate) struct AttachFrame<'a> {
     pub(crate) version: u16,
     pub(crate) presentation: Presentation,
     pub(crate) flags: u8,
-    /// The byte at 17, which each kind of frame gives its own meaning.
-    pub(crate) own: u8,
+    /// The word at 20, which each kind of frame gives its own meaning.
+    pub(crate) own: u32,
     /// Empty for none.
     pub(crate) name: &'a str,
     pub(crate) target: Option<&'a str>,
@@ -295,12 +296,12 @@ impl<'a> AttachFrame<'a> {
         PresentationWire::of(self.presentation).put(out);
         out[3] = self.flags;
         out[16] = u8::try_from(self.name.len()).map_err(|_| Errno::OutOfRange)?;
-        out[17] = self.own;
         put_u16(
             out,
             18,
             u16::try_from(target.len()).map_err(|_| Errno::OutOfRange)?,
         );
+        put_u32(out, 20, self.own);
         let names = &mut out[ATTACH_HEAD_LEN..];
         names[..self.name.len()].copy_from_slice(self.name.as_bytes());
         names[self.name.len()..].copy_from_slice(target.as_bytes());
@@ -313,9 +314,9 @@ impl<'a> AttachFrame<'a> {
     ///
     /// [`Errno::AbiVersionUnsupported`] for another version;
     /// [`Errno::OutOfRange`] for an unknown presentation or flag, an owner or
-    /// mode carried by a presentation that names none, or a name or target
-    /// that is not UTF-8; [`Errno::LengthOutOfRange`] for a frame that does
-    /// not end where its target does.
+    /// mode carried by a presentation that names none, a nonzero pad, or a
+    /// name or target that is not UTF-8; [`Errno::LengthOutOfRange`] for a
+    /// frame that does not end where its target does.
     pub(crate) fn decode(bytes: &'a [u8], version: u16, known: u8) -> Result<Self, Errno> {
         if bytes.len() < ATTACH_HEAD_LEN || bytes.len() > ATTACH_MAX {
             return Err(Errno::LengthOutOfRange);
@@ -325,7 +326,7 @@ impl<'a> AttachFrame<'a> {
         }
         let presentation = PresentationWire::read(bytes).presentation()?;
         let flags = bytes[3];
-        if flags & !known != 0 {
+        if flags & !known != 0 || bytes[17] != 0 {
             return Err(Errno::OutOfRange);
         }
         let name_len = usize::from(bytes[16]);
@@ -339,7 +340,7 @@ impl<'a> AttachFrame<'a> {
             version,
             presentation,
             flags,
-            own: bytes[17],
+            own: read_u32(bytes, 20),
             name: text(name)?,
             target: match target_len {
                 0 => None,

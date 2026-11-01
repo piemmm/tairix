@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-bootguard-qemu-x86_64"
-description = "QEMU integration test: the x86_64 boot stack's poison guard is reserved by the linker, filled by the boot stub after the .bss clear, named correctly by the port's post-mortem handle, and detects a write through its canary."
+description = "QEMU integration test: the x86_64 boot stack's poison guard is reserved by the linker, filled by the boot stub after the .bss clear, named correctly by the port's post-mortem handle, and detects a write through its canary and a fault inside it."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

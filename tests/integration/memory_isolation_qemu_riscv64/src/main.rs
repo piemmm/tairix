@@ -72,10 +72,7 @@ mod kernel {
     /// Magic byte written into the secret frame.
     const SECRET_BYTE: u8 = 0xC0;
 
-    /// Gigapages of identity map both spaces share: `[0, 4 GiB)` covers
-    /// the `virt` board's low MMIO (the `SiFive` Test device, PLIC, …)
-    /// and the 2 GiB RAM base at `0x8000_0000` where this kernel runs.
-    const IDENTITY_GIGABYTES: usize = 4;
+    use tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES;
 
     /// Stable audit-event ids for the QEMU transcript.
     const TEST_START: EventId = EventId(4210);
@@ -187,9 +184,10 @@ mod kernel {
         }
 
         // ---- Build the victim space and add the secret mapping. ----
-        let Some(mut victim) =
-            paging::AddressSpace::new_identity_gigapages(&PAGE_TABLE_POOL, IDENTITY_GIGABYTES)
-        else {
+        let Some(mut victim) = paging::AddressSpace::new_identity_gigapages(
+            &PAGE_TABLE_POOL,
+            KERNEL_IDENTITY_GIGAPAGES,
+        ) else {
             note(TEST_FAIL, "page-table pool exhausted (victim)");
             qemu_exit::exit_failure(FAIL_POOL);
         };
@@ -210,9 +208,10 @@ mod kernel {
         }
 
         // ---- Build the attacker space: identity window only. ----
-        let Some(attacker) =
-            paging::AddressSpace::new_identity_gigapages(&PAGE_TABLE_POOL, IDENTITY_GIGABYTES)
-        else {
+        let Some(attacker) = paging::AddressSpace::new_identity_gigapages(
+            &PAGE_TABLE_POOL,
+            KERNEL_IDENTITY_GIGAPAGES,
+        ) else {
             note(TEST_FAIL, "page-table pool exhausted (attacker)");
             qemu_exit::exit_failure(FAIL_POOL);
         };

@@ -24,10 +24,6 @@
 //! part of this steady-state budget and are deliberately excluded from
 //! the measured window; they run only during warm-up here.
 
-use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::alloc::System;
-
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, NetOffloads};
 use tairix_abi::time::Duration64;
 use tairix_net::addr::{IpAddr, Ipv4Addr};
@@ -51,44 +47,8 @@ impl TempAddrSource for FixedTempSource {
     }
 }
 
-/// A pass-through allocator that counts every allocation, reallocation,
-/// and zeroed allocation while counting is armed, so the test can assert
-/// that a measured window performs none.
-struct CountingAlloc;
-
-static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
-static ARMED: AtomicBool = AtomicBool::new(false);
-
-#[inline]
-fn note_alloc() {
-    if ARMED.load(Ordering::Relaxed) {
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-// SAFETY: every method forwards to the system allocator unchanged; the
-// only added behaviour is a relaxed atomic counter bump, which cannot
-// affect memory safety.
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        note_alloc();
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        note_alloc();
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        note_alloc();
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
 #[global_allocator]
-static ALLOCATOR: CountingAlloc = CountingAlloc;
+static ALLOCATOR: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
 const MAC_A: MacAddress = MacAddress([0x02, 0xAA, 0, 0, 0, 0x01]);
 const MAC_B: MacAddress = MacAddress([0x02, 0xBB, 0, 0, 0, 0x02]);
@@ -178,18 +138,16 @@ fn udp_data_plane_is_allocation_free_in_steady_state() {
     // Measured window: a fixed number of transmit + receive rounds with
     // the warm, reused outputs. Every buffer is recycled, so the count
     // must be exactly zero.
-    ALLOC_COUNT.store(0, Ordering::Relaxed);
-    ARMED.store(true, Ordering::Relaxed);
-    for _ in 0..ROUNDS {
-        a.send_datagram(IpAddr::V4(V4_B), 4000, 4001, payload, now, &mut out_a)
-            .expect("send");
-        let len = out_a.frames[0].bytes.len();
-        wire[..len].copy_from_slice(&out_a.frames[0].bytes);
-        b.on_frame(&wire[..len], now, &mut out_b);
-    }
-    ARMED.store(false, Ordering::Relaxed);
-
-    let allocations = ALLOC_COUNT.load(Ordering::Relaxed);
+    let ((), metering) = tairix_fuzzseed::meter::metered(|| {
+        for _ in 0..ROUNDS {
+            a.send_datagram(IpAddr::V4(V4_B), 4000, 4001, payload, now, &mut out_a)
+                .expect("send");
+            let len = out_a.frames[0].bytes.len();
+            wire[..len].copy_from_slice(&out_a.frames[0].bytes);
+            b.on_frame(&wire[..len], now, &mut out_b);
+        }
+    });
+    let allocations = metering.allocations;
     assert_eq!(
         allocations, 0,
         "the UDP data-plane hot path must allocate nothing in steady state; \

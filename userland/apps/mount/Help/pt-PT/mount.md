@@ -30,7 +30,8 @@ partir de uma imagem nunca executa programas.
 
 Um `target` da forma `/Storage/name` monta o volume sob esse nome.
 Qualquer outro `target`, um diretório vazio que lhe pertença sob
-`/Users`, mostra o volume também aí.
+`/Users` ou num volume em `/Storage`, mostra o volume também aí; um
+diretório num volume FAT32 ou ADFS não o pode mostrar.
 
 O volume permanece montado até o desanexar com `unmount` ou até a sua
 sessão terminar. Uma imagem que contenha um disco particionado, um dos
@@ -43,13 +44,20 @@ montada, e o `mount` diz porquê.
 - `-r, --read-only` — montar o volume só de leitura (como `-o ro`).
 - `-w, --rw, --read-write` — montar o volume em leitura e escrita, ou
   não o montar de todo: uma imagem em que não possa escrever, ou cujo
-  sistema de ficheiros não admita escrita, não é montada. O último
-  indicado de `-r`, `-w`, `-o ro` e `-o rw` vence.
-- `-t, --types <type>` — o sistema de ficheiros que a imagem tem de
-  conter, tal como a listagem de montagens o designa (`iso9660`, `udf`,
-  `adfs`, `affs`, `fat32`), ou `auto` para o que quer que contenha.
-  Uma imagem que contenha outro, ou para a qual se indique um tipo que
-  nenhuma imagem de disco contenha, não é montada.
+  sistema de ficheiros não admita escrita, não é montada. Um `-r`
+  posterior anula esta opção; um `-o ro` ou `-o rw` posterior não. O
+  último indicado de `-r`, `-w`, `-o ro` e `-o rw` decide se o volume
+  fica só de leitura.
+- `-t, --types <list>` — os sistemas de ficheiros, separados por
+  vírgulas, um dos quais a imagem tem de conter, tal como a listagem de
+  montagens os designa (`iso9660`, `udf`, `adfs`, `affs`, `fat32`), ou
+  `auto` para o que quer que contenha; uma lista que comece por `no`
+  nomeia os que não pode conter. O que a imagem contém é reconhecido
+  pelo seu conteúdo, pelo que a ordem não escolhe nada: um disco ótico
+  que contenha tanto UDF como ISO 9660 é montado como UDF, a menos que o
+  seu ISO 9660 guarde registos Rock Ridge ou RISC OS. Uma imagem que não
+  contenha nenhum deles, ou uma lista que não nomeie nenhum tipo que uma
+  imagem de disco contenha, não é montada.
 - `-o, --options <list>` — uma lista separada por vírgulas de `ro`,
   `rw` (leitura e escrita quando for possível, a predefinição),
   `noexec`, `loop` e `name=name`, o nome que o volume deve receber.

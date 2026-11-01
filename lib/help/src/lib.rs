@@ -68,7 +68,7 @@ pub use doc::{
     MAX_TABLE_COLUMNS, MAX_TABLE_ROWS,
 };
 #[cfg(feature = "lint")]
-pub use lint::{lint_help_trees, LintDoc};
+pub use lint::{lint_help_trees, options_entry_mentions, LintDoc};
 pub use locale::{
     load, load_raw, DocumentName, Fallback, HelpSource, LoadError, Loaded, Locale, NameError,
     RawLoaded, Selection, SourceError, TagError, DEFAULT_LOCALE, MAX_DOCUMENT_NAME_LEN,

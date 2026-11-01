@@ -21,10 +21,10 @@
 //     (`AP_BOOT_SLOT_OFFSET`, currently `0xF00`) inside the same 4 KiB
 //     frame. The BSP must populate the record AND publish-release the
 //     trampoline page before sending the first SIPI.
-//  4. The payload never writes its own page: the Rust entry reports the AP
-//     live (the boot record's `ready` flag) once it has left the page, and
-//     every GDT descriptor's accessed bit is preset. So the start-up root
-//     maps the page read and execute only.
+//  4. The payload never writes its own page: the Rust entry answers the boot
+//     CPU, joined or refused, through a kernel static once it has left the
+//     page, and every GDT descriptor's accessed bit is preset. So the
+//     start-up root maps the page read and execute only.
 //  5. The trampoline-internal GDT below has a 32-bit code segment at
 //     selector 0x08 (used for the protected-mode trampoline step), a
 //     64-bit code segment at selector 0x10 (L=1, used after entering
@@ -45,6 +45,11 @@
 //     set, and an AP must not run uncached.
 // 10. INIT leaves `RFLAGS` at `0x2`, so `AC` is clear when the Rust entry
 //     holds the AP to SMAP; nothing here sets it.
+// 11. `EFER.NXE` is armed as the boot entry arms it (`boot.s`
+//     SAFETY-INVARIANT 13), by the same `nx_probe` it defines. An AP that still
+//     does not offer execute-disable halts here, unpaged: the start-up root
+//     carries NX leaves it could not decode, and the boot CPU's wait for it
+//     times out.
 
 .section .ap_trampoline, "ax"
 .code16
@@ -60,7 +65,7 @@
 //   [0x000 .. ~0x200]  16-bit + 64-bit code
 //   [0xE00 .. 0xE20]   trampoline-internal GDT (4 × 8 bytes)
 //   [0xEE0 .. 0xEE6]   GDTR record (limit + 32-bit base)
-//   [0xF00 .. 0xF44]   ApBootSlot (written by the BSP; the AP reads it here)
+//   [0xF00 .. 0xF14]   ApBootSlot (written by the BSP; the AP reads it here)
 //   AP_TRAMPOLINE_LEN  = AP_BOOT_SLOT_OFFSET = 0xF00, i.e. the payload
 //                        proper is the part the BSP copies verbatim.
 .equ AP_GDT_OFFSET,             0xE00
@@ -97,11 +102,13 @@ _ap_trampoline_start:
     movl    AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_CR3, %eax
     movl    %eax, %cr3
 
-    // Arm long mode and execute-disable before paging can consume an NX leaf.
-    // wrmsr requires CPL = 0; we are in real mode at CPL = 0.
-    movl    $0xC0000080, %ecx
+    // Arm long mode and execute-disable before paging can consume an NX leaf
+    // (SAFETY-INVARIANT 11). wrmsr requires CPL = 0; we are in real mode at
+    // CPL = 0.
+    nx_probe .Lap_no_nx
+    movl    ${IA32_EFER}, %ecx
     rdmsr
-    orl     $(1 << 8) | (1 << 11), %eax       // LME | NXE
+    orl     $({EFER_LME} | {EFER_NXE}), %eax
     wrmsr
 
     // Enable PE and PG simultaneously in one MOV to CR0. Per SDM §10.8.5
@@ -117,6 +124,12 @@ _ap_trampoline_start:
     // `(_ap_long_mode - _ap_trampoline_start)` to a constant offset
     // within the page (SAFETY-INVARIANT 1, 5).
     ljmpl   $0x10, $(0x8000 + (_ap_long_mode - _ap_trampoline_start))
+
+    // No execute-disable: stop before paging (SAFETY-INVARIANT 11).
+.Lap_no_nx:
+    cli
+    hlt
+    jmp     .Lap_no_nx
 
 .code64
 _ap_long_mode:
@@ -155,7 +168,7 @@ _ap_long_mode:
     movl    AP_BOOT_SLOT_CPU_ID(%rsi), %edi
 
     // The Rust entry joins the kernel root, which leaves this page behind,
-    // and only then reports the AP live (SAFETY-INVARIANT 4, 7).
+    // and only then answers (SAFETY-INVARIANT 4, 7).
     movabsq $tairix_arch_x86_64_ap_entry, %rax
     call    *%rax
 

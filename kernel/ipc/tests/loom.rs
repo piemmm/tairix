@@ -9,10 +9,7 @@
 //! ```
 //!
 //! When `loom` is *not* enabled, this file compiles to an empty test
-//! binary so the default `cargo test` workflow stays fast. The
-//! `cargo xtask test` driver runs the loom suite when the
-//! helper-tool cache contains a usable `loom` build, mirroring
-//! `kernel/sync/tests/loom.rs` and `kernel/sched/tests/loom.rs`.
+//! binary. No stage runs it until `plans/OPEN-DEFECTS.md` D131 is resolved.
 //!
 //! The invariant under test is:
 //!

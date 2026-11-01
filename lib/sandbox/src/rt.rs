@@ -200,7 +200,7 @@ impl RtLauncher {
 /// worker's is a share of the machine's installed RAM, read when it starts.
 fn ceiling_of(memory: WorkerMemory) -> u64 {
     let ram = match memory {
-        WorkerMemory::Messages | WorkerMemory::HeldDocument => 0,
+        WorkerMemory::Messages | WorkerMemory::HeldDocument | WorkerMemory::Artwork => 0,
         WorkerMemory::Documents => {
             tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0)
         }

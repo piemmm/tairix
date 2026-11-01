@@ -22,6 +22,7 @@ use tairix_controls::{
     ComboBox, ControlState, FieldAction, FieldControl, FieldGroup, FieldRow, Slider, Toggle,
 };
 use tairix_soundtheme::{layered, merge_pushed, SoundKey, SoundSettings};
+use tairix_util::utf8::shown;
 
 /// What a reader may search for to reach the pane.
 pub(crate) const EFFECTS_FACTS: [&str; 7] = [
@@ -353,16 +354,21 @@ pub(crate) fn row(owner: EffectsRow, reading: &EffectsReading) -> FieldRow {
             let at = offers(file)
                 .position(|(offer, _)| offer == current)
                 .unwrap_or(0);
-            let choices = offers(file).map(|(_, name)| String::from(name)).collect();
+            let choices = offers(file)
+                .map(|(_, name)| shown(name).into_owned())
+                .collect();
             let row = FieldRow::new(
                 label(event),
                 FieldControl::Combo(ComboBox::new(choices).with_selected(at)),
             )
             .with_state(applies);
             match file {
-                EffectFile::Unavailable(name) if current == Offer::Chosen => row.with_description(
-                    format!("{name} cannot be read, so the theme's sound plays."),
-                ),
+                EffectFile::Unavailable(name) if current == Offer::Chosen => {
+                    row.with_description(format!(
+                        "{} cannot be read, so the theme's sound plays.",
+                        shown(name)
+                    ))
+                }
                 _ => row,
             }
         }

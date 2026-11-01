@@ -450,8 +450,8 @@ fn bind_wire(qemu_sock: &Path, peer_sock: &Path) -> Result<Wire, String> {
 #[cfg(test)]
 mod wire_tests {
     use super::{bind_wire, SEND_TIMEOUT};
+    use crate::process::answered;
     use std::os::unix::net::UnixDatagram;
-    use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use tairix_qemu::ReservedSocket;
 
@@ -481,8 +481,7 @@ mod wire_tests {
 
         // The whole sequence runs on a worker: without a transmit bound it
         // never returns, and a hung test diagnoses nothing.
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
+        let (accepted, refused, waited) = answered(PARKED, move || {
             let frame = [0u8; 1514];
             let mut accepted = 0u32;
             while wire.socket.send_to(&frame, &wire.qemu_sock).is_ok() {
@@ -493,10 +492,9 @@ mod wire_tests {
             }
             let start = Instant::now();
             let refused = wire.socket.send_to(&frame, &wire.qemu_sock).is_err();
-            let _ = tx.send((accepted, refused, start.elapsed()));
-        });
-
-        let (accepted, refused, waited) = rx.recv_timeout(PARKED).expect(
+            (accepted, refused, start.elapsed())
+        })
+        .expect(
             "a transmit onto a saturated wire must be refused, not park the observer: a \
              parked observer never reaches the receive path its verdict depends on, so the \
              run expires on its ceiling and reports the guest as the fault",

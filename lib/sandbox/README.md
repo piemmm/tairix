@@ -220,7 +220,11 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   `AddressSpaceBytes` ceiling its launcher's `WorkerMemory` names
   (`memory`), so a runaway decode ends as the worker's own memory-bound exit
   rather than the machine's, which the host reports as the request outgrowing
-  that bound rather than as a shortage worth asking again.
+  that bound rather than as a shortage worth asking again. An artwork worker's
+  ceiling is fixed, so a program pooling them runs as many as fit in one
+  document decoder's and never fewer than one (`WorkerMemory::pooled`): below
+  512 MiB of RAM, where none fits, that one may map more than a document
+  decoder.
 - Fuzzed: `fuzz_sandbox` (the decode, helpdoc, and imagerender service
   request decoders — icon and wallpaper alike — the caller-side reply
   decoders/validators, and the session seam's inbound codec over a hostile

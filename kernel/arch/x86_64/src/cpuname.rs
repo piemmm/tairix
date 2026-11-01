@@ -11,30 +11,16 @@
 //! `None` rather than the host machine's identity (no fake hardware in
 //! production paths). A part that does not implement the brand-string
 //! leaves, or reports an empty or non-UTF-8 string, is `None` — an honest
-//! "unknown" the boot facts record as such.
-//!
-//! Who made the part comes from leaf 0
-//! ([`vendor_from_leaf0`](crate::cpuname::vendor_from_leaf0)), which every
-//! CPU's bring-up reads as well as feature detection, so it lives in this
-//! always-built module rather than behind the scheduler HAL's feature.
+//! "unknown" the boot facts record as such. Who made the part is
+//! [`crate::cpuid::Vendor`].
 
 /// Byte length of the CPUID processor brand string (three leaves of four
 /// 32-bit registers).
 pub const BRAND_LEN: usize = 48;
 
-/// First CPUID leaf of the processor brand string. Only read on the
-/// bare-metal target after bounding the maximum extended leaf.
-#[cfg_attr(not(all(target_arch = "x86_64", target_os = "none")), allow(dead_code))]
-const LEAF_BRAND_FIRST: u32 = 0x8000_0002;
-
-/// Last CPUID leaf of the processor brand string.
-#[cfg_attr(not(all(target_arch = "x86_64", target_os = "none")), allow(dead_code))]
-const LEAF_BRAND_LAST: u32 = 0x8000_0004;
-
-/// CPUID leaf bounding the maximum supported *extended* leaf, returned in
-/// `EAX`. The brand-string leaves are read only when within bounds.
-#[cfg_attr(not(all(target_arch = "x86_64", target_os = "none")), allow(dead_code))]
-const LEAF_EXT_MAX: u32 = 0x8000_0000;
+/// The CPUID leaves of the processor brand string.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+const LEAVES_BRAND: core::ops::RangeInclusive<u32> = 0x8000_0002..=0x8000_0004;
 
 /// Decode the raw 48 brand-string bytes into the part's name.
 ///
@@ -56,24 +42,16 @@ pub fn brand_from_bytes(bytes: &[u8; BRAND_LEN]) -> Option<&str> {
 /// Read the brand string of the CPU this function executes on into
 /// `buf`, returning the decoded name borrowed from it.
 ///
-/// On the bare-metal target it bounds the maximum extended leaf via leaf
-/// `0x8000_0000` (so an unsupported leaf is never executed, per the SDM
-/// usage requirement), reads the three brand-string leaves, and decodes
-/// them through [`brand_from_bytes`]. On the host target it reports
-/// `None` rather than the host machine's identity.
+/// On the bare-metal target it reads the three brand-string leaves, `None`
+/// where the CPU does not report them, and decodes them through
+/// [`brand_from_bytes`]. On the host target it reports `None` rather than
+/// the host machine's identity.
 #[must_use]
 pub fn boot_cpu_name(buf: &mut [u8; BRAND_LEN]) -> Option<&str> {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        // `CPUID` is unconditionally available on every x86_64 CPU (it
-        // predates the architecture) and is side-effect-free, so these
-        // intrinsics are safe on this target.
-        let max_ext_leaf = core::arch::x86_64::__cpuid(LEAF_EXT_MAX).eax;
-        if max_ext_leaf < LEAF_BRAND_LAST {
-            return None;
-        }
-        for (i, leaf) in (LEAF_BRAND_FIRST..=LEAF_BRAND_LAST).enumerate() {
-            let regs = core::arch::x86_64::__cpuid(leaf);
+        for (i, leaf) in LEAVES_BRAND.enumerate() {
+            let regs = crate::cpuid::leaf(leaf, 0)?;
             let at = i * 16;
             buf[at..at + 4].copy_from_slice(&regs.eax.to_le_bytes());
             buf[at + 4..at + 8].copy_from_slice(&regs.ebx.to_le_bytes());
@@ -89,44 +67,9 @@ pub fn boot_cpu_name(buf: &mut [u8; BRAND_LEN]) -> Option<&str> {
     }
 }
 
-/// Decode the vendor identity string from `CPUID.0` (`EBX`/`EDX`/`ECX`
-/// in that layout order) into a stable marketing name.
-///
-/// Returns `None` for a vendor outside the recognised set — an honest
-/// "unknown", never a guessed name.
-#[must_use]
-pub fn vendor_from_leaf0(ebx: u32, edx: u32, ecx: u32) -> Option<&'static str> {
-    let mut bytes = [0u8; 12];
-    bytes[0..4].copy_from_slice(&ebx.to_le_bytes());
-    bytes[4..8].copy_from_slice(&edx.to_le_bytes());
-    bytes[8..12].copy_from_slice(&ecx.to_le_bytes());
-    match &bytes {
-        b"GenuineIntel" => Some("Intel"),
-        b"AuthenticAMD" => Some("AMD"),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn vendor_strings_decode() {
-        // "GenuineIntel": EBX="Genu", EDX="ineI", ECX="ntel".
-        let ebx = u32::from_le_bytes(*b"Genu");
-        let edx = u32::from_le_bytes(*b"ineI");
-        let ecx = u32::from_le_bytes(*b"ntel");
-        assert_eq!(vendor_from_leaf0(ebx, edx, ecx), Some("Intel"));
-
-        let ebx = u32::from_le_bytes(*b"Auth");
-        let edx = u32::from_le_bytes(*b"enti");
-        let ecx = u32::from_le_bytes(*b"cAMD");
-        assert_eq!(vendor_from_leaf0(ebx, edx, ecx), Some("AMD"));
-
-        // An unknown vendor is an honest None.
-        assert_eq!(vendor_from_leaf0(0, 0, 0), None);
-    }
 
     /// A `BRAND_LEN` buffer holding `text` followed by NUL padding.
     fn padded(text: &str) -> [u8; BRAND_LEN] {

@@ -19,8 +19,11 @@ until an administrator sets one (and none can be guessed), exactly as the
 GNU tool creates a disabled account. Set a password afterwards with the
 `users` tool's `passwd` command.
 
-When `-u` is omitted the user id is allocated automatically, one above
-the highest existing id. When `-d` is omitted the home directory is the
+When `-u` is omitted the user id is allocated automatically: one above
+the highest existing id of 1000 or more, or 1000 when no account has
+one. Ids below 1000 are the system's and are never allocated, and once
+no id is left above the highest the account is not created. When `-d`
+is omitted the home directory is the
 standard `/Users/NAME` layout. The account starts the system default
 shell and the ordinary session capability ceiling; an administrator
 widens it afterwards with the `users` tool's `grant` command.
@@ -30,7 +33,8 @@ widens it afterwards with the `users` tool's `grant` command.
 ## OPTIONS
 
 - `-u, --uid UID` — numeric user id; allocated automatically when
-  omitted (one above the highest existing id).
+  omitted (one above the highest existing id of 1000 or more, else
+  1000).
 - `-g, --gid GID` — numeric primary group id. Required: there is no
   default-group policy to guess.
 - `-G, --groups LIST` — comma-separated numeric supplementary group ids.

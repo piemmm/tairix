@@ -28,11 +28,16 @@ an die er gebunden ist; er wird daher dort genannt, wo er unter
 `/Storage` eingehängt ist.
 
 Ein Datenträger, dessen Gerät mit noch nicht festgeschriebenen
-Schreibvorgängen entfernt wurde, bleibt als `unavailable-dirty`
-(oder `unavailable-lost`) in der Einhängeliste sichtbar, und ein
-einfaches `unmount` verweigert: die zurückgehaltenen Daten werden für
-ein geprüftes Wiedereinstecken aufbewahrt. Auch bei einem Datenträger,
-auf dem noch Dateien geöffnet sind oder auf dem ein Programm sein
+Schreibvorgängen entfernt wurde, bleibt als `unavailable-dirty` in der
+Einhängeliste sichtbar, und ein einfaches `unmount` verweigert: die
+zurückgehaltenen Daten werden für ein geprüftes Wiedereinstecken
+aufbewahrt. Ebenso verweigert es bei einem wieder eingesteckten
+Datenträger, bei dem sich nicht nachweisen ließ, dass er unverändert
+ist (`recovery-conflict`), und der diese Daten weiterhin aufbewahrt,
+sowie bei einem, dessen noch nicht festgeschriebene Schreibvorgänge
+nicht erhalten werden konnten (`unavailable-lost`), damit ihr Verlust
+anerkannt statt übergangen wird. Auch bei einem Datenträger, auf dem
+noch Dateien geöffnet sind oder auf dem ein Programm sein
 Arbeitsverzeichnis hat, verweigert ein einfaches `unmount`. `--force`
 ist der bewusste Ausweg — noch geöffnete Dateien auf dem Datenträger
 werden abgetrennt, ein Programm, das darauf arbeitet, bleibt in einem

@@ -3,7 +3,7 @@
  *
  * Used by every QEMU integration test binary in `tests/integration/*` that
  * targets `x86_64-tairix-none`. The script is the *only* place the boot
- * layout is encoded; AGENTS.md §2.2 forbids duplicating it per-test.
+ * layout is encoded, so no test restates it.
  *
  * # Higher-half memory model
  *
@@ -13,8 +13,7 @@
  * physical memory just above 1 MiB. This is what `-C code-model=kernel`
  * (`.cargo/config.toml`) already assumes, and what lets the syscall-entry
  * RSP0 validator (`syscall_entry::validate_kernel_rsp0`) demand a
- * canonical higher-half kernel stack (ret2usr / CVE-2019-1125 hardening,
- * AGENTS.md §5).
+ * canonical higher-half kernel stack (ret2usr / CVE-2019-1125 hardening).
  *
  * The early boot trampoline (`.boot.*`) is the one region that must stay at
  * its physical load address: it executes in 32-bit protected mode with
@@ -44,6 +43,9 @@
  *   - All other sections are linked at `KERNEL_VMA_BASE + phys` with an
  *     explicit `AT()` mapping their LMA back to the contiguous low physical
  *     image.
+ *   - `.text` starts and ends on the image window's block size
+ *     (`kernel_image_block`), its last block padded with `int3`, so the
+ *     window maps the code with large leaves only.
  *   - Unwind / debug-only sections the loader doesn't need are discarded.
  */
 
@@ -93,17 +95,16 @@ SECTIONS
         *(.boot.bss)
         /* The bootstrap stack the BSP runs on for the whole pre-handoff
          * boot path, directly above the page tables `boot.s` reserves.
-         * Paging is off when the BSP first descends it, so an overrun
-         * cannot be caught by unmapping a page: `boot_common` fills the
-         * guard below it with the shared sentinel and the panic path
-         * reads it back, turning a silent clobber of `boot_pds` into a
-         * named overrun. The guard is every byte up to
-         * `boot_stack_bottom`, padding included, so the fill and the
-         * check share one pair of symbols. */
+         * Paging is off when the BSP first descends it, so `boot_common`
+         * fills the guard below it with the shared sentinel and the panic
+         * path reads it back; the kernel root then maps the guard
+         * read-only, so an overrun there faults on its first byte. The
+         * guard is every byte up to `boot_stack_bottom`, padding included,
+         * and ends on a page so the stack never shares its page. */
         . = ALIGN(4K);
         boot_stack_guard_bottom = .;
         . += BOOT_STACK_GUARD_BYTES;
-        . = ALIGN(16);
+        . = ALIGN(4K);
         boot_stack_bottom = .;
         . += BOOT_STACK_BYTES;
         boot_stack_top = .;
@@ -136,10 +137,14 @@ SECTIONS
      * explicit `AT(ADDR(section) - KERNEL_VMA_BASE)`. */
     . += KERNEL_VMA_BASE;
 
-    .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_VMA_BASE)
+    /* Whole blocks of the image window's size, so it maps the code with
+     * large leaves rather than a page each every PCID caches; the pad that
+     * ends the last block is `int3`, never what the loader left there. */
+    .text ALIGN(kernel_image_block) : AT(ADDR(.text) - KERNEL_VMA_BASE)
     {
         *(.text .text.*)
-    }
+        . = ALIGN(kernel_image_block);
+    } =0xCCCCCCCC
 
     /* AP startup payload (Stage 3a (b)). Embedded into the kernel image
      * as opaque bytes; the BSP copies `[_ap_trampoline_start,
@@ -181,11 +186,16 @@ SECTIONS
     __kernel_phys_end = . - KERNEL_VMA_BASE;
 
     /* The physical spans the kernel root's image window maps, each page
-     * aligned: the boot data it reaches by alias (RW), the code (RX), the
-     * AP payload's source bytes with the read-only data (R), and the
-     * writable data with .bss (RW). The boot code and its GDT are left out:
-     * nothing runs them once the trampoline has jumped high. */
-    __image_boot_data_start = ADDR(.boot.bss);
+     * aligned: the boot stack's guard (R), the boot stack with the boot
+     * CPU's descriptor tables (RW), the code (RX), the AP payload's source
+     * bytes with the read-only data (R), and the writable data with .bss
+     * (RW). The boot code, its GDT and the trampoline's page tables are left
+     * out: nothing reaches them through the window once the trampoline has
+     * jumped high, and the page under the guard must never be writable
+     * there, since a frame pushed from the guard's lowest byte lands on it. */
+    __image_stack_guard_start = boot_stack_guard_bottom;
+    __image_stack_guard_end = boot_stack_bottom;
+    __image_boot_data_start = boot_stack_bottom;
     __image_boot_data_end = __boot_phys_end;
     __image_text_start = ADDR(.text) - KERNEL_VMA_BASE;
     __image_text_end = ADDR(.ap_trampoline) - KERNEL_VMA_BASE;
@@ -196,7 +206,8 @@ SECTIONS
 
     /* The trampoline's higher-half window, and the image window after it,
      * each map exactly the first GiB. */
-    ASSERT(__kernel_phys_end <= 1024M, "the kernel image must end within its first physical GiB")
+    ASSERT(__kernel_phys_end <= kernel_image_span, "the kernel image must end within its first physical GiB")
+    ASSERT(__image_text_start % kernel_image_block == 0 && __image_text_end % kernel_image_block == 0, "the kernel's text must fill whole blocks of the image window")
 
     /DISCARD/ :
     {

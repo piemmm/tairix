@@ -31,7 +31,8 @@ rhaglenni.
 
 Mae `target` ar ffurf `/Storage/name` yn gosod y gyfrol dan yr enw
 hwnnw. Mae unrhyw `target` arall, cyfeiriadur gwag sy'n eiddo i chi
-dan `/Users`, yn dangos y gyfrol yno hefyd.
+dan `/Users` neu ar gyfrol yn `/Storage`, yn dangos y gyfrol yno
+hefyd; ni all cyfeiriadur ar gyfrol FAT32 neu ADFS ei dangos.
 
 Mae'r gyfrol yn aros wedi'i gosod nes i chi ei datgysylltu gyda
 `unmount`, neu nes i'ch sesiwn fewngofnodi ddod i ben. Ni osodir
@@ -45,13 +46,20 @@ pam.
 - `-r, --read-only` — gosod y gyfrol i'w darllen yn unig (fel `-o ro`).
 - `-w, --rw, --read-write` — gosod y gyfrol i'w darllen a'i
   hysgrifennu, neu ddim o gwbl: ni osodir delwedd na chewch ysgrifennu
-  iddi, neu na ellir ysgrifennu i'w system ffeiliau. Yr olaf o `-r`,
-  `-w`, `-o ro` ac `-o rw` sy'n ennill.
-- `-t, --types <type>` — y system ffeiliau y mae'n rhaid i'r ddelwedd
-  ei dal, fel y mae'r rhestr osodiadau'n ei henwi (`iso9660`, `udf`,
-  `adfs`, `affs`, `fat32`), neu `auto` ar gyfer beth bynnag y mae'n ei
-  ddal. Ni osodir delwedd sy'n dal un arall, na math nad yw'r un
-  ddelwedd ddisg yn ei ddal.
+  iddi, neu na ellir ysgrifennu i'w system ffeiliau. Mae `-r`
+  diweddarach yn tynnu hyn yn ôl; nid yw `-o ro` nac `-o rw`
+  diweddarach yn gwneud hynny. Yr olaf o `-r`, `-w`, `-o ro` ac
+  `-o rw` sy'n penderfynu a yw'r gyfrol i'w darllen yn unig.
+- `-t, --types <list>` — y systemau ffeiliau, wedi'u gwahanu â chomâu,
+  y mae'n rhaid i'r ddelwedd ddal un ohonynt, fel y mae'r rhestr
+  osodiadau'n eu henwi (`iso9660`, `udf`, `adfs`, `affs`, `fat32`), neu
+  `auto` ar gyfer beth bynnag y mae'n ei ddal; mae rhestr sy'n dechrau
+  â `no` yn enwi'r rhai na chaiff y ddelwedd eu dal. Adnabyddir yr hyn y
+  mae'r ddelwedd yn ei ddal o'i chynnwys, felly nid yw'r drefn yn dewis
+  dim: fel UDF y gosodir disg sy'n dal UDF yn ogystal ag ISO 9660, oni
+  bai bod yr ISO 9660 arni yn cadw cofnodion Rock Ridge neu RISC OS. Ni
+  osodir delwedd nad yw'n dal yr un ohonynt, na rhestr nad yw'n enwi'r
+  un math y mae delwedd ddisg yn ei ddal.
 - `-o, --options <list>` — rhestr wedi'i gwahanu â choma o `ro`, `rw`
   (i'w darllen a'i hysgrifennu lle bo modd, y rhagosodiad), `noexec`,
   `loop` a `name=name`, yr enw y mae'r gyfrol i'w gymryd. Fel `noexec`

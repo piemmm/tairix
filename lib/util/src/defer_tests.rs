@@ -372,3 +372,30 @@ fn an_answer_landing_once_a_pass_has_counted_still_wakes_the_loop() {
     assert_eq!(queue.collect(), Some(10));
     assert_eq!(queue.collect(), Some(20));
 }
+
+/// A worker taking only its own share passes over the others, oldest first,
+/// and leaves them for the worker whose they are.
+#[test]
+fn a_worker_takes_the_oldest_request_it_admits_and_no_other() {
+    let mut queue = JobQueue::<u32, u32>::with_capacity(4).expect("room for four");
+    for job in [1, 2, 3, 4] {
+        queue.submit(job).expect("room");
+    }
+    let even = |job: &u32| job.is_multiple_of(2);
+    assert_eq!(queue.next_job_where(even), Some(2));
+    assert_eq!(queue.next_job_where(even), Some(4));
+    assert_eq!(queue.next_job_where(even), None, "no even request waits");
+    assert!(queue.has_work(), "the odd requests still wait");
+    assert_eq!(queue.next_job(), Some(1));
+    assert_eq!(queue.next_job(), Some(3));
+    for answer in [20, 40, 10, 30] {
+        queue.deliver(answer);
+    }
+    assert!(!queue.outstanding());
+    queue.stop();
+    assert_eq!(
+        queue.next_job_where(|_| true),
+        None,
+        "a stopped queue hands nothing out"
+    );
+}

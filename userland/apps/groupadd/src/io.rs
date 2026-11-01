@@ -46,8 +46,9 @@ pub trait GroupDb {
     /// # Errors
     ///
     /// Any [`Errno`] the database raises — e.g. [`Errno::PermissionDenied`]
-    /// when the caller lacks `CAP_USER_ADMIN`, or [`Errno::OutOfRange`] when
-    /// the requested gid is already taken.
+    /// when the caller lacks `CAP_USER_ADMIN`, [`Errno::AlreadyExists`] when
+    /// the requested gid is already taken, or [`Errno::OutOfRange`] when no
+    /// gid is left in the user band.
     fn create(&self, spec: &GroupSpec<'_>) -> Result<(), Errno>;
 }
 

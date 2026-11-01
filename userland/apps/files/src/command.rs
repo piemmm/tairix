@@ -60,8 +60,8 @@ use core::fmt;
 
 use tairix_abi::fs::FS_PATH_MAX;
 use tairix_abi::Errno;
-use tairix_browse::vfs::{absolute_path, components_from_absolute_path};
-use tairix_browse::BrowseError;
+use tairix_browse::vfs::{components_from_absolute_path, spell_shown_path};
+use tairix_browse::{BrowseError, Unnamable};
 use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
@@ -305,11 +305,10 @@ const FALLBACK: &str = "opening your own files instead";
 /// place and can be read by a test.
 #[must_use]
 pub fn unlistable_reason(location: &[String], why: &str, instead: &[String]) -> String {
-    let spell = |path: &[String]| absolute_path(path).unwrap_or_else(|_| String::from("/"));
     format!(
         "could not list {} ({why}); opening {} instead",
-        spell(location),
-        spell(instead)
+        spell_shown_path(location),
+        spell_shown_path(instead)
     )
 }
 
@@ -324,6 +323,8 @@ pub const fn listing_refusal(err: BrowseError) -> &'static str {
         }
         BrowseError::OutOfMemory => "there was not enough memory to list it",
         BrowseError::Unreachable => "it cannot be reached now",
+        BrowseError::Unnamable(Unnamable::Name) => "its name holds a character no path may carry",
+        BrowseError::Unnamable(Unnamable::Length) => "its path is too long",
         BrowseError::Source(errno) => device_refusal(errno, "it could not be read"),
     }
 }

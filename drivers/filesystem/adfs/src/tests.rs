@@ -16,6 +16,7 @@ use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::driver::filesystem::clock::TestClock;
 use tairix_abi::driver::filesystem::listing::listed;
 use tairix_abi::DriverKind;
+use tairix_fsprobe::adfs::{BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE, DISC_RECORD_SIZE};
 
 // What a test's creations ask for, which ADFS has nowhere to keep.
 const FILE_RECORD: NodeSecurity = NodeSecurity::new(0o644, 0, 0);
@@ -545,6 +546,61 @@ fn assert_rejected(variant: AdfsVariant, data: Vec<u8>, what: &str) {
             "{variant:?}: {what}: expected BadMagic, got {other:?}",
             other = other.map(|_| "Ok")
         ),
+    }
+}
+
+/// A boot block whose disc record's zone 0 cannot hold it is refused, never
+/// mounted: where its map lies would be computed by subtracting past zero.
+#[test]
+fn a_disc_record_whose_first_zone_cannot_hold_it_is_refused_not_mounted() {
+    for nzones in [2, 1] {
+        let mut record = tairix_fsprobe::adfs::DiscRecord::parse(&[0; DISC_RECORD_SIZE]);
+        record.log2secsize = 9;
+        record.idlen = 15;
+        record.log2bpmb = 7;
+        record.zone_spare = 4048;
+        record.nzones = nzones;
+        record.disc_size = 1 << 20;
+        record.root = 0x200;
+        let mut data = vec![0u8; 1 << 20];
+        let at = usize::try_from(BOOT_BLOCK_OFFSET).expect("fits");
+        let mut block = [0u8; BOOT_BLOCK_SIZE];
+        tairix_fsprobe::adfs::seal_boot_block(&mut block, &record);
+        data[at..at + BOOT_BLOCK_SIZE].copy_from_slice(&block);
+        assert_rejected(AdfsVariant::HardDisc, data, &std::format!("{nzones} zones"));
+    }
+}
+
+/// The new-map formats keep the zone geometry they had: where the map lies
+/// and each zone's first block and stream, as mkfs lays them and the map
+/// reads them through the one definition.
+#[test]
+fn each_new_map_format_keeps_its_zone_geometry() {
+    for (variant, bytes, map_offset, zones) in [
+        (AdfsVariant::E, 800 * 1024, 0, &[(0, 6400)][..]),
+        (
+            AdfsVariant::F,
+            1600 * 1024,
+            0xC6800,
+            &[(0, 6112), (6112, 6592), (12704, 6592), (19296, 6592)][..],
+        ),
+        (
+            AdfsVariant::HardDisc,
+            4 * 1024 * 1024,
+            0x001C_0000,
+            &[(0, 3584), (3584, 4064), (7648, 4064)][..],
+        ),
+    ] {
+        let record = mkfs::new_map_record(variant, bytes).expect("a record");
+        assert_eq!(record.map_offset(), map_offset, "{variant:?}");
+        assert_eq!(usize::from(record.nzones), zones.len(), "{variant:?}");
+        for (zone, &(start, stream)) in (0..).zip(zones) {
+            assert_eq!(
+                (record.zone_start_block(zone), record.zone_stream_bits(zone)),
+                (start, stream),
+                "{variant:?} zone {zone}"
+            );
+        }
     }
 }
 

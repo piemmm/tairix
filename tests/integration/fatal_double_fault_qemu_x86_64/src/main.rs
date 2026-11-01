@@ -1,13 +1,13 @@
-//! `plans/OPEN-DEFECTS.md` D146 on x86_64: an exception taken on a stack that
-//! cannot be used — what an overrun of the boot stack becomes — is reported
-//! rather than triple-faulting into a silent exit.
+//! `plans/OPEN-DEFECTS.md` D146 and D1590 on x86_64: an overrun of the boot
+//! stack faults on the guard's first byte rather than rewriting the page
+//! tables beneath it, and is reported rather than triple-faulting.
 //!
-//! The kernel points `rsp` at memory nothing maps and raises a breakpoint.
-//! Delivering it faults, delivering that page fault faults again, and the CPU
-//! escalates to `#DF`. The port's boot tables give `#DF` a stack of its own,
-//! so the double fault reaches the fatal path, and with no handler installed
-//! the port writes its own report. The harness passes the run only if it
-//! stopped on that report's record naming vector 8.
+//! The kernel moves `rsp` to the boot stack's lowest byte and pushes. The
+//! kernel root maps the guard below it read-only, so the push faults;
+//! delivering that fault needs the same stack, so the CPU escalates to `#DF`,
+//! which the boot tables take on a stack of their own to the fatal path. The
+//! harness passes the run only if it stopped on that report's record naming
+//! vector 8 and the address the guard stopped.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -19,11 +19,12 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_arch_x86_64::panic::handle_panic_via_serial;
-    use tairix_arch_x86_64::serial;
+    use tairix_arch_x86_64::{qemu_exit, serial};
 
-    /// A stack top every push below which lands on memory nothing maps: the
-    /// user half, which the kernel root leaves unmapped.
-    const STACK_TOP: u64 = 0x1_0000_1000;
+    extern "C" {
+        /// The boot stack's lowest byte, through the kernel window.
+        static boot_stack_bottom_high: u8;
+    }
 
     #[panic_handler]
     fn fatal_double_fault_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
@@ -34,17 +35,33 @@ mod kernel {
     #[no_mangle]
     pub extern "C" fn kernel_main(_boot_info: u64) -> ! {
         let mut com1 = serial::Serial::init(serial::COM1_BASE);
+        // Taking the extern's address is a link-time constant; it is never
+        // dereferenced here.
+        let bottom = core::ptr::addr_of!(boot_stack_bottom_high) as u64;
         let _ = writeln!(
             com1,
-            "[fatal_double_fault] x86_64: trapping with rsp at {STACK_TOP:#x}"
+            "[fatal_double_fault] x86_64: pushing below the boot stack at {bottom:#x}"
         );
-        // SAFETY: the stack pointer is moved onto memory nothing maps and a
-        // breakpoint raised; its delivery escalates to `#DF`, which the boot
-        // tables take on their own stack to the fatal path, which parks the
-        // CPU, so nothing runs after it.
+        // SAFETY: moves `rsp` to the boot stack's lowest byte, pushes one word
+        // into the guard below it and restores `rsp`. Under the kernel root
+        // the guard is read-only, so the push faults and the CPU takes `#DF`
+        // to the fatal path, which parks; only a guard that took the write
+        // returns here, and no byte below `bottom` is live.
         unsafe {
-            core::arch::asm!("mov rsp, {sp}", "int3", sp = in(reg) STACK_TOP, options(noreturn));
+            core::arch::asm!(
+                "mov {saved}, rsp",
+                "mov rsp, {bottom}",
+                "push {saved}",
+                "pop rsp",
+                bottom = in(reg) bottom,
+                saved = out(reg) _,
+            );
         }
+        let _ = writeln!(
+            com1,
+            "[fatal_double_fault] x86_64 FAILED: the boot stack's guard took a write"
+        );
+        qemu_exit::exit_failure()
     }
 }
 

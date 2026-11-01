@@ -11,17 +11,14 @@
 //!
 //! # What is repeated, and what is not
 //!
-//! Only stages that actually *execute test cases* are flake-hunted: the host
-//! `cargo test` matrix, the scene tier `ci` leaves out, the release-profile
-//! crypto constant-time tests, the QEMU integration tests, the fuzz harnesses,
-//! and the proptest models. The
-//! deterministic gates `ci` also runs — `fmt`, `clippy`, `deps-check`,
-//! `cfg-check`, `board-check`, `help-lint`, `docs-check`, `cargo deny`, `supply-chain`,
-//! `model-check`
-//! (exhaustive by construction), `spec-review`, `abi-check`, `c-header`, and
-//! the image gate — are pass/fail checks whose result cannot change between
-//! runs, so repeating them 2·[`REPS`] times would burn a long-runner's time
-//! for no signal. They run once, exactly as in `ci`.
+//! Only the stages that *execute test cases* are flake-hunted
+//! ([`super::CiStage::flake_hunted`]): the host `cargo test` matrix, with the
+//! scene tier `ci` leaves out, the release-profile crypto constant-time
+//! tests, the QEMU integration tests, the fuzz harnesses, and the proptest
+//! models. Every other `ci` stage is a pass/fail check whose result cannot
+//! change between runs, so repeating it 2·[`REPS`] times would burn a
+//! long-runner's time for no signal: it runs once, in `ci`'s order, ahead of
+//! the hunt.
 //!
 //! # Sequential then concurrent, per test
 //!
@@ -52,7 +49,7 @@
 //!   QEMU replicas still all get submitted; they simply overlap as far as the
 //!   headroom budget allows rather than all at once.
 
-use crate::commands::parallel::{self, Job};
+use crate::commands::parallel::Job;
 use crate::commands::{fuzz, proptest, qemu_tests, seed};
 use crate::Context;
 
@@ -94,27 +91,32 @@ impl<'a> FlakeUnit<'a> {
 }
 
 /// Run every unit `reps` times sequentially, then `reps` times concurrently,
-/// before moving on to the next unit. Fails closed: the first sequential pass
-/// or concurrent batch that fails aborts the hunt and returns the failure
-/// (there is no retry — a failure is a flake found, which is the point).
-pub(crate) fn flake_hunt(units: Vec<FlakeUnit<'_>>, reps: u32) -> Result<(), String> {
+/// before moving on to the next unit, each batch through `run`: the parallel
+/// runner, in a real hunt. Fails closed: the first sequential pass or
+/// concurrent batch that fails aborts the hunt and returns the failure (there
+/// is no retry — a failure is a flake found, which is the point).
+pub(crate) fn flake_hunt(
+    units: Vec<FlakeUnit<'_>>,
+    reps: u32,
+    run: impl Fn(Vec<Job>, usize) -> Result<(), String>,
+) -> Result<(), String> {
     let reps = reps.max(1);
     for unit in units {
-        eprintln!("xtask: [ci-long] {} — {reps}x sequential", unit.label);
+        noteln!("xtask: [ci-long] {} — {reps}x sequential", unit.label);
         for pass in 1..=reps {
             let job = (unit.factory)((pass - 1) as usize);
             // Budget one: the single job streams its output live and runs
             // strictly alone, giving the isolated-run timing profile.
-            parallel::run(vec![job], 1).map_err(|e| {
+            run(vec![job], 1).map_err(|e| {
                 format!(
                     "ci-long: {} failed on sequential pass {pass}/{reps}: {e}",
                     unit.label
                 )
             })?;
         }
-        eprintln!("xtask: [ci-long] {} — {reps}x concurrent", unit.label);
+        noteln!("xtask: [ci-long] {} — {reps}x concurrent", unit.label);
         let jobs: Vec<Job> = (0..reps).map(|i| (unit.factory)(i as usize)).collect();
-        parallel::run(jobs, unit.concurrency_budget).map_err(|e| {
+        run(jobs, unit.concurrency_budget).map_err(|e| {
             format!(
                 "ci-long: {} failed running {reps}x concurrently: {e}",
                 unit.label
@@ -146,8 +148,7 @@ pub(crate) fn all_units(ctx: &Context, reps: u32) -> Result<Vec<FlakeUnit<'_>>, 
 fn host_units(ctx: &Context, reps: u32) -> Result<Vec<FlakeUnit<'_>>, String> {
     let budget = reps as usize;
     let mut units = vec![FlakeUnit::new("host cargo test", budget, move |replica| {
-        let mut cmd = ctx.cargo();
-        cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
+        let mut cmd = super::host_test_command(ctx);
         // Each replica starts in an order of its own, so the hunt covers
         // test *ordering* as well as timing: a suite that only passes in
         // the harness's alphabetical order is a flake like any other. The
@@ -173,16 +174,14 @@ fn host_units(ctx: &Context, reps: u32) -> Result<Vec<FlakeUnit<'_>>, String> {
             Job::new(format!("{label} (order seed {order})"), cmd).with_budget(lane.budget())
         }));
     }
-    // The constant-time comparison guarantee can be broken by the
-    // optimiser, so this runs the secret-handling tests at `-C
-    // opt-level=3`, mirroring `ci`'s crypto-constant-time gate.
     units.push(FlakeUnit::new(
         "crypto constant-time (release)",
         budget,
         move |_| {
-            let mut cmd = ctx.cargo();
-            cmd.args(["test", "--release", "--locked", "-p", "tairix-crypto"]);
-            Job::new("crypto constant-time (release)", cmd)
+            Job::new(
+                "crypto constant-time (release)",
+                super::crypto_constant_time_command(ctx),
+            )
         },
     ));
     Ok(units)
@@ -199,6 +198,7 @@ fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
         .into_iter()
         .map(|enrol| {
             let target_dir = ctx.target_dir();
+            let children = std::sync::Arc::clone(&ctx.children);
             let label = format!("qemu {}", enrol.package);
             let job_label = label.clone();
             let weight = qemu_tests::qemu_job_weight(enrol.cpus, budget);
@@ -209,6 +209,7 @@ fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
             // sibling's disk underneath it (`qemu_tests::sidecar_path`).
             FlakeUnit::new(label, budget, move |replica| {
                 let target_dir = target_dir.clone();
+                let children = std::sync::Arc::clone(&children);
                 let job_label = job_label.clone();
                 // Resolve this enrolment's memoised (`'static`) per-arch
                 // `/System`-store bundle set off the job closure so the
@@ -217,7 +218,7 @@ fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
                 // a memoised composition failure fails the job closed.
                 let stores = enrol.stores(ctx);
                 Job::closure(job_label, weight, move || {
-                    enrol.run(&target_dir, replica, &stores.clone()?)
+                    enrol.run(&children, &target_dir, replica, &stores.clone()?)
                 })
             })
         })
@@ -260,21 +261,27 @@ fn proptest_units(ctx: &Context, reps: u32) -> Vec<FlakeUnit<'_>> {
 ///
 /// # Errors
 ///
-/// As [`all_units`].
+/// As [`all_units`], or where stdout cannot take the plan.
 pub(crate) fn print_plan(ctx: &Context) -> Result<(), String> {
+    let once: Vec<&str> = super::ci_long_plan()
+        .filter_map(|step| match step {
+            super::LongStep::Once(ci_stage) => Some(ci_stage.label()),
+            super::LongStep::FlakeHunt => None,
+        })
+        .collect();
+    outln!("ci-long plan: once, in ci's order: {}", once.join(", "))?;
     let units = all_units(ctx, REPS)?;
-    eprintln!(
-        "ci-long plan: {} test(s), each run {REPS}x sequential then {REPS}x concurrent \
-         (deterministic gates run once):",
+    outln!(
+        "then {} test(s), each run {REPS}x sequential then {REPS}x concurrent:",
         units.len()
-    );
+    )?;
     for unit in &units {
         let alone = if unit.concurrency_budget == 1 {
             " (its concurrent replicas one at a time)"
         } else {
             ""
         };
-        eprintln!("  - {}{alone}", unit.label);
+        outln!("  - {}{alone}", unit.label)?;
     }
     Ok(())
 }
@@ -282,7 +289,7 @@ pub(crate) fn print_plan(ctx: &Context) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{all_units, flake_hunt, FlakeUnit, REPS};
-    use crate::commands::parallel::Job;
+    use crate::commands::parallel::{run_unlogged, Job};
     use crate::Context;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -317,7 +324,7 @@ mod tests {
         let built = AtomicUsize::new(0);
         let ran = Arc::new(AtomicUsize::new(0));
         let unit = counting_unit(&built, Arc::clone(&ran), None);
-        flake_hunt(vec![unit], 3).expect("all passes succeed");
+        flake_hunt(vec![unit], 3, run_unlogged).expect("all passes succeed");
         // 3 sequential + 3 concurrent = 6 jobs built and run.
         assert_eq!(built.load(Ordering::SeqCst), 6);
         assert_eq!(ran.load(Ordering::SeqCst), 6);
@@ -329,7 +336,8 @@ mod tests {
         let ran = Arc::new(AtomicUsize::new(0));
         // Fail the second sequential run (0-based index 1).
         let unit = counting_unit(&built, Arc::clone(&ran), Some(1));
-        let err = flake_hunt(vec![unit], 4).expect_err("a failing pass must fail the hunt");
+        let err =
+            flake_hunt(vec![unit], 4, run_unlogged).expect_err("a failing pass must fail the hunt");
         assert!(
             err.contains("sequential pass 2/4"),
             "unexpected error: {err}"
@@ -344,7 +352,7 @@ mod tests {
         let built = AtomicUsize::new(0);
         let ran = Arc::new(AtomicUsize::new(0));
         let unit = counting_unit(&built, Arc::clone(&ran), None);
-        flake_hunt(vec![unit], 0).expect("zero clamps to one");
+        flake_hunt(vec![unit], 0, run_unlogged).expect("zero clamps to one");
         // 1 sequential + 1 concurrent.
         assert_eq!(ran.load(Ordering::SeqCst), 2);
     }
@@ -354,7 +362,7 @@ mod tests {
     /// machine.
     #[test]
     fn all_units_covers_every_test_source() {
-        let ctx = Context::discover().expect("workspace context");
+        let ctx = Context::discover(None).expect("workspace context");
         let units = all_units(&ctx, 2).expect("the units");
         let labels: Vec<&str> = units.iter().map(|u| u.label.as_str()).collect();
         assert!(labels.contains(&"host cargo test"));

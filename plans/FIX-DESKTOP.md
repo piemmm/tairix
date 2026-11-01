@@ -101,7 +101,7 @@ event loop** inherits the freeze:
 | File manager folder cues | `userland/apps/files/src/run.rs` (`resolve_occupancy` **inside the render**) | A directory open, read and close per newly-visible folder, while painting. Fixed in DESK-11. |
 | File manager "Open With…" | `userland/apps/files/src/run.rs` (`RtBundleSource`) | Three whole program stores walked, one `AppInfo` per bundle, on the click that opened the chooser. Fixed in DESK-11. |
 | File manager icon artwork | `userland/apps/files/src/icons.rs` | One bounded read plus a sandbox round trip **on the event loop**, once per turn. Already outside the paint and interleaved with input service, but still I/O the loop performs. Fixed in DESK-12. |
-| File manager writes | `userland/apps/files/src/run.rs` (New ▸, the Properties commits, the Trash folder, the `stat`s that plan a paste or a move to Trash, and every operation step) | One bounded filesystem call each **on the event loop**, so a slow or failing volume stalls every window for it. Fixed: every one-shot write rides the reader by ticket, and every operation step runs on the operations worker (`plans/NEW-FILEMANAGER.md` FM20). |
+| File manager writes | `userland/apps/files/src/run.rs` (New ▸, the Properties commits, the Trash folder, the `stat`s that plan a paste or a move to Trash, and every operation step) | One bounded filesystem call each **on the event loop**, so a slow or failing volume stalls every window for it. Fixed: every one-shot write rides its volume's reader by ticket, and every operation step runs on an operations worker (`plans/NEW-FILEMANAGER.md` FM20, FM25). |
 | Statistics reported to `sysinfod` | `lib/rt/src/cachereport.rs`, `userland/gui/session/src/frames.rs` | Up to **eight blocking cross-process round trips a second** on the compositor's own frame path, and on the file manager's and `fontd`'s loops, purely to report counters. `ipc_call` parks the caller off the run queue, so a gesture stuttered four times a second and every app blocked in a window call waited behind it. Fixed in DESK-15. |
 | Terminal settings sheet — the sheet's own pixels | `userland/apps/terminal/src/run.rs` (`present_overlay`) | The damage its controls reported was **computed and discarded**: every pointer sample allocated a sheet-sized surface, re-rendered every tab, row, label and swatch, and presented the whole popup. Fixed in DESK-16. |
 | Desktop listing + wallpaper workers | `lib/browse/src/desk.rs`, `userland/gui/session/src/wallpaper.rs` | A **runaway**: the job hand-out cloned the request instead of taking it, so an answered job was immediately workable again and the worker re-ran it for ever — 1030 directory reads of one folder in 13 s, ~150/s, each waking the compositor. A core and a disk spent continuously, contending with every frame. Fixed in DESK-17. |
@@ -715,7 +715,7 @@ Each stage is independently reviewable and must leave the whole-project
   syscall; the `Run` binary adds the futex mutex, the condition variable the
   worker parks on, and the shared wake. It lives in `lib/icon` beside the
   `ArtworkResolver` contract it implements — and *is* that resolver — because
-  the file manager drives the same desk from its own reader thread (DESK-12,
+  the file manager drives the same desk from its own readers (DESK-12,
   `plans/NEW-FILEMANAGER.md`) and `userland/apps/*` may not depend on
   `userland/gui/*`. One policy, one drive mechanism: a worker thread behind a
   futex mutex in both processes.
@@ -1140,12 +1140,11 @@ Each stage is independently reviewable and must leave the whole-project
   Pi drag-resize witness is `plans/TEMPORARY.md` TMP-6.
 
 ### DESK-11 — The file manager's reads off its loop
-- Every unbounded read the file manager makes now runs on one reader
-  thread, and the window keeps drawing throughout. The three kinds share a
-  worker rather than taking one each: the app browses one place at a time, so
-  they are never concurrent workloads, and one worker gives the order they are
-  served in a single stated answer — the listing first (the user navigated and
-  is waiting), then the folder cues (which decorate a listing already shown),
+- Every unbounded read the file manager makes now runs off its loop, on the
+  reader serving the volume it touches (`plans/NEW-FILEMANAGER.md` FM25), and
+  the window keeps drawing throughout. Within a volume the kinds are served in
+  a single stated order — the listing first (the user navigated and is
+  waiting), then the folder cues (which decorate a listing already shown),
   then the bundle scan (which no frame depends on). Nothing starves: each
   request set is finite and refilled only by the user asking again.
   - **Listings** go through `ListingDesk<FilesClient>` and a
@@ -1170,7 +1169,8 @@ Each stage is independently reviewable and must leave the whole-project
 ### DESK-12 — The file manager's icon decode off its loop
 - The last read the file manager's loop performed every turn — one
   bounded artwork read plus one parser-sandbox round trip — now runs on the
-  DESK-11 reader thread. Its writes and operations followed
+  DESK-11 readers, on the lane of the volume each decode reads from. Its
+  writes and operations followed
   (`plans/NEW-FILEMANAGER.md` FM20).
 - **Where the split falls, and why there.** `IconPipeline` is the paint side
   alone: the reclaim-governed `ArtworkCache` and the resolver its misses go to.
@@ -1180,14 +1180,16 @@ Each stage is independently reviewable and must leave the whole-project
   lend nothing to a paint. Keeping the whole pipeline under one lock would have
   been worse still: the paint's guard would span the render, and the folder-cue
   probe the render performs takes that same lock.
-- **The reader's turn.** `Work` gained `artwork: ArtworkDesk` and `Read` gained
-  `Artwork(ArtworkJob)`, served after listings and before the cues. The worker
-  takes the job under the lock, drops it, runs the shared
-  `tairix_icon::render_artwork` through seams it built once at the top of
-  `serve` — including its **own** `ParserSandbox`, so no sandbox handle crosses
-  a thread — then retakes the lock to deliver. It nudges the loop when its
-  artwork queue drains rather than after each icon, so a folder of fifty
-  bundles costs one repaint and the tiles appear together.
+- **The reader's turn.** `Work` gained `artwork: ArtworkDesk<Lane>` and `Read`
+  gained `Artwork(ArtworkJob)`, served after listings and before the cues. The
+  reader serving the artwork's volume takes the job under the lock, drops it,
+  runs the shared `tairix_icon::render_artwork` through a decoder (a
+  `ParserSandbox` held to `WorkerMemory::Artwork`) taken from those no reader is
+  using and put back after, no more at once than `lanes::Decodes` admits, then
+  retakes the lock to deliver. A paint wakes a reader only for a decode it
+  recorded on a volume no reader serves. It nudges the loop when its volume's share of the artwork queue
+  drains rather than after each icon, so a folder of fifty bundles costs one
+  repaint and the tiles appear together.
 - **The paint side.** `DeferredArtwork` is the boxed `ArtworkResolver` over the
   shared desk; with no reader thread `open_icons` boxes `InlineArtwork`
   instead, so the read and the round trip happen in the paint exactly as they
@@ -1382,9 +1384,10 @@ Each stage is independently reviewable and must leave the whole-project
   profile it renders from the one the store holds, and the desktop session's
   persist-then-adopt happens on a worker.
 - **DESK-11.** Every unbounded read the file manager makes — listings,
-  folder cues, and the "Open With…" bundle scan — runs on one reader thread.
+  folder cues, and the "Open With…" bundle scan — runs on its readers, one to
+  a volume (`plans/NEW-FILEMANAGER.md` FM25).
 - **DESK-12.** The file manager's icon decode runs on the DESK-11
-  reader thread; its writes and operations run off its loop too
+  readers; its writes and operations run off its loop too
   (`plans/NEW-FILEMANAGER.md` FM20).
 - **DESK-15.** No interactive or serve loop waits on a statistics
   report; `tairix_rt::submit::Submission` is the one shape both publishers hand

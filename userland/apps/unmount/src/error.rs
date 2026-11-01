@@ -3,6 +3,7 @@
 use alloc::string::String;
 use core::fmt;
 
+pub use tairix_abi::sysinfo::Retention;
 use tairix_abi::Errno;
 use tairix_help::MISUSE;
 use tairix_procinfo::{CallError, ListError};
@@ -41,17 +42,18 @@ pub enum UnmountError {
     /// The named mount exists but carries no detachable volume identity
     /// (a boot volume or an in-RAM view binding — permanent by design).
     NotDetachable(String),
-    /// The kernel refused or failed the detach. `unavailable` is `true`
-    /// when the mount listing already showed the volume as
-    /// surprise-removed, so the diagnostic can spell out the `--force`
-    /// consequence.
+    /// The kernel refused or failed the detach. `retention` says what the
+    /// volume's writes had to do with a refused plain detach, so the
+    /// diagnostic can spell out the `--force` consequence: only for the one
+    /// refusal its listed state earns, and never for a force.
     Detach {
         /// The volume, as named.
         name: String,
         /// The kernel's exact refusal.
         errno: Errno,
-        /// Whether the volume was listed as unavailable (dirty or lost).
-        unavailable: bool,
+        /// What the volume's uncommitted writes need of a force, where they
+        /// are why it was refused.
+        retention: Option<Retention>,
     },
     /// The `MOUNT_LIST` or `VIEW_LIST` query failed: the transport errored,
     /// the service refused, or the reply did not decode against
@@ -145,18 +147,28 @@ impl fmt::Display for UnmountError {
             Self::Detach {
                 name,
                 errno,
-                unavailable: true,
+                retention: Some(Retention::Held),
             } => write!(
                 f,
                 "{name}: volume holds retained uncommitted data \
                  (use --force to discard it): {errno}.",
                 name = quote_subject(name)
             ),
+            Self::Detach {
+                name,
+                errno,
+                retention: Some(Retention::Lost),
+            } => write!(
+                f,
+                "{name}: the volume's uncommitted data was already lost \
+                 (use --force to detach it): {errno}.",
+                name = quote_subject(name)
+            ),
             Self::Path { name, errno }
             | Self::Detach {
                 name,
                 errno,
-                unavailable: false,
+                retention: None,
             } => write!(f, "{name}: {errno}.", name = quote_subject(name)),
             Self::Service(errno) => write!(f, "system information service error: {errno}"),
             Self::Output(errno) => write!(f, "cannot write output: {errno}"),

@@ -50,7 +50,7 @@ fn report_panic(message: &dyn fmt::Display, location: Option<&Location<'_>>) -> 
         location,
         || {
             let bt = Backtracer::new();
-            bt.boot_stack_verdict(Some(bt.capture().sp))
+            bt.boot_stack_verdict(Some(bt.capture().sp), None)
         },
     );
     halt_current_cpu()
@@ -65,7 +65,7 @@ pub fn report_unclaimed_fault(fault: &KernelFault) -> ! {
         processor(),
         fault,
         format_args!("{}", crate::fault::Decoded(fault)),
-        || Backtracer::new().boot_stack_verdict(fault.sp),
+        || Backtracer::new().boot_stack_verdict(fault.sp, fault.address),
     );
     halt_current_cpu()
 }
@@ -75,7 +75,7 @@ pub fn report_stack_corruption(corruption: &StackCorruption) -> ! {
     let entry = enter(&Cause::Stack(*corruption));
     REPORTER.stack_corruption(&mut ConsoleWriter, entry, processor(), corruption, || {
         let bt = Backtracer::new();
-        bt.boot_stack_verdict(Some(bt.capture().sp))
+        bt.boot_stack_verdict(Some(bt.capture().sp), None)
     });
     halt_current_cpu()
 }

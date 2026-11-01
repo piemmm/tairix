@@ -6414,7 +6414,7 @@ mod program {
         fn serve(&self) {
             let mut reader = ArtworkFileReader(VfsFileReader);
             let mut rasteriser = ArtworkSandbox(OwnedSandbox(ParserSandbox::new(
-                RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
+                RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Artwork),
                 tairix_rt::LogSink,
             )));
             loop {
@@ -6447,36 +6447,25 @@ mod program {
             }
         }
 
-        /// Answer a paint's miss on `key` at `side`, waking a decoder if there
-        /// is anything for one to do.
-        ///
-        /// A notify with no decode outstanding wakes nobody and a worker already
-        /// running is not waiting to be told, so the signal is unconditional
-        /// rather than a second reading of the desk's own state.
+        /// Answer a paint's miss on `key` at `side`, waking a decoder for a
+        /// decode this call recorded: one recorded earlier the decoder already
+        /// has, and waking it on every paint would cost a wake per icon per
+        /// frame.
         fn resolve(&self, key: &ArtworkKey, side: u32) -> Resolved {
-            let (answer, wanted) = {
-                let mut desk = self.desk.lock();
-                let answer = desk.collect(key, side);
-                (answer, desk.has_work())
-            };
-            if wanted {
+            let (answer, recorded) = self.desk.lock().collect(key, side);
+            if recorded {
                 self.work.notify_one();
             }
             answer
         }
 
-        /// Record `key` at `side` as wanted and wake a decoder, without waiting
-        /// for or collecting an answer.
+        /// Record `key` at `side` as wanted and wake a decoder for it, without
+        /// waiting for or collecting an answer.
         ///
         /// This is what a warm-up drives: the surface that will draw the icon is
         /// not painting yet, so there is nothing to answer — only work to start.
         fn want(&self, key: &ArtworkKey, side: u32) {
-            let wanted = {
-                let mut desk = self.desk.lock();
-                desk.want(key, side);
-                desk.has_work()
-            };
-            if wanted {
+            if self.desk.lock().want(key, side) {
                 self.work.notify_one();
             }
         }

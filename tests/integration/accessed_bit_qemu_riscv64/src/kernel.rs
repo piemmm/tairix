@@ -14,11 +14,7 @@ use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use tairix_log::{log, Event, EventId, Level};
 
-/// Gigabytes of identity map the address space provides: `[0, 4 GiB)`
-/// covers the `virt` board's low MMIO and the RAM base where this kernel
-/// and its page-table pool run. The probe page ([`TEST_VADDR`], 64 GiB)
-/// sits far above, on freshly walked Sv39 tables.
-const IDENTITY_GIGABYTES: usize = 4;
+use tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES;
 
 /// Virtual address the test maps its single 4 KiB probe page at. Chosen at
 /// 64 GiB — far above the identity window and within the Sv39 39-bit VA
@@ -140,7 +136,7 @@ pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
     // Build the Sv39 identity address space and activate it so the probe
     // mapping lands in the live translation regime.
     let Some(mut space) =
-        paging::AddressSpace::new_identity_gigapages(&PAGE_TABLE_POOL, IDENTITY_GIGABYTES)
+        paging::AddressSpace::new_identity_gigapages(&PAGE_TABLE_POOL, KERNEL_IDENTITY_GIGAPAGES)
     else {
         fail("accessed_bit test: page-table pool exhausted", FAIL_POOL);
     };

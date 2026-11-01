@@ -5,10 +5,8 @@ name: ci-long
 # matrix, the release crypto constant-time tests, the QEMU integration tests,
 # the fuzz harnesses, and the proptest models — is run 20 times sequentially
 # and then 20 times concurrently, per test, before moving on to the next test.
-# The deterministic gates (fmt, clippy, deps-check, cfg-check, docs-check,
-# cargo deny, supply-chain, model-check, spec-review, abi-check, c-header, and
-# the image gate) are pass/fail checks whose result cannot change between runs,
-# so they run once — repeating them would burn the runner's time for no signal.
+# Every other `ci` stage is a pass/fail check whose result cannot change between
+# runs, so it runs once, in ci's order, ahead of the hunt.
 # All pipeline logic lives in `cargo xtask`, never in the workflow: a green run
 # here and a green `cargo xtask ci-long` on a builder are
 # equivalent by construction; this workflow adds only scheduling.
@@ -30,7 +28,7 @@ name: ci-long
 # ONLY on `workflow_dispatch` — never on `pull_request`/`pull_request_target`,
 # so a fork's PR can never execute on the runner — and every job is
 # additionally gated (see the job `if:` below) to the owner (`piemmm`) in the
-# canonical `piemmm/rustos` repo, so a fork or any other actor manually
+# canonical `piemmm/tairix` repo, so a fork or any other actor manually
 # dispatching is refused before any step runs.
 on:
   workflow_dispatch:

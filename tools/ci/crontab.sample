@@ -18,14 +18,18 @@
 
 # On Linux change this to e.g. /home/<user>/RustroverProjects/tairix.
 REPO=/Users/ianhawkins/RustroverProjects/tairix
+# The scheduled soak's own checkout (`git clone` it once), so the gate, which
+# resets REPO every 30 minutes, never changes the tree under a running soak.
+SOAK_REPO=/Users/ianhawkins/RustroverProjects/tairix-soak
 SHELL=/bin/bash
 
 # Full per-PR gate (AGENTS.md §7) every 30 minutes.
 */30 * * * *  TAIRIX_CI_SYNC=1 $REPO/tools/ci/ci-run.sh ci
 
-# Nightly 24 h soaks — every §19.6 fuzz harness, §19.7 proptest model, and the
-# §7 repeated-test matrix in parallel. One invocation; soak.sh fans them out.
-0 2 * * *     TAIRIX_CI_SYNC=1 $REPO/tools/ci/soak.sh all
+# The scheduled soak — every fuzz harness, proptest model, filesystem and
+# generator soak, and the repeated-test matrix in parallel, each to the close
+# of the scheduled window. One invocation; soak.sh fans them out.
+0 2 * * *     TAIRIX_CI_SYNC=1 $SOAK_REPO/tools/ci/soak.sh all --scheduled
 
 # Nightly headless Tier-1 builds (AGENTS.md §17.5) — the headless image must
 # keep building for every Tier-1 target.

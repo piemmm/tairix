@@ -1,18 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  launchd LaunchAgent — TAIRiX nightly 24 h soaks (parallel).
+  launchd LaunchAgent — TAIRiX scheduled soak (parallel).
 
-  Runs tools/ci/soak.sh all, which fans every §19.6 fuzz harness, §19.7
-  proptest model, and the §7 repeated-test matrix out into parallel
-  processes. Install with:
+  Runs tools/ci/soak.sh all --scheduled, which fans every fuzz harness,
+  proptest model, filesystem and generator soak, and the repeated-test matrix
+  out into parallel processes, each soaking to the close of the scheduled
+  window (the nightly workflow's seven hours).
+
+  It runs from a checkout of its own, so the gate's agent, which resets its
+  checkout every 30 minutes, never changes the tree under a running soak.
+  Make it once with `git clone <repository> ~/RustroverProjects/tairix-soak`.
+  Install with:
 
     cp tools/ci/launchd/com.tairix.soak.plist.sample \
        ~/Library/LaunchAgents/com.tairix.soak.plist
-    # edit the absolute paths below to match your checkout / user, then:
+    # edit the absolute paths below to match the soak's checkout / user, then:
     launchctl load ~/Library/LaunchAgents/com.tairix.soak.plist
 
   StartCalendarInterval fires once a day at 02:00 local time. RunAtLoad is
-  deliberately absent so loading the agent does not kick off a 24 h job.
+  deliberately absent so loading the agent does not kick off a seven-hour job.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -22,8 +28,9 @@
     <string>com.tairix.soak</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/ianhawkins/RustroverProjects/tairix/tools/ci/soak.sh</string>
+        <string>/Users/ianhawkins/RustroverProjects/tairix-soak/tools/ci/soak.sh</string>
         <string>all</string>
+        <string>--scheduled</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-gpu"
-description = "TAIRiX device-neutral GPU seam: the memory and submission model every backend implements — contexts as the unit of isolation, typed allocations charged to a context's limit and a heap, buffers made for stated uses, command buffers checked whole at submission and refused rather than clamped, in-order queues, timelines reached only once every earlier signal has landed, fences, and a deadline on every submission whose overrun loses only its own context — and the software device that implements it on the CPU on every target (plans/GPU.md)."
+description = "TAIRiX device-neutral GPU seam: the memory and submission model every backend implements — contexts as the unit of isolation, typed allocations charged to a context's limit and a heap, buffers made for stated uses, images in a layout of the device's own with views, texel buffers and samplers, bind sets made whole against their layouts and the pipeline layouts an admitted module is agreed against, compute pipelines lowered once and their dispatches direct and indirect, the device-stated capabilities, features and format uses past the portable core, command buffers checked whole at submission and refused rather than clamped, in-order queues, timelines reached only once every earlier signal has landed, fences, and a deadline on every submission whose overrun loses only its own context — and the software device that implements it on the CPU on every target, on a worker of its own, its compute pipelines run by a tile-wide SPIR-V interpreter in which every value is defined (plans/GPU.md)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,19 +14,35 @@ workspace = true
 [dependencies]
 # `Duration64` deadlines and the `MonotonicClock` seam they are read from.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
-# The generational tables a context's objects and a device's jobs are filed
-# in, so a handle that outlived its object is refused.
+# The sRGB transfer an sRGB texel is read and written through.
+tairix-colour = { path = "../colour", version = "=0.0.0" }
+# The generational tables a context's objects and jobs are filed in, so a
+# handle that outlived its object is refused, and the tree lowering keeps its
+# freed register slots of uncommon sizes in.
 tairix-collections = { path = "../collections", version = "=0.0.0" }
 # The bounded lists a device description and a submission's points are held
 # in.
 tairix-inline = { path = "../inline", version = "=0.0.0" }
-# The futex-backed lock the device's state is kept under and the condition
-# variable a wait parks on.
+# The runner a command's work is shared across cores through, the process's
+# own: the device makes no pool of its own.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
+# The futex-backed lock the device's state is kept under, the condition
+# variable a wait parks on, and the thread the device's worker runs on.
 tairix-rt = { path = "../rt", version = "=0.0.0" }
+# The shader modules the seam takes, admitted by their validator, and the
+# vocabulary their bindings are described in.
+tairix-spirv = { path = "../spirv", version = "=0.0.0" }
 # The bit-flag sets, and the fallible fills memory and recorded data are
 # made with.
 tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]
+# The host's syscall seam, through which a test sees each wake a lock or a
+# notification asks of the kernel on its thread.
+tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0", features = ["host-seam"] }
 # The shared per-run seed and budget the fuzz harness draws through.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# The real-thread runner the tests share a command's work across.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false, features = ["test-util"] }
+# The assembler the tests write their modules in.
+tairix-spirv = { path = "../spirv", version = "=0.0.0", features = ["test-support"] }

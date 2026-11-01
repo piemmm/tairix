@@ -319,9 +319,12 @@ a permission check: search permission on each traversed directory is proven
 *before* the child is looked up, exactly as for any other walk.
 
 The answer is always a path this VFS would accept back — at most
-`MAX_PATH_COMPONENTS` components and `FS_PATH_MAX` bytes, else
-`VfsError::InvalidPath` — so a caller can feed it straight into another
-call without being refused for spelling.
+`MAX_PATH_COMPONENTS` components and `FS_PATH_MAX` bytes, each name one the
+path grammar spells, else `VfsError::InvalidPath` — so a caller can feed it
+straight into another call without being refused for spelling. A working
+directory's path is spelled without the name check, so a shell standing in a
+directory whose name holds `:` or a control character still knows where it
+is.
 
 ## Per-format link support
 

@@ -183,7 +183,7 @@ pub use entry::{
     bundle_stem, is_bundle_name, resolve_target, DriveMark, Entry, EntryKind, LinkResolution,
     LinkTarget, Listed, Occupancy,
 };
-pub use error::BrowseError;
+pub use error::{BrowseError, Unnamable};
 pub use execute::{paste_strategy, PasteStrategy, VolumeId};
 pub use format::{format_datetime, format_minute, format_size};
 pub use layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode};

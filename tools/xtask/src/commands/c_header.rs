@@ -2992,6 +2992,7 @@ fn generate_syscall() -> String {
     emit_fs_contract(&mut out);
     emit_spawn_attach_contract(&mut out);
     emit_attach_contract(&mut out);
+    emit_detach_contract(&mut out);
     emit_readdir_contract(&mut out);
     emit_dir_watch_contract(&mut out);
     emit_grant_contract(&mut out);
@@ -4090,10 +4091,12 @@ fn emit_attach_contract(out: &mut String) {
          * for EXPLICIT. A network attach may set TAIRIX_ATTACH_FLAG_READ_ONLY and\n\
          * has `own` zero. An image attach may set READ_ONLY or\n\
          * TAIRIX_IMAGE_ATTACH_FLAG_WRITABLE, not both, and\n\
-         * TAIRIX_IMAGE_ATTACH_FLAG_EXPECTS, which makes `own` the TAIRIX_VOLUME_FS_*\n\
-         * the file must hold; without it `own` is zero. TAIRIX_IMAGE_ATTACH_FLAG_ADOPT\n\
-         * takes up a volume of the file attached already for the caller's login\n\
-         * session too. Anything else is refused. */\n",
+         * TAIRIX_IMAGE_ATTACH_FLAG_EXPECTS, which makes `own` a set of\n\
+         * 1u << TAIRIX_VOLUME_FS_* bits naming the filesystems the file must hold one\n\
+         * of; without it `own` is zero. `pad` is zero. TAIRIX_IMAGE_ATTACH_FLAG_ADOPT\n\
+         * takes up a volume of the file attached already, one as writable as the\n\
+         * attach asks, for the caller's login session too. Anything else is\n\
+         * refused. */\n",
     );
     let _ = writeln!(
         out,
@@ -4149,11 +4152,35 @@ fn emit_attach_contract(out: &mut String) {
          \x20   uint16_t dir_mode;\n\
          \x20   uint16_t file_mode;\n\
          \x20   uint8_t name_len;\n\
-         \x20   uint8_t own;\n\
+         \x20   uint8_t pad;\n\
          \x20   uint16_t target_len;\n\
+         \x20   uint32_t own;\n\
          } tairix_attach_head_t;\n\n",
     );
     emit_attach_replies(out);
+}
+
+/// Emit the frame `volume_detach()` takes, its length and mode values read
+/// from `lib/abi` and the modes spelled by an exhaustive match, so a mode
+/// added there fails this build until it is named here.
+fn emit_detach_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::volume::{DetachMode, VOLUME_DETACH_LEN, VOLUME_ID_LEN};
+    let _ = writeln!(
+        out,
+        "/* The frame volume_detach() takes: the {VOLUME_ID_LEN}-byte identity an attach\n\
+         \x20* reply names, then one TAIRIX_VOLUME_DETACH_* mode byte. LOST forces a\n\
+         \x20* volume recorded lost and is PLAIN for any other. */"
+    );
+    let _ = writeln!(out, "#define TAIRIX_VOLUME_DETACH_LEN {VOLUME_DETACH_LEN}u");
+    emit_u8_discriminants(out, "TAIRIX_VOLUME_DETACH", |raw| {
+        DetachMode::from_u8(raw).ok().map(|mode| match mode {
+            DetachMode::Plain => "PLAIN",
+            DetachMode::Force => "FORCE",
+            DetachMode::Lost => "LOST",
+        })
+    });
+    out.push('\n');
 }
 
 /// Emit the replies `fsserve_attach()` and `image_attach()` write.
@@ -4176,8 +4203,11 @@ fn emit_attach_replies(out: &mut String) {
          * a TARGET_REFUSED one in `refused_errno` the TAIRIX_E_* the directory the\n\
          * volume was also to be shown at refused it with, and a NAME_REFUSED one\n\
          * there the TAIRIX_E_* the name asked for it was refused with, each\n\
-         * leaving `volume` zero and nothing attached; every field an outcome does\n\
-         * not name is zero. */\n",
+         * leaving `volume` zero and nothing attached, though a volume a\n\
+         * TARGET_REFUSED attach mounted first stays until the system takes it\n\
+         * out where the caller was being killed or the volume was in use, a retry\n\
+         * being refused TAIRIX_E_BUSY until then; every field an outcome does not\n\
+         * name is zero. */\n",
     );
     let _ = writeln!(out, "#define TAIRIX_ATTACH_REPLY_LEN {ATTACH_REPLY_LEN}u");
     let _ = writeln!(
@@ -6788,7 +6818,7 @@ mod tests {
             IMAGE_ATTACH_MAX, IMAGE_ATTACH_VERSION,
         };
         use tairix_abi::netattach::{Presentation, ATTACH_HEAD_LEN, NETWORK_ATTACH_MAX};
-        use tairix_abi::volume::{VolumeFsType, VOLUME_NAME_MAX};
+        use tairix_abi::volume::{VolumeFsType, VolumeFsTypes, VOLUME_NAME_MAX};
         let h = body("tairix_syscall.h");
         let attach = ImageAttach {
             name: Some("vol"),
@@ -6800,7 +6830,7 @@ mod tests {
             },
             access: ImageAccess::Writable,
             target: Some("/Users/ada/disk"),
-            expects: Some(VolumeFsType::Affs),
+            expects: VolumeFsTypes::of([VolumeFsType::Affs]),
             adopt: false,
         };
         let mut frame = [0; IMAGE_ATTACH_MAX];
@@ -6825,13 +6855,16 @@ mod tests {
         assert_eq!(word("dir_mode"), 0o750);
         assert_eq!(word("file_mode"), 0o640);
         assert_eq!(usize::from(frame[at("name_len")]), "vol".len());
-        assert_byte(&h, "VOLUME_FS_AFFS", frame[at("own")]);
-        assert_eq!(usize::from(word("target_len")), "/Users/ada/disk".len());
-        assert_eq!(
-            at("target_len") + 2,
-            ATTACH_HEAD_LEN,
-            "the head ends at the name"
+        assert_eq!(frame[at("pad")], 0);
+        let own = long("own");
+        assert_eq!(own.count_ones(), 1, "one filesystem expected");
+        assert_byte(
+            &h,
+            "VOLUME_FS_AFFS",
+            u8::try_from(own.trailing_zeros()).expect("a bit of a word"),
         );
+        assert_eq!(usize::from(word("target_len")), "/Users/ada/disk".len());
+        assert_eq!(at("own") + 4, ATTACH_HEAD_LEN, "the head ends at the name");
         assert_eq!(&frame[ATTACH_HEAD_LEN..ATTACH_HEAD_LEN + 3], b"vol");
         for line in [
             format!("#define TAIRIX_ATTACH_HEAD_LEN {ATTACH_HEAD_LEN}u"),
@@ -6894,6 +6927,39 @@ mod tests {
         assert_eq!(
             h.matches("#define TAIRIX_VOLUME_FS_").count(),
             VolumeFsType::ALL.len()
+        );
+    }
+
+    /// The detach frame's length and every mode are the bytes `lib/abi`
+    /// encodes, each mode named once.
+    #[test]
+    fn syscall_header_names_the_detach_frame_as_lib_abi_encodes_it() {
+        use tairix_abi::volume::{
+            DetachMode, VolumeDetachRequest, VOLUME_DETACH_LEN, VOLUME_ID_LEN,
+        };
+        let h = body("tairix_syscall.h");
+        assert_line(
+            &h,
+            &format!("#define TAIRIX_VOLUME_DETACH_LEN {VOLUME_DETACH_LEN}u"),
+        );
+        for (name, mode) in [
+            ("PLAIN", DetachMode::Plain),
+            ("FORCE", DetachMode::Force),
+            ("LOST", DetachMode::Lost),
+        ] {
+            let mut frame = [0; VOLUME_DETACH_LEN];
+            VolumeDetachRequest {
+                volume_id: [9; VOLUME_ID_LEN],
+                mode,
+            }
+            .encode(&mut frame)
+            .expect("a frame in shape");
+            assert_byte(&h, &format!("VOLUME_DETACH_{name}"), frame[VOLUME_ID_LEN]);
+        }
+        assert_eq!(
+            h.matches("#define TAIRIX_VOLUME_DETACH_").count(),
+            1 + 3,
+            "the length and the three modes"
         );
     }
 

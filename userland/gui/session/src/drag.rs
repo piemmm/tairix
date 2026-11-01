@@ -28,6 +28,7 @@ use tairix_browse::media::{name_endings, MediaType};
 use tairix_controls::Tooltip;
 use tairix_geometry::{Point, Rect};
 use tairix_theme::{CursorKind, Theme};
+use tairix_util::utf8::shown;
 use tairix_window::DragConclusion;
 use tairix_wm::{
     Compositor, Corners, InputEvent, Key, NamedKey, PointerButton, PointerCatch, Surface, WindowId,
@@ -116,18 +117,19 @@ impl DropRefusal {
 
     /// The alert the desktop states the refusal in, or `None` for a label no
     /// alert can carry — a compiled-in word, so a defect the tests catch.
+    ///
+    /// The item and the application are named as shown, since a developer
+    /// chooses an application's name and anyone a file's.
     #[must_use]
     pub fn spec(&self) -> Option<AlertSpec> {
-        let headline = format!("{} cannot open \u{201c}{}\u{201d}", self.app, self.item);
+        let (app, item) = (shown(&self.app), shown(&self.item));
+        let headline = format!("{app} cannot open \u{201c}{item}\u{201d}");
         let detail = if !self.one_file {
-            format!(
-                "{} opens one file at a time, never a folder or several items at once.",
-                self.app
-            )
+            format!("{app} opens one file at a time, never a folder or several items at once.")
         } else if self.opens.is_empty() {
-            format!("{} opens no files dropped on it.", self.app)
+            format!("{app} opens no files dropped on it.")
         } else {
-            format!("{} opens files ending {}.", self.app, self.endings())
+            format!("{app} opens files ending {}.", self.endings())
         };
         AlertSpec::acknowledged(AlertSeverity::Error, &headline, &detail).ok()
     }
@@ -695,7 +697,7 @@ impl DesktopShell {
 /// are carried.
 fn plate_text(items: &DragItems) -> String {
     if items.count() == 1 {
-        String::from(items.first().as_str())
+        shown(items.first().as_str()).into_owned()
     } else {
         format!("{} items", items.count())
     }

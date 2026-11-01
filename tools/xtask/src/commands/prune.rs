@@ -47,7 +47,7 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     }
     let reclaimed = prune(ctx);
     let target_dir = ctx.target_dir();
-    eprintln!(
+    noteln!(
         "xtask: [prune] reclaimed {} of superseded build-script output in {}",
         format_bytes(reclaimed.bytes),
         super::relative(&ctx.workspace_root, &target_dir),

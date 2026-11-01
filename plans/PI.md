@@ -1143,15 +1143,14 @@ retention still follow.
 overrun that silently corrupted the next task's snapshot (P6e-3b-ii) is now
 defended: `kernel/core::kthread::BoxStack` carries a poison-filled guard
 page immediately *below* the usable stack and `dispatch_step` verifies its
-canary on every switch-back, failing the task closed on an overrun rather
-than letting it reach the heap neighbour (`AGENTS.md` §4 / §2.9 / §2.17,
+canary on every switch-back; an overrun that reached the guard stops the
+kernel with the corrupt-stack record (`4012`, `plans/OPEN-DEFECTS.md` D1573),
+since it may have run on past the guard (`AGENTS.md` §4 / §2.9 / §2.17,
 host-proven; the same emulation `kernel/mem`'s slab guard documents). **This
 is the real, non-deferred defence — not the old 64 KiB limit bump.** The
-*deployment* form, which turns the overrun into an immediate hardware fault
-instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
-The deployment form — turning the overrun into an immediate hardware fault
-instead of a next-reschedule detection — is **landed on every port `[x]`**,
-and not by splitting a live block.
+deployment form — turning the overrun into an immediate hardware fault
+instead of a next-reschedule detection — is **landed on every port `[x]`**
+(G1–G3c), and not by splitting a live block.
 
 A kthread kernel stack is a run of pages in the **shared kernel remap
 window** (`kernel/mem::KernelVirtMap`), laid out `[guard slot | usable
@@ -1590,7 +1589,7 @@ riscv64, mirroring the aarch64 P-stage arc.
   `with_console` backing (`RiscvUartConsole` over the new verbatim
   `serial::write_console_bytes`). After `BootCompleted`, `kernel_main`
   drops PID 1 `init` into U-mode (its own Sv39 root, the shared 4 GiB
-  `spawn_producer::identity_gigapages()` window plus the direct physical
+  `paging::KERNEL_IDENTITY_GIGAPAGES` window plus the direct physical
   map, a window-backed hardware-guarded kernel stack), `init`
   writes its banner through `stream_write` and
   issues the `CAP_PROC_SPAWN`-gated `spawn` for `/System/Commands/elsh.app/Run`; the

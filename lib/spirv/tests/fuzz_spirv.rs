@@ -17,6 +17,8 @@
 //! 6. An admitted entry point agrees with a layout of exactly its own
 //!    bindings and push constants, and a layout without its first binding
 //!    is refused as missing it.
+//! 7. The view answers what every type an admitted module declares is, and
+//!    answers no type for any other id.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -28,7 +30,8 @@ use tairix_spirv::enumerant::{
     ImageFormat, ImageOperands, MemoryModel, StorageClass,
 };
 use tairix_spirv::{
-    Admitted, Arg, Disagreement, EncodeError, Encoder, Id, Layout, Module, Op, Version,
+    Admitted, Arg, Disagreement, EncodeError, Encoder, Id, Layout, Module, Op, SpecError,
+    SpecValue, Specialized, Type, Version,
 };
 
 /// Rounds per sweep. Miri interprets every operation, so it drives a handful.
@@ -309,6 +312,52 @@ fn strings() -> Result<Vec<u8>, EncodeError> {
     Ok(e.finish())
 }
 
+/// A compute shader whose constants every specialization operation reaches,
+/// and whose workgroup size is specialized.
+fn specialized() -> Vec<u8> {
+    tairix_spirv::assemble::assemble(
+        r#"
+OpCapability Shader
+OpCapability Int64
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+OpDecorate %x SpecId 0
+OpDecorate %y SpecId 1
+OpDecorate %flag SpecId 2
+OpDecorate %size BuiltIn WorkgroupSize
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%bool = OpTypeBool
+%uint = OpTypeInt 32 0
+%int = OpTypeInt 32 1
+%ulong = OpTypeInt 64 0
+%v3uint = OpTypeVector %uint 3
+%x = OpSpecConstant %uint 8
+%y = OpSpecConstant %int -3
+%flag = OpSpecConstantFalse %bool
+%one = OpConstant %uint 1
+%two = OpConstant %uint 2
+%size = OpSpecConstantComposite %v3uint %x %one %one
+%sum = OpSpecConstantOp %uint IAdd %x %one
+%quotient = OpSpecConstantOp %int SDiv %y %y
+%modulus = OpSpecConstantOp %int SMod %y %y
+%shifted = OpSpecConstantOp %uint ShiftLeftLogical %x %two
+%wide = OpSpecConstantOp %ulong UConvert %x
+%less = OpSpecConstantOp %bool ULessThan %x %two
+%either = OpSpecConstantOp %bool LogicalOr %less %flag
+%chosen = OpSpecConstantOp %uint Select %either %x %two
+%shuffled = OpSpecConstantOp %v3uint VectorShuffle %size %size 5 1 0
+%taken = OpSpecConstantOp %uint CompositeExtract %shuffled 0
+%placed = OpSpecConstantOp %v3uint CompositeInsert %taken %size 2
+%main = OpFunction %void None %fn
+%entry = OpLabel
+OpReturn
+OpFunctionEnd
+"#,
+        Version::NEWEST,
+    )
+}
+
 fn words(bytes: &[u8]) -> Vec<u32> {
     bytes
         .as_chunks::<4>()
@@ -425,16 +474,71 @@ fn check_validated(input: &[u8], module: Module) {
             return;
         }
     };
+    for values in [
+        &[][..],
+        &[
+            SpecValue { id: 0, bits: 0 },
+            SpecValue {
+                id: 1,
+                bits: 0x8000_0000,
+            },
+            SpecValue { id: 2, bits: 1 },
+        ][..],
+        &[SpecValue {
+            id: 0,
+            bits: u64::MAX,
+        }][..],
+    ] {
+        let sizes = |s: Specialized| {
+            (0..admitted.entry_points().len())
+                .map(|entry| s.workgroup_size(entry))
+                .collect::<Vec<_>>()
+        };
+        let first = admitted.specialize(values).map(sizes);
+        assert_ne!(
+            first,
+            Err(SpecError::Malformed),
+            "an admitted module's constants evaluate"
+        );
+        assert_eq!(
+            first,
+            admitted.specialize(values).map(sizes),
+            "specialization is deterministic"
+        );
+    }
+    for instruction in admitted.module().instructions() {
+        let Some(id) = admitted.module().result(instruction) else {
+            continue;
+        };
+        let declares = declares_type(instruction.op());
+        assert_eq!(
+            admitted.type_id(id).is_some(),
+            declares,
+            "the view answers a type for every type an admitted module declares, and no other id"
+        );
+        if let Some(ty) = admitted.type_id(id) {
+            let Some(answered) = admitted.ty(ty) else {
+                panic!("the view answers what each declared type is");
+            };
+            if let Type::Struct { members } = answered {
+                for member in 0..=members {
+                    let _ = admitted.member(ty, member);
+                }
+            }
+            let _ = (admitted.array_stride(ty), admitted.parameter(ty, 0));
+        }
+    }
     for entry in admitted.entry_points() {
         let own = Layout {
             bindings: entry.bindings(),
             push_constants: entry.push_constants().unwrap_or(0),
+            push_constant_stages: entry.stage().stages(),
         };
         assert_eq!(entry.agree(&own), Ok(()), "agrees with its own layout");
         if let Some((first, rest)) = entry.bindings().split_first() {
             let short = Layout {
                 bindings: rest,
-                push_constants: own.push_constants,
+                ..own
             };
             assert_eq!(
                 entry.agree(&short),
@@ -472,14 +576,20 @@ fn the_decoder_is_total_over_mutated_modules() {
         fragment().expect("encoded"),
         compute().expect("encoded"),
         texture().expect("encoded"),
+        specialized(),
         strings().expect("encoded"),
     ];
     for module in &corpus {
         check_accepted(&Module::decode(module).expect("the corpus is valid"));
     }
-    for module in &corpus[..3] {
+    for module in &corpus[..4] {
         Admitted::new(Module::decode(module).expect("decoded")).expect("the shaders are admitted");
     }
+    let seed = Admitted::new(Module::decode(&corpus[3]).expect("decoded")).expect("admitted");
+    let sized = seed
+        .specialize(&[SpecValue { id: 0, bits: 32 }])
+        .expect("specialized");
+    assert_eq!(sized.workgroup_size(0), Some([32, 1, 1]));
     let mut rng = Prng::new(tairix_fuzzseed::start(
         "the_decoder_is_total_over_mutated_modules",
         tairix_fuzzseed::FUZZ_SEED_ENV,
@@ -493,4 +603,25 @@ fn the_decoder_is_total_over_mutated_modules() {
             break;
         }
     }
+}
+
+/// Whether `op` declares a type the validator may admit.
+const fn declares_type(op: Op) -> bool {
+    matches!(
+        op,
+        Op::TYPE_VOID
+            | Op::TYPE_BOOL
+            | Op::TYPE_INT
+            | Op::TYPE_FLOAT
+            | Op::TYPE_VECTOR
+            | Op::TYPE_MATRIX
+            | Op::TYPE_IMAGE
+            | Op::TYPE_SAMPLER
+            | Op::TYPE_SAMPLED_IMAGE
+            | Op::TYPE_ARRAY
+            | Op::TYPE_RUNTIME_ARRAY
+            | Op::TYPE_STRUCT
+            | Op::TYPE_POINTER
+            | Op::TYPE_FUNCTION
+    )
 }

@@ -23,6 +23,7 @@ pub(crate) const ASM_SOURCES: &[(&str, &str)] = &[
     ("backtrace.rs", include_str!("backtrace.rs")),
     ("context.rs", include_str!("context.rs")),
     ("context_hal.rs", include_str!("context_hal.rs")),
+    ("exceptions.rs", include_str!("exceptions.rs")),
     ("fault.rs", include_str!("fault.rs")),
     ("fpu.rs", include_str!("fpu.rs")),
     ("gdt.rs", include_str!("gdt.rs")),
@@ -56,28 +57,47 @@ pub(crate) const ASM_SOURCES: &[(&str, &str)] = &[
     ("takeover.s", include_str!("takeover.s")),
 ];
 
-/// Whether `name` is an assembly source rather than a Rust one.
-pub(crate) fn is_assembly(name: &str) -> bool {
-    std::path::Path::new(name)
-        .extension()
-        .is_some_and(|extension| extension == "s")
+/// One line of assembly, whitespace-normalised and without its comment, or
+/// `None` for a line holding none.
+pub(crate) fn assembly_line(line: &str) -> Option<String> {
+    let code = line.split('#').next()?.split("//").next()?;
+    let text = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then_some(text)
 }
 
-/// The instructions of `source`, whitespace-normalised: every string
-/// literal line of a Rust source, every non-comment line of an assembly one.
+/// The instructions of `source`, whitespace-normalised: every non-comment
+/// line of an assembly source; of a Rust one, every string-literal line and
+/// every line of a raw string, the form a `global_asm!` template spells
+/// assembly in.
 pub(crate) fn instructions(name: &str, source: &str) -> Vec<String> {
-    if is_assembly(name) {
-        source
-            .lines()
-            .filter_map(|line| {
-                let code = line.split('#').next()?.split("//").next()?;
-                let text = code.split_whitespace().collect::<Vec<_>>().join(" ");
-                (!text.is_empty()).then_some(text)
-            })
-            .collect()
-    } else {
-        source.lines().filter_map(literal).collect()
+    if tairix_fuzzseed::sources::is_assembly(name) {
+        return source.lines().filter_map(assembly_line).collect();
     }
+    let mut out = Vec::new();
+    let mut raw = false;
+    for line in source.lines() {
+        if raw {
+            let (content, closed) = line
+                .find("\"#")
+                .map_or((line, false), |end| (&line[..end], true));
+            out.extend(assembly_line(content));
+            raw = !closed;
+            continue;
+        }
+        let code = line.split("//").next().unwrap_or("");
+        if let Some(open) = code.find("r#\"") {
+            let rest = &line[open + 3..];
+            if let Some(end) = rest.find("\"#") {
+                out.extend(assembly_line(&rest[..end]));
+            } else {
+                out.extend(assembly_line(rest));
+                raw = true;
+            }
+        } else {
+            out.extend(literal(line));
+        }
+    }
+    out
 }
 
 /// Every return-to-user instruction in the port, as `(source, index)` into
@@ -103,40 +123,30 @@ fn user_returns() -> Vec<(&'static str, Vec<String>, usize)> {
 /// entry or return path escapes the scans that read it.
 #[test]
 fn every_source_carrying_assembly_is_inspected() {
-    let listed: BTreeSet<&str> = ASM_SOURCES.iter().map(|(name, _)| *name).collect();
-    let mut pending = Vec::from([std::path::PathBuf::from(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src"
-    ))]);
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).expect("the port's sources") {
-            let path = entry.expect("a directory entry").path();
-            if path.is_dir() {
-                pending.push(path);
-                continue;
-            }
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("");
-            let carries = if is_assembly(name) {
-                true
-            } else if path.extension().is_some_and(|extension| extension == "rs")
-                && !name.ends_with("_tests.rs")
-            {
-                std::fs::read_to_string(&path)
-                    .expect("a readable source")
-                    .contains("asm!(")
-            } else {
-                false
-            };
-            assert!(
-                !carries || listed.contains(name),
-                "{} carries assembly but is not inspected",
-                path.display()
-            );
-        }
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+    assert_eq!(
+        tairix_fuzzseed::sources::unlisted_assembly(root, ASM_SOURCES).expect("the port's sources"),
+        Vec::<String>::new(),
+        "each carries assembly but is not inspected"
+    );
+}
+
+/// The kernel reaches user memory only through the direct map, so nothing
+/// opens a user page to it under SMAP: no source spells `stac`.
+#[test]
+fn no_source_opens_user_pages_to_the_kernel() {
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+    for source in tairix_fuzzseed::sources::crate_sources(root).expect("the port's sources") {
+        let opens = instructions(source.name(), source.text())
+            .iter()
+            .any(|instruction| mnemonic_is(instruction, "stac"));
+        assert!(!opens, "{} sets RFLAGS.AC", source.relative());
     }
+}
+
+/// Whether `instruction`'s mnemonic is `name`.
+fn mnemonic_is(instruction: &str, name: &str) -> bool {
+    instruction.split_whitespace().next() == Some(name)
 }
 
 #[test]

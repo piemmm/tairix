@@ -14,9 +14,13 @@ décimale. La création d'un groupe est une opération d'administration :
 le registre refuse un appelant sans la capacité d'administration des
 utilisateurs.
 
-Quand `-g` est omis, l'identifiant du groupe est alloué automatiquement,
-un au-dessus du plus haut identifiant existant. Un identifiant demandé
-déjà pris est refusé ; le registre est l'autorité sur les collisions.
+Quand `-g` est omis, l'identifiant du groupe est alloué
+automatiquement : un au-dessus du plus haut des identifiants existants
+d'au moins 1000, ou 1000 quand aucun groupe n'en a. Les identifiants
+inférieurs à 1000 appartiennent au système et ne sont jamais alloués,
+et dès qu'il ne reste aucun identifiant au-dessus du plus haut, le
+groupe n'est pas créé. Un identifiant demandé déjà pris est refusé ; le
+registre est l'autorité sur les collisions.
 
 `--` termine l'analyse des options : chaque argument ultérieur est un
 opérande.
@@ -25,7 +29,7 @@ opérande.
 
 - `-g, --gid GID` — identifiant numérique du groupe ; alloué
   automatiquement quand il est omis (un au-dessus du plus haut
-  existant).
+  existant d'au moins 1000, sinon 1000).
 - `-h, -?, --help` — afficher l'aide courte de cette commande.
 
 ## EXAMPLES

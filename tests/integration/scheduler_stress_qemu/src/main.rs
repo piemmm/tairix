@@ -18,9 +18,8 @@
 //! 2. The BSP software-enables the LAPIC, installs the AP trampoline at
 //!    `AP_TRAMPOLINE_PHYS = 0x8000`, and walks the discovered AP list
 //!    serially: per AP it writes the `ApBootSlot` and drives the
-//!    INIT-SIPI-SIPI handshake through `init_sipi_sipi`, then waits
-//!    (acquire-load) on the per-slot `ready` flag the trampoline's
-//!    `xchg` raised.
+//!    INIT-SIPI-SIPI handshake through `init_sipi_sipi`, then settles the
+//!    AP's answer on one compare-and-swap of `AP_ANSWER`.
 //! 3. The BSP constructs a single `Arc<Scheduler<SmpArch>>` and
 //!    publishes it through a `static AtomicPtr`. Each AP `Acquire`-loads
 //!    the pointer before entering its cooperative `step` loop.

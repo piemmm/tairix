@@ -1,8 +1,8 @@
 //! QEMU integration test: the x86_64 boot stack's poison guard.
 //!
-//! The boot stack is in use before the MMU is on, so an overrun cannot be
-//! caught by unmapping a page below it. The guard is poison instead, and
-//! only a real boot can show that the linker reserved it, that the stub's
+//! The boot stack is in use before paging is on, so the guard is poison
+//! while the trampoline runs, and read-only once the kernel root is loaded.
+//! Only a real boot can show that the linker reserved it, that the stub's
 //! fill survived the `.bss` clear that spans it, and that the port's
 //! post-mortem handle names that same reservation. The checks themselves
 //! are `tairix_itest_bootguard`'s, shared with the sibling ports; the
@@ -46,10 +46,17 @@ mod kernel {
         // link-time constant; they are never dereferenced here.
         let low = core::ptr::addr_of!(boot_stack_guard_bottom_high) as u64;
         let bottom = core::ptr::addr_of!(boot_stack_bottom_high) as u64;
+        // The kernel root maps the guard read-only, so the check writes it
+        // through the direct map's alias of the same bytes.
+        let writable = tairix_arch_x86_64::paging::physmap_virt(
+            bottom - tairix_arch_x86_64::paging::KERNEL_VMA_BASE,
+        );
         // SAFETY: `boot.s` reserves `[low, bottom)` as the BSP's boot-stack
-        // guard and nothing else claims it; this kernel is the only thing
-        // running, so the checks' write-and-restore is unraced.
-        match unsafe { check(bt.boot_stack_guard(), low, bottom, sp) } {
+        // guard and nothing else claims it, and `writable` is its stack-bottom
+        // byte through the direct map, which the floor covers; this kernel is
+        // the only thing running, so the checks' write-and-restore is
+        // unraced.
+        match unsafe { check(bt.boot_stack_guard(), low, bottom, sp, writable) } {
             Ok(()) => {
                 let _ = writeln!(com1, "[bootguard] x86_64 boot-stack guard verified");
                 qemu_exit::exit_success()

@@ -159,6 +159,27 @@ pub fn push<T>(buffer: &mut Vec<T>, item: T) -> bool {
     true
 }
 
+/// Move `buffer` into an allocation of exactly its length where the allocator
+/// grants one, and leave it as it is where none is: a refusal never aborts, as
+/// `Vec::shrink_to_fit`'s does.
+pub fn trim<T>(buffer: &mut Vec<T>) {
+    if buffer.capacity() == buffer.len() {
+        return;
+    }
+    let mut exact = Vec::new();
+    if exact.try_reserve_exact(buffer.len()).is_ok() {
+        exact.append(buffer);
+        *buffer = exact;
+    }
+}
+
+/// The bytes `buffer`'s allocation holds: its capacity's worth, not its
+/// length's, as that is what the allocator gave it.
+#[must_use]
+pub fn held<T>(buffer: &Vec<T>) -> u64 {
+    (buffer.capacity() as u64).saturating_mul(core::mem::size_of::<T>() as u64)
+}
+
 #[cfg(test)]
 #[path = "fallible_tests.rs"]
 mod tests;

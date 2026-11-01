@@ -15,7 +15,7 @@
 //! Only the architecture port reads `CPUID`, so detection lives here.
 //! The decoder (`features_from_cpuid`) is pure and host-tested, as is the
 //! vendor decode it shares with CPU bring-up
-//! ([`crate::cpuname::vendor_from_leaf0`]); the register reads execute only
+//! ([`crate::cpuid::Vendor`]); the register reads execute only
 //! on the freestanding target and the host build reports the empty set / an
 //! unknown core (no fake hardware in production paths).
 
@@ -138,12 +138,11 @@ impl CpuFeatures for CpuFeatureDetect {
     fn core_type(&self, _cpu: CpuId) -> CoreType {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            let leaf0 = core::arch::x86_64::__cpuid(0);
             let leaf1 = core::arch::x86_64::__cpuid(1);
             // An unknown vendor still keys its ops table by the leaf-1
             // signature in `raw_id`.
             CoreType {
-                model: crate::cpuname::vendor_from_leaf0(leaf0.ebx, leaf0.edx, leaf0.ecx),
+                model: crate::cpuid::vendor().map(crate::cpuid::Vendor::name),
                 class: tairix_arch_api::CoreClass::Performance,
                 raw_id: u64::from(leaf1.eax),
             }

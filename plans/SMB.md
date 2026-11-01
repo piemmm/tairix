@@ -384,8 +384,9 @@ generated from a pinned Unicode 18.0.0 UCD snapshot by `cargo xtask unicode`:
 - a combining sequence cut at one U+FFFD where it would carry more than four
   nonspacing marks or a mark an earlier character of it already carries,
   judged over canonical decompositions (UTS #39 §5.4, `MarkRun`);
-- `mixes_scripts`, UTS #39's minimally restrictive level, for a surface to
-  mark a name whose scripts could impersonate another (Z9 does).
+- UTS #39's minimally restrictive level (`tairix_unicode::restriction_level`),
+  which a surface applies to mark a name whose scripts could impersonate
+  another (Z9's network view does, `NetworkEndpoint::mixes_scripts`).
 
 The length bound is each surface's layout budget — the file manager's
 middle cut that keeps an extension, the title bar's 512-character keep, a

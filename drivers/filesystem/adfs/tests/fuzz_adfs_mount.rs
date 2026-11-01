@@ -15,13 +15,16 @@
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` draws
 //! pseudo-random images, and a structured sweep flips bytes of real
-//! formatted images — one per map flavour (old map, new map, big
-//! directories) — to hammer the checksum and structural validation.
-//! A plain `cargo test` runs a quick seed-driven smoke sample; the
-//! time-limited soak (`TAIRIX_FUZZ_BUDGET_SECS`) sweeps byte positions
-//! in a seeded full-coverage order until the wall-clock budget elapses
-//! (the nightly budget flips every byte of every base image) and runs
-//! the PRNG stream to the same budget.
+//! formatted images — one per map flavour (old map, a bare disc record,
+//! big directories, a boot block over four zones) — to hammer the checksum
+//! and structural validation. Half of each base's stream shapes the disc
+//! record's geometry at its edges and seals it again behind its boot-block
+//! checksum or zone check, so the validation of the geometry is reached
+//! rather than the checksum in front of it. A plain `cargo test` runs a
+//! quick seed-driven smoke sample; the time-limited soak
+//! (`TAIRIX_FUZZ_BUDGET_SECS`) gives each base an equal share of the
+//! budget, half to sweeping byte positions in a seeded full-coverage order
+//! and half to the PRNG stream.
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{
@@ -30,6 +33,11 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::DriverError;
 use tairix_drv_fs_adfs::{Adfs, AdfsVariant};
+use tairix_fsprobe::adfs::{
+    boot_block_checksum, zone_check, DiscRecord, BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE,
+    DISC_RECORD_BITS, DISC_RECORD_IN_BOOT_BLOCK, DISC_RECORD_SIZE, ZONE_CHECK_BYTE,
+    ZONE_HEADER_SIZE,
+};
 use tairix_fuzzseed::Prng;
 
 const BLOCK_SIZE: u32 = 512;
@@ -38,11 +46,23 @@ const BLOCK_SIZE: u32 = 512;
 const FILE_RECORD: NodeSecurity = NodeSecurity::new(0o644, 0, 0);
 const DIR_RECORD: NodeSecurity = NodeSecurity::new(0o755, 0, 0);
 
+/// Where a base's disc record lies, which a shaped record is sealed behind.
+#[derive(Copy, Clone)]
+enum RecordAt {
+    /// An old map carries none.
+    Nowhere,
+    /// In map zone 0, after the zone header, under the zone's check.
+    Bare,
+    /// In the boot block, under its checksum.
+    BootBlock,
+}
+
 /// The smallest volume of each map flavour keeps the sweep affordable.
-const BASES: [(AdfsVariant, usize); 3] = [
-    (AdfsVariant::S, 160 * 1024),
-    (AdfsVariant::E, 800 * 1024),
-    (AdfsVariant::EPlus, 800 * 1024),
+const BASES: [(AdfsVariant, usize, RecordAt); 4] = [
+    (AdfsVariant::S, 160 * 1024, RecordAt::Nowhere),
+    (AdfsVariant::E, 800 * 1024, RecordAt::Bare),
+    (AdfsVariant::EPlus, 800 * 1024, RecordAt::Bare),
+    (AdfsVariant::F, 1600 * 1024, RecordAt::BootBlock),
 ];
 
 /// PRNG-image count for the quick smoke pass (no budget set).
@@ -163,15 +183,114 @@ fn pin_round_trip(fs: &mut Adfs<MemBlock>) {
 
 /// The single invariant: opening an arbitrary image returns a
 /// `Result`, never panics; a mounted volume is walked and re-opened.
-fn exercise(image: &[u8]) {
-    let dev = MemBlock {
-        store: image.to_vec(),
-    };
+fn exercise(image: Vec<u8>) {
+    let dev = MemBlock { store: image };
     if let Ok(mut fs) = Adfs::open(dev) {
         walk(&mut fs);
         let _ = fs.stats();
         pin_round_trip(&mut fs);
     }
+}
+
+/// One of `edges`, or what `otherwise` draws, as the stream picks.
+fn edge_or<T: Copy>(rng: &mut Prng, edges: &[T], otherwise: impl FnOnce(&mut Prng) -> T) -> T {
+    if rng.below(2) == 0 {
+        *rng.pick(edges)
+    } else {
+        otherwise(rng)
+    }
+}
+
+/// Shape one to three of the disc record's fields in `image` at its edges,
+/// or at random, and seal the record again where it lies, so what decides is
+/// the validation of its geometry. An edge that does not exist for the record
+/// as shaped is a random value instead: the harness's own arithmetic never
+/// overflows.
+fn shape_record(image: &mut [u8], at: RecordAt, rng: &mut Prng) {
+    let boot_block = usize::try_from(BOOT_BLOCK_OFFSET).expect("the boot block's offset fits");
+    let offset = match at {
+        RecordAt::Nowhere => return,
+        RecordAt::Bare => ZONE_HEADER_SIZE,
+        RecordAt::BootBlock => boot_block + DISC_RECORD_IN_BOOT_BLOCK,
+    };
+    let Some(raw) = image
+        .get(offset..offset + DISC_RECORD_SIZE)
+        .and_then(|raw| <[u8; DISC_RECORD_SIZE]>::try_from(raw).ok())
+    else {
+        return;
+    };
+    let mut record = DiscRecord::parse(&raw);
+    for _ in 0..=rng.below(3) {
+        match rng.below(9) {
+            0 => record.log2secsize = edge_or(rng, &[7, 8, 9, 10, 11], Prng::next_u8),
+            1 => {
+                let at = record.log2secsize;
+                let edges = [at.saturating_add(2), at.saturating_add(3), 15, 16, 19, 20];
+                record.idlen = edge_or(rng, &edges, Prng::next_u8);
+            }
+            2 => record.log2bpmb = edge_or(rng, &[5, 6, 7, 16, 17], Prng::next_u8),
+            3 => {
+                let [low, high] = record.nzones.to_le_bytes();
+                let low = edge_or(rng, &[0, 1, 2, 3, 0xFF], |_| low);
+                let high = edge_or(rng, &[0, 1, 2, 3, 0xFF], |_| high);
+                record.nzones = u16::from_le_bytes([low, high]);
+            }
+            4 => record.root = edge_or(rng, &[0, 0x1FF, 0x200, u32::MAX], Prng::next_u32),
+            5 => record.disc_size = rng.next_u64() >> rng.below(64),
+            6 => record.format_version = edge_or(rng, &[0, 1, 2], Prng::next_u32),
+            _ => record.zone_spare = shaped_spare(&record, rng),
+        }
+    }
+    image[offset..offset + DISC_RECORD_SIZE].copy_from_slice(&record.encode());
+    match at {
+        RecordAt::Nowhere => {}
+        RecordAt::Bare => {
+            if (8..=10).contains(&record.log2secsize) {
+                let sector = 1usize << record.log2secsize;
+                if let Some(zone) = image.get_mut(..sector) {
+                    zone[ZONE_CHECK_BYTE] = zone_check(zone);
+                }
+            }
+        }
+        RecordAt::BootBlock => {
+            if let Some(block) = image
+                .get_mut(boot_block..boot_block + BOOT_BLOCK_SIZE)
+                .and_then(|block| <&mut [u8; BOOT_BLOCK_SIZE]>::try_from(block).ok())
+            {
+                block[BOOT_BLOCK_SIZE - 1] = boot_block_checksum(block);
+            }
+        }
+    }
+}
+
+/// A zone spare at the edges of what `record`'s own sector size and id
+/// width admit — an exact fit for the record and one fragment, one bit short,
+/// a zone 0 smaller than the record, the zone header's edge — or a common or
+/// random value.
+fn shaped_spare(record: &DiscRecord, rng: &mut Prng) -> u16 {
+    let sector_bits = (7..=11)
+        .contains(&record.log2secsize)
+        .then(|| 8u32.checked_shl(u32::from(record.log2secsize)))
+        .flatten();
+    let idlen = u32::from(record.idlen);
+    let edge = |from: Option<u32>| from.and_then(|bits| u16::try_from(bits).ok());
+    let edges = sector_bits.map(|bits| {
+        let record_bits = bits.checked_sub(DISC_RECORD_BITS);
+        [
+            edge(record_bits.and_then(|left| left.checked_sub(idlen + 1))),
+            edge(record_bits.and_then(|left| left.checked_sub(idlen))),
+            edge(record_bits.and_then(|left| left.checked_add(1))),
+            edge(bits.checked_sub(33 + idlen)),
+            edge(bits.checked_sub(32 + idlen)),
+            Some(0),
+            Some(32),
+            Some(0x520),
+            Some(0x640),
+        ]
+    });
+    edges
+        .and_then(|edges| *rng.pick(&edges))
+        .unwrap_or_else(|| rng.next_u16())
 }
 
 /// A populated base image of `variant`: files, a nested directory, and
@@ -212,49 +331,59 @@ fn fuzz_adfs_mount() {
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
 
-    for (variant, bytes) in BASES {
+    // Each base gets its share of the budget, half to the sweep and half to
+    // the stream, so no base is starved by the one before it.
+    let halves = u32::try_from(2 * BASES.len()).expect("a handful of bases");
+    let slices = tairix_fuzzseed::budget_slices(deadline, halves);
+    for (at, (variant, bytes, record_at)) in (0u32..).zip(BASES) {
         let base = formatted_image(variant, bytes);
+        let (sweep_until, stream_until) = (slices(2 * at + 1), slices(2 * at + 2));
         // Structured single-byte sweep over a valid image, probing the
         // checksum/structure rejection near genuinely valid data. The soak
-        // visits positions in a seeded full-coverage order and stops at the
-        // wall-clock deadline — the nightly budget flips every byte, a short
+        // visits positions in a seeded full-coverage order and stops at its
+        // slice of the budget — the nightly budget flips every byte, a short
         // budget probes a reproducible spread on time — while the smoke pass
         // samples a fixed number of positions.
-        if let Some(deadline) = deadline {
-            tairix_fuzzseed::budgeted_sweep(base.len(), rng.next_u64(), deadline, |i| {
+        if let Some(until) = sweep_until {
+            tairix_fuzzseed::budgeted_sweep(base.len(), rng.next_u64(), until, |i| {
                 let mut image = base.clone();
                 image[i] ^= 0xFF;
-                exercise(&image);
+                exercise(image);
             });
         } else {
             for _ in 0..SMOKE_FLIP_SAMPLES {
                 let mut image = base.clone();
                 let i = rng.below(base.len());
                 image[i] ^= 0xFF;
-                exercise(&image);
+                exercise(image);
             }
         }
 
-        // PRNG sweep: multi-byte mutations of the valid image, plus the
-        // occasional pure-noise image.
+        // PRNG sweep: multi-byte mutations of the valid image, every other
+        // one with its disc record shaped at its edges and sealed again, plus
+        // the occasional pure-noise image.
         let mut iteration: u64 = 0;
         loop {
             let mut image = base.clone();
-            let flips = 1 + rng.below(23);
-            for _ in 0..flips {
-                let pos = rng.below(image.len());
-                image[pos] = rng.next_u8();
+            if iteration % 2 == 1 {
+                shape_record(&mut image, record_at, &mut rng);
+            } else {
+                let flips = 1 + rng.below(23);
+                for _ in 0..flips {
+                    let pos = rng.below(image.len());
+                    image[pos] = rng.next_u8();
+                }
             }
-            exercise(&image);
+            exercise(image);
 
             if rng.below(8) == 0 {
                 let mut noise = vec![0u8; 64 * 1024];
                 rng.fill(&mut noise);
-                exercise(&noise);
+                exercise(noise);
             }
 
             iteration += 1;
-            if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+            if !tairix_fuzzseed::within_budget(stream_until) && iteration >= SMOKE_ITERATIONS {
                 break;
             }
         }

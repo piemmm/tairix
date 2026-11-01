@@ -34,6 +34,9 @@
 //! 4. It also requires the production boot to have installed the fatal
 //!    fault handler, without which a fault gets only the port's bare
 //!    report — no registers, no backtrace.
+//! 5. On the baseline model, which lacks PAN, no core holds it and the boot
+//!    records that at Warn; the GICv3 binary, on the default model, requires
+//!    every core held to it and the record at Info.
 //!
 //! A regression that fails any init phase — or that loses a secondary
 //! core — never reaches the finisher, so the run times out and the
@@ -63,6 +66,10 @@
 
 #[cfg(itest_aarch64)]
 mod kernel;
+
+/// Whether every core is held to PAN: the baseline model lacks it.
+#[cfg(itest_aarch64)]
+const PAN_HELD: bool = false;
 
 /// The default `virt` board's tree: a GICv2.
 #[cfg(itest_aarch64)]

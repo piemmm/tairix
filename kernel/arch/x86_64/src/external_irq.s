@@ -1,17 +1,16 @@
-// x86_64 external-IRQ ISR stubs (Stage 4.D Item 2-tail.2).
+// x86_64 external-IRQ ISR stubs.
 //
-// Reserves architectural vectors 0x30..=0xFE for external IRQs. Each vector
-// points to its own tiny stub that pushes the vector number as an immediate
-// and jumps to the shared trampoline, `tairix_arch_x86_64_external_irq_common`
-// in `irq.rs`, which saves and restores the interrupted context around the
-// Rust dispatcher.
+// One stub per vector of the range `irq` defines, which the including
+// `global_asm!` passes in as `first_vector` and `vector_count`. Each pushes its
+// vector number as an immediate and jumps to the shared trampoline,
+// `tairix_arch_x86_64_external_irq_common` in `irq.rs`, which saves and
+// restores the interrupted context around the Rust dispatcher.
 //
 // SAFETY-INVARIANTs:
 //
-//   1. None of the targeted vectors (0x30..=0xFE) push a hardware
-//      error code, so the synthetic-vector qword sits at a known
-//      offset and the per-vector immediate fits in a sign-extended
-//      i32 (every value is ≤ 0xFE).
+//   1. None of the targeted vectors push a hardware error code, so the
+//      synthetic-vector qword sits at a known offset and the per-vector
+//      immediate fits in a sign-extended i32 (every vector fits a byte).
 //   2. The stub addresses are published through the
 //      `tairix_arch_x86_64_external_irq_table` data array (one
 //      `.quad` per vector, indexed by `vector - EXTERNAL_VECTOR_FIRST`).
@@ -25,10 +24,8 @@
 
 // --- Per-vector stubs ---------------------------------------------
 //
-// Generated through `.altmacro` + `.rept` so (no
-// duplication) is satisfied. The macro produces one labelled stub
-// per vector in [EXTERNAL_VECTOR_FIRST, EXTERNAL_VECTOR_LAST]
-// (0x30..=0xFE inclusive — 207 vectors).
+// Generated through `.altmacro` + `.rept`: one labelled stub per vector
+// of the range `irq` defines.
 //
 // Each stub is exactly two instructions: push the vector as an
 // immediate, then jmp to the shared trampoline. The `push imm8`
@@ -53,8 +50,8 @@ tairix_arch_x86_64_external_irq_\vec:
     .quad tairix_arch_x86_64_external_irq_\vec
 .endm
 
-.set    vec_no, 0x30
-.rept   (0xFF - 0x30)
+.set    vec_no, {first_vector}
+.rept   {vector_count}
     external_irq_stub %vec_no
     .set vec_no, vec_no + 1
 .endr
@@ -79,8 +76,8 @@ tairix_arch_x86_64_external_irq_\vec:
 .type   tairix_arch_x86_64_external_irq_table, @object
 
 tairix_arch_x86_64_external_irq_table:
-.set    vec_no, 0x30
-.rept   (0xFF - 0x30)
+.set    vec_no, {first_vector}
+.rept   {vector_count}
     external_irq_table_entry %vec_no
     .set vec_no, vec_no + 1
 .endr

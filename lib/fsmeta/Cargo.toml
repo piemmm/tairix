@@ -16,6 +16,8 @@ path = "src/lib.rs"
 
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The bounded string a key is held in, so parsing one never allocates.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
 # The one rule for showing text from elsewhere (`Faithful`): what an
 # attribute's display escapes, and what keeps a value from being offered back
 # as text.

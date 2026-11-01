@@ -4,7 +4,8 @@
 //! `tairix_log::registry`, so one number never carries two meanings in the
 //! log. This stage reads every identifier the workspace's crates define and
 //! fails when a crate defines one outside its range, when a crate defines any
-//! with no range registered, or when two crates define one value.
+//! with no range registered, when two crates define one value, or when a crate
+//! defines one a removed event carried (`registry::RETIRED`).
 //!
 //! A definition is an `EventId(<integer literal>)`, or an arm of a catalogue
 //! spelled `EventId(match self { … => <integer literal>, … })`; an `EventId`
@@ -15,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use tairix_log::registry::{Owner, OWNERS};
+use tairix_log::registry::{Owner, OWNERS, RETIRED};
 use tairix_log::EventId;
 
 /// The trees whose crates emit events.
@@ -37,7 +38,7 @@ struct Definition {
 /// Every violation found, one per line, or a failure to read the tree.
 pub fn run(root: &Path) -> Result<(), String> {
     let definitions = scan(root)?;
-    let violations = check(&definitions, OWNERS);
+    let violations = check(&definitions, OWNERS, RETIRED);
     if violations.is_empty() {
         return Ok(());
     }
@@ -386,7 +387,7 @@ fn matching(bytes: &[u8], open: usize, up: u8, down: u8) -> Option<usize> {
 }
 
 /// Every way `definitions` break the registry `owners`.
-fn check(definitions: &[Definition], owners: &[Owner]) -> Vec<String> {
+fn check(definitions: &[Definition], owners: &[Owner], retired: &[u32]) -> Vec<String> {
     let mut violations = Vec::new();
     let mut unregistered = BTreeSet::new();
     let mut by_id: BTreeMap<u32, BTreeMap<&str, &Definition>> = BTreeMap::new();
@@ -415,6 +416,13 @@ fn check(definitions: &[Definition], owners: &[Owner]) -> Vec<String> {
                 ));
             }
             Some(_) => {}
+        }
+        if retired.binary_search(&definition.id).is_ok() {
+            violations.push(format!(
+                "{}:{}: event id {} is retired: a removed event carried it, so an old \
+                 record would read as this one",
+                definition.file, definition.line, definition.id
+            ));
         }
         by_id
             .entry(definition.id)
@@ -526,7 +534,7 @@ const LIFETIME: &'static str = "x"; const C: char = '"'; const V: EventId = Even
             definition("kernel/tairix-kernel", 4_260),
             definition("drivers/bus/usb/xhci", 27_001),
         ];
-        assert!(check(&defs, FIXTURE).is_empty());
+        assert!(check(&defs, FIXTURE, &[]).is_empty());
     }
 
     #[test]
@@ -537,7 +545,7 @@ const LIFETIME: &'static str = "x"; const C: char = '"'; const V: EventId = Even
             definition("drivers/bus/usb/xhci", 4_101),
             definition("drivers/storage/raid", 4_191),
         ];
-        let violations = check(&defs, FIXTURE);
+        let violations = check(&defs, FIXTURE, &[]);
         assert_eq!(violations.len(), 3, "{violations:#?}");
         assert!(violations
             .iter()
@@ -551,11 +559,22 @@ const LIFETIME: &'static str = "x"; const C: char = '"'; const V: EventId = Even
     }
 
     #[test]
+    fn a_retired_id_is_refused_wherever_it_is_defined() {
+        let defs = [
+            definition("kernel/core", 4_105),
+            definition("kernel/tairix-kernel", 4_260),
+        ];
+        let violations = check(&defs, FIXTURE, &[4_020, 4_105]);
+        assert_eq!(violations.len(), 1, "{violations:#?}");
+        assert!(violations[0].contains("event id 4105 is retired"));
+    }
+
+    #[test]
     fn one_crate_repeating_an_id_is_not_a_collision() {
         let defs = [
             definition("kernel/tairix-kernel", 4_139),
             definition("kernel/tairix-kernel", 4_139),
         ];
-        assert!(check(&defs, FIXTURE).is_empty());
+        assert!(check(&defs, FIXTURE, &[]).is_empty());
     }
 }

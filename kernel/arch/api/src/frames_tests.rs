@@ -19,15 +19,19 @@ fn leaf(slot: &AtomicU64, seen: u64) -> Leaf<'_> {
     }
 }
 
-/// A slot that counts the exchanges an update makes.
+/// A slot that counts the exchanges an update makes, `racer` set into its
+/// word just ahead of the first, as another CPU winning the race would.
 struct Counted {
     word: AtomicU64,
     exchanges: AtomicUsize,
+    racer: u64,
 }
 
 impl DescriptorSlot for Counted {
     fn exchange(&self, current: u64, new: u64) -> Result<u64, u64> {
-        self.exchanges.fetch_add(1, Ordering::Relaxed);
+        if self.exchanges.fetch_add(1, Ordering::Relaxed) == 0 {
+            self.word.fetch_or(self.racer, Ordering::Relaxed);
+        }
         self.word.exchange(current, new)
     }
 }
@@ -55,6 +59,28 @@ fn an_update_sets_its_bits_on_a_leaf_it_admits() {
         Some(VALID | ACCESSED)
     );
     assert_eq!(slot.load(Ordering::Relaxed), VALID | ACCESSED);
+}
+
+/// An exchange lost to another CPU making the same change leaves the leaf as
+/// that CPU set it: the update takes the set leaf, with no second exchange.
+#[test]
+fn an_update_lost_to_the_same_change_takes_the_leaf_as_set() {
+    let slot = Counted {
+        word: AtomicU64::new(VALID),
+        exchanges: AtomicUsize::new(0),
+        racer: ACCESSED,
+    };
+    let held = Leaf {
+        slot: &slot,
+        seen: VALID,
+        shift: 12,
+    };
+    assert_eq!(
+        held.set_while(ACCESSED, |desc| desc & VALID != 0),
+        Some(VALID | ACCESSED)
+    );
+    assert_eq!(slot.exchanges.load(Ordering::Relaxed), 1);
+    assert_eq!(slot.word.load(Ordering::Relaxed), VALID | ACCESSED);
 }
 
 #[test]
@@ -92,6 +118,7 @@ fn an_update_whose_bits_are_set_writes_nothing() {
     let slot = Counted {
         word: AtomicU64::new(VALID | ACCESSED),
         exchanges: AtomicUsize::new(0),
+        racer: 0,
     };
     let held = Leaf {
         slot: &slot,
@@ -110,6 +137,7 @@ fn an_update_refused_from_the_start_writes_nothing() {
     let slot = Counted {
         word: AtomicU64::new(VALID | ACCESSED),
         exchanges: AtomicUsize::new(0),
+        racer: 0,
     };
     let held = Leaf {
         slot: &slot,

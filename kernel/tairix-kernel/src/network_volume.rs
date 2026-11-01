@@ -12,7 +12,8 @@
 //! A volume its server retires — withdrawn or lost — leaves the namespace at
 //! once, unless the server last said it held writes it had not published:
 //! that one stays, its stand-in answering a device fault and the mount
-//! reporting the loss, until its owner detaches it. The registry is a spin
+//! reporting the loss, until its owner detaches it. However a volume leaves,
+//! what lies on it leaves with it ([`Departed`]). The registry is a spin
 //! lock, and a retirement never waits on the server's own lanes, so a server
 //! that cannot answer cannot hold up its own retirement.
 
@@ -42,7 +43,9 @@ use tairix_kernel_ipc::{CallEndpoint, EndpointId};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_sync::SpinLock;
 
-use super::{mount_flags, record, record_retired, storage_path, take_down, UnavailableFs, Wiring};
+use super::{
+    mount_flags, record, record_retired, storage_path, take_down, UnavailableFs, Wiring, Writes,
+};
 use crate::kernel_fs::KernelFs;
 use crate::system_mount::{publish_volume_identity, FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST};
 use crate::volume_policy::{presentation_word, Presented, PresentedFs};
@@ -130,11 +133,13 @@ struct Claimed {
     activity: Arc<ServerActivity>,
 }
 
-/// An operation's hold on one network volume, let go on drop.
+/// An operation's hold on one network volume, let go on drop: one its server
+/// retired while it was held is retired then, and `departed` told.
 struct Claim<'a> {
     volumes: &'a NetworkVolumes,
     offer: OfferId,
     audit: &'static (dyn Sink + Sync),
+    departed: Departed<'a>,
 }
 
 impl Drop for Claim<'_> {
@@ -150,7 +155,7 @@ impl Drop for Claim<'_> {
             }
         }
         self.volumes
-            .retire_claimed(self.offer, self.audit, "retired_while_held");
+            .retire_claimed(self.offer, self.audit, "retired_while_held", self.departed);
     }
 }
 
@@ -227,8 +232,8 @@ impl NetworkVolumes {
         Ok(())
     }
 
-    /// `op` on the volume `server` offered as `offer`: the handle of the
-    /// attached volume a withdrawal retired at once.
+    /// `op` on the volume `server` offered as `offer`, telling `departed` of
+    /// an attached volume a withdrawal retired.
     ///
     /// # Errors
     ///
@@ -239,7 +244,8 @@ impl NetworkVolumes {
         server: u64,
         offer: OfferId,
         op: FsserveCtl,
-    ) -> Result<Option<DriverHandle>, Errno> {
+        departed: Departed<'_>,
+    ) -> Result<(), Errno> {
         {
             let mut volumes = self.volumes.lock();
             let at = position(&volumes, offer)
@@ -249,16 +255,17 @@ impl NetworkVolumes {
             match op {
                 FsserveCtl::Alive => {
                     volume.activity.touch();
-                    return Ok(None);
+                    return Ok(());
                 }
                 FsserveCtl::Withdraw if volume.claimed => {
                     volume.retiring = true;
-                    return Ok(None);
+                    return Ok(());
                 }
                 FsserveCtl::Withdraw => volume.claimed = true,
             }
         }
-        Ok(self.retire_claimed(offer, wiring.audit, "withdrawn"))
+        self.retire_claimed(offer, wiring.audit, "withdrawn", departed);
+        Ok(())
     }
 
     /// Whether the volume published as `volume_id` is a network volume.
@@ -270,13 +277,13 @@ impl NetworkVolumes {
     }
 
     /// The server serving over `endpoint` is gone: retire each volume it
-    /// offered, telling `retired` the handle of each that leaves the
-    /// namespace or stays lost. Takes no sleeping lock.
+    /// offered, telling `departed` of each that leaves the namespace or stays
+    /// lost. Takes no sleeping lock.
     pub(super) fn server_lost(
         &self,
         endpoint: u64,
         audit: &'static (dyn Sink + Sync),
-        retired: &mut dyn FnMut(DriverHandle),
+        departed: Departed<'_>,
     ) {
         loop {
             let offer = {
@@ -295,13 +302,13 @@ impl NetworkVolumes {
                 volume.claimed = true;
                 volume.offer
             };
-            if let Some(handle) = self.retire_claimed(offer, audit, "server_lost") {
-                retired(handle);
-            }
+            self.retire_claimed(offer, audit, "server_lost", departed);
         }
     }
 
     /// Attach the volume offered as `offer` for `caller`, as `attach` asks.
+    /// One whose target is refused leaves again, `held` settling what was
+    /// held on it meanwhile.
     ///
     /// # Errors
     ///
@@ -313,6 +320,7 @@ impl NetworkVolumes {
         offer: OfferId,
         attach: &NetworkAttach<'_>,
         name_reserved: &dyn Fn(&str) -> bool,
+        held: HeldOn<'_>,
     ) -> Result<AttachReply, Errno> {
         let audit = wiring.audit;
         let refused = |cause: &'static str, errno: Errno| {
@@ -326,7 +334,7 @@ impl NetworkVolumes {
             );
             errno
         };
-        let (claim, offered) = self.claim_offer(offer, caller.uid, audit)?;
+        let (claim, offered) = self.claim_offer(offer, caller.uid, audit, held.departed)?;
         let presented = Presented::asked_by(caller, attach.presentation)
             .map_err(|errno| refused("presentation_refused", errno))?;
         let read_only = attach.read_only || offered.serve.write_refusal.is_some();
@@ -364,12 +372,11 @@ impl NetworkVolumes {
                 },
             ));
         }
-        let fstype = offered.serve.format.as_str();
         let registered = LATE_FILESYSTEM.register_network(
             handle,
             lanes.drivers,
             &offered.source,
-            fstype,
+            offered.serve.format.as_str(),
             offered.volume_id,
             Some(presented.owner(caller.uid)),
         );
@@ -392,9 +399,13 @@ impl NetworkVolumes {
                 narrowing: MountFlags::default(),
             };
             if let Err(errno) = FS_SERVICE.view_bind(caller.uid, caller.caps, &bind) {
-                // Reachable from the moment it was registered, so what anyone
+                // Reachable from the moment it was registered, so an image
+                // attached on it meanwhile is detached first, and what anyone
                 // left held on the server is let go with it.
-                let _ = take_down(attached.handle, offered.volume_id, true, false);
+                let _ = (held.settle)(attached.handle, true);
+                if take_down(attached.handle, offered.volume_id, true, Writes::Served).is_ok() {
+                    (held.departed)(attached.handle);
+                }
                 return Err(refused("target_refused", errno));
             }
         }
@@ -416,8 +427,9 @@ impl NetworkVolumes {
         Ok(reply)
     }
 
-    /// Detach the network volume `request` names, for `caller`, once
-    /// `dependents` has settled what is held on it.
+    /// Detach the network volume `request` names, for `caller`, once `held`
+    /// has settled what is held on it, telling it once the volume has left:
+    /// what entered on it as it was detached leaves with it.
     ///
     /// # Errors
     ///
@@ -427,9 +439,10 @@ impl NetworkVolumes {
         wiring: &Wiring,
         request: &VolumeDetachRequest,
         caller: &Principal<'_>,
-        dependents: Dependents<'_>,
+        held: HeldOn<'_>,
     ) -> Result<(), Errno> {
         let audit = wiring.audit;
+        let departed = held.departed;
         let (claim, attached, lost, endpoint) = {
             let mut volumes = self.volumes.lock();
             let volume = volumes
@@ -461,12 +474,15 @@ impl NetworkVolumes {
                 volumes: self,
                 offer: volume.offer,
                 audit,
+                departed,
             };
             (claim, attached, lost, volume.endpoint)
         };
-        let given_up = match dependents(attached.handle, request.force)
-            .and_then(|()| take_down(attached.handle, request.volume_id, request.force, lost))
-        {
+        let force = request.mode.forces(lost);
+        let given_up = match (held.settle)(attached.handle, force).and_then(|()| {
+            let writes = if lost { Writes::Lost } else { Writes::Served };
+            take_down(attached.handle, request.volume_id, force, writes)
+        }) {
             Ok(given_up) => given_up,
             Err((cause, errno)) => {
                 record(
@@ -490,16 +506,17 @@ impl NetworkVolumes {
             }
         }
         drop(claim);
+        departed(attached.handle);
         end_endpoint(endpoint, audit);
         record(
             audit,
-            Level::Info,
+            if force { Level::Warn } else { Level::Info },
             NETWORK_VOLUME_DETACHED,
             "network-volume: detached",
             &attached.name,
             if given_up.unflushed {
                 "forced_unflushed"
-            } else if request.force {
+            } else if force {
                 "forced"
             } else {
                 "clean"
@@ -511,17 +528,20 @@ impl NetworkVolumes {
     /// Retire the volume offered as `offer`, which the caller has claimed,
     /// for `cause`, and let the claim go: an offer goes with its channel; an
     /// attached volume leaves the namespace, or stays lost while its server
-    /// held writes it had not published. The handle of an attached volume it
-    /// retired. Takes no sleeping lock.
+    /// held writes it had not published, and `departed` is told once the
+    /// registry lock is let go. Takes no sleeping lock.
     fn retire_claimed(
         &self,
         offer: OfferId,
         audit: &'static (dyn Sink + Sync),
         cause: &str,
-    ) -> Option<DriverHandle> {
+        departed: Departed<'_>,
+    ) {
         let retiring = {
             let mut volumes = self.volumes.lock();
-            let at = position(&volumes, offer)?;
+            let Some(at) = position(&volumes, offer) else {
+                return;
+            };
             let volume = &mut volumes[at];
             match volume.stage {
                 Stage::Attached(attached) => Retiring {
@@ -535,7 +555,7 @@ impl NetworkVolumes {
                 Stage::Lost(_) => {
                     volume.claimed = false;
                     volume.retiring = false;
-                    return None;
+                    return;
                 }
                 Stage::Offered { .. } => {
                     let dropped = volumes.remove(at);
@@ -549,7 +569,7 @@ impl NetworkVolumes {
                         "offer_dropped",
                     );
                     end_endpoint(dropped.endpoint, audit);
-                    return None;
+                    return;
                 }
             }
         };
@@ -590,7 +610,7 @@ impl NetworkVolumes {
             },
         );
         end_endpoint(retiring.endpoint, audit);
-        Some(handle)
+        departed(handle);
     }
 
     /// Claim the offer `offer` made to `uid`.
@@ -600,12 +620,13 @@ impl NetworkVolumes {
     /// [`Errno::NotFound`] for no offer made to `uid` under that id, and
     /// [`Errno::AlreadyExists`] for one attached already; [`Errno::Busy`] for
     /// one another operation holds.
-    fn claim_offer(
-        &self,
+    fn claim_offer<'a>(
+        &'a self,
         offer: OfferId,
         uid: u32,
         audit: &'static (dyn Sink + Sync),
-    ) -> Result<(Claim<'_>, Claimed), Errno> {
+        departed: Departed<'a>,
+    ) -> Result<(Claim<'a>, Claimed), Errno> {
         let mut volumes = self.volumes.lock();
         let at = position(&volumes, offer)
             .filter(|&at| volumes[at].for_uid == uid)
@@ -632,6 +653,7 @@ impl NetworkVolumes {
                 volumes: self,
                 offer,
                 audit,
+                departed,
             },
             claimed,
         ))
@@ -710,10 +732,54 @@ impl NetworkVolumes {
     }
 }
 
-/// What settles the volumes held on the volume registered as a handle before
-/// it is detached, forced or not: `(cause, errno)` for what keeps it.
-pub(super) type Dependents<'a> =
-    &'a dyn Fn(DriverHandle, bool) -> Result<(), (&'static str, Errno)>;
+#[cfg(test)]
+impl NetworkVolumes {
+    /// Run `during` while network volume `id` is held as an attach or detach
+    /// holds it, then let it go, telling `departed` if it was retired
+    /// meanwhile.
+    pub(super) fn while_held<T>(
+        &self,
+        id: &[u8; 16],
+        audit: &'static (dyn Sink + Sync),
+        departed: Departed<'_>,
+        during: impl FnOnce() -> T,
+    ) -> T {
+        let held = {
+            let mut volumes = self.volumes.lock();
+            volumes
+                .iter_mut()
+                .find(|v| v.volume_id == *id && !v.claimed)
+                .map(|volume| {
+                    volume.claimed = true;
+                    Claim {
+                        volumes: self,
+                        offer: volume.offer,
+                        audit,
+                        departed,
+                    }
+                })
+        };
+        assert!(held.is_some(), "a network volume nothing holds");
+        let outcome = during();
+        drop(held);
+        outcome
+    }
+}
+
+/// What the volumes held on a network volume need as it leaves.
+#[derive(Clone, Copy)]
+pub(super) struct HeldOn<'a> {
+    /// Settles them before the volume, registered as the handle, is
+    /// detached, forced or not: `(cause, errno)` for what keeps it.
+    pub(super) settle: &'a dyn Fn(DriverHandle, bool) -> Result<(), (&'static str, Errno)>,
+    /// Retires them once it has left.
+    pub(super) departed: Departed<'a>,
+}
+
+/// What retires the volumes held on a network volume that has left the
+/// namespace or stands in lost, told the handle it was registered as,
+/// whichever path it left by. Called with no registry lock held.
+pub(super) type Departed<'a> = &'a dyn Fn(DriverHandle);
 
 /// What a network attach mounts: its lanes, and the state their server
 /// reports.

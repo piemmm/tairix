@@ -47,9 +47,11 @@ struct Slot {
     /// The directory this consumer is waiting on, cleared when its answer is
     /// stored. Recording a different one abandons the old request.
     wanted: Option<Vec<String>>,
-    /// Whether a worker has taken [`Slot::wanted`] and not yet answered it, so
-    /// the same request is never handed out twice.
-    reading: bool,
+    /// The reads workers have taken for this consumer and not yet answered,
+    /// at most one per worker. Keyed by what each was taken for, so a read
+    /// hung on one device never holds up the consumer's next request, and a
+    /// request already being read is never handed out twice.
+    reading: Vec<Reading>,
     /// Advanced by every fresh request, and stamped on each job handed out, so
     /// a read that began before the latest one is recognised when it lands.
     request: u64,
@@ -57,12 +59,32 @@ struct Slot {
     done: Option<Answer>,
 }
 
+/// A read a worker has taken and not yet answered.
+struct Reading {
+    target: Vec<String>,
+    request: u64,
+}
+
 impl Slot {
-    /// Make `components` the directory this consumer is waiting on.
-    fn want(&mut self, components: &[String]) {
-        if self.wanted.as_deref() != Some(components) {
-            self.wanted = Some(components.to_vec());
+    /// Make `components` the directory this consumer is waiting on, answering
+    /// whether that gave a worker a read to take it had not been given.
+    fn want(&mut self, components: &[String]) -> bool {
+        if self.wanted.as_deref() == Some(components) {
+            return false;
         }
+        self.wanted = Some(components.to_vec());
+        self.unread().is_some()
+    }
+
+    /// The directory this consumer waits on, unless a worker is reading it
+    /// for this very request already.
+    fn unread(&self) -> Option<&[String]> {
+        let wanted = self.wanted.as_deref()?;
+        let taken = self
+            .reading
+            .iter()
+            .any(|reading| reading.request == self.request && reading.target == wanted);
+        (!taken).then_some(wanted)
     }
 }
 
@@ -113,6 +135,8 @@ pub struct ListingDesk<C> {
     /// Set once the embedder is tearing down, so a parked worker leaves instead
     /// of looking for work.
     stopping: bool,
+    /// How many reads a take or refresh has given the workers to take.
+    recorded: u64,
 }
 
 impl<C: Copy + Ord> Default for ListingDesk<C> {
@@ -129,6 +153,7 @@ impl<C: Copy + Ord> ListingDesk<C> {
             slots: BTreeMap::new(),
             last: None,
             stopping: false,
+            recorded: 0,
         }
     }
 
@@ -157,7 +182,9 @@ impl<C: Copy + Ord> ListingDesk<C> {
             // For somewhere the consumer has since navigated away from: gone.
             Some(_) | None => {}
         }
-        slot.want(components);
+        if slot.want(components) {
+            self.recorded = self.recorded.wrapping_add(1);
+        }
         Ok(Listing::Pending)
     }
 
@@ -171,18 +198,24 @@ impl<C: Copy + Ord> ListingDesk<C> {
     pub fn refresh(&mut self, client: C, components: &[String]) {
         let slot = self.slots.entry(client).or_default();
         slot.done = None;
-        slot.want(components);
+        let _ = slot.want(components);
         slot.request = slot.request.wrapping_add(1);
+        self.recorded = self.recorded.wrapping_add(1);
+    }
+
+    /// How many reads a [`take`](Self::take) or [`refresh`](Self::refresh)
+    /// has given the workers to take: an embedder wakes a worker when a call
+    /// moves it, so asking again for a read already queued or under way
+    /// wakes none.
+    #[must_use]
+    pub const fn recorded(&self) -> u64 {
+        self.recorded
     }
 
     /// Whether any consumer has an unanswered request no worker has taken.
     #[must_use]
     pub fn has_work(&self) -> bool {
-        !self.stopping
-            && self
-                .slots
-                .values()
-                .any(|slot| slot.wanted.is_some() && !slot.reading)
+        !self.stopping && self.slots.values().any(|slot| slot.unread().is_some())
     }
 
     /// Take the next directory to read, or `None` when there is nothing to do.
@@ -190,10 +223,20 @@ impl<C: Copy + Ord> ListingDesk<C> {
     /// Round-robin from wherever the last hand-out left the cursor, so two
     /// consumers asking continuously each get every other read.
     pub fn next_job(&mut self) -> Option<ListingJob<C>> {
+        self.next_job_where(|_| true)
+    }
+
+    /// Take the next directory to read that `mine` admits, by its root-first
+    /// components, in the same round-robin: what a worker takes when its
+    /// workers each serve their own share of the directories.
+    pub fn next_job_where(
+        &mut self,
+        mut mine: impl FnMut(&[String]) -> bool,
+    ) -> Option<ListingJob<C>> {
         if self.stopping {
             return None;
         }
-        let workable = |(_, slot): &(&C, &Slot)| !slot.reading && slot.wanted.is_some();
+        let workable = |(_, slot): &(&C, &Slot)| slot.unread().is_some_and(&mut mine);
         let client = match self.last {
             Some(last) => self
                 .slots
@@ -205,7 +248,10 @@ impl<C: Copy + Ord> ListingDesk<C> {
         .map(|(client, _)| *client)?;
         let slot = self.slots.get_mut(&client)?;
         let target = slot.wanted.clone()?;
-        slot.reading = true;
+        slot.reading.push(Reading {
+            target: target.clone(),
+            request: slot.request,
+        });
         self.last = Some(client);
         Some(ListingJob {
             client,
@@ -231,7 +277,13 @@ impl<C: Copy + Ord> ListingDesk<C> {
         let Some(slot) = self.slots.get_mut(&job.client) else {
             return false;
         };
-        slot.reading = false;
+        if let Some(at) = slot
+            .reading
+            .iter()
+            .position(|reading| reading.request == job.request && reading.target == job.target)
+        {
+            slot.reading.swap_remove(at);
+        }
         if slot.wanted.as_deref() != Some(job.target.as_slice()) || slot.request != job.request {
             return false;
         }

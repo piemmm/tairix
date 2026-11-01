@@ -32,8 +32,8 @@ y cierran la lista de la categoría bajo el cursor. Una ventana demasiado
 estrecha descarta la barra lateral, y la primera miga de la ruta enumera
 entonces las categorías.
 
-Se lanza desde la fila *Settings…* del menú de sistema del escritorio, desde la
-Biblioteca de programas, o por su nombre desde un intérprete de órdenes.
+Se lanza desde la fila *Settings…* del menú de sistema del escritorio, o desde
+un intérprete de órdenes por su ruta, `/System/Components/settings.app`.
 Requiere una sesión gráfica en marcha: sin ella el canal de ventana es
 inalcanzable y comunica el rechazo en el flujo de error estándar y termina.
 
@@ -64,6 +64,14 @@ El panel muestra también la temperatura del procesador y si el ventilador está
 en marcha. Cuando *Automatic* no puede leer la temperatura, el ventilador
 funciona hasta que pueda. Como los demás ajustes de la máquina, un cambio espera
 a *Apply*, que pide una cuenta que pueda cambiarlos.
+
+**Storage** enumera cada volumen montado, salvo el que otro usuario
+mantiene privado: dónde está montado, su sistema de archivos, su dispositivo y
+su soporte, lo lleno que está y si está en buen estado. Es un informe, no un
+control —montar y desmontar corresponden al gestor de archivos y al comando
+`mount`— y un volumen cuyo formato no guarda ninguna capacidad fija lo dice en
+lugar de mostrar una barra. `df` informa de las mismas cifras en un intérprete
+de órdenes.
 
 ## EXIT STATUS
 

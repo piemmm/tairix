@@ -12,6 +12,12 @@ use super::{Limit, Validator};
 use crate::enumerant::{BuiltIn, Capability, Decoration, Dim, ImageFormat, StorageClass};
 use crate::{Id, Instruction, Op, Value};
 
+/// The most components a vector the Shader capability admits has.
+pub const MAX_VECTOR_COMPONENTS: usize = 4;
+
+/// The most columns a matrix the Shader capability admits has.
+pub const MAX_MATRIX_COLUMNS: usize = 4;
+
 tairix_util::flags! {
     /// What a type is or holds, at any depth.
     pub(crate) struct Holds(u32) {
@@ -87,6 +93,22 @@ impl Scalar {
 
     pub(crate) const fn is_unsigned(self) -> bool {
         matches!(self, Self::Int { signed: false, .. })
+    }
+
+    /// Whether a literal's bits hold a value of this scalar: a type
+    /// narrower than its word zero-extended, or sign-extended if signed.
+    pub(crate) fn holds(self, literal: u64) -> bool {
+        match self {
+            Self::Int {
+                width: 16,
+                signed: true,
+            } => {
+                let low = (literal & 0xffff) as u16;
+                literal == u64::from(i32::from(low.cast_signed()).cast_unsigned())
+            }
+            Self::Int { width: 16, .. } | Self::Float { width: 16 } => literal <= 0xffff,
+            _ => true,
+        }
     }
 }
 
@@ -516,7 +538,7 @@ impl Validator<'_> {
                 let Ty::Scalar(s) = self.ty(component).ty else {
                     return Err(Rule::Type);
                 };
-                if !(2..=4).contains(&count) {
+                if !(2..=MAX_VECTOR_COMPONENTS).contains(&(count as usize)) {
                     return Err(Rule::Type);
                 }
                 Ok((Ty::Vector { scalar: s, count }, 1, self.ty(component).holds))
@@ -527,7 +549,7 @@ impl Validator<'_> {
                 let Ty::Vector { scalar: s, count } = self.ty(column).ty else {
                     return Err(Rule::Type);
                 };
-                if !s.is_float() || !(2..=4).contains(&columns) {
+                if !s.is_float() || !(2..=MAX_MATRIX_COLUMNS).contains(&(columns as usize)) {
                     return Err(Rule::Type);
                 }
                 let holds = self.ty(column).holds.with(Holds::MATRIX);

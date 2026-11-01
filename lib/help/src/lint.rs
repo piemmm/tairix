@@ -38,7 +38,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::doc::{Block, HelpDoc, SectionKind, Span};
+use crate::doc::{Block, HelpDoc, ListItem, SectionKind, Span};
 use crate::locale::{DocumentName, Locale, DEFAULT_LOCALE, REQUIRED_LOCALES};
 
 /// One discovered help document for the lint to judge: its bundle directory
@@ -272,22 +272,17 @@ fn tree_violations(
 /// no `OPTIONS` section; an item that does not lead with a backticked key is
 /// a violation.
 fn options_switch_keys(at: &str, doc: &HelpDoc) -> Result<Option<Vec<String>>, Vec<String>> {
-    let Some(section) = doc.section(SectionKind::Options) else {
+    if doc.section(SectionKind::Options).is_none() {
         return Ok(None);
-    };
+    }
     let mut keys = Vec::new();
     let mut violations = Vec::new();
-    for block in &section.blocks {
-        let Block::List { items, .. } = block else {
-            continue;
-        };
-        for item in items {
-            match item.spans.first() {
-                Some(Span::Code(key)) => keys.push(key.clone()),
-                _ => violations.push(format!(
-                    "{at}: OPTIONS item does not lead with a backticked switch key"
-                )),
-            }
+    for item in options_items(doc) {
+        match item.spans.first() {
+            Some(Span::Code(key)) => keys.push(key.clone()),
+            _ => violations.push(format!(
+                "{at}: OPTIONS item does not lead with a backticked switch key"
+            )),
         }
     }
     if violations.is_empty() {
@@ -295,6 +290,33 @@ fn options_switch_keys(at: &str, doc: &HelpDoc) -> Result<Option<Vec<String>>, V
     } else {
         Err(violations)
     }
+}
+
+/// The `OPTIONS` section's list items, in document order.
+fn options_items(doc: &HelpDoc) -> impl Iterator<Item = &ListItem> {
+    doc.section(SectionKind::Options)
+        .into_iter()
+        .flat_map(|section| &section.blocks)
+        .filter_map(|block| match block {
+            Block::List { items, .. } => Some(items),
+            _ => None,
+        })
+        .flatten()
+}
+
+/// Whether `doc`'s `OPTIONS` entry for the switch whose key begins with
+/// `key_prefix` mentions `needle` in any of its spans; `None` where the
+/// document has no such entry.
+#[must_use]
+pub fn options_entry_mentions(doc: &HelpDoc, key_prefix: &str, needle: &str) -> Option<bool> {
+    let entry = options_items(doc).find(
+        |item| matches!(item.spans.first(), Some(Span::Code(key)) if key.starts_with(key_prefix)),
+    )?;
+    Some(entry.spans.iter().any(|span| match span {
+        Span::Text(text) | Span::Strong(text) | Span::Emphasis(text) | Span::Code(text) => {
+            text.contains(needle)
+        }
+    }))
 }
 
 /// Render a switch-key sequence (or the absence of an `OPTIONS` section)
@@ -368,7 +390,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::fmt::Write as _;
 
-    use super::{lint_help_trees, LintDoc, REQUIRED_LOCALES};
+    use super::{lint_help_trees, options_entry_mentions, LintDoc, REQUIRED_LOCALES};
 
     /// A minimal valid document whose `OPTIONS` documents `keys` (rendered
     /// one list item per key).
@@ -592,6 +614,21 @@ mod tests {
                 .iter()
                 .any(|v| v.contains("not a `.md` document")),
             "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn an_options_entry_is_found_by_its_key_and_read_for_a_mention() {
+        let doc = crate::HelpDoc::parse(
+            b"## NAME\n\nx \xe2\x80\x94 a tool\n\n## SYNOPSIS\n\n`x`\n\n## DESCRIPTION\n\nDoes x.\n\n## OPTIONS\n\n- `-g, --gid GID` the group id; else from 1000\n- `-h` help\n",
+        )
+        .expect("a document");
+        assert_eq!(options_entry_mentions(&doc, "-g,", "1000"), Some(true));
+        assert_eq!(options_entry_mentions(&doc, "-g,", "2000"), Some(false));
+        assert_eq!(
+            options_entry_mentions(&doc, "-u,", "1000"),
+            None,
+            "no such entry"
         );
     }
 }

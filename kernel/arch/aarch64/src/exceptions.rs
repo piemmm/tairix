@@ -737,17 +737,17 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
         }
 
         // Software-managed Access Flag (the cold-page referenced bit for
-        // `plans/SWAPSWAPSWAP.md`): cortex-a57/a72 lack HAFDBS, so an
-        // access to a valid leaf whose AF the scanner cleared
+        // `plans/SWAPSWAPSWAP.md`): the port leaves `TCR_EL1.HA` clear, so
+        // an access to a valid leaf whose AF the scanner cleared
         // (`crate::paging::AddressSpace::test_and_clear_accessed`) raises
         // an Access-Flag fault rather than updating AF in the walk. Set AF
         // back on the faulting leaf and return so the trampoline `eret`
         // retries the access (`ELR_EL1` still points at the faulting
         // instruction — the PE does not advance it for an abort). Both
-        // data and instruction aborts, from either EL, are handled. When
-        // the leaf is not a cleared-AF leaf (`set_accessed_flag_in_active`
-        // returns `false`), the fault was something else and falls through
-        // to the resolver / fatal path unchanged (fail closed).
+        // data and instruction aborts, from either EL, are handled. When no
+        // valid leaf covers the address (`set_accessed_flag_in_active`
+        // returns `false`), the fault falls through to the resolver / fatal
+        // path (fail closed).
         if let Some(address) = far {
             if crate::fault::is_abort(esr)
                 && crate::fault::is_access_flag_fault(esr)

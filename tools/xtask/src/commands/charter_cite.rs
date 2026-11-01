@@ -45,6 +45,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use super::source_tree;
+use crate::children::Children;
 
 /// The charter file, both the label source and the name rule 1 refuses.
 const CHARTER: &str = "AGENTS.md";
@@ -548,10 +549,10 @@ fn scan_paragraph(text: &str, labels: &BTreeSet<String>) -> Vec<(usize, &'static
 }
 
 /// Scan the workspace rooted at `root` for citations of the charter.
-pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
+pub fn scan(root: &Path, children: &Children) -> Result<Vec<Violation>, String> {
     let labels = charter_labels(root)?;
     let mut out = Vec::new();
-    source_tree::for_each_file(root, "charter-cite", |path, rel, name| {
+    source_tree::for_each_file(root, children, "charter-cite", |path, rel, name| {
         if name != SELF_FILE {
             if let Some(syntax) = Syntax::of(name) {
                 scan_file(path, rel, syntax, &labels, &mut out)?;
@@ -680,9 +681,9 @@ fn line_of<'a>(para: &[(usize, &'a str)], at: usize) -> Option<(usize, &'a str)>
 }
 
 /// Run the check, printing a report and failing when any citation remains.
-pub fn run(root: &Path) -> Result<(), String> {
+pub fn run(root: &Path, children: &Children) -> Result<(), String> {
     use std::fmt::Write as _;
-    let violations = scan(root)?;
+    let violations = scan(root, children)?;
     if violations.is_empty() {
         return Ok(());
     }
@@ -724,7 +725,7 @@ mod tests {
 
     #[test]
     fn workspace_carries_no_charter_citations() {
-        let violations = scan(&workspace_root()).expect("scan");
+        let violations = scan(&workspace_root(), &Children::default()).expect("scan");
         assert!(
             violations.is_empty(),
             "unexpected charter citations in comments: {violations:#?}"

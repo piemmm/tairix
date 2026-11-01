@@ -48,7 +48,7 @@ use tairix_log::{Event, EventId, Level, Sink};
 use tairix_virtio::transport_mmio::{regs, COMPATIBLE};
 use tairix_virtio::{PoolId, VirtioHost};
 
-use crate::common::{drive_driver_lifecycle, FixtureLine, QemuEnv, ScenarioConfig, IDENTITY_LIMIT};
+use crate::common::{drive_driver_lifecycle, FixtureLine, QemuEnv, ScenarioConfig};
 use tairix_itest_finisher::fail_point;
 
 /// Re-export so the verticals name the concrete transport for the shared
@@ -182,6 +182,16 @@ impl QemuEnv for AArch64QemuEnv {
 }
 
 // --- EL1 bring-up ----------------------------------------------------
+
+/// The identity map [`bring_up_el1_identity_mmu`] installs, as a physical
+/// map: the board's device registers and the RAM a vertical's buffers sit in.
+#[must_use]
+pub fn identity_map() -> DirectPhysMap {
+    // SAFETY: the bring-up maps `[0, IDENTITY_GIB)` GiB as itself and nothing
+    // unmaps it; before it the MMU is off and every address is its own.
+    unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) }
+        .expect("the identity map addresses itself")
+}
 
 /// Bring the `virt`-board PE up to the state the rest of every aarch64
 /// vertical assumes: FP/SIMD enabled at EL1 and the stage-1 MMU on with a
@@ -463,9 +473,7 @@ where
     let Ok(frames) = FrameAllocator::new(&dma_map) else {
         env.fail("frame allocator build");
     };
-    // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let phys = unsafe { DirectPhysMap::identity(IDENTITY_LIMIT) }
-        .expect("the boot direct map addresses its window");
+    let phys = identity_map();
 
     // 3. Bus-driver task capability context.
     let mut grants = CapabilitySet::empty();

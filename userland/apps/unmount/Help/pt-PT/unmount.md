@@ -25,18 +25,22 @@ o `mount` resolve um. O volume privado de outro utilizador não mostra
 nem o seu nome de ficheiro nem os diretórios a que está ligado, pelo que
 se indica pelo local onde está montado em `/Storage`.
 
-Um volume cujo dispositivo foi removido ainda com escritas por
-confirmar permanece visível como `unavailable-dirty` (ou
-`unavailable-lost`) na lista de montagens, e um `unmount` simples
-recusa: os dados retidos são guardados para uma reinserção verificada.
-Um volume no qual ainda há ficheiros abertos, ou que um programa tem
-como diretório de trabalho, também recusa um `unmount` simples.
-`--force` é a saída deliberada — os ficheiros ainda abertos no volume
-são desligados, um programa que nele trabalhe fica num diretório que já
-não existe, os dados retidos são descartados, o volume é retirado e
-aquilo de que se prescindiu fica registado no registo de auditoria. Num
-volume saudável, `--force` continua a despejar e desanexar de forma
-limpa; nada é descartado quando uma confirmação limpa é possível.
+Um volume cujo dispositivo foi removido ainda com escritas por confirmar
+permanece visível como `unavailable-dirty` na lista de montagens, e um
+`unmount` simples recusa: os dados retidos são guardados para uma
+reinserção verificada. O mesmo acontece com um volume reinserido sem que
+se tenha podido demonstrar que ficou inalterado (`recovery-conflict`), o
+qual ainda retém esses dados, e com um volume cujas escritas por
+confirmar não puderam ser mantidas (`unavailable-lost`), para que a sua
+perda seja reconhecida em vez de passar em claro. Um volume no qual
+ainda há ficheiros abertos, ou que um programa tem como diretório de
+trabalho, também recusa um `unmount` simples. `--force` é a saída
+deliberada — os ficheiros ainda abertos no volume são desligados, um
+programa que nele trabalhe fica num diretório que já não existe, os
+dados retidos são descartados, o volume é retirado e aquilo de que se
+prescindiu fica registado no registo de auditoria. Num volume saudável,
+`--force` continua a despejar e desanexar de forma limpa; nada é
+descartado quando uma confirmação limpa é possível.
 
 Uma imagem de disco ou uma partilha de rede que tenha montado pode ser
 desanexada por si; qualquer outro volume exige a autoridade de

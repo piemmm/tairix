@@ -22,12 +22,6 @@
 //! Reference: Intel SDM Vol. 3B §18.17 ("Invariant TSC"); AMD64 APM
 //! Vol. 2 — CPUID leaf `0x8000_0007` EDX bit 8 (`TscInvariant`).
 
-/// CPUID leaf reporting the maximum supported *extended* leaf in `EAX`.
-/// The Advanced Power Management leaf is probed only when it is within
-/// this bound.
-#[cfg_attr(not(all(target_arch = "x86_64", target_os = "none")), allow(dead_code))]
-const LEAF_EXT_MAX: u32 = 0x8000_0000;
-
 /// CPUID "Advanced Power Management Information" leaf. `EDX` bit 8 is the
 /// Invariant TSC flag on both Intel (SDM Vol. 3B §18.17) and AMD (APM
 /// Vol. 2).
@@ -51,12 +45,9 @@ pub const fn invariant_tsc_supported(advanced_power_mgmt_edx: u32) -> bool {
 /// Returns `true` when the CPU this function executes on advertises an
 /// Invariant TSC.
 ///
-/// On the bare-metal target it bounds the maximum extended leaf via leaf
-/// `0x8000_0000` before reading leaf `0x8000_0007` (the SDM/APM usage
-/// requirement), then decodes the flag with [`invariant_tsc_supported`].
-/// A part whose maximum extended leaf does not even reach
-/// `0x8000_0007` cannot assert invariance, so the probe returns `false`
-/// (fail closed).
+/// On the bare-metal target it decodes leaf `0x8000_0007` with
+/// [`invariant_tsc_supported`]. A part that does not report the leaf cannot
+/// assert invariance, so the probe returns `false` (fail closed).
 ///
 /// On the host target there is no bare-metal CPU contract to honour and
 /// the production boot validation never runs, so the probe reports
@@ -68,14 +59,8 @@ pub const fn invariant_tsc_supported(advanced_power_mgmt_edx: u32) -> bool {
 pub fn detect_invariant_tsc() -> bool {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        // `CPUID` is unconditionally available on every x86_64 CPU (it
-        // predates the architecture) and is side-effect-free, so these
-        // intrinsics are safe on this target.
-        let max_ext_leaf = core::arch::x86_64::__cpuid(LEAF_EXT_MAX).eax;
-        if max_ext_leaf < LEAF_ADVANCED_POWER_MGMT {
-            return false;
-        }
-        invariant_tsc_supported(core::arch::x86_64::__cpuid(LEAF_ADVANCED_POWER_MGMT).edx)
+        crate::cpuid::leaf(LEAF_ADVANCED_POWER_MGMT, 0)
+            .is_some_and(|leaf| invariant_tsc_supported(leaf.edx))
     }
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {

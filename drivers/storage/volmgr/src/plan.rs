@@ -9,11 +9,14 @@
 //! [`tairix_fsprobe::recognise`]. A **RAID array member** is counted
 //! ([`PlanSummary::raid_members`]) and skipped, never attached: it belongs to
 //! an array awaiting assembly, one copy of a mirror mounted read-write
-//! diverges the array, and a member that missed writes serves stale data.
-//! Volumes are planned in a fixed order:
+//! diverges the array, and a member that missed writes serves stale data. A
+//! disk an **Amiga Rigid Disk Block** partitions holds partitions this build
+//! does not attach (`plans/DISK-IMAGES.md` DI20): with no readable PC table
+//! over its start it is counted ([`PlanSummary::unrecognised`]), never planned
+//! and never blank. Volumes are planned in a fixed order:
 //!
 //! 1. **A whole-device volume first.** A format whose structures open the
-//!    device (`ARXFS`, ext4, FAT32, ADFS) leaves no room for a partition
+//!    device (`ARXFS`, ext4, FAT32, AmigaDOS, ADFS) leaves no room for a partition
 //!    table, so the device is planned whole and the partition parse skipped:
 //!    parsing a boot sector's code bytes as an MBR would fabricate extents.
 //!    An optical disc — a device that reports a disc layout
@@ -72,7 +75,9 @@ pub struct VolumePlan {
 pub struct PlanSummary {
     /// Volumes recognised and handed to the sink.
     pub planned: u32,
-    /// Present partitions recognised as nothing.
+    /// Extents holding nothing this build attaches: a present partition that
+    /// is no supported volume or lies off the device, or a disk an Amiga
+    /// Rigid Disk Block partitions with no readable PC table over it.
     pub unrecognised: u32,
     /// Extents (the whole device, or a partition) recognised as a **RAID array
     /// member** and deliberately *not* attached: a member belongs to a RAID
@@ -80,8 +85,9 @@ pub struct PlanSummary {
     /// diverge a mirror's copies or serve stale data. Not an error, and never
     /// counted as blank/unrecognised.
     pub raid_members: u32,
-    /// `true` when the device carried no partition table and no
-    /// whole-device volume (nothing attachable, not an error).
+    /// `true` only when the device carries nothing at all: no RAID
+    /// membership, no partition table (PC or Amiga) and no whole-device
+    /// volume — the one shape offered for array composition.
     pub no_scheme: bool,
 }
 
@@ -280,6 +286,42 @@ mod tests {
 
     const BS: usize = 512;
     const BS_U32: u32 = 512;
+
+    /// The name the README's attached-format list gives `fstype`: exhaustive,
+    /// so a format added fails to build until the list is spelled for it.
+    fn named_in_readme(fstype: VolumeFsType) -> &'static str {
+        match fstype {
+            VolumeFsType::ARXFS => "ARXFS",
+            VolumeFsType::Ext4 => "ext2/3/4",
+            VolumeFsType::Fat32 => "FAT32",
+            VolumeFsType::Iso9660 => "ISO 9660",
+            VolumeFsType::Udf => "UDF",
+            VolumeFsType::Adfs => "ADFS",
+            VolumeFsType::Affs => "AmigaDOS",
+        }
+    }
+
+    #[test]
+    fn the_readme_names_every_filesystem_a_volume_is_planned_as() {
+        let readme = include_str!("../README.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (from, to) = (
+            "Only the formats a served driver ships for —",
+            "— are attached",
+        );
+        let start = readme.find(from).expect("the list's opening") + from.len();
+        let end = start + readme[start..].find(to).expect("the list's close");
+        let list = &readme[start..end];
+        for fstype in VolumeFsType::ALL {
+            let name = named_in_readme(fstype);
+            assert!(
+                list.contains(name),
+                "README.md's attached formats omit {name}"
+            );
+        }
+    }
 
     /// An in-memory block device over a byte image.
     struct MemBlock {

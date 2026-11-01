@@ -1028,50 +1028,13 @@ mod tests {
     use super::*;
 
     use alloc::vec::Vec;
-    use core::alloc::{GlobalAlloc, Layout};
-    use core::cell::{Cell, RefCell};
+    use core::cell::RefCell;
     use tairix_abi::Errno;
 
     extern crate std;
 
-    std::thread_local! {
-        /// Whether this thread's allocations are refused.
-        static STARVED: Cell<bool> = const { Cell::new(false) };
-    }
-
-    /// The system allocator, refusing every allocation of a thread that
-    /// asked to be starved, so a bind with no memory to record it in is seen
-    /// refused rather than aborting the process.
-    struct Starving;
-
-    // SAFETY: every method forwards to `System`, which upholds the contract,
-    // or returns null, which the contract allows for any request.
-    unsafe impl GlobalAlloc for Starving {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            if STARVED.with(Cell::get) {
-                return core::ptr::null_mut();
-            }
-            // SAFETY: forwarded; the caller upholds the layout contract.
-            unsafe { std::alloc::System.alloc(layout) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            // SAFETY: `ptr` came from `System` with `layout`, as no starved
-            // allocation ever returned one.
-            unsafe { std::alloc::System.dealloc(ptr, layout) }
-        }
-    }
-
     #[global_allocator]
-    static ALLOCATOR: Starving = Starving;
-
-    /// Run `f` with this thread's allocations refused.
-    fn starved<T>(f: impl FnOnce() -> T) -> T {
-        STARVED.with(|starved| starved.set(true));
-        let out = f();
-        STARVED.with(|starved| starved.set(false));
-        out
-    }
+    static ALLOCATOR: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
     /// A controller that cannot read its lines back says so, rather than
     /// reporting a line idle.
@@ -1084,7 +1047,7 @@ mod tests {
     fn a_bind_with_nothing_to_record_it_in_is_refused_and_leaves_no_trace() {
         let t = IrqTable::new(15);
         assert_eq!(
-            starved(|| t.bind(9, ProcessId(1))),
+            tairix_fuzzseed::meter::refusing_above(0, || t.bind(9, ProcessId(1))),
             Err(IrqError::Exhausted)
         );
         assert!(t.is_empty());

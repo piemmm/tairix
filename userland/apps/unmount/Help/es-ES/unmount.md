@@ -26,18 +26,22 @@ su nombre de archivo ni los directorios a los que está enlazado, así que
 se nombra por el lugar donde está montado en `/Storage`.
 
 Un volumen cuyo dispositivo fue retirado con escrituras aún sin
-confirmar sigue visible como `unavailable-dirty` (o
-`unavailable-lost`) en la lista de montajes, y un `unmount` simple lo
-rechaza: sus datos retenidos se conservan para una reinserción
-verificada. Un `unmount` simple también rechaza un volumen con
-archivos aún abiertos en él o que un programa tiene como directorio de
-trabajo. `--force` es la salida deliberada: los archivos aún abiertos
-en el volumen quedan desconectados, un programa que trabaja en él se
-queda en un directorio que ya no existe, los datos retenidos se
-descartan, el volumen se retira y lo que se abandonó queda registrado
-en el registro de auditoría. En un volumen sano, `--force` sigue
-vaciando y desmontando limpiamente; nada se descarta cuando es posible
-una confirmación limpia.
+confirmar sigue visible como `unavailable-dirty` en la lista de
+montajes, y un `unmount` simple lo rechaza: sus datos retenidos se
+conservan para una reinserción verificada. Asimismo rechaza un volumen
+reinsertado del que no pudo demostrarse que siguiera sin cambios
+(`recovery-conflict`), que aún conserva esos datos, y uno cuyas
+escrituras sin confirmar no pudieron guardarse (`unavailable-lost`),
+para que su pérdida se reconozca en lugar de pasarse por alto. Un
+`unmount` simple también rechaza un volumen con archivos aún abiertos
+en él o que un programa tiene como directorio de trabajo. `--force` es
+la salida deliberada: los archivos aún abiertos en el volumen quedan
+desconectados, un programa que trabaja en él se queda en un directorio
+que ya no existe, los datos retenidos se descartan, el volumen se
+retira y lo que se abandonó queda registrado en el registro de
+auditoría. En un volumen sano, `--force` sigue vaciando y desmontando
+limpiamente; nada se descarta cuando es posible una confirmación
+limpia.
 
 Puede desmontar una imagen de disco o un recurso compartido de red que
 haya montado usted mismo; cualquier otro volumen requiere la autoridad

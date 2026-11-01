@@ -27,8 +27,12 @@ checksummed structure — old-map sector sums, the boot-block sum, each
 map zone's check byte, the map-wide cross-check, and every directory's
 check byte and sequence pair — is verified on the way in and rewritten
 on every mutation; a mismatch refuses the volume or directory
-(`BadMagic`), never "best effort". `Adfs::format` lays out an empty
-volume of any variant (floppies use the authentic `FileCore` geometry;
+(`BadMagic`), never "best effort". A disc record is admitted only when its
+zone spare leaves room for the zone header and zone 0's map bits hold the
+record and one whole fragment, so a forged geometry is refused before any
+zone is read; the zone geometry itself is `tairix_fsprobe::adfs`'s, the one
+definition the probe, the map and `format` share. `Adfs::format` lays out an
+empty volume of any variant (floppies use the authentic `FileCore` geometry;
 hard-disc zone counts are derived from the device size).
 
 ## RISC OS metadata
@@ -123,9 +127,10 @@ bytes/sequence numbers, zone checks, the cross-check, the boot block,
 big-directory headers/tails/heaps, and entry pointers, asserting the
 driver fails closed each time. `tests/fuzz_adfs_mount.rs` is the §19.6
 harness (registered with `cargo xtask fuzz`): seed-logged single-byte
-sweeps over valid images of each map flavour plus PRNG mutations, with
-the invariant that `open`, the read surface and a file driven through a pin
-never panic.
+sweeps over valid images of each map flavour plus PRNG mutations, half of
+them shaping the disc record's geometry at its edges behind a re-sealed boot
+block or zone check, with the invariant that `open`, the read surface and a
+file driven through a pin never panic.
 
 ## Public surface
 

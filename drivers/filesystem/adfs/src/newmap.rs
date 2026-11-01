@@ -15,8 +15,9 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
 use tairix_fsprobe::adfs::{
-    boot_block_checksum, zone_check, DiscRecord, BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE,
-    DISC_RECORD_IN_BOOT_BLOCK, DISC_RECORD_SIZE, DISC_RECORD_SIZE_U32, FRAG_ROOT,
+    link_bits, seal_boot_block, zone_check, zone_start_bit, DiscRecord, BOOT_BLOCK_OFFSET,
+    BOOT_BLOCK_SIZE, CROSS_CHECK_BYTE, CROSS_CHECK_SUM, DISC_RECORD_SIZE, FRAG_ROOT, FREELINK_BIT,
+    ZONE_CHECK_BYTE, ZONE_HEADER_SIZE,
 };
 
 /// Largest map sector (zone) size: `log2secsize` is at most 10.
@@ -26,16 +27,6 @@ pub const MAX_ZONE_BYTES: usize = 1024;
 /// loops against a hostile disc record; a genuine `FileCore` volume of
 /// the maximum 2 TiB size stays far below it.
 pub const MAX_ZONES: usize = 512;
-
-/// Bit offset of the free-space link within a zone.
-const FREELINK_BIT: u32 = 8;
-
-/// Map-bit offset where zone 0's fragment stream starts (header plus the
-/// embedded disc record).
-const ZONE0_START_BIT: u32 = 32 + DISC_RECORD_SIZE_U32 * 8;
-
-/// Map-bit offset where every other zone's fragment stream starts.
-const ZONE_START_BIT: u32 = 32;
 
 /// The new-map allocation engine.
 ///
@@ -222,7 +213,7 @@ impl NewMap {
     ///
     /// * [`DriverError::BadMagic`] if the record is inconsistent with
     ///   the device, a zone check fails, or the cross-check bytes do
-    ///   not XOR to `0xFF`.
+    ///   not XOR to [`CROSS_CHECK_SUM`].
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
     pub fn open<B: Block>(
         volume: &mut ByteDevice<B>,
@@ -247,18 +238,17 @@ impl NewMap {
         let mut crosscheck = 0u8;
         for zone in 0..u32::from(record.nzones) {
             let staged = map.load_zone(volume, zone)?;
-            crosscheck ^= staged.bytes[3];
+            crosscheck ^= staged.bytes[CROSS_CHECK_BYTE];
         }
-        if crosscheck != 0xFF {
+        if crosscheck != CROSS_CHECK_SUM {
             return Err(DriverError::BadMagic);
         }
         Ok(map)
     }
 
-    /// Width of a free-space link field: a fragment-id slot, capped at
-    /// the 15 bits a link may span.
+    /// Width of a free-space link field.
     fn link_bits(&self) -> u32 {
-        u32::from(self.record.idlen).min(15)
+        link_bits(self.record.idlen)
     }
 
     /// Home zone of `frag_id` (the root fragment lives in the middle
@@ -737,14 +727,13 @@ impl NewMap {
         self.record.root_size = new_size;
         let mut staged = self.load_zone(volume, 0)?;
         let encoded = self.record.encode();
-        staged.bytes[4..4 + DISC_RECORD_SIZE].copy_from_slice(&encoded);
+        staged.bytes[ZONE_HEADER_SIZE..ZONE_HEADER_SIZE + DISC_RECORD_SIZE]
+            .copy_from_slice(&encoded);
         self.store_zone(volume, 0, &mut staged)?;
         if boot_block {
             let mut block = [0u8; BOOT_BLOCK_SIZE];
             volume.read(BOOT_BLOCK_OFFSET, &mut block)?;
-            block[DISC_RECORD_IN_BOOT_BLOCK..DISC_RECORD_IN_BOOT_BLOCK + DISC_RECORD_SIZE]
-                .copy_from_slice(&encoded);
-            block[BOOT_BLOCK_SIZE - 1] = boot_block_checksum(&block);
+            seal_boot_block(&mut block, &self.record);
             volume.write(BOOT_BLOCK_OFFSET, &block)?;
         }
         Ok(())
@@ -912,37 +901,19 @@ impl NewMap {
         Ok(())
     }
 
-    /// Zone-stream geometry for `zone`.
+    /// Zone-stream geometry for `zone`: where its stream starts and ends in
+    /// the sector, and the first disc block it describes.
     fn zone_geometry(&self, zone: u32) -> (u32, u32, u64) {
-        let zone_bits = u64::from(self.record.zone_bits());
-        let dr_bits = (DISC_RECORD_SIZE as u64) * 8;
-        let (start_bit, start_block) = if zone == 0 {
-            (ZONE0_START_BIT, 0u64)
-        } else {
-            (ZONE_START_BIT, u64::from(zone) * zone_bits - dr_bits)
-        };
+        let start_bit = zone_start_bit(zone);
+        let start_block = self.record.zone_start_block(zone);
+        let mut stream = self.record.zone_stream_bits(zone);
         // The last zone covers only what remains of the disc.
-        let total_blocks = self.record.disc_size >> self.record.log2bpmb;
-        let mut end_bit = ZONE_START_BIT + self.record.zone_bits();
         if zone == u32::from(self.record.nzones) - 1 {
-            let covered_before = if self.record.nzones == 1 {
-                0
-            } else {
-                u64::from(zone) * zone_bits - dr_bits
-            };
-            let remaining = total_blocks.saturating_sub(covered_before);
-            let base = if zone == 0 {
-                ZONE0_START_BIT
-            } else {
-                ZONE_START_BIT
-            };
-            let full = u64::from(end_bit - base);
-            if remaining < full {
-                // `remaining` is under the zone's (u32) bit count here.
-                end_bit = base + u32::try_from(remaining).unwrap_or(0);
-            }
+            let remaining =
+                (self.record.disc_size >> self.record.log2bpmb).saturating_sub(start_block);
+            stream = u32::try_from(remaining).map_or(stream, |remaining| remaining.min(stream));
         }
-        (start_bit, end_bit, start_block)
+        (start_bit, start_bit + stream, start_block)
     }
 
     /// Load and verify zone `zone` from the map area of `volume`.
@@ -964,7 +935,7 @@ impl NewMap {
             end_bit,
             start_block,
         };
-        if zone_check(staged.bits()) != staged.bytes[0] {
+        if zone_check(staged.bits()) != staged.bytes[ZONE_CHECK_BYTE] {
             return Err(DriverError::BadMagic);
         }
         Ok(staged)
@@ -977,7 +948,7 @@ impl NewMap {
         zone: u32,
         staged: &mut Zone,
     ) -> Result<(), DriverError> {
-        staged.bytes[0] = zone_check(&staged.bytes[..staged.len]);
+        staged.bytes[ZONE_CHECK_BYTE] = zone_check(&staged.bytes[..staged.len]);
         let offset = self.record.map_offset() + u64::from(zone) * self.record.sector_size();
         volume.write(offset, &staged.bytes[..staged.len])
     }

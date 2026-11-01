@@ -3281,10 +3281,12 @@ pub trait SyscallHandlers {
     /// Detach a runtime-attached volume: flush it, retract its mount, and
     /// unpublish its root (`plans/DEVICES.md` D3b).
     ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_MOUNT`]. `request`/`request_len` name the
-    /// caller's encoded `VolumeDetachRequest` (the volume's stable
-    /// identity plus the force byte).
+    /// `request`/`request_len` name the caller's encoded
+    /// `VolumeDetachRequest` (the volume's stable identity plus the mode
+    /// byte). The dispatcher checks no capability: the owner of a network or
+    /// disk-image volume may detach it, so the implementation requires
+    /// [`CapabilityId::FS_MOUNT`] of any other caller once it knows the
+    /// volume.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn volume_detach(

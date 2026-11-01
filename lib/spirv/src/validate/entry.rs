@@ -6,6 +6,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use super::allow::V1_4;
 use super::binding::Binding;
 use super::body::{fold, Access, Needs};
 use super::types::{Scalar, Ty};
@@ -14,7 +15,7 @@ use super::{
     NONE,
 };
 use crate::enumerant::{BuiltIn, Decoration, ExecutionMode, ExecutionModel, StorageClass};
-use crate::{Id, Instruction, Op, Value, Version};
+use crate::{Id, Instruction, Op, Value};
 
 /// The pipeline stage an entry point is.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -66,6 +67,7 @@ pub struct EntryPoint {
     pub(crate) push_constants: Option<u32>,
     pub(crate) inputs: Vec<Varying>,
     pub(crate) outputs: Vec<Varying>,
+    pub(crate) globals: Vec<Id>,
 }
 
 impl EntryPoint {
@@ -118,6 +120,25 @@ impl EntryPoint {
     #[must_use]
     pub fn outputs(&self) -> &[Varying] {
         &self.outputs
+    }
+
+    /// The module-scope variables it and its callees name, by ascending id:
+    /// another entry point's are not its to need.
+    #[must_use]
+    pub fn globals(&self) -> &[Id] {
+        &self.globals
+    }
+
+    pub(crate) fn held_bytes(&self) -> u64 {
+        [
+            self.name.capacity() as u64,
+            tairix_util::fallible::held(&self.bindings),
+            tairix_util::fallible::held(&self.inputs),
+            tairix_util::fallible::held(&self.outputs),
+            tairix_util::fallible::held(&self.globals),
+        ]
+        .into_iter()
+        .fold(0, u64::saturating_add)
     }
 }
 
@@ -178,7 +199,13 @@ impl Validator<'_> {
             self.model_needs(stage, &reach).map_err(refuse)?;
             let (inputs, outputs) = self.stage_interface(stage, &interface).map_err(refuse)?;
             let workgroup = self.modes_of(function, stage, &reach).map_err(refuse)?;
-            let (bindings, push_constants) = self.resources(&reach).map_err(refuse)?;
+            let (bindings, push_constants) = self.resources(&reach, stage).map_err(refuse)?;
+            let mut globals: Vec<Id> = with_capacity(reach.globals.len())?;
+            globals.extend(
+                reach.globals.iter().filter_map(|&(slot, _)| {
+                    self.m.definitions.get(slot as usize).map(|&(id, _)| id)
+                }),
+            );
             let mut owned = String::new();
             owned
                 .try_reserve_exact(name.len())
@@ -195,6 +222,7 @@ impl Validator<'_> {
                     push_constants,
                     inputs,
                     outputs,
+                    globals,
                 },
             )?;
         }
@@ -400,7 +428,7 @@ impl Validator<'_> {
     fn interface_list(&self, instruction: &Instruction) -> Result<Vec<u32>, Rule> {
         let operands = self.m.operands(instruction).get(3..).unwrap_or(&[]);
         let mut list: Vec<u32> = with_capacity(operands.len()).map_err(|r| r.rule)?;
-        let old = self.enabled.version < (Version { major: 1, minor: 4 });
+        let old = self.enabled.version < V1_4;
         for operand in operands {
             let Value::Id(id) = self.m.value(operand) else {
                 return Err(Rule::Interface);
@@ -438,7 +466,7 @@ impl Validator<'_> {
     /// Every global the call tree names is listed: from 1.4 every one,
     /// before it every input and output.
     fn complete(&self, reach: &Reach, interface: &[u32]) -> Result<(), Rule> {
-        let old = self.enabled.version < (Version { major: 1, minor: 4 });
+        let old = self.enabled.version < V1_4;
         for &(slot, _) in &reach.globals {
             let Some(&(id, _)) = self.m.definitions.get(slot as usize) else {
                 continue;

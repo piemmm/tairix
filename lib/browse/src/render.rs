@@ -2440,7 +2440,7 @@ impl Field {
     fn value(self, props: &Properties) -> String {
         match self {
             Self::Kind => String::from(props.kind_label()),
-            Self::Alias => String::from(props.target().unwrap_or_default()),
+            Self::Alias => shown(props.target().unwrap_or_default()).into_owned(),
             Self::Size => alloc::format!(
                 "{} ({} on disk)",
                 props.size_display(),
@@ -2658,7 +2658,8 @@ fn draw_identity(
     let name_y = bounds
         .top()
         .saturating_add(to_i32(bounds.height.saturating_sub(block) / 2));
-    let (name, elided) = title.elide_to_width(identity.name, budget);
+    let name = shown(identity.name);
+    let (name, elided) = title.elide_to_width(&name, budget);
     let pen = title.draw_text(surface, text_x, name_y, name, palette.on_surface.into());
     if elided {
         title.draw_text(surface, pen, name_y, ELLIPSIS, palette.on_surface.into());
@@ -5275,7 +5276,7 @@ pub fn draw_open_with_chooser(
             else {
                 break;
             };
-            let mut row = ListRow::new(candidate.name()).with_icon(IconKind::AppBundle);
+            let mut row = ListRow::new(shown(candidate.name())).with_icon(IconKind::AppBundle);
             if index == OPEN_WITH_DEFAULT_INDEX {
                 row = row.with_trailing(OPEN_WITH_DEFAULT_MARK);
             }

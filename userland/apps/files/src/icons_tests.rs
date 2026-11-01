@@ -158,7 +158,7 @@ struct Deferring(Rc<RefCell<ArtworkDesk>>);
 
 impl ArtworkResolver for Deferring {
     fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
-        self.0.borrow_mut().collect(key, side)
+        self.0.borrow_mut().collect(key, side).0
     }
 
     fn prefetch(&mut self, key: &ArtworkKey, side: u32) {

@@ -173,8 +173,7 @@ fn hlt_fallback_park(table: &IrqTable, handle: IrqHandle) {
     // pipeline's per-CPU init), and the device's MSI-X vector is the routed
     // wake source, so a taken interrupt dispatches through a valid handler.
     // `cli`/`sti`/`hlt` are privileged but well-defined in ring 0 and touch
-    // only `IF`; `preserves_flags` is intentionally omitted because
-    // `sti`/`cli` modify `IF`.
+    // only `IF`.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         if !table.ready_for(handle) {

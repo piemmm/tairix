@@ -119,6 +119,13 @@ pub const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 /// (Intel SDM Vol 3A §2.2.1 Table 2-2).
 pub const EFER_SCE: u64 = 1 << 0;
 
+/// `IA32_EFER.LME` (Long Mode Enable) — bit 8, which each boot entry sets.
+pub const EFER_LME: u64 = 1 << 8;
+
+/// `IA32_EFER.NXE` (No-Execute Enable) — bit 11, which each boot entry sets
+/// only where the CPU offers execute-disable; elsewhere it is reserved.
+pub const EFER_NXE: u64 = 1 << 11;
+
 /// `RFLAGS` mask written to `IA32_FMASK`.
 ///
 /// Bits cleared on syscall entry: `TF` (bit 8, `0x100`), `IF`
@@ -1212,7 +1219,8 @@ mod tests {
             crate::xstate::Flavour::Xsaveopt,
             crate::xstate::X87 | crate::xstate::SSE | crate::xstate::AVX,
             832,
-        );
+        )
+        .expect("an AVX image");
         assert_eq!(crate::xstate::publish(config), Ok(()));
 
         // `RSP0` is the 64-byte-aligned base of the area below the top.

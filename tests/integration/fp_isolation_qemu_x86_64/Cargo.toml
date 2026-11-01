@@ -19,6 +19,10 @@ test-hooks = []
 name = "tairix-test-fp-isolation-qemu-x86-64"
 path = "src/main.rs"
 
+[[bin]]
+name = "tairix-test-fp-isolation-capped-cpuid-qemu-x86-64"
+path = "src/capped.rs"
+
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }

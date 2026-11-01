@@ -65,7 +65,7 @@ use tairix_util::fallible;
 
 use crate::badge::badge_picture;
 use crate::folder::{
-    card_slots, paper_card, print_card, DrawnSample, FolderSample, MIN_COMPOSITE_SIDE,
+    card_slots, paper_card, print_card, DrawnCard, DrawnSample, FolderSample, MIN_COMPOSITE_SIDE,
 };
 use crate::glyph::{builtin_icon_at, IconKind};
 use crate::picture::{Artwork, CastShadow, Fitted, IconPicture};
@@ -802,6 +802,24 @@ impl ArtworkKey {
     /// a path a writer could be filling.
     pub(crate) fn is_named_under(&self, tree: &str) -> bool {
         self.view().is_named_under(tree)
+    }
+
+    /// The file producing this reads first, by its absolute path: an asset
+    /// file, a bundle's directory, a picture file, a folder's front pictured
+    /// member. `None` for a kind's shipped artwork, a built-in picture, a
+    /// folder drawn as kinds, and a program found by name in the stores: none
+    /// is read from a place a listing named.
+    #[must_use]
+    pub fn read_path(&self) -> Option<&str> {
+        match self {
+            Self::Asset(path) | Self::Bundle { dir: path, .. } => Some(path),
+            Self::Thumbnail(thumbnail) => Some(&thumbnail.path),
+            Self::Folder(sample) => sample
+                .cards()
+                .find_map(DrawnCard::picture)
+                .map(|picture| picture.path.as_str()),
+            Self::Raster(_) | Self::Vector(_) | Self::Program { .. } | Self::Builtin(_) => None,
+        }
     }
 
     /// This key borrowed, as a lookup compares it.

@@ -175,25 +175,51 @@ impl BarPace {
     }
 }
 
-/// Whether a delete confirmation for `asked`, whose plan has just come back,
-/// may open: only over the very selection it plans, `planned_now`, in a
-/// window with nothing else open (`busy`). A confirmation opened over anything
-/// else would take a key meant for that as its answer.
+/// What becomes of a removal's question once what it asks about has been
+/// read.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Confirmation {
+    /// It is asked.
+    Asked,
+    /// The window moved on from what it asks about, so it is let go unasked,
+    /// as the user meant.
+    MovedOn,
+    /// The window is still on it but has something else open, which a
+    /// question would take keys meant for: the removal is refused, saying so.
+    Busy,
+}
+
+impl Confirmation {
+    const fn of(still_on_it: bool, busy: bool) -> Self {
+        match (still_on_it, busy) {
+            (false, _) => Self::MovedOn,
+            (true, true) => Self::Busy,
+            (true, false) => Self::Asked,
+        }
+    }
+}
+
+/// Why a removal was refused unasked: the window had something else open.
+pub const BUSY_ELSEWHERE: &str = "the window had something else open when it would have asked";
+
+/// The delete confirmation for `asked`, whose plan has just come back: asked
+/// only over the very selection it plans, `planned_now`, in a window with
+/// nothing else open (`busy`).
 #[must_use]
-pub fn confirmation_may_open(
+pub fn delete_confirmation(
     asked: &DeletePlan,
     planned_now: Option<&DeletePlan>,
     busy: bool,
-) -> bool {
-    !busy && planned_now == Some(asked)
+) -> Confirmation {
+    Confirmation::of(planned_now == Some(asked), busy)
 }
 
-/// Whether a confirmation to empty `trash`, whose contents have just been
-/// read, may open: only in a window still showing it, `shown`, with nothing
-/// else open (`busy`).
+/// The confirmation to empty `trash`, whose contents have just been read:
+/// asked only in a window still showing it, `shown`, with nothing else open
+/// (`busy`).
 #[must_use]
-pub fn empty_confirmation_may_open(trash: &[String], shown: &[String], busy: bool) -> bool {
-    !busy && trash == shown
+pub fn empty_confirmation(trash: &[String], shown: &[String], busy: bool) -> Confirmation {
+    Confirmation::of(trash == shown, busy)
 }
 
 /// The words a refusal is stated in, naming the item by what the user sees,

@@ -1053,6 +1053,7 @@ dependencies = [
  "tairix-conout",
  "tairix-fbcon",
  "tairix-fdt",
+ "tairix-fuzzseed",
  "tairix-fwcfg",
  "tairix-log",
  "tairix-memguard",
@@ -1084,6 +1085,7 @@ dependencies = [
  "tairix-conout",
  "tairix-fbcon",
  "tairix-fdt",
+ "tairix-fuzzseed",
  "tairix-log",
  "tairix-memguard",
  "tairix-rng",
@@ -1244,6 +1246,7 @@ dependencies = [
  "tairix-reclaim",
  "tairix-rt",
  "tairix-theme",
+ "tairix-unicode",
  "tairix-util",
  "tairix-visible",
 ]
@@ -2761,6 +2764,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
+ "tairix-inline",
  "tairix-visible",
 ]
 
@@ -2865,10 +2869,14 @@ name = "tairix-gpu"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-abi-trap",
  "tairix-collections",
+ "tairix-colour",
  "tairix-fuzzseed",
  "tairix-inline",
+ "tairix-parallel",
  "tairix-rt",
+ "tairix-spirv",
  "tairix-util",
 ]
 
@@ -3391,6 +3399,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-collections",
+ "tairix-fuzzseed",
  "tairix-hash",
  "tairix-kernel-sec",
  "tairix-log",
@@ -4674,6 +4683,7 @@ name = "tairix-spirv"
 version = "0.0.0"
 dependencies = [
  "tairix-fuzzseed",
+ "tairix-spirv",
  "tairix-util",
 ]
 
@@ -7076,9 +7086,11 @@ dependencies = [
 name = "tairix-test-riscv64-boot"
 version = "0.0.0"
 dependencies = [
+ "tairix-arch-riscv64",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
+ "tairix-kernel-mem",
  "tairix-log",
  "tairix-sync",
 ]
@@ -8759,6 +8771,7 @@ dependencies = [
  "tairix-abi",
  "tairix-buildcfg",
  "tairix-help",
+ "tairix-path",
  "tairix-procinfo",
  "tairix-rt",
  "tairix-util",
@@ -8850,7 +8863,7 @@ name = "tairix-util"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-unicode",
+ "tairix-fuzzseed",
  "tairix-visible",
 ]
 
@@ -9177,7 +9190,6 @@ dependencies = [
  "tairix-appstore",
  "tairix-arch-api",
  "tairix-browse",
- "tairix-cc",
  "tairix-colour",
  "tairix-controls",
  "tairix-cpuops",

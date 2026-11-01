@@ -1158,7 +1158,7 @@ mod program {
             let mut reader = VfsArtworkReader;
             let mut rasteriser = SandboxRasteriser {
                 sandbox: ParserSandbox::new(
-                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
+                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Artwork),
                     tairix_rt::LogSink,
                 ),
             };
@@ -1197,12 +1197,9 @@ mod program {
         /// worker records nothing and every row simply draws its glyph — the
         /// authority to read a file is exercised on a worker or not at all.
         fn resolve(&self, key: &ArtworkKey, side: u32) -> Resolved {
-            let (answer, wanted) = {
-                let mut desk = self.desk.lock();
-                let answer = desk.collect(key, side);
-                (answer, desk.has_work())
-            };
-            if wanted {
+            let (answer, recorded) = self.desk.lock().collect(key, side);
+            // Only a decode this call recorded is news to the worker.
+            if recorded {
                 self.signal.notify_one();
             }
             answer
@@ -1210,12 +1207,7 @@ mod program {
 
         /// Record `key` at `side` as wanted, without collecting an answer.
         fn want(&self, key: &ArtworkKey, side: u32) {
-            let wanted = {
-                let mut desk = self.desk.lock();
-                desk.want(key, side);
-                desk.has_work()
-            };
-            if wanted {
+            if self.desk.lock().want(key, side) {
                 self.signal.notify_one();
             }
         }

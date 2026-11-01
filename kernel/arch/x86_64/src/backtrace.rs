@@ -224,10 +224,10 @@ impl CpuStateCapture for Backtracer {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     fn active_root(&self) -> Option<u64> {
         let cr3: u64;
-        // SAFETY: reading `CR3` into an output operand has no side effects
-        // and cannot fault in ring 0.
+        // SAFETY: reading `CR3` into an output operand touches no memory and
+        // cannot fault in ring 0.
         unsafe {
-            core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+            core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
         }
         Some(cr3)
     }

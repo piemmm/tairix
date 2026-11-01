@@ -39,6 +39,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::cpuid::Vendor;
+
 /// `XCR0.X87`.
 pub const X87: u64 = 1 << 0;
 /// `XCR0.SSE`: `xmm0`–`xmm15` and `MXCSR`, which every entry frames instead.
@@ -53,7 +55,10 @@ pub const AVX512: u64 = 0b111 << 5;
 /// The legacy FXSAVE image, which also begins every XSAVE image.
 const FXSAVE_BYTES: u32 = 512;
 /// The XSAVE header that follows the legacy image.
-pub(crate) const XSAVE_HEADER_BYTES: usize = 64;
+pub(crate) const XSAVE_HEADER_BYTES: u32 = 64;
+/// The bytes every XSAVE image holds whatever it saves: the legacy image and
+/// the header, whose `XSTATE_BV` every save writes.
+const XSAVE_FLOOR_BYTES: u32 = FXSAVE_BYTES + XSAVE_HEADER_BYTES;
 /// XSAVE requires its image 64-byte aligned.
 const IMAGE_ALIGN: u64 = 64;
 
@@ -89,18 +94,26 @@ const PACKED_SCRUB_BIT: u32 = 56;
 impl Config {
     /// The configuration CPUID describes, `image_bytes` being CPUID
     /// leaf 0xD's `EBX` once `xcr0` is set, or ignored for FXSAVE.
+    ///
+    /// `None` for an XSAVE image smaller than the legacy image and header
+    /// every save writes, or larger than the published word holds.
     #[must_use]
-    pub const fn new(flavour: Flavour, xcr0: u64, image_bytes: u32) -> Self {
+    pub const fn new(flavour: Flavour, xcr0: u64, image_bytes: u32) -> Option<Self> {
         let image_bytes = match flavour {
             Flavour::Fxsave => FXSAVE_BYTES,
-            Flavour::Xsave | Flavour::Xsaveopt => image_bytes,
+            Flavour::Xsave | Flavour::Xsaveopt => {
+                if image_bytes < XSAVE_FLOOR_BYTES || image_bytes > u16::MAX as u32 {
+                    return None;
+                }
+                image_bytes
+            }
         };
-        Self {
+        Some(Self {
             flavour,
             xcr0,
             image_bytes,
             scrub_x87_pointers: false,
-        }
+        })
     }
 
     /// This configuration on a CPU that does or does not need the x87 pointers
@@ -186,8 +199,22 @@ const EXT8_EBX_XSAVE_ERPTR: u32 = 1 << 2;
 /// `XSaveErPtr`, is trusted to: AMD before Zen 2 does not, and an unknown
 /// vendor is scrubbed rather than assumed safe.
 #[must_use]
-pub fn keeps_x87_pointers(vendor: Option<&str>, xsave_erptr: bool) -> bool {
-    xsave_erptr || vendor == Some("Intel")
+pub fn keeps_x87_pointers(vendor: Option<Vendor>, xsave_erptr: bool) -> bool {
+    xsave_erptr || vendor == Some(Vendor::Intel)
+}
+
+/// Whether an image of `image_bytes` holds every component `xcr0` enables
+/// past x87 and SSE, whose places the legacy image fixes: `extent` gives a
+/// component's offset and size in the standard format, CPUID leaf 0xD's
+/// sub-leaf `EBX` and `EAX`.
+#[must_use]
+pub fn holds_components(xcr0: u64, image_bytes: u32, extent: impl Fn(u32) -> (u32, u32)) -> bool {
+    (2..u64::BITS)
+        .filter(|&component| xcr0 & (1 << component) != 0)
+        .all(|component| {
+            let (offset, bytes) = extent(component);
+            u64::from(offset) + u64::from(bytes) <= u64::from(image_bytes)
+        })
 }
 
 /// The `XCR0` this kernel enables given the components the CPU supports
@@ -232,6 +259,16 @@ pub(crate) static PUBLISHED: AtomicU64 = AtomicU64::new(0);
 /// A CPU whose extended-state configuration differs from the boot CPU's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mismatch;
+
+/// Why a CPU's extended state could not be set up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitError {
+    /// CPUID describes an XSAVE image that does not hold what a save writes,
+    /// or that is too large to publish.
+    Layout,
+    /// The configuration differs from the boot CPU's ([`Mismatch`]).
+    Mismatch,
+}
 
 /// Publish `config` as the machine's, or confirm it matches the one the first
 /// CPU published.
@@ -360,7 +397,7 @@ pub fn resume(header: &mut AreaHeader, area: u64, cpu: u64, owner: u64, owner_sl
 #[repr(C, align(64))]
 pub struct InitImage {
     legacy: [u8; FXSAVE_BYTES as usize],
-    header: [u8; XSAVE_HEADER_BYTES],
+    header: [u8; XSAVE_HEADER_BYTES as usize],
 }
 
 /// The x87 control word FNINIT establishes: every exception masked,
@@ -385,7 +422,7 @@ pub static INIT_IMAGE: InitImage = {
     }
     InitImage {
         legacy,
-        header: [0; XSAVE_HEADER_BYTES],
+        header: [0; XSAVE_HEADER_BYTES as usize],
     }
 };
 
@@ -401,56 +438,70 @@ const CR4_OSXSAVE: u64 = 1 << 18;
 /// Must precede this CPU's feature detection, whose AVX bits follow the
 /// state enabled here, and any user task on it.
 ///
+/// A CPU that advertises XSAVE but does not report leaf 0xD names no layout
+/// to save in, so it saves with FXSAVE64 as one without XSAVE does.
+///
 /// # Errors
 ///
-/// [`Mismatch`] when this CPU's configuration differs from the boot CPU's.
+/// [`InitError::Layout`] where CPUID's XSAVE image does not hold what a save
+/// writes, and [`InitError::Mismatch`] when this CPU's configuration differs
+/// from the boot CPU's.
 ///
 /// # Safety
 ///
 /// At CPL 0 on the CPU being brought up, with interrupts disabled.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub(crate) unsafe fn init_cpu() -> Result<(), Mismatch> {
+pub(crate) unsafe fn init_cpu() -> Result<(), InitError> {
     use core::arch::x86_64::{__cpuid, __cpuid_count};
-    let leaf0 = __cpuid(0);
-    let vendor = crate::cpuname::vendor_from_leaf0(leaf0.ebx, leaf0.edx, leaf0.ecx);
-    let xsave_erptr = __cpuid(0x8000_0000).eax >= 0x8000_0008
-        && __cpuid(0x8000_0008).ebx & EXT8_EBX_XSAVE_ERPTR != 0;
+    const LEAF_XSAVE: u32 = 0xD;
+    let xsave_erptr =
+        crate::cpuid::leaf(0x8000_0008, 0).is_some_and(|leaf| leaf.ebx & EXT8_EBX_XSAVE_ERPTR != 0);
     let leaf1_ecx = __cpuid(1).ecx;
-    let config = if leaf1_ecx & LEAF1_ECX_XSAVE == 0 {
-        Config::new(Flavour::Fxsave, X87 | SSE, 0)
-    } else {
-        let leaf_d0 = __cpuid_count(0xD, 0);
-        let xcr0 = xcr0_for((u64::from(leaf_d0.edx) << 32) | u64::from(leaf_d0.eax));
-        let (lo, hi) = crate::msr::halves(xcr0);
-        // SAFETY: CPUID advertises XSAVE, so `CR4.OSXSAVE` exists; with it set,
-        // XSETBV accepts an `XCR0` built from the supported components under
-        // the architecture's rules, which `xcr0_for` keeps.
-        unsafe {
-            core::arch::asm!(
-                "mov {t}, cr4",
-                "or {t}, {bit}",
-                "mov cr4, {t}",
-                t = out(reg) _,
-                bit = in(reg) CR4_OSXSAVE,
-                options(nostack),
-            );
-            core::arch::asm!(
-                "xsetbv",
-                in("ecx") 0u32,
-                in("eax") lo,
-                in("edx") hi,
-                options(nomem, nostack, preserves_flags),
-            );
+    let config = match crate::cpuid::leaf(LEAF_XSAVE, 0) {
+        Some(leaf_d0) if leaf1_ecx & LEAF1_ECX_XSAVE != 0 => {
+            let xcr0 = xcr0_for((u64::from(leaf_d0.edx) << 32) | u64::from(leaf_d0.eax));
+            let (lo, hi) = crate::msr::halves(xcr0);
+            // SAFETY: CPUID advertises XSAVE, so `CR4.OSXSAVE` exists; with it set,
+            // XSETBV accepts an `XCR0` built from the supported components under
+            // the architecture's rules, which `xcr0_for` keeps.
+            unsafe {
+                core::arch::asm!(
+                    "mov {t}, cr4",
+                    "or {t}, {bit}",
+                    "mov cr4, {t}",
+                    t = out(reg) _,
+                    bit = in(reg) CR4_OSXSAVE,
+                    options(nostack),
+                );
+                core::arch::asm!(
+                    "xsetbv",
+                    in("ecx") 0u32,
+                    in("eax") lo,
+                    in("edx") hi,
+                    options(nomem, nostack, preserves_flags),
+                );
+            }
+            // The size is for the components now enabled, so it is read after.
+            // The leaf is reported, so its sub-leaves are read directly.
+            let image_bytes = __cpuid_count(LEAF_XSAVE, 0).ebx;
+            let extent = |component| {
+                let leaf = __cpuid_count(LEAF_XSAVE, component);
+                (leaf.ebx, leaf.eax)
+            };
+            if !holds_components(xcr0, image_bytes, extent) {
+                return Err(InitError::Layout);
+            }
+            Config::new(
+                flavour_for(leaf1_ecx, __cpuid_count(LEAF_XSAVE, 1).eax),
+                xcr0,
+                image_bytes,
+            )
+            .ok_or(InitError::Layout)?
         }
-        // The size is for the components now enabled, so it is read after.
-        let image_bytes = __cpuid_count(0xD, 0).ebx;
-        Config::new(
-            flavour_for(leaf1_ecx, __cpuid_count(0xD, 1).eax),
-            xcr0,
-            image_bytes,
-        )
+        _ => Config::new(Flavour::Fxsave, X87 | SSE, 0).ok_or(InitError::Layout)?,
     };
-    publish(config.scrubbing_x87_pointers(!keeps_x87_pointers(vendor, xsave_erptr)))
+    publish(config.scrubbing_x87_pointers(!keeps_x87_pointers(crate::cpuid::vendor(), xsave_erptr)))
+        .map_err(|Mismatch| InitError::Mismatch)
 }
 
 /// Save the running task's extended state before it parks, unless a load is

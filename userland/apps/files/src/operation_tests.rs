@@ -12,10 +12,10 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
 use super::{
-    change_refusal, completion_closes_at, confirmation_may_open, create_refusal,
-    destination_refusal, empty_confirmation_may_open, item_refusal, mode_flip_allowed,
-    move_refusal, operation_refusal, progress_control, reach_refusal, read_refusal, remove_refusal,
-    trash_read_refusal, write_refusal, BarPace, ProgressControl, COMPLETION_DWELL_NS,
+    change_refusal, completion_closes_at, create_refusal, delete_confirmation, destination_refusal,
+    empty_confirmation, item_refusal, mode_flip_allowed, move_refusal, operation_refusal,
+    progress_control, reach_refusal, read_refusal, remove_refusal, trash_read_refusal,
+    write_refusal, BarPace, Confirmation, ProgressControl, COMPLETION_DWELL_NS,
 };
 use tairix_abi::Errno;
 use tairix_fscopy::op::OpError;
@@ -249,8 +249,9 @@ fn a_refusal_names_its_cause_and_a_failing_device_reads_alike() {
     assert_eq!(read_refusal(Errno::OutOfRange), "it could not be read");
 }
 
-/// A plan that comes back after the user moved on — to another selection,
-/// another folder, or into something else on screen — opens no confirmation.
+/// A plan that comes back after the user moved on — to another selection or
+/// another folder — asks nothing; one that comes back while something else
+/// is open over the window is refused, saying so, rather than dropped.
 #[test]
 fn a_delete_confirmation_opens_only_over_the_selection_it_plans() {
     let plan = |name: &str, node: u64| {
@@ -267,21 +268,26 @@ fn a_delete_confirmation_opens_only_over_the_selection_it_plans() {
     let asked = plan("a", 1);
     let other = plan("b", 2);
     let swapped = plan("a", 3);
-    assert!(confirmation_may_open(&asked, Some(&asked), false));
-    assert!(
-        !confirmation_may_open(&asked, Some(&other), false),
-        "another selection"
+    assert_eq!(
+        delete_confirmation(&asked, Some(&asked), false),
+        Confirmation::Asked
     );
-    assert!(
-        !confirmation_may_open(&asked, Some(&swapped), false),
-        "another node under the selected name"
-    );
-    assert!(
-        !confirmation_may_open(&asked, None, false),
-        "nothing selected"
-    );
-    assert!(
-        !confirmation_may_open(&asked, Some(&asked), true),
+    for (now, why) in [
+        (Some(&other), "another selection"),
+        (Some(&swapped), "another node under the selected name"),
+        (None, "nothing selected"),
+    ] {
+        for busy in [false, true] {
+            assert_eq!(
+                delete_confirmation(&asked, now, busy),
+                Confirmation::MovedOn,
+                "{why}"
+            );
+        }
+    }
+    assert_eq!(
+        delete_confirmation(&asked, Some(&asked), true),
+        Confirmation::Busy,
         "something else open"
     );
 }
@@ -291,13 +297,20 @@ fn a_delete_confirmation_opens_only_over_the_selection_it_plans() {
 #[test]
 fn an_empty_confirmation_opens_only_over_the_trash_it_read() {
     let trash: Vec<String> = ["home", "Library", "Trash"].map(String::from).to_vec();
-    assert!(empty_confirmation_may_open(&trash, &trash, false));
-    assert!(
-        !empty_confirmation_may_open(&trash, &trash[..2], false),
-        "the window moved on"
+    assert_eq!(
+        empty_confirmation(&trash, &trash, false),
+        Confirmation::Asked
     );
-    assert!(
-        !empty_confirmation_may_open(&trash, &trash, true),
+    for busy in [false, true] {
+        assert_eq!(
+            empty_confirmation(&trash, &trash[..2], busy),
+            Confirmation::MovedOn,
+            "the window moved on"
+        );
+    }
+    assert_eq!(
+        empty_confirmation(&trash, &trash, true),
+        Confirmation::Busy,
         "something else open"
     );
 }

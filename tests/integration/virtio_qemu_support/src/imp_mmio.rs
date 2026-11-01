@@ -21,7 +21,7 @@ use tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use tairix_drv_bus_virtio::MmioTransport;
 use tairix_fdt::Fdt;
 use tairix_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter, Trigger};
-use tairix_kernel_mem::{AddressSpace, DirectPhysMap, DmaPool, HostPageTable, MmioMap, VirtAddr};
+use tairix_kernel_mem::{AddressSpace, DmaPool, HostPageTable, MmioMap, VirtAddr};
 use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{
@@ -52,9 +52,7 @@ pub use tairix_log::{
 #[doc(hidden)]
 pub use tairix_test_riscv64_boot::boot;
 
-use crate::common::{
-    drive_driver_lifecycle, dtb_total_size, FixtureLine, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
-};
+use crate::common::{drive_driver_lifecycle, dtb_total_size, FixtureLine, QemuEnv, ScenarioConfig};
 
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -289,9 +287,7 @@ where
         env.fail("no live frame allocator");
     };
     let frames = services.frames();
-    // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let phys = unsafe { DirectPhysMap::identity(IDENTITY_LIMIT) }
-        .expect("the boot direct map addresses its window");
+    let phys = tairix_test_riscv64_boot::boot::identity_map();
 
     // 3. Bus-driver task capability context.
     let mut grants = CapabilitySet::empty();

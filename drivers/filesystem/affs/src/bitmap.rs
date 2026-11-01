@@ -3,17 +3,18 @@
 //! the root lists — 25 of them, then extension blocks of further pointers.
 //!
 //! Pages are read when first touched and held in a cache bounded by
-//! [`CACHE_BYTES`]; a page leaving the cache dirty is written as it goes.
+//! [`CACHE_BYTES`], whose buffers are taken as the bitmap loads, so no bitmap
+//! operation allocates; a page leaving the cache dirty is written as it goes.
 //! What is kept whole is the bitmap's own block list, in its order and
 //! sorted, a longword a block as the format records them: one longword each
 //! for a floppy, about 4 MiB each for the largest volume the format can
 //! number. The count of free blocks is taken by one scan the first time it is
-//! asked for and kept from then on.
+//! asked for, or by a search that found no free block, and kept from then on.
 
 use alloc::vec::Vec;
 
 use tairix_abi::DriverError;
-use tairix_fsprobe::affs::{be32, put_be32, sums_to_zero, BOOT_BLOCKS};
+use tairix_fsprobe::affs::{be32, put_be32, seal, sums_to_zero, BITMAP_CHECKSUM, BOOT_BLOCKS};
 
 use crate::header::{low32, within};
 
@@ -48,7 +49,6 @@ pub(crate) struct Bitmap {
     /// bitmap's own — ascending.
     reserved: Vec<u32>,
     pages: Vec<Page>,
-    capacity: usize,
     clock: u64,
     free: Option<u64>,
     /// Where the last allocation ended, so the next looks from there.
@@ -63,7 +63,8 @@ impl Bitmap {
     /// # Errors
     ///
     /// [`DriverError::BadMagic`] for too few bitmap blocks to cover the
-    /// volume, or a pointer outside it; [`DriverError::OutOfMemory`].
+    /// volume, a pointer outside it, or a block named twice among the root,
+    /// the bitmap's blocks and its extensions; [`DriverError::OutOfMemory`].
     pub(crate) fn new(
         pointers: Vec<u32>,
         extensions: &[u32],
@@ -84,18 +85,29 @@ impl Bitmap {
         reserved.push(low32(root));
         reserved.extend(pointers.iter().chain(extensions));
         reserved.sort_unstable();
-        let capacity = (CACHE_BYTES / block_size).clamp(2, 64);
+        if reserved.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(DriverError::BadMagic);
+        }
+        let capacity = (CACHE_BYTES / block_size).clamp(2, 64).min(pointers.len());
         let mut pages = Vec::new();
         pages
-            .try_reserve(capacity)
+            .try_reserve_exact(capacity)
             .map_err(|_| DriverError::OutOfMemory)?;
+        for _ in 0..capacity {
+            pages.push(Page {
+                index: usize::MAX,
+                data: tairix_util::fallible::filled(block_size, 0)
+                    .ok_or(DriverError::OutOfMemory)?,
+                dirty: false,
+                used: 0,
+            });
+        }
         Ok(Self {
             pointers,
             block_size,
             blocks,
             reserved,
             pages,
-            capacity,
             clock: 0,
             free: None,
             hint: root,
@@ -115,39 +127,29 @@ impl Bitmap {
             return Ok(at);
         }
         let block = u64::from(*self.pointers.get(index).ok_or(DriverError::BadMagic)?);
-        let slot = if self.pages.len() < self.capacity {
-            let data = tairix_util::fallible::filled(self.block_size, 0)
-                .ok_or(DriverError::OutOfMemory)?;
-            self.pages.push(Page {
-                index,
-                data,
-                dirty: false,
-                used: 0,
-            });
-            self.pages.len() - 1
-        } else {
-            let at = self
-                .pages
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, p)| p.used)
-                .map_or(0, |(at, _)| at);
-            self.write_page(io, at)?;
-            at
-        };
+        // A slot holding no page was never used, so it goes first.
+        let slot = self
+            .pages
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, p)| p.used)
+            .map(|(at, _)| at)
+            .ok_or(DriverError::BadMagic)?;
+        self.write_page(io, slot)?;
         let page = &mut self.pages[slot];
         page.index = index;
         page.dirty = false;
         page.used = self.clock;
-        if let Err(err) = io.read(block, &mut page.data) {
+        let read = match io.read(block, &mut page.data) {
+            Ok(()) if sums_to_zero(&page.data) => Ok(slot),
+            Ok(()) => Err(DriverError::BadMagic),
+            Err(err) => Err(err),
+        };
+        if read.is_err() {
             page.index = usize::MAX;
-            return Err(err);
+            page.used = 0;
         }
-        if !sums_to_zero(&page.data) {
-            page.index = usize::MAX;
-            return Err(DriverError::BadMagic);
-        }
-        Ok(slot)
+        read
     }
 
     fn write_page(&mut self, io: &mut dyn Pages, at: usize) -> Result<(), DriverError> {
@@ -156,9 +158,7 @@ impl Bitmap {
             return Ok(());
         }
         let block = u64::from(self.pointers[page.index]);
-        put_be32(&mut page.data, 0, 0);
-        let sum = tairix_fsprobe::affs::checksum(&page.data, 0);
-        put_be32(&mut page.data, 0, sum);
+        seal(&mut page.data, BITMAP_CHECKSUM);
         io.write(block, &page.data)?;
         page.dirty = false;
         Ok(())
@@ -215,23 +215,47 @@ impl Bitmap {
         Ok(())
     }
 
-    /// Give block `block` back.
+    /// Give block `block` back: never the root or a block of the bitmap's
+    /// own, which only damage names as anything else.
     pub(crate) fn release(&mut self, io: &mut dyn Pages, block: u64) -> Result<(), DriverError> {
+        if self.reserves(block, 1) {
+            return Err(DriverError::BadMagic);
+        }
         self.set(io, block, true)
+    }
+
+    /// Whether any of the `count` blocks from `first` is the root or a block of
+    /// the bitmap's own.
+    pub(crate) fn reserves(&self, first: u64, count: u64) -> bool {
+        let at = self
+            .reserved
+            .partition_point(|&block| u64::from(block) < first);
+        self.reserved
+            .get(at)
+            .is_some_and(|&block| u64::from(block) < first.saturating_add(count))
     }
 
     /// The free block an allocation would take: the first at or after
     /// `near`, or after the last block taken, wrapping to the volume's start;
-    /// `None` when the volume is full. Changes nothing.
+    /// `None` when the volume is full, which a volume counted full answers
+    /// without a scan. Changes no bit.
     pub(crate) fn find(
         &mut self,
         io: &mut dyn Pages,
         near: Option<u64>,
     ) -> Result<Option<u64>, DriverError> {
+        if self.free == Some(0) {
+            return Ok(None);
+        }
         let start = near
             .filter(|&near| within(near, self.blocks))
             .unwrap_or(self.hint);
-        self.find_free(io, start)
+        let found = self.find_free(io, start)?;
+        if found.is_none() {
+            // The search spanned every block the count does.
+            self.free = Some(0);
+        }
+        Ok(found)
     }
 
     /// Take block `block`, which [`Self::find`] answered.
@@ -277,11 +301,7 @@ impl Bitmap {
                     continue;
                 }
                 let candidate = bit + u64::from(long.trailing_zeros());
-                if self
-                    .reserved
-                    .binary_search(&low32(candidate + BOOT_BLOCKS))
-                    .is_err()
-                {
+                if !self.reserves(candidate + BOOT_BLOCKS, 1) {
                     return Ok(Some(candidate));
                 }
                 bit = candidate + 1;
@@ -329,4 +349,44 @@ impl Bitmap {
 /// Blocks one bitmap page maps: every longword after its checksum.
 pub(crate) fn bits_per_page(block_size: usize) -> u64 {
     (block_size as u64 / 4 - 1) * 32
+}
+
+#[cfg(test)]
+mod tests {
+    use tairix_abi::DriverError;
+
+    use super::{bits_per_page, Bitmap, Pages};
+
+    /// Bitmap pages that mark every block in use, counting their reads.
+    struct Full {
+        reads: usize,
+    }
+
+    impl Pages for Full {
+        fn read(&mut self, _block: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+            self.reads += 1;
+            buf.fill(0);
+            Ok(())
+        }
+
+        fn write(&mut self, _block: u64, _buf: &[u8]) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_volume_found_full_answers_an_allocation_without_another_scan() {
+        let blocks = 2 + 100 * bits_per_page(512);
+        let pointers = (10..110).collect();
+        let mut bitmap = Bitmap::new(pointers, &[], 512, blocks, blocks / 2).expect("a bitmap");
+        let mut io = Full { reads: 0 };
+        assert_eq!(bitmap.find(&mut io, None), Ok(None));
+        assert!(io.reads >= 100, "the first search reads every page");
+        io.reads = 0;
+        assert_eq!(bitmap.find(&mut io, Some(blocks - 1)), Ok(None));
+        assert_eq!(bitmap.free(&mut io), Ok(0));
+        assert_eq!(io.reads, 0, "counted full, so answered without a scan");
+        bitmap.release(&mut io, 5000).expect("released");
+        assert_eq!(bitmap.find(&mut io, None), Ok(Some(5000)));
+    }
 }

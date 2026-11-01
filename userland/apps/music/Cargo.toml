@@ -48,6 +48,9 @@ tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # The menu builder the context and icon-bar menus are composed with; the
 # engine needs no runtime half of it.
 tairix-window = { path = "../../../lib/window", version = "=0.0.0", default-features = false }
+# The one rule for showing a name from elsewhere, and the bounded queue the
+# worker's jobs wait in.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # Everything only the freestanding `Run` binary links.
 [target.'cfg(target_os = "none")'.dependencies]
@@ -78,8 +81,6 @@ tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features
 tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 # The sink a contained worker's death is logged to.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
-# The bounded queue the worker's jobs wait in.
-tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The engine's host tests draw text, so they inject the shared solid test

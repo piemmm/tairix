@@ -97,6 +97,44 @@
 //     inherited `DF` would run Rust's string instructions backwards, and an
 //     inherited `AC` would leave every user page open to the kernel under
 //     SMAP.
+// 13. `EFER.NXE` is set only where the CPU offers execute-disable
+//     (`CPUID.80000001H:EDX[20]`, a leaf every x86-64 CPU reports): where it
+//     does not, the bit is reserved, and setting it faults with no table to
+//     report the fault. An Intel part's firmware can withhold it (XD Bit
+//     Disable, `IA32_MISC_ENABLE` bit 34), so that control is cleared first
+//     where it is set, and only on an Intel part, the one vendor with the
+//     register. Every constant is the Rust definition, passed in as an
+//     operand. The windows the trampoline runs on carry no NX bit, so a CPU
+//     still without it reaches the Rust entry, which refuses it. The probe is
+//     `nx_probe`, defined once here and expanded by `ap_trampoline.s` too.
+
+// The execute-disable probe each boot entry runs before it arms long mode:
+// on through where the CPU offers execute-disable, once an Intel part's
+// firmware-set XD Bit Disable is cleared, else to \absent.
+.macro nx_probe absent
+    movl $0x80000001, %eax
+    cpuid
+    btl  ${EXT1_EDX_NX}, %edx
+    jc   .Lnx_probed\@
+    xorl %eax, %eax
+    cpuid                                           // leaf 0: the vendor
+    cmpl ${INTEL_EBX}, %ebx
+    jne  \absent
+    cmpl ${INTEL_EDX}, %edx
+    jne  \absent
+    cmpl ${INTEL_ECX}, %ecx
+    jne  \absent
+    movl ${IA32_MISC_ENABLE}, %ecx
+    rdmsr
+    btrl ${XD_DISABLE_HIGH}, %edx                   // its bit in the high half
+    jnc  \absent
+    wrmsr
+    movl $0x80000001, %eax
+    cpuid
+    btl  ${EXT1_EDX_NX}, %edx
+    jnc  \absent
+.Lnx_probed\@:
+.endm
 
 .section .multiboot_header, "a"
 .align 8
@@ -161,9 +199,11 @@ boot_common:
     pushl $0x2                                      // RFLAGS (SAFETY-INVARIANT 12)
     popfl
 
-    // Poison the guard reserved below the stack, before anything descends
-    // it, so a later overrun is a disturbed sentinel the panic path can
-    // name rather than a silent clobber of the boot page tables under it.
+    // Poison the guard below the stack before anything runs deep enough to
+    // reach it (the RFLAGS write above touches only the top word): until the
+    // kernel root maps the guard read-only, an overrun is a disturbed
+    // sentinel the panic path can name, not a silent clobber of the page
+    // tables under it.
     // %edi/%esi carry the boot hand-off into long mode and are left alone;
     // %ecx is dead until the page-table loop below resets it.
     movl $boot_stack_guard_bottom, %ecx
@@ -257,10 +297,19 @@ boot_common:
     orl  $(1 << 5), %eax
     movl %eax, %cr4
 
-    // Arm long mode and execute-disable before paging can consume an NX leaf.
-    movl $0xC0000080, %ecx
+    // Arm long mode, and execute-disable where it is offered, before paging
+    // can consume an NX leaf (SAFETY-INVARIANT 13). The hand-off in
+    // %edi/%esi is left alone.
+    nx_probe .Lnx_absent
+    movl ${EFER_NXE}, %ebx
+    jmp  .Larm_long_mode
+.Lnx_absent:
+    xorl %ebx, %ebx
+.Larm_long_mode:
+    movl ${IA32_EFER}, %ecx
     rdmsr
-    orl  $(1 << 8) | (1 << 11), %eax              // LME | NXE
+    orl  ${EFER_LME}, %eax
+    orl  %ebx, %eax
     wrmsr
 
     // CR0 = PE|PG (SAFETY-INVARIANT 11): paging on, in compatibility mode.
@@ -312,7 +361,7 @@ higher_half_entry:
     // only in the identity window, and a process root carries none: the
     // first push after a switch to one would fault. Nothing is live on the
     // stack here, so replacing the pointer outright is sound: the 32-bit
-    // trampoline above pushes nothing and reaches this label by jump.
+    // path above pops the one word it pushes and reaches this label by jump.
     movabsq $boot_stack_top_high, %rsp
     // The compiler may emit SSE in any Rust function, the first included.
     // The routine clobbers only %rax.

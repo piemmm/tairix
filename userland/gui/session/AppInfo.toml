@@ -10,7 +10,9 @@
 # display service maps (and to map each served app window's granted
 # frames), CAP_PROC_SPAWN for the taskbar's launchers and program-library
 # popup (plans/APPWIN.md AW3, plans/NEW-TASKBAR.md), CAP_FS_ACCESS for the
-# trusted file picker and the program-library catalog stores
+# trusted file picker, the program-library catalog stores, the Desktop
+# folder and the shortcuts made in it, and the disk images a double-click
+# mounts, which an image attach asks of its caller
 # (plans/APPWIN.md AW5, plans/CAPABILITY_USE.md CU6): the session lists
 # directories, reads the catalog documents, and opens the user's chosen
 # file under its own identity

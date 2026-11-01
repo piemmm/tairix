@@ -502,15 +502,17 @@ The x86_64 trap path threads an external IRQ end-to-end through:
 
 1. **IDT vectors `0x30..=0xFE`.** Reserved for external IRQs.
    Per-vector asm stubs are emitted by an `.altmacro` / `.rept`
-   loop in `kernel/arch/x86_64/src/external_irq.s`; the stub
-   addresses are published as a `.rodata` `.quad` table and
-   exposed through `kernel/arch/x86_64::irq::external_isr_addr`.
+   loop in `kernel/arch/x86_64/src/external_irq.s`, one per vector of
+   `irq::EXTERNAL_VECTOR_FIRST`/`EXTERNAL_VECTOR_COUNT`, which its
+   `global_asm!` passes in; the stub addresses are published as a
+   `.rodata` `.quad` table and exposed through
+   `kernel/arch/x86_64::irq::external_isr_addr`.
 2. **Shared trampoline.** Each per-vector stub pushes the vector
    immediate and jumps to `tairix_arch_x86_64_external_irq_common`,
    which saves the 15 GPRs into a `SavedRegs` block and calls
    `tairix_arch_x86_64_external_irq_dispatch(*mut SavedRegs, u64)`.
 3. **Rust dispatcher.** Reads the installed `ExternalIrqDispatchFn`
-   from a set-once `AtomicUsize` and writes the LAPIC EOI register
+   from a set-once `FnCell` and writes the LAPIC EOI register
    before returning. The asm trampoline pops GPRs, drops the
    vector qword, and `iretq`s.
 4. **Vector↔GSI routing.** A read-only-after-init `Routing` table

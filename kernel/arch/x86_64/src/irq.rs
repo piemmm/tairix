@@ -100,9 +100,9 @@ pub fn external_isr_addr(vector: u8) -> Option<u64> {
     let idx = (vector - EXTERNAL_VECTOR_FIRST) as usize;
     // SAFETY: `tairix_arch_x86_64_external_irq_table` is a
     // `'static`-lifetime `.rodata` array of exactly
-    // `EXTERNAL_VECTOR_COUNT` entries published by
-    // `external_irq.s`; the `idx < EXTERNAL_VECTOR_COUNT` bound is
-    // proved by the range check immediately above.
+    // `EXTERNAL_VECTOR_COUNT` entries, because its `global_asm!` emits one
+    // per vector from these constants; the `idx < EXTERNAL_VECTOR_COUNT`
+    // bound is proved by the range check immediately above.
     let addr = unsafe { tairix_arch_x86_64_external_irq_table[idx] };
     Some(addr as u64)
 }
@@ -118,8 +118,7 @@ pub fn external_isr_addr(_vector: u8) -> Option<u64> {
 
 // --- Dispatcher slot ----------------------------------------------
 
-/// Slot holding the installed external-IRQ dispatcher, as a raw
-/// function pointer packed into a `usize`.
+/// Set-once slot holding the installed external-IRQ dispatcher.
 ///
 /// The kernel binary installs the production dispatcher (which
 /// forwards to `tairix_kernel_irq::IrqTable::fire`) exactly once
@@ -398,7 +397,7 @@ unsafe extern "C" fn tairix_arch_x86_64_external_irq_dispatch(regs: *mut SavedRe
 /// guard pins it against the `SavedRegs` size the frame-location arithmetic
 /// in `tairix_arch_x86_64_external_irq_dispatch` depends on).
 #[cfg(any(all(target_arch = "x86_64", target_os = "none"), test))]
-const EXTERNAL_VECTOR_QWORD_BYTES: usize = 8;
+pub(crate) const EXTERNAL_VECTOR_QWORD_BYTES: usize = 8;
 
 // --- Host tests ----------------------------------------------------
 

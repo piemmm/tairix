@@ -8,7 +8,7 @@
 use alloc::string::String;
 
 use tairix_abi::window_ipc::WINDOW_TITLE_MAX;
-use tairix_browse::vfs::{spell_absolute_path, spell_title_of};
+use tairix_browse::vfs::{spell_shown_path, spell_title_of};
 use tairix_browse::{Browser, DirectorySource};
 
 /// What the window must do after the desktop reports a *secondary* press on
@@ -38,22 +38,21 @@ pub fn leave_directory<S: DirectorySource>(browser: &mut Browser<S>) -> Leave {
     match browser.go_up() {
         Ok(true) => Leave::Climbed,
         Ok(false) => Leave::Closed,
-        Err(_) => Leave::Refused(refusal(browser)),
+        Err(_) => Leave::Refused(refusal(browser.folder())),
     }
 }
 
-/// What the user is told when the parent could not be listed: the place the
-/// climb was refused, spelled the one way every path is spelled.
+/// What the user is told when the parent of `folder` could not be listed:
+/// the place the climb was refused, spelled as a message names a place.
 ///
 /// The browser has not moved, so the parent is the location less its leaf. A
 /// refusal only arises where there *was* a parent; spelling from the split
 /// keeps that an observation rather than an assumption.
-fn refusal<S: DirectorySource>(browser: &Browser<S>) -> String {
-    let parent = browser
-        .folder()
+fn refusal(folder: Option<&[String]>) -> String {
+    let parent = folder
         .and_then(<[String]>::split_last)
         .map_or(&[][..], |(_, rest)| rest);
-    alloc::format!("could not open {}", spell_absolute_path(parent))
+    alloc::format!("could not open {}", spell_shown_path(parent))
 }
 
 /// The title the window carries while it shows `browser`'s location.

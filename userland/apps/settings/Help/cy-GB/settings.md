@@ -32,10 +32,10 @@ cerdded y bar ochr ac mae `Enter` yn agor y rhes. Mae `Right` a `Left` yn agor
 ac yn cau rhestr y categori o dan y cyrchwr. Mae ffenestr rhy gul yn gollwng y
 bar ochr, ac yna mae briwsionyn cyntaf y llwybr yn rhestru'r categorïau.
 
-Caiff ei lansio o res *Settings…* menu system y bwrdd gwaith, o'r Llyfrgell
-Rhaglenni, neu wrth ei enw o gragen. Mae'n gofyn am sesiwn graffigol sy'n
-rhedeg: heb un mae sianel y ffenestr yn anghyraeddadwy ac mae'n adrodd y
-gwrthodiad ar y ffrwd gwall safonol ac yn gorffen.
+Caiff ei lansio o res *Settings…* menu system y bwrdd gwaith, neu o gragen
+wrth ei lwybr, `/System/Components/settings.app`. Mae'n gofyn am sesiwn
+graffigol sy'n rhedeg: heb un mae sianel y ffenestr yn anghyraeddadwy ac mae'n
+adrodd y gwrthodiad ar y ffrwd gwall safonol ac yn gorffen.
 
 Mae Sain yn dangos pob allbwn a mewnbwn gyda'i ddewis rhagosodedig, ei lefel
 a'i fudo, a'r hyn sy'n recordio: eich recordiadau chi wrth eu henw, a faint
@@ -57,6 +57,13 @@ Mae'r paen hefyd yn dangos tymheredd y prosesydd ac a yw'r ffan yn rhedeg. Pan
 na all *Automatic* ddarllen y tymheredd, mae'r ffan yn rhedeg nes y gall. Fel
 gosodiadau eraill y peiriant, mae newid yn aros am *Apply*, sy'n gofyn am gyfrif
 a gaiff eu newid.
+
+Mae **Storage** yn rhestru pob cyfrol sydd wedi'i gosod ac eithrio cyfrol
+breifat defnyddiwr arall: y man lle mae wedi'i gosod, ei system ffeiliau, ei
+dyfais a'i chyfrwng, pa mor llawn ydyw, ac a yw'n iach. Adroddiad ydyw, nid
+rheolydd — gwaith y rheolwr ffeiliau a'r gorchymyn `mount` yw gosod a dad-osod —
+ac mae cyfrol nad yw ei fformat yn cadw capasiti sefydlog yn dweud hynny yn
+hytrach na dangos bar. Mae `df` yn adrodd yr un ffigurau mewn cragen.
 
 ## EXIT STATUS
 

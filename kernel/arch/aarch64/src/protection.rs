@@ -10,9 +10,19 @@
 //!
 //! PAN is ARMv8.1 (`FEAT_PAN`); the Raspberry Pi 4's Cortex-A72 lacks it. The
 //! boot CPU settles whether it is in force from what it offers, before any
-//! other CPU starts, and a CPU that cannot hold it does not join.
+//! other CPU starts, and a CPU that cannot hold it does not join: it answers
+//! that it lacks PAN ([`PAN`]) and stops.
 
+use core::num::NonZeroU8;
 use core::sync::atomic::{AtomicBool, Ordering};
+
+/// PAN, as the bit set a start answer names a protection lacking by
+/// ([`tairix_arch_api::StartAnswer::Refused`]).
+pub const PAN: NonZeroU8 = NonZeroU8::MIN;
+
+/// `PSTATE.PAN`, bit 22 of the `PAN` register.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+const PSTATE_PAN: u64 = 1 << 22;
 
 /// Whether PAN is in force: settled once, by the boot CPU, before any other
 /// CPU starts, and clear until then.
@@ -59,6 +69,27 @@ fn pan_offered_here() -> bool {
     pan_offered_by(mmfr1)
 }
 
+/// Whether the calling CPU holds PAN: `false` while PAN is not in force,
+/// when the CPU may not even have the register.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub fn held_here() -> bool {
+    if !pan_in_force() {
+        return false;
+    }
+    let pan: u64;
+    // SAFETY: PAN is in force, so every running CPU offers the register, and
+    // reading it changes nothing.
+    unsafe {
+        core::arch::asm!(
+            "mrs {pan}, S3_0_C4_C2_3",
+            pan = out(reg) pan,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    pan & PSTATE_PAN != 0
+}
+
 /// Settle whether the kernel holds every CPU to PAN: whether the boot CPU
 /// offers it.
 ///
@@ -93,7 +124,7 @@ pub(crate) unsafe fn hold() -> bool {
     unsafe {
         core::arch::asm!(
             "msr S3_0_C4_C2_3, {pan}",
-            pan = in(reg) 1u64 << 22,
+            pan = in(reg) PSTATE_PAN,
             options(nostack, preserves_flags),
         );
     }

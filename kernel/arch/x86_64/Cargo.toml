@@ -92,6 +92,7 @@ tairix-multiboot2 = { path = "../../../lib/multiboot2", version = "=0.0.0" }
 # `test-arch` self-link convention used by `kernel/sched` and
 # `kernel/core`.
 [dev-dependencies]
+tairix-arch-api = { path = "../api", version = "=0.0.0", features = ["host-tests"] }
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../../mem", version = "=0.0.0" }
 tairix-arch-x86_64 = { path = ".", version = "=0.0.0", features = ["sched-arch"] }

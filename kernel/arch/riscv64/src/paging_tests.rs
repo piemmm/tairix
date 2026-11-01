@@ -222,6 +222,27 @@ fn map_4k_rejects_misaligned() {
         .is_none());
 }
 
+/// No riscv64 leaf is both writable and executable, and a refused one draws
+/// no table.
+#[test]
+fn map_4k_refuses_a_writable_and_executable_page() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
+    let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
+    let drawn = POOL.used.load(Ordering::Relaxed);
+    let va = 100u64 << 30;
+    assert!(space
+        .map_4k(
+            pool,
+            va,
+            0x8200_0000,
+            flags::READ | flags::WRITE | flags::EXEC
+        )
+        .is_none());
+    assert_eq!(POOL.used.load(Ordering::Relaxed), drawn, "no table drawn");
+    assert_eq!(translate(pool, &space, va), None);
+}
+
 #[test]
 fn map_4k_refuses_to_shatter_a_gigapage() {
     static POOL: PageTablePool = PageTablePool::new();
@@ -229,57 +250,6 @@ fn map_4k_refuses_to_shatter_a_gigapage() {
     let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
     // VA 0 lives under the identity gigapage at root slot 0 — a leaf.
     assert!(space.map_4k(pool, 0x0, 0x8000_0000, flags::READ).is_none());
-}
-
-#[test]
-fn map_gigapage_aliases_a_whole_gigabyte_at_a_high_va() {
-    static POOL: PageTablePool = PageTablePool::new();
-    let pool = &POOL;
-    let mut space = AddressSpace::new_identity_gigapages(pool, 4).expect("root");
-    // Alias the kernel's gigabyte (phys 0x8000_0000) at a high VA with the
-    // USER bit — the BIAS-alias trick the crt0 QEMU vertical uses.
-    let bias: u64 = 64 << 30; // 64 GiB, 1 GiB-aligned.
-    let paddr: u64 = 0x8000_0000;
-    let vaddr = paddr + bias;
-    space
-        .map_gigapage(
-            vaddr,
-            paddr,
-            flags::USER | flags::READ | flags::WRITE | flags::EXEC,
-        )
-        .expect("gigapage alias");
-    // Every address in the aliased gigabyte resolves to its phys base.
-    assert_eq!(translate(pool, &space, vaddr), Some(paddr));
-    assert_eq!(
-        translate(pool, &space, vaddr + 0x20_0000),
-        Some(paddr),
-        "a megabyte into the gigapage still resolves to the gigapage base"
-    );
-    // The installed leaf carries the USER bit.
-    let root_table = pool
-        .table_at(space.root_phys())
-        .expect("the pool's own root");
-    // SAFETY: a live table page from the pool, exclusively owned here.
-    assert_ne!(
-        unsafe { &*root_table }[vpn_index(vaddr, 2)] & flags::USER,
-        0
-    );
-}
-
-#[test]
-fn map_gigapage_rejects_misaligned_and_occupied() {
-    static POOL: PageTablePool = PageTablePool::new();
-    let pool = &POOL;
-    let mut space = AddressSpace::new_identity_gigapages(pool, 4).expect("root");
-    // Misaligned virtual / physical addresses are refused.
-    assert!(space
-        .map_gigapage((64 << 30) + 0x1000, 0x8000_0000, flags::READ)
-        .is_none());
-    assert!(space
-        .map_gigapage(64 << 30, 0x8000_0000 + 0x1000, flags::READ)
-        .is_none());
-    // Root slot 0 is occupied by the identity gigapage; refuse to clobber it.
-    assert!(space.map_gigapage(0, 0x8000_0000, flags::READ).is_none());
 }
 
 #[test]

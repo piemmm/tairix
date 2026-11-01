@@ -4,15 +4,19 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::info::BufferUsage;
-use crate::memory::Memory;
-use crate::model::{BufferKey, BufferState};
+use crate::image::{BufferImageCopy, ClearValue, ImageCopy, ImageRange};
+use crate::info::{BufferUsage, DeviceInfo, QueueCapabilities};
+use crate::memory::{Charge, Memory};
+use crate::model::{
+    shared_bytes, BindSetKey, BufferKey, BufferState, ComputePipelineKey, ContextState, ImageKey,
+};
+use crate::resource::ImageState;
+use crate::software::dispatch::{Dispatch, Groups};
+use crate::transfer::{self, Direction};
 use crate::{Error, MAX_COPY_REGIONS, MAX_UPDATE_BYTES};
 
-use tairix_collections::SlotMap;
-
 /// One span a copy moves: `size` bytes from `src_offset` in its source buffer
-/// to `dst_offset` in its destination.
+/// to `dst_offset` in its destination, each a whole number of words.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct CopyRegion {
     /// Where the bytes start in the source buffer.
@@ -21,6 +25,29 @@ pub struct CopyRegion {
     pub dst_offset: u64,
     /// How many there are.
     pub size: u64,
+}
+
+/// An update's bytes, charged to their context from when they are recorded
+/// until the command buffer and every submission of it have let them go, so
+/// a buffer submitted again is charged for them once.
+#[derive(Debug)]
+pub(crate) struct Recorded {
+    pub(crate) bytes: Vec<u8>,
+    _charge: Charge,
+}
+
+impl Recorded {
+    pub(crate) const fn new(bytes: Vec<u8>, charge: Charge) -> Self {
+        Self {
+            bytes,
+            _charge: charge,
+        }
+    }
+
+    /// What `bytes`, once recorded, keep on the device.
+    pub(crate) fn held(bytes: &Vec<u8>) -> u64 {
+        shared_bytes::<Self>().saturating_add(tairix_util::fallible::held(bytes))
+    }
 }
 
 /// A command as recorded: buffers by key, checked only when submitted.
@@ -40,8 +67,73 @@ pub(crate) enum Command {
     Update {
         dst: BufferKey,
         offset: u64,
-        data: Arc<Vec<u8>>,
+        data: Arc<Recorded>,
     },
+    /// `overlapping` where two regions write one texel, decided as it was
+    /// recorded.
+    BufferToImage {
+        src: BufferKey,
+        dst: ImageKey,
+        regions: Vec<BufferImageCopy>,
+        overlapping: bool,
+    },
+    /// `overlapping` where two regions write one byte.
+    ImageToBuffer {
+        src: ImageKey,
+        dst: BufferKey,
+        regions: Vec<BufferImageCopy>,
+        overlapping: bool,
+    },
+    /// `overlapping` where two regions write one texel, or one reads a
+    /// texel of the same image another writes.
+    CopyImage {
+        src: ImageKey,
+        dst: ImageKey,
+        regions: Vec<ImageCopy>,
+        overlapping: bool,
+    },
+    ClearImage {
+        image: ImageKey,
+        value: ClearValue,
+        ranges: Vec<ImageRange>,
+    },
+    Dispatch(DispatchRecord),
+}
+
+/// A dispatch as it is recorded, its objects named by key.
+#[derive(Debug)]
+pub(crate) struct DispatchRecord {
+    pub(crate) pipeline: ComputePipelineKey,
+    pub(crate) sets: Vec<BindSetKey>,
+    /// The push constants' whole words, shared by every submission of it;
+    /// `None` for none.
+    pub(crate) push: Option<Arc<Vec<u32>>>,
+    pub(crate) push_bytes: usize,
+    pub(crate) groups: Count,
+}
+
+/// How many workgroups a recorded dispatch makes: given, or read from a
+/// buffer when it runs.
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum Count {
+    Direct([u32; 3]),
+    Indirect { buffer: BufferKey, offset: u64 },
+}
+
+impl Command {
+    /// The work a queue's family must run to take it.
+    pub(crate) const fn needs(&self) -> QueueCapabilities {
+        match self {
+            Self::Copy { .. }
+            | Self::Fill { .. }
+            | Self::Update { .. }
+            | Self::BufferToImage { .. }
+            | Self::ImageToBuffer { .. }
+            | Self::CopyImage { .. }
+            | Self::ClearImage { .. } => QueueCapabilities::TRANSFER,
+            Self::Dispatch(_) => QueueCapabilities::COMPUTE,
+        }
+    }
 }
 
 /// One span of a resolved copy, by offset into the memories themselves.
@@ -70,28 +162,74 @@ pub(crate) enum Op {
     Update {
         dst: Arc<Memory>,
         offset: u64,
-        data: Arc<Vec<u8>>,
+        data: Arc<Recorded>,
     },
+    BufferImage {
+        buffer: Arc<BufferState>,
+        image: Arc<ImageState>,
+        regions: Vec<BufferImageCopy>,
+        direction: Direction,
+    },
+    CopyImage {
+        src: Arc<ImageState>,
+        dst: Arc<ImageState>,
+        regions: Vec<ImageCopy>,
+    },
+    ClearImage {
+        image: Arc<ImageState>,
+        value: ClearValue,
+        ranges: Vec<ImageRange>,
+    },
+    Dispatch(alloc::boxed::Box<Dispatch>),
+}
+
+impl core::fmt::Debug for Dispatch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Dispatch").finish_non_exhaustive()
+    }
 }
 
 impl Op {
-    /// The bytes it writes.
-    pub(crate) fn bytes(&self) -> u64 {
+    /// The host bytes it holds past its own size while queued.
+    pub(crate) fn held_bytes(&self) -> u64 {
+        use tairix_util::fallible::held;
         match self {
-            Self::Copy { spans, .. } => spans.iter().map(|span| span.len).sum(),
-            Self::Fill { len, .. } => *len,
-            Self::Update { data, .. } => data.len() as u64,
+            Self::Copy { spans, .. } => held(spans),
+            // An update's bytes are charged with its recording.
+            Self::Fill { .. } | Self::Update { .. } => 0,
+            Self::BufferImage { regions, .. } => held(regions),
+            Self::CopyImage { regions, .. } => held(regions),
+            Self::ClearImage { ranges, .. } => held(ranges),
+            Self::Dispatch(dispatch) => dispatch.held_bytes(),
+        }
+    }
+
+    /// The host bytes the tables of its run take on a device of
+    /// `participants`, made as it starts and let go as it ends.
+    pub(crate) fn run_bytes(&self, participants: usize) -> u64 {
+        match self {
+            Self::Dispatch(dispatch) => dispatch.run_bytes(participants),
+            _ => 0,
+        }
+    }
+
+    /// The host bytes its run's placements keep for its job on a device of
+    /// `participants`.
+    pub(crate) fn place_bytes(&self, participants: usize) -> u64 {
+        match self {
+            Self::Dispatch(dispatch) => dispatch.place_bytes(participants),
+            _ => 0,
         }
     }
 }
 
 /// The buffer `key` names, made for `usage`.
-fn buffer(
-    buffers: &SlotMap<BufferKey, BufferState>,
+pub(crate) fn buffer(
+    context: &ContextState,
     key: BufferKey,
     usage: BufferUsage,
-) -> Result<&BufferState, Error> {
-    let buffer = buffers.get(key).ok_or(Error::Stale)?;
+) -> Result<&Arc<BufferState>, Error> {
+    let buffer = context.buffers.get(key).ok_or(Error::Stale)?;
     if buffer.usage.contains(usage) {
         Ok(buffer)
     } else {
@@ -111,7 +249,7 @@ fn within(buffer: &BufferState, offset: u64, len: u64) -> Result<u64, Error> {
     }
 }
 
-/// Refuse a fill or an update whose offset or length is not whole words.
+/// Refuse a copy, fill or update whose offset or length is not whole words.
 fn words(offset: u64, len: u64) -> Result<(), Error> {
     if offset.is_multiple_of(4) && len.is_multiple_of(4) {
         Ok(())
@@ -120,16 +258,17 @@ fn words(offset: u64, len: u64) -> Result<(), Error> {
     }
 }
 
-/// Check `command` against the buffers it names, resolving it to the
-/// operation a device runs.
+/// Check `command` against the objects of `context` it names and the
+/// device `info` describes, resolving it to the operation a device runs.
 pub(crate) fn resolve(
-    buffers: &SlotMap<BufferKey, BufferState>,
+    info: &DeviceInfo,
+    context: &ContextState,
     command: &Command,
 ) -> Result<Op, Error> {
     match command {
         Command::Copy { src, dst, regions } => {
-            let src = buffer(buffers, *src, BufferUsage::TRANSFER_SRC)?;
-            let dst = buffer(buffers, *dst, BufferUsage::TRANSFER_DST)?;
+            let src = buffer(context, *src, BufferUsage::TRANSFER_SRC)?;
+            let dst = buffer(context, *dst, BufferUsage::TRANSFER_DST)?;
             if regions.is_empty() {
                 return Err(Error::Empty);
             }
@@ -141,11 +280,14 @@ pub(crate) fn resolve(
                 .try_reserve_exact(regions.len())
                 .map_err(|_| Error::OutOfMemory)?;
             for region in regions {
-                spans.push(Span {
+                let span = Span {
                     src: within(src, region.src_offset, region.size)?,
                     dst: within(dst, region.dst_offset, region.size)?,
                     len: region.size,
-                });
+                };
+                words(region.src_offset, region.size)?;
+                words(region.dst_offset, region.size)?;
+                spans.push(span);
             }
             refuse_overlap(&spans, Arc::ptr_eq(&src.memory, &dst.memory))?;
             Ok(Op::Copy {
@@ -160,7 +302,7 @@ pub(crate) fn resolve(
             size,
             word,
         } => {
-            let dst = buffer(buffers, *dst, BufferUsage::TRANSFER_DST)?;
+            let dst = buffer(context, *dst, BufferUsage::TRANSFER_DST)?;
             let at = within(dst, *offset, *size)?;
             words(*offset, *size)?;
             Ok(Op::Fill {
@@ -171,11 +313,11 @@ pub(crate) fn resolve(
             })
         }
         Command::Update { dst, offset, data } => {
-            let dst = buffer(buffers, *dst, BufferUsage::TRANSFER_DST)?;
-            if data.len() > MAX_UPDATE_BYTES {
+            let dst = buffer(context, *dst, BufferUsage::TRANSFER_DST)?;
+            if data.bytes.len() > MAX_UPDATE_BYTES {
                 return Err(Error::TooMany);
             }
-            let len = data.len() as u64;
+            let len = data.bytes.len() as u64;
             let at = within(dst, *offset, len)?;
             words(*offset, len)?;
             Ok(Op::Update {
@@ -184,7 +326,116 @@ pub(crate) fn resolve(
                 data: Arc::clone(data),
             })
         }
+        Command::BufferToImage {
+            src,
+            dst,
+            regions,
+            overlapping,
+        } => transfer::buffer_image(
+            context,
+            (*src, *dst),
+            (regions, *overlapping),
+            Direction::ToImage,
+        ),
+        Command::ImageToBuffer {
+            src,
+            dst,
+            regions,
+            overlapping,
+        } => transfer::buffer_image(
+            context,
+            (*dst, *src),
+            (regions, *overlapping),
+            Direction::ToBuffer,
+        ),
+        Command::CopyImage {
+            src,
+            dst,
+            regions,
+            overlapping,
+        } => transfer::image_image(context, (*src, *dst), (regions, *overlapping)),
+        Command::ClearImage {
+            image,
+            value,
+            ranges,
+        } => transfer::clear(context, *image, *value, ranges),
+        Command::Dispatch(recorded) => dispatch(info, context, recorded),
     }
+}
+
+/// A dispatch checked whole: its pipeline live, each bind set live and of
+/// the layout's set's bindings, its push constants exactly the layout's, and
+/// its workgroup counts within the device's or its indirect arguments within
+/// a buffer made for them.
+fn dispatch(
+    info: &DeviceInfo,
+    context: &ContextState,
+    recorded: &DispatchRecord,
+) -> Result<Op, Error> {
+    let DispatchRecord {
+        pipeline,
+        sets,
+        push,
+        push_bytes,
+        groups,
+    } = recorded;
+    let pipeline = Arc::clone(
+        context
+            .compute_pipelines
+            .get(*pipeline)
+            .ok_or(Error::Stale)?,
+    );
+    let layout = &pipeline.layout;
+    if sets.len() != layout.sets.len() {
+        return Err(Error::Bindings);
+    }
+    let mut held = Vec::new();
+    held.try_reserve_exact(sets.len())
+        .map_err(|_| Error::OutOfMemory)?;
+    for (key, wanted) in sets.iter().zip(&layout.sets) {
+        let set = context.bind_sets.get(*key).ok_or(Error::Stale)?;
+        if !set.layout.serves(wanted) {
+            return Err(Error::Bindings);
+        }
+        held.push(Arc::clone(set));
+    }
+    if *push_bytes != layout.push_constants.bytes as usize {
+        return Err(Error::Shape);
+    }
+    let groups = match *groups {
+        Count::Direct(counts) => {
+            let within = counts
+                .iter()
+                .zip(&info.limits.max_workgroup_count)
+                .all(|(count, most)| count <= most);
+            if !within {
+                return Err(Error::TooLarge);
+            }
+            Groups::Direct(counts)
+        }
+        Count::Indirect {
+            buffer: key,
+            offset,
+        } => {
+            let buffer = buffer(context, key, BufferUsage::INDIRECT)?;
+            if !offset.is_multiple_of(4) {
+                return Err(Error::Misaligned);
+            }
+            let at = within(buffer, offset, 12)?;
+            Groups::Indirect {
+                memory: Arc::clone(&buffer.memory),
+                offset: at,
+            }
+        }
+    };
+    let work = alloc::boxed::Box::try_new(Dispatch {
+        pipeline,
+        sets: held,
+        push: push.clone(),
+        groups,
+    })
+    .map_err(|_| Error::OutOfMemory)?;
+    Ok(Op::Dispatch(work))
 }
 
 /// Refuse a copy writing any byte twice, or, within one memory, writing a

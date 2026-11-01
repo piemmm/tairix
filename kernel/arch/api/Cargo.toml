@@ -58,8 +58,9 @@ path = "src/lib.rs"
 # kernel builds — a port always reserves its regions, and a machine dies once.
 host-tests = []
 # `loom` builds `tests/loom.rs`, the models of the lock-free page-table
-# protocol: a table linked under a walk that follows it, and a fault-time
-# leaf update racing an unmap. The update is generic over `DescriptorSlot`,
+# protocol: a table linked under a walk that follows it, a fault-time leaf
+# update racing an unmap, and two fix-ups of one leaf. The update is generic
+# over `DescriptorSlot`,
 # so the models drive it over loom's own atomics and the crate graph builds
 # as usual; `cargo xtask loom` alone turns it on.
 loom = ["dep:loom"]

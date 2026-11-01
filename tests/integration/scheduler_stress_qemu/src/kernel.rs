@@ -464,8 +464,8 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
             qemu_exit::exit_failure();
         }
     };
-    // Install the AP entry once (set-once); the HAL stamps it into each
-    // AP's boot slot.
+    // Install the AP entry once (set-once); each AP's trampoline calls it
+    // through the port's own entry.
     if smp::set_secondary_entry(ap_entry).is_err() {
         let _ = writeln!(
             com1,
@@ -663,9 +663,8 @@ extern "C" fn ap_entry(cpu_id: u32) -> ! {
     // interrupts are enabled.
     unsafe {
         if percpu::init(cpu_id as usize).is_err() {
-            // We cannot signal the BSP cleanly from here (the BSP is
-            // spinning on `ready` in the trampoline frame, which has
-            // already been set). Halt the AP; the BSP's watchdog
+            // We cannot signal the BSP cleanly from here: this AP's joined
+            // answer already stands. Halt the AP; the BSP's watchdog
             // budget will eventually catch the missing dispatch.
             loop {
                 core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));

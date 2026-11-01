@@ -1290,6 +1290,24 @@ fn a_display_name_the_shared_rule_refuses_is_refused_with_its_reason() {
             "the one shared name rule's own reason is what the desktop reports"
         );
     }
+    // A program's name is its developer's, so what hides in it is shown.
+    let catalog = catalog_of(
+        "os.tairix.chess",
+        "Chess\u{202e}/1",
+        "/System/Applications/chess.app",
+    );
+    let DesktopAction::Refuse(refusal) =
+        desktop.shortcut_to(&catalog, &entry_id("os.tairix.chess"))
+    else {
+        panic!("refused");
+    };
+    assert_eq!(
+        refusal,
+        GestureRefusal::new(
+            "\u{201c}Chess\u{fffd}/1\u{201d} cannot name a shortcut",
+            "A shortcut is a file, and a file or directory name may not contain `/`.",
+        )
+    );
 }
 
 #[test]
@@ -1494,6 +1512,61 @@ fn a_shortcut_that_names_nothing_at_all_is_refused_rather_than_opened() {
             "It holds no target to open.",
         )))
     );
+}
+
+/// A refusal quotes an entry as its tile shows it, so what hides in a name
+/// cannot make one entry's refusal read as another's.
+#[test]
+fn a_refused_entry_is_quoted_with_what_hides_in_its_name_shown() {
+    let hidden = "a\u{202e}b";
+    let double_clicked = |entry: Entry| {
+        let mut desktop = desktop_of(vec![entry]);
+        let layout = layout_of(&desktop);
+        let at = centre_of(&layout, 0);
+        for clicks in [0, 1] {
+            let acted = desktop.press(
+                at,
+                &layout,
+                Scale::ONE,
+                &theme(),
+                clicks,
+                &editor(),
+                &mut Region::new(),
+            );
+            if clicks == 1 {
+                return acted.action;
+            }
+        }
+        None
+    };
+    for (entry, headline) in [
+        (
+            file(hidden),
+            "No installed application opens \u{201c}a\u{fffd}b\u{201d}",
+        ),
+        (
+            link(
+                hidden,
+                LinkTarget::Dangling,
+                "/System/Applications/chess.app",
+            ),
+            "The shortcut \u{201c}a\u{fffd}b\u{201d} points at something that is not there",
+        ),
+        (
+            Entry::new(
+                hidden,
+                EntryKind::Link(LinkTarget::Bundle),
+                0,
+                Time64::UNIX_EPOCH,
+            ),
+            "The shortcut \u{201c}a\u{fffd}b\u{201d} names nothing",
+        ),
+    ] {
+        let Some(DesktopAction::Refuse(refusal)) = double_clicked(entry) else {
+            panic!("the entry is refused");
+        };
+        assert_eq!(refusal.headline(), headline);
+    }
 }
 
 #[test]

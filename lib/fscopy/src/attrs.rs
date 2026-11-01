@@ -239,16 +239,9 @@ impl Omissions {
             Human::message(&message),
         )
         .with_ai(&ai);
-        // Framing escapes a string field to at most six bytes a byte and
-        // embeds `ai` as it stands, so this holds the whole line.
-        let mut line = alloc::vec![0u8; 512 + 6 * (producer.len() + message.len()) + ai.len()];
-        match record.write_jsonl(&mut line) {
-            Ok(len) => line.truncate(len),
-            Err(_) => line.clear(),
-        }
         Some(Report {
             summary: format!("extended attributes not kept on {files} ({reasons}): {keys}"),
-            record: line,
+            record: tairix_util::output::framed(&record),
         })
     }
 }

@@ -40,7 +40,7 @@ the network are chosen by whoever runs each computer, so a name is never
 proof of which computer you are looking at. Connecting to a computer's
 shares is not available on this system, and opening one says so.
 
-Run by name from a shell (or opened on a folder from the desktop) it is an
+Started from a shell by its path, `/System/Components/files.app`, it is an
 ordinary application instead: one window, and it ends when you close it.
 Either way it requires a running graphical session: without one, the window
 channel is unreachable and the browser reports the refusal on the standard
@@ -101,11 +101,15 @@ and says why. *New* follows it, then *Select All* and *Clear Selection*, and
 item's submenu is greyed.
 
 Opening a disk image — an `.iso`, `.adf`, `.hdf` and the like — mounts it
-for you in `/Storage`, writable where the file is, and opens its window;
-*Mount Read-Only* mounts it read-only instead. It stays mounted until you
-eject it or your login session ends. *Eject* takes off a volume you mounted,
-from its icon or from its row in the places rail, whose own right-click menu
-holds *Open* and *Eject*; your windows on it move to `/Storage` first.
+for you in `/Storage`, writable where both the file and its format allow it,
+and opens its window; *Mount Read-Only* mounts it read-only instead. It stays
+mounted until you eject it or your login session ends. *Eject* takes off a
+volume you mounted, from its icon or from its row in the places rail, whose
+own right-click menu holds *Open* and *Eject*; your windows on it move to
+`/Storage` first. A volume that went away — its disk removed, or its server
+lost — before all you wrote to it was saved leaves the rail but keeps its
+icon in `/Storage`, and what was not saved is lost; *Eject* on that icon asks
+before letting it go.
 
 The right-click menu's *New* submenu makes a folder, or an empty document of
 each kind an installed editor writes, and opens its name for editing.

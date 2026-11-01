@@ -33,10 +33,14 @@ pub trait Detacher {
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the kernel raises — e.g. [`Errno::NotFound`] for an
-    /// identity no attached volume carries, [`Errno::DeviceFault`] for a
-    /// plain detach of an unavailable volume, or
-    /// [`Errno::PermissionDenied`] for a volume the caller may not detach.
+    /// Any [`Errno`] the kernel raises, as
+    /// [`VolumeDetachRequest`](tairix_abi::volume::VolumeDetachRequest) lists
+    /// them — e.g. [`Errno::NotFound`] for an identity no attached volume
+    /// carries, [`Errno::Busy`] while a descriptor, a working directory or
+    /// another operation holds it, [`Errno::DeviceFault`] or
+    /// [`Errno::NotEmpty`] for a plain detach a vanished or conflicted
+    /// volume's writes refuse, or [`Errno::PermissionDenied`] for a volume
+    /// the caller may not detach.
     fn detach(&self, volume_id: [u8; VOLUME_ID_LEN], force: bool) -> Result<(), Errno>;
 
     /// The directory `path` names, absolute and canonical, as util-linux

@@ -24,9 +24,14 @@ path = "src/lib.rs"
 # The single riscv64 boot pipeline (`boot_riscv64`) this crate re-exports
 # and delegates to.
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+# The identity extent every root the kernel runs under maps
+# (`paging::KERNEL_IDENTITY_GIGAPAGES`), which `identity_map` spans.
+tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
 # The `FreeListAllocator` type the consuming vertical's own
 # `#[global_allocator]` is handed through to the production pipeline.
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+# The identity window every kernel root maps, as a physical map.
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
 tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 

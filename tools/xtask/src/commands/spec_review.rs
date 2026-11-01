@@ -15,6 +15,7 @@
 use std::path::Path;
 
 use super::source_tree;
+use crate::children::Children;
 
 /// The distinctive token of the draft marker (`// SPEC-DRAFT:`). Matching the
 /// bare token rather than the exact comment punctuation catches every spelling
@@ -34,9 +35,9 @@ pub struct Violation {
 }
 
 /// Scan the workspace rooted at `root` and return every draft marker found.
-pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
+pub fn scan(root: &Path, children: &Children) -> Result<Vec<Violation>, String> {
     let mut out = Vec::new();
-    source_tree::for_each_file(root, "spec-review", |path, rel, name| {
+    source_tree::for_each_file(root, children, "spec-review", |path, rel, name| {
         if source_tree::is_rust(name) && name != SELF_FILE {
             scan_file(path, rel, &mut out)?;
         }
@@ -63,9 +64,9 @@ fn scan_file(path: &Path, rel: &str, out: &mut Vec<Violation>) -> Result<(), Str
 
 /// Run the check, printing a report and returning an error if any draft
 /// marker remains in the tree.
-pub fn run(root: &Path) -> Result<(), String> {
+pub fn run(root: &Path, children: &Children) -> Result<(), String> {
     use std::fmt::Write as _;
-    let violations = scan(root)?;
+    let violations = scan(root, children)?;
     if violations.is_empty() {
         return Ok(());
     }
@@ -94,7 +95,7 @@ mod tests {
     #[test]
     fn workspace_carries_no_draft_markers() {
         let root = workspace_root();
-        let violations = scan(&root).expect("scan");
+        let violations = scan(&root, &Children::default()).expect("scan");
         assert!(
             violations.is_empty(),
             "unexpected §19.7 draft markers: {violations:#?}"

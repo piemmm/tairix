@@ -14,17 +14,18 @@ use crate::netattach::{
     check_attach_fields, AttachFrame, AttachReply, Presentation, ATTACH_FLAG_READ_ONLY, ATTACH_MAX,
     ATTACH_REPLY_LEN,
 };
-use crate::volume::VolumeFsType;
+use crate::volume::VolumeFsTypes;
 use crate::Errno;
 
 /// The version every [`ImageAttach`] frame opens with.
 pub const IMAGE_ATTACH_VERSION: u16 = 1;
 
 /// The largest [`ImageAttach`]: the attach frame every attach shares, whose
-/// byte 17 is here the expected filesystem.
+/// own word is here the filesystems expected.
 pub const IMAGE_ATTACH_MAX: usize = ATTACH_MAX;
 
-/// The [`ImageAttach`] flag saying byte 17 is the [`VolumeFsType`] expected.
+/// The [`ImageAttach`] flag saying the frame's own word is the
+/// [`VolumeFsTypes`] the file must hold one of.
 pub const IMAGE_ATTACH_FLAG_EXPECTS: u8 = 0x02;
 /// The [`ImageAttach`] flag asking for [`ImageAccess::Writable`].
 pub const IMAGE_ATTACH_FLAG_WRITABLE: u8 = 0x04;
@@ -54,6 +55,19 @@ pub enum ImageAccess {
     Writable,
 }
 
+impl ImageAccess {
+    /// Whether a volume that is, or is not, `read_only` is as writable as
+    /// this access asks.
+    #[must_use]
+    pub const fn accepts(self, read_only: bool) -> bool {
+        match self {
+            Self::ReadOnly => read_only,
+            Self::WritableWherePossible => true,
+            Self::Writable => !read_only,
+        }
+    }
+}
+
 /// How a principal asks for the volume an image file holds.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ImageAttach<'a> {
@@ -68,12 +82,15 @@ pub struct ImageAttach<'a> {
     pub access: ImageAccess,
     /// The directory it is also bound at, under `/Users` or `/Storage`.
     pub target: Option<&'a str>,
-    /// The filesystem the caller expects the file to hold: a claim the kernel
-    /// holds to its own recognition, never one that chooses a driver.
-    pub expects: Option<VolumeFsType>,
-    /// Take up a volume of this file the caller has attached already for the
-    /// caller's login session too, so it lives until that session ends as
-    /// well. Without it such an attach is answered and changes nothing.
+    /// The filesystems the caller expects the file to hold one of: a claim
+    /// the kernel holds to its own recognition, never one that chooses a
+    /// driver.
+    pub expects: Option<VolumeFsTypes>,
+    /// Take up a volume of this file the caller has attached already, one as
+    /// writable as `access` accepts, for the caller's login session too, so
+    /// it lives until that session ends as well. Without it, or for a volume
+    /// `access` does not accept, such an attach is answered and changes
+    /// nothing.
     pub adopt: bool,
 }
 
@@ -103,7 +120,7 @@ impl<'a> ImageAttach<'a> {
             version: IMAGE_ATTACH_VERSION,
             presentation: self.presentation,
             flags,
-            own: self.expects.map_or(0, VolumeFsType::as_u8),
+            own: self.expects.map_or(0, VolumeFsTypes::bits),
             name: self.name.unwrap_or(""),
             target: self.target,
         }
@@ -117,9 +134,9 @@ impl<'a> ImageAttach<'a> {
     ///
     /// [`Errno::AbiVersionUnsupported`] for another version;
     /// [`Errno::OutOfRange`] for an unknown presentation, flag or filesystem,
-    /// read-only and writable both asked,
+    /// read-only and writable both asked, a claim naming no filesystem,
     /// an owner or mode carried by a presentation that names none, a
-    /// filesystem byte with no claim, or a name, mode or target out of shape;
+    /// filesystem word with no claim, or a name, mode or target out of shape;
     /// [`Errno::LengthOutOfRange`] for a frame that does not end where its
     /// target does.
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
@@ -132,7 +149,7 @@ impl<'a> ImageAttach<'a> {
                 | IMAGE_ATTACH_FLAG_ADOPT,
         )?;
         let expects = match (frame.flags & IMAGE_ATTACH_FLAG_EXPECTS != 0, frame.own) {
-            (true, fstype) => Some(VolumeFsType::from_u8(fstype)?),
+            (true, bits) => Some(VolumeFsTypes::from_bits(bits)?),
             (false, 0) => None,
             (false, _) => return Err(Errno::OutOfRange),
         };
@@ -290,7 +307,10 @@ pub enum ImageAttachReply {
     /// The file holds nothing the kernel will attach.
     Refused(ImageRefusal),
     /// The directory the volume was also to be shown at would not take it,
-    /// for the reason the errno states, so nothing was attached.
+    /// for the reason the errno states. The volume was taken out before this
+    /// answer, unless the caller was being killed, something held it, or its
+    /// detach was refused: the system then takes it out, and a retry may be
+    /// refused [`Errno::Busy`] until it has.
     TargetRefused(Errno),
     /// The catalog name asked for the volume would not be given it —
     /// [`Errno::OutOfRange`] for one the naming policy keeps,

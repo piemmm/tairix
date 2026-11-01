@@ -12,7 +12,8 @@
 //!   to write into static buffers, ring buffers, or device registers.
 //! * **Stable event IDs.** Event identifiers are assigned by their callers
 //!   and treated as part of the ABI between TAIRiX and external log
-//!   consumers; they may not be re-used or re-numbered.
+//!   consumers; they may not be re-used or re-numbered, and one an event no
+//!   longer carries is kept in [`registry::RETIRED`].
 //!
 //! Sink installation is intentionally not a global registration table.
 //! Stage 2 will wire `kernel/sec` to a single in-kernel sink and userland

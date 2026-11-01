@@ -33,14 +33,18 @@ states that reason (`ImageRefusal::reason`).
 
 `image_attach` (syscall 164, `lib/abi/src/imageattach.rs`) takes a
 descriptor and an `ImageAttach`: the catalog name wanted, the presentation,
-its `ImageAccess`, a directory to bind it at too, the filesystem expected,
-and whether an attach finding the volume there already takes it up for the
+its `ImageAccess`, a directory to bind it at too, the filesystems expected
+(`VolumeFsTypes`, a set the recognised one must fall in, never a choice of
+driver), and whether an attach finding the volume there already takes it up for the
 caller's session (`adopt`). The reply names the volume and says whether it is read-only; a
 directory that would not take the volume, and a name asked that the volume
 may not take — one the naming policy keeps, or one in use, found so even as
 the volume is shown — are answered as such, with the reason
 (`ImageAttachReply::TargetRefused`, `ImageAttachReply::NameRefused`), and
-nothing is left attached. A C
+nothing is left attached: a volume mounted before its directory was tried is
+taken out before the reply, or by the system soon after where the caller is
+being killed or the volume is in use, a retry being refused `Busy` until then.
+A C
 program fills a `tairix_attach_head_t` and reads a
 `tairix_image_attach_reply_t` ([C development header](../abi/c-abi.md)).
 
@@ -52,15 +56,18 @@ program fills a `tairix_attach_head_t` and reads a
   volume or is refused `ReadOnly` — the descriptor or the format will not
   write — and nothing stays mounted. The attachment holds a counted clone of the open
   file with the caller's identity frozen into it, so the file outlives the
-  caller's close and an unlink.
+  caller's close and an unlink. It holds the file through the file's own
+  volume, so opening it through a bind ties nothing to that bind.
 - **One attachment per user and file.** Its identity is SHA-256 over a
   domain label, the attacher's uid, the file's volume and inode, and what the
   probe found; attaching the same file again answers `AlreadyAttached` with
   the volume there is. An attach that adopts it — the desktop's — hands it
   to its session too, so it lives until every login session it was handed
-  to has ended, its teardown cancelled if one was owed; one that does not —
-  `mount`'s — changes nothing, and is refused `Busy` for a volume owing its
-  teardown rather than told of one about to leave. While another attach is
+  to has ended, its teardown cancelled if one was owed, but only a volume as
+  writable as it asks: a read-only attach meeting a writable volume is
+  answered as one that does not adopt. One that does not — `mount`'s —
+  changes nothing, and is refused `Busy` for a volume owing its teardown
+  rather than told of one about to leave. While another attach is
   answering for it, an operation holds it, or it is lost awaiting its
   owner's eject, the attach is refused `Busy`.
 - **One writer.** The attachment holds an advisory lock over the whole file,
@@ -69,8 +76,11 @@ program fills a `tairix_attach_head_t` and reads a
 - **Presented as its attacher's.** `Private` — the caller and their primary
   group, `rwx------`/`rw-------` — for anyone; `Shared` and `Explicit` need
   `CAP_FS_MOUNT`. Always `noexec`. A target — for a caller without
-  `CAP_FS_MOUNT`, an empty directory of their own under `/Users` — is bound
-  in the same call.
+  `CAP_FS_MOUNT`, an empty directory of their own under `/Users` or inside a
+  volume in `/Storage`, reached through directories of their own or the
+  system's, and never on a FAT32 or ADFS volume, whose nodes keep no identity
+  a bind can hold — is bound in the same call, as any view bind is
+  ([drives](./drives.md)).
 - **Named from the volume.** An explicit name must be a label's own
   kebab-case spelling and no reserved word, so it can never take a name the
   policy gives a volume it names itself, else it is refused `OutOfRange`; it
@@ -93,8 +103,10 @@ program fills a `tairix_attach_head_t` and reads a
   out before the call could answer is `NotAttached`.
 - **An answer that cannot be delivered is undone.** The reply is written to
   the caller from within the attach: if it cannot be, a volume the attach
-  mounted is taken out, and the hold it gave a login session on one attached
-  already is let go, so no one holds a volume they were never told of.
+  mounted is taken out before the call returns, or soon after where the
+  caller is being killed or the volume is in use, and the hold it gave a login
+  session on one attached already is let go, so no one holds a volume they
+  were never told of.
 
 The image's blocks are 512 bytes over the held file; a trailing partial
 block is outside the volume, and a short read is a device fault, never
@@ -105,6 +117,12 @@ an optical disc, a floppy's layout a floppy.
 
 - **Eject.** The owner detaches it without `CAP_FS_MOUNT`: flushed through
   its driver, then the file, then taken out of the namespace.
+- **Lost.** A volume whose backing went with writes unpublished stays listed,
+  unreadable, until its owner ejects it with a force, or with a detach that
+  takes the lost (`DetachMode::Lost`): the kernel forces that one only while
+  the volume is recorded lost, and takes any other volume down as a plain
+  detach, so a stale view never forces a healthy volume. Its audit says
+  `forced`.
 - **The login session's end.** The session notifier tells the volume service
   which sessions ended, and an image none of whose sessions is open comes to
   owe its detach. The notifier's tasks do it, as a forced detach would:
@@ -118,7 +136,9 @@ an optical disc, a floppy's layout a floppy.
   is attached is refused `Busy`; a forced one detaches those images first; a
   surprise removal or a lost server retires them with it.
 - **The driver lost.** As for a stick: the stand-in answers, the mount
-  reports recovering, and `devmgr`'s restart serves it again.
+  reports recovering, and `devmgr`'s restart serves it again. A plain eject
+  meanwhile detaches it, as a stick's detach does: what the driver held
+  unpublished went with it, so there is nothing left to flush.
 
 The mount table records an image volume as `VolumeClass::Image`, its owner
 the attacher and its source the file's name. One presented to its attacher
@@ -138,16 +158,21 @@ whole ([System Information API](../abi/sysinfo.md)).
   worker of their own (`tairix_browse::mount::MountWorker`), since an attach
   waits for a driver, and open a window on the volume; a refusal is stated in
   an alert. *Mount Read-Only* and *Eject* are in `files.app`'s menus, and
-  *Eject* on the places rail. *Mount Read-Only* of an image mounted writable
-  already says so rather than opening the writable volume. An eject first
+  *Eject* on the places rail. A lost volume has no rail row, and *Eject* on
+  its catalog entry asks before letting what was unsaved go, then sends
+  `DetachMode::Lost`. *Mount Read-Only* of an image mounted writable already
+  says so rather than opening the writable volume or holding it for the
+  session, and one of an image no path can name says why. An eject first
   has the app's reader read where the volume is bound — once, then, rather
   than with every change to the mount table — and takes `files.app`'s own
   windows off every place it is shown, its catalog entry and each directory
   it is bound at, to the catalog, letting go of what any window watches or
-  was offered there; the reader then carries it out after the read under way
-  and any write committed before it, so no read or watch of the app's own
-  holds the volume as it goes; a copy the app is running on it still does,
-  as it should.
+  was offered there; the reader serving the volume's lane then carries it out
+  after the read under way there and any write committed before it, so no read
+  or watch of the app's own routed to the volume holds it as it goes — one
+  routed before the mount table was re-read can, and the eject is then refused
+  as busy, saying so; a copy the app is running on it still does, as it
+  should.
 - **`mount IMAGE [TARGET]`** mounts one from a terminal, and
   **`unmount NAME`** detaches it ([utilities](../userland/utilities.md)).
 
@@ -158,6 +183,6 @@ whole ([System Information API](../abi/sysinfo.md)).
 | 4320 | `fs.image.awaiting` | published, awaiting its driver (`cause`: the presentation) |
 | 4321 | `fs.image.attached` | served and mounted, or served again (`cause`: the format) |
 | 4322 | `fs.image.attach_refused` | an attach was refused (`cause`) |
-| 4323 | `fs.image.detached` | detached (`cause`, and what a force gave up) |
+| 4323 | `fs.image.detached` | detached (`cause`, `outcome` `clean` or `forced`, and what a force gave up) |
 | 4324 | `fs.image.detach_refused` | a detach was refused (`cause`) |
 | 4325 | `fs.image.retired` | retired with its file's volume, or its driver lost (`cause`, `outcome`) |

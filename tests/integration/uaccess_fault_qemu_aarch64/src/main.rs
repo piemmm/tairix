@@ -90,12 +90,6 @@ mod kernel {
     /// [`PROBE_PAGE`] at.
     const USER_PROBE_VA: u64 = 4 * (1 << 30);
 
-    /// `PSTATE.PAN`, as the `PAN` register reads it.
-    const PSTATE_PAN: u64 = 1 << 22;
-
-    /// `SCTLR_EL1.SPAN`: set, an exception taken to EL1 leaves PAN alone.
-    const SCTLR_SPAN: u64 = 1 << 23;
-
     /// The byte every word of [`PROBE_PAGE`] holds.
     const PROBE_BYTE: u8 = 0x5A;
 
@@ -188,19 +182,16 @@ mod kernel {
         if !protection::pan_in_force() {
             fail("PAN not in force on a CPU offering it", FAIL_PAN_NOT_HELD);
         }
-        let (pan, sctlr): (u64, u64);
-        // SAFETY: the CPU offers PAN, so its register exists; both reads
-        // change nothing.
+        let sctlr: u64;
+        // SAFETY: reading `SCTLR_EL1` at EL1 changes nothing.
         unsafe {
             core::arch::asm!(
-                "mrs {pan}, S3_0_C4_C2_3",
                 "mrs {sctlr}, sctlr_el1",
-                pan = out(reg) pan,
                 sctlr = out(reg) sctlr,
                 options(nomem, nostack, preserves_flags),
             );
         }
-        if pan & PSTATE_PAN == 0 || sctlr & SCTLR_SPAN != 0 {
+        if !protection::held_here() || sctlr & paging::SCTLR_SPAN != 0 {
             fail("PAN not set, or SPAN left set", FAIL_PAN_NOT_HELD);
         }
         // The watchdog's stack-link probe: EL1 may read its own stack, and

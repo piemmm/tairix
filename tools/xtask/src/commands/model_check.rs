@@ -443,12 +443,12 @@ pub fn selected(opts: &Options) -> Result<Vec<NamedModel>, String> {
 /// Run the selected models, failing closed on the first counterexample.
 ///
 /// # Errors
-/// Returns an error if any model finds a state or transition that violates an
-/// invariant.
+/// An unknown model, a `--list` stdout cannot take, or any model that finds a
+/// state or transition violating an invariant.
 pub fn run(opts: &Options) -> Result<(), String> {
     if opts.list {
         for m in MODELS {
-            println!("{:<10} {}", m.name, m.description);
+            outln!("{:<10} {}", m.name, m.description)?;
         }
         return Ok(());
     }
@@ -456,9 +456,11 @@ pub fn run(opts: &Options) -> Result<(), String> {
     for m in &selected(opts)? {
         match (m.run)() {
             Ok(report) => {
-                eprintln!(
+                noteln!(
                     "xtask: [model-check] {}: {} states, {} transitions — all invariants hold",
-                    m.name, report.states, report.transitions
+                    m.name,
+                    report.states,
+                    report.transitions
                 );
             }
             Err(cx) => {

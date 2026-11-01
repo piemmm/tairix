@@ -3677,6 +3677,24 @@ fn realpath_of_a_dangling_link_follows_its_target() {
     );
 }
 
+/// A link may store a name no caller can spell, and `-m` carries a vacant
+/// one into the answer: realpath refuses rather than answer a path the
+/// service would refuse back.
+#[test]
+fn realpath_refuses_an_answer_no_caller_could_spell_back() {
+    let svc = ready();
+    let caps = caps();
+    for (link, target) in [("lnk0", "new\tdir"), ("lnk1", "a:b")] {
+        svc.symlink(TEST_UID, &caps, target, at(&path(link)))
+            .expect("a link stores any name");
+        assert_eq!(
+            svc.realpath(TEST_UID, &caps, at(&path(link)), RealpathMode::Missing),
+            Err(Errno::OutOfRange),
+            "{target:?}"
+        );
+    }
+}
+
 #[test]
 fn realpath_refuses_a_cycle_and_needs_search_permission_on_the_way() {
     let svc = ready();

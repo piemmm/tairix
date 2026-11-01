@@ -31,7 +31,6 @@ mod support;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::time::Instant;
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{
@@ -670,14 +669,10 @@ fn fuzz_ext4_mount() {
     ];
     // Each base gets its share of the budget, half to the sweep and half to
     // the stream, so the journal bases are never starved by the first.
-    let start = Instant::now();
     let halves = u32::try_from(2 * bases.len()).expect("a handful of bases");
-    let share = deadline.map(|deadline| deadline.saturating_duration_since(start) / halves);
-    for (at, base) in bases.iter().enumerate() {
-        let slice = |half: u32| {
-            share.map(|share| start + share * (2 * u32::try_from(at).expect("few bases") + half))
-        };
-        let (sweep_until, stream_until) = (slice(1), slice(2));
+    let slices = tairix_fuzzseed::budget_slices(deadline, halves);
+    for (at, base) in (0u32..).zip(bases.iter()) {
+        let (sweep_until, stream_until) = (slices(2 * at + 1), slices(2 * at + 2));
         // A base that does not mount would make every input below vacuous,
         // and one whose log does not replay would never reach the replay.
         let mounts = if base.needs_replay {

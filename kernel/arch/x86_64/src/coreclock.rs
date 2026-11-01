@@ -19,6 +19,12 @@
 //! fabricated rate). The MSRs are privileged, so the whole source is gated to
 //! the freestanding target; a host build (even on an x86_64 developer
 //! machine) declares itself unsupported and never executes `rdmsr`.
+//!
+//! Each CPU asks `CPUID` once, as it enables the counter: the instruction
+//! serialises, and exits to the hypervisor under one, so it has no place on
+//! the reads every preemption tick takes.
+
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use tairix_arch_api::{CoreClock, CoreClockSupport};
 
@@ -31,22 +37,15 @@ const IA32_MPERF: u32 = 0xE7;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const IA32_APERF: u32 = 0xE8;
 
-/// `true` if the `APERF`/`MPERF` hardware-coordination-feedback pair is
-/// present (`CPUID.06H:ECX.0`). Off the freestanding target this is `false`
-/// so no privileged MSR is ever read on the host.
-#[inline]
+/// `true` if the calling CPU has the `APERF`/`MPERF`
+/// hardware-coordination-feedback pair (`CPUID.06H:ECX.0`). Off the
+/// freestanding target this is `false` so no privileged MSR is ever read on
+/// the host.
 #[must_use]
 fn aperf_mperf_present() -> bool {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        // `CPUID` is side-effect-free; leaf 6 exists when the max basic leaf
-        // (leaf 0 EAX) reaches it. Bit 0 of ECX is the effective-frequency
-        // (APERF/MPERF) capability.
-        let max_basic = core::arch::x86_64::__cpuid(0).eax;
-        if max_basic < 6 {
-            return false;
-        }
-        core::arch::x86_64::__cpuid_count(6, 0).ecx & 1 != 0
+        crate::cpuid::leaf(6, 0).is_some_and(|leaf| leaf.ecx & 1 != 0)
     }
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {
@@ -54,14 +53,37 @@ fn aperf_mperf_present() -> bool {
     }
 }
 
+/// What the CPUs that have enabled the counter say of the pair, ordered so an
+/// answer folds in as a maximum: unprobed, present once one has it, and
+/// absent for good once any lacks it, so no CPU reads a register one lacks.
+const UNPROBED: u8 = 0;
+const PRESENT: u8 = 1;
+const ABSENT: u8 = 2;
+
+/// The pair's state across the CPUs that have enabled the counter.
+static FEEDBACK: AtomicU8 = AtomicU8::new(UNPROBED);
+
+/// Fold one CPU's answer into `state`. Relaxed: a CPU lacking the pair reads
+/// only after its own fold, and a CPU reading the pair reads its own.
+fn fold(state: &AtomicU8, present: bool) {
+    state.fetch_max(if present { PRESENT } else { ABSENT }, Ordering::Relaxed);
+}
+
+/// Whether the pair may be read on the calling CPU, which has enabled the
+/// counter.
+fn feedback_present() -> bool {
+    FEEDBACK.load(Ordering::Relaxed) == PRESENT
+}
+
 /// Read a model-specific register. Freestanding target only — the caller
-/// gates on [`aperf_mperf_present`] so the MSR is known to exist.
+/// gates on [`feedback_present`] so the MSR is known to exist.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[inline]
 #[must_use]
 fn rdmsr(msr: u32) -> u64 {
-    // SAFETY: the kernel runs at ring 0 and the caller has confirmed `msr`
-    // (APERF/MPERF) exists via `CPUID.06H:ECX.0`, so the read cannot `#GP`.
+    // SAFETY: the kernel runs at ring 0 and every CPU that enabled the
+    // counter, this one included, reported `CPUID.06H:ECX.0`, so `msr`
+    // (APERF/MPERF) exists and the read cannot `#GP`.
     unsafe { crate::msr::read(msr) }
 }
 
@@ -84,7 +106,7 @@ impl CoreClockCounter {
     /// present and the TSC (reference) frequency has been calibrated.
     #[must_use]
     fn available() -> bool {
-        aperf_mperf_present() && calibrated_tsc_hz() != 0
+        feedback_present() && calibrated_tsc_hz() != 0
     }
 }
 
@@ -108,13 +130,14 @@ fn calibrated_tsc_hz() -> u64 {
 impl CoreClock for CoreClockCounter {
     fn enable(&self) {
         // `APERF`/`MPERF` are free-running whenever the CPU implements the
-        // feedback pair; there is nothing to enable.
+        // feedback pair, so enabling is only asking whether it does.
+        fold(&FEEDBACK, aperf_mperf_present());
     }
 
     fn core_cycles(&self) -> u64 {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            if aperf_mperf_present() {
+            if feedback_present() {
                 return rdmsr(IA32_APERF);
             }
         }
@@ -124,7 +147,7 @@ impl CoreClock for CoreClockCounter {
     fn reference_cycles(&self) -> u64 {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            if aperf_mperf_present() {
+            if feedback_present() {
                 return rdmsr(IA32_MPERF);
             }
         }
@@ -160,10 +183,31 @@ mod tests {
         // Off the freestanding target the MSRs are unreachable, so the handle
         // fails closed: unsupported, zero counters — no `rdmsr` executes.
         let clock = CoreClockCounter::new();
+        clock.enable();
         assert!(!clock.support().is_supported());
         assert_eq!(clock.core_cycles(), 0);
         assert_eq!(clock.reference_cycles(), 0);
         assert_eq!(clock.reference_hz(), 0);
         coreclock::conformance::run_all(&clock);
+    }
+
+    /// A CPU lacking the pair stops every CPU reading it, whatever answers
+    /// come after; until one answers, nothing may read it.
+    #[test]
+    fn one_cpu_lacking_the_pair_keeps_every_cpu_from_reading_it() {
+        let state = AtomicU8::new(UNPROBED);
+        fold(&state, true);
+        assert_eq!(state.load(Ordering::Relaxed), PRESENT);
+        fold(&state, true);
+        assert_eq!(state.load(Ordering::Relaxed), PRESENT);
+        fold(&state, false);
+        assert_eq!(state.load(Ordering::Relaxed), ABSENT);
+        fold(&state, true);
+        assert_eq!(state.load(Ordering::Relaxed), ABSENT, "absent for good");
+
+        let first_lacks = AtomicU8::new(UNPROBED);
+        fold(&first_lacks, false);
+        fold(&first_lacks, true);
+        assert_eq!(first_lacks.load(Ordering::Relaxed), ABSENT);
     }
 }

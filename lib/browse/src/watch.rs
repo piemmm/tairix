@@ -728,6 +728,15 @@ impl<C: Copy + Ord, H: Clone> Watches<C, H> {
 
     /// The next drain for the reader: whose, which location, and the handle.
     pub fn next_drain(&mut self) -> Option<(C, Vec<String>, H)> {
+        self.next_drain_where(|_| true)
+    }
+
+    /// The next drain of a location `mine` admits: what a reader takes when
+    /// its readers each serve their own share of the folders.
+    pub fn next_drain_where(
+        &mut self,
+        mut mine: impl FnMut(&[String]) -> bool,
+    ) -> Option<(C, Vec<String>, H)> {
         if self.stopping {
             return None;
         }
@@ -735,8 +744,14 @@ impl<C: Copy + Ord, H: Clone> Watches<C, H> {
             if !slot.wanted {
                 return None;
             }
+            let Some((location, handle)) = slot.watching.as_ref() else {
+                slot.wanted = false;
+                return None;
+            };
+            if !mine(location) {
+                return None;
+            }
             slot.wanted = false;
-            let (location, handle) = slot.watching.as_ref()?;
             Some((*client, location.clone(), handle.clone()))
         })
     }
@@ -774,21 +789,17 @@ impl<C: Copy + Ord, H: Clone> Watches<C, H> {
         slot.watching.take().map(|(_, handle)| handle)
     }
 
-    /// The window is leaving everything `within` names — a volume about to
-    /// be ejected: the watch it holds there, and one offered with a listing
-    /// of there it has not taken, for the window to release. Anything it
-    /// holds elsewhere stays.
-    pub fn release_within(
-        &mut self,
-        client: C,
-        within: impl Fn(&[String]) -> bool,
-    ) -> [Option<H>; 2] {
+    /// The window is leaving every place within `roots` — a volume about to
+    /// be ejected, as [`within`](crate::mount::within) decides it: the watch
+    /// it holds there, and one offered with a listing of there it has not
+    /// taken, for the window to release. Anything it holds elsewhere stays.
+    pub fn release_within(&mut self, client: C, roots: &[&[String]]) -> [Option<H>; 2] {
         let Some(slot) = self.slots.get_mut(&client) else {
             return [None, None];
         };
         let watching = slot
             .watching
-            .take_if(|(at, _)| within(at))
+            .take_if(|(at, _)| crate::mount::within(roots, at))
             .map(|(_, handle)| handle);
         if watching.is_some() {
             slot.wanted = false;
@@ -796,7 +807,7 @@ impl<C: Copy + Ord, H: Clone> Watches<C, H> {
         }
         let offered = slot
             .offered
-            .take_if(|(at, _)| within(at))
+            .take_if(|(at, _)| crate::mount::within(roots, at))
             .map(|(_, handle)| handle);
         [watching, offered]
     }

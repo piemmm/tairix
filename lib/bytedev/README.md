@@ -2,7 +2,8 @@
 
 Byte-addressed I/O over a `tairix_abi::driver::block::Block` device: the one
 reader the filesystem drivers that address a device in bytes or in a block
-size of their own (ext4, FAT32, ADFS, ISO 9660, UDF), the volume probe, the
+size of their own (ext4, FAT32, ADFS, AmigaDOS, ISO 9660, UDF), the volume
+probe, the
 volume manager, the RAID driver and the kernel's volume service read through.
 
 `ByteDevice` validates the device geometry once (a power-of-two block size in

@@ -2274,14 +2274,16 @@ pub fn volume_attach(request: &[u8]) -> i64 {
 /// D3b).
 ///
 /// `request` is an encoded [`tairix_abi::volume::VolumeDetachRequest`]
-/// (the volume's stable 16-byte identity plus the force byte). The user who
+/// (the volume's stable 16-byte identity plus the
+/// [`DetachMode`](tairix_abi::volume::DetachMode) byte). The user who
 /// attached a disk image or a network share may detach it; any other volume
 /// needs `CAP_FS_MOUNT`, and only a runtime-attached volume can be detached.
-/// A plain detach fails closed on a flush error (or an
-/// unavailable, surprise-removed volume) rather than discarding
-/// uncommitted data; a force detach retracts the volume anyway,
-/// deliberately discarding the retained set with its own audit event.
-/// Returns `0` on success or `-errno`.
+/// A plain detach fails closed, each refusal the errno
+/// [`VolumeDetachRequest`](tairix_abi::volume::VolumeDetachRequest) lists,
+/// rather than discarding uncommitted data; a force detach retracts the
+/// volume anyway, deliberately discarding the retained set with its own
+/// audit event; a lost detach forces only a volume recorded lost. Returns
+/// `0` on success or `-errno`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn volume_detach(request: &[u8]) -> i64 {
@@ -8612,8 +8614,8 @@ mod tests {
         use tairix_abi::driver::filesystem::{NameMatching, NodeId, NodeIdentity};
         use tairix_abi::fsserve::{Lanes, ServeOffer};
         use tairix_abi::netattach::{
-            FsserveCtl, NetworkAttach, NetworkOffer, OfferId, Presentation, ATTACH_REPLY_LEN,
-            OFFER_GRANT_LEN,
+            FsserveCtl, NetworkAttach, NetworkOffer, OfferId, Presentation, ATTACH_HEAD_LEN,
+            ATTACH_REPLY_LEN, OFFER_GRANT_LEN,
         };
         let offer = NetworkOffer {
             serve: ServeOffer {
@@ -8648,9 +8650,10 @@ mod tests {
             assert_eq!(fsserve_attach(id, &attach).err(), Some(Errno::OutOfRange));
         });
         assert_eq!(number, NUM_FSSERVE_ATTACH);
+        let frame = ATTACH_HEAD_LEN + attach.name.len();
         assert_eq!(
             (args[0], args[2], args[4]),
-            (9, 25, ATTACH_REPLY_LEN as u64)
+            (9, frame as u64, ATTACH_REPLY_LEN as u64)
         );
         let (number, args) = capture(0, || {
             assert_eq!(fsserve_ctl(id, FsserveCtl::Withdraw), Ok(()));
@@ -8679,7 +8682,7 @@ mod tests {
             (args[0], args[2], args[4]),
             (
                 5,
-                20,
+                ATTACH_HEAD_LEN as u64,
                 tairix_abi::imageattach::IMAGE_ATTACH_REPLY_LEN as u64
             )
         );

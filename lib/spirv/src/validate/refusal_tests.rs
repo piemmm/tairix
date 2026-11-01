@@ -5,7 +5,7 @@ use alloc::format;
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use super::assemble::{admit_version, refused, with};
+use super::assemble::{admit, admit_version, refused, with};
 use super::tests::{COMPUTE, FRAGMENT, VERTEX};
 use crate::enumerant::{Capability, Decoration, Dim, ExecutionMode};
 use crate::{Kind, Limit, Op, Rule, Version};
@@ -249,6 +249,26 @@ fn an_id_nothing_defines_is_refused() {
         "%w = OpFAdd %float %v %nothing",
     );
     assert!(matches!(refused(&module), Rule::Undefined(_)));
+}
+
+#[test]
+fn an_instruction_using_its_own_result_is_refused() {
+    let module = with(
+        COMPUTE,
+        "%w = OpFAdd %float %v %v",
+        "%w = OpFAdd %float %v %w",
+    );
+    assert!(matches!(refused(&module), Rule::NotDominated(_)));
+}
+
+#[test]
+fn a_declaration_naming_itself_is_refused() {
+    let module = after(
+        COMPUTE,
+        "%zero = OpConstant %uint 0",
+        "%loop = OpSpecConstantOp %uint IAdd %loop %zero",
+    );
+    assert!(matches!(refused(&module), Rule::ForwardReference(_)));
 }
 
 #[test]
@@ -860,6 +880,46 @@ fn entry_points_past_the_bound_are_refused() {
 }
 
 #[test]
+fn a_vector_chosen_by_one_boolean_is_refused_before_1_4() {
+    let declared = after(
+        COMPUTE,
+        "%float = OpTypeFloat 32",
+        "%bool = OpTypeBool\n%v2float = OpTypeVector %float 2\n%v2bool = OpTypeVector %bool 2\n%flag = OpSpecConstantTrue %bool",
+    );
+    let compare = "%c = OpFOrdLessThan %bool %v %w\n%pair = OpCompositeConstruct %v2float %v %w";
+    let one = after(
+        &declared,
+        "%w = OpFAdd %float %v %v",
+        &format!("{compare}\n%either = OpSelect %v2float %c %pair %pair"),
+    );
+    let constant = after(
+        &declared,
+        "%zero = OpConstant %uint 0",
+        "%v2uint = OpTypeVector %uint 2\n%zeros = OpConstantComposite %v2uint %zero %zero\n%picked = OpSpecConstantOp %v2uint Select %flag %zeros %zeros",
+    );
+    let each = after(
+        &declared,
+        "%w = OpFAdd %float %v %v",
+        &format!("{compare}\n%cs = OpCompositeConstruct %v2bool %c %c\n%either = OpSelect %v2float %cs %pair %pair"),
+    );
+    // Before 1.4 the interface lists inputs and outputs alone.
+    let old = |text: &str| {
+        admit_version(
+            &with(text, "\"main\" %gid %buf", "\"main\" %gid"),
+            Version { major: 1, minor: 3 },
+        )
+    };
+    for (module, refusal) in [
+        (&one, Rule::OperandType(2)),
+        (&constant, Rule::SpecConstantOp),
+    ] {
+        admit(module).expect("chosen whole from 1.4");
+        assert_eq!(old(module).expect_err("refused").rule, refusal);
+    }
+    old(&each).expect("chosen a component at a time before it");
+}
+
+#[test]
 fn a_selection_between_pointers_is_refused() {
     let module = after(
         COMPUTE,
@@ -943,7 +1003,7 @@ fn a_bit_count_of_a_64_bit_integer_is_refused() {
     let module = after(
         &module,
         "%uint = OpTypeInt 32 0",
-        "%ulong = OpTypeInt 64 0\n%big = OpConstant %ulong 1 0",
+        "%ulong = OpTypeInt 64 0\n%big = OpConstant %ulong 1",
     );
     let module = after(
         &module,
@@ -1226,7 +1286,7 @@ fn texels_reached_through_a_parameter_are_refused_where_their_image_forbids_it()
 fn a_subgroup_operation_on_a_width_that_needs_a_device_feature_is_refused() {
     let caps = "OpCapability Shader\nOpCapability Int64\nOpCapability Float16\nOpCapability GroupNonUniform\nOpCapability GroupNonUniformArithmetic\nOpCapability GroupNonUniformBallot";
     let module = with(COMPUTE, "OpCapability Shader", caps);
-    let module = after(&module, "%float = OpTypeFloat 32", "%long = OpTypeInt 64 0\n%half = OpTypeFloat 16\n%subgroup = OpConstant %uint 3\n%five = OpConstant %long 5 0\n%hc = OpConstant %half 0x3c00");
+    let module = after(&module, "%float = OpTypeFloat 32", "%long = OpTypeInt 64 0\n%half = OpTypeFloat 16\n%subgroup = OpConstant %uint 3\n%five = OpConstant %long 5\n%hc = OpConstant %half 0x3c00");
     let wide = after(
         &module,
         "%w = OpFAdd %float %v %v",

@@ -23,7 +23,11 @@
 //! type, key, secondary type, name and comment bounds and pointers, a data
 //! block's owner and sequence number, a bitmap block's sum. Anything out of
 //! shape is [`DriverError::BadMagic`]. Every chain is walked under a bound
-//! with a loop check, so a damaged volume cannot hold the driver.
+//! with a loop check, so a damaged volume cannot hold the driver, and a change
+//! that frees or fills what a file's extension chain names walks it on to its
+//! end first, so one returning to a block it passed is refused before anything
+//! is written. The root and the bitmap's own blocks are named once each, and no
+//! change writes or frees one as anything else.
 //!
 //! # Writing
 //!
@@ -33,11 +37,13 @@
 //! blocks return to the bitmap. The commit writes the bitmap, flushes, and only
 //! then marks the root valid again, so a crash in between leaves a volume
 //! AmigaDOS revalidates. While an object the kernel holds has lost its last
-//! name the root stays marked invalid, so a crash before the last unpin frees
-//! its blocks has AmigaDOS reclaim them. Every refusal is decided before a
-//! change's first write, so a refused change writes nothing; one that fails
-//! part-way leaves the volume for AmigaDOS to validate, and the driver writes
-//! nothing more to it.
+//! name, or its free at the last unpin failed, the root stays marked invalid,
+//! so AmigaDOS reclaims its blocks; a free the heap refuses at that unpin is
+//! made when the mount's pins are released. Every refusal is decided before a
+//! change's first write, so a refused change writes nothing — a heap running
+//! short among them, as what a change takes once it has written is held before
+//! it and the commit allocates nothing. One that fails part-way leaves the
+//! volume for AmigaDOS to validate, and the driver writes nothing more to it.
 //!
 //! # Names and links
 //!
@@ -91,6 +97,7 @@ use tairix_fsprobe::affs::{
 use tairix_writeback::CommitScheduler;
 
 mod bitmap;
+mod chain;
 mod dir;
 mod file;
 mod guard;
@@ -103,7 +110,7 @@ mod served;
 mod tests;
 
 use bitmap::{Bitmap, Pages};
-use header::{Header, Kind};
+use header::{Extension, Header, Kind};
 use name::Name;
 
 pub use mkfs::FormatOptions;
@@ -129,11 +136,24 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
     DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
 }
 
+/// The block buffers a change may take once it has written: the headers and
+/// extensions it reads after its first write, a walk handing each step's back
+/// and every header a change is done with handed back as it finishes with it.
+/// A fixed bound on one change's working set; the deepest, a rename with its
+/// buckets crowded, holds four at once.
+const SPARE_BLOCKS: usize = 8;
+
 /// The blocks of the volume, read and written whole.
 struct Disk<B: Block> {
     dev: ByteDevice<B>,
     block_size: usize,
     blocks: u64,
+    /// Buffers held for a change to take after its first write, so a heap
+    /// that runs short refuses a change before it writes rather than
+    /// stopping it part-way.
+    spare: Vec<Vec<u8>>,
+    /// The change under way has written, so a buffer comes from the spares.
+    spending: bool,
 }
 
 impl<B: Block> Disk<B> {
@@ -155,8 +175,60 @@ impl<B: Block> Disk<B> {
         self.dev.write(at, buf)
     }
 
-    fn buffer(&self) -> Result<Vec<u8>, DriverError> {
+    /// Zero the `count` blocks from `block`.
+    fn zero(&mut self, block: u64, count: u64) -> Result<(), DriverError> {
+        let len = usize::try_from(count)
+            .ok()
+            .and_then(|count| count.checked_mul(self.block_size))
+            .ok_or(DriverError::OutOfRange)?;
+        let at = self.offset(block, len)?;
+        self.dev.zero(at, len as u64)
+    }
+
+    /// A zeroed block buffer: once a change has written, one of the spares.
+    fn buffer(&mut self) -> Result<Vec<u8>, DriverError> {
+        if self.spending {
+            if let Some(mut buf) = self.spare.pop() {
+                buf.fill(0);
+                return Ok(buf);
+            }
+        }
         tairix_util::fallible::filled(self.block_size, 0).ok_or(DriverError::OutOfMemory)
+    }
+
+    /// Keep `buf`, a block buffer a change has read with and is done with, for
+    /// the change's next take: only while it spends spares, into the room
+    /// [`stock`](Self::stock) reserved before it wrote, so keeping one never
+    /// allocates. Outside a change the buffer is let go.
+    fn recycle(&mut self, buf: Vec<u8>) {
+        if self.spending && self.spare.len() < SPARE_BLOCKS && buf.len() == self.block_size {
+            self.spare.push(buf);
+        }
+    }
+
+    /// Hold every spare a change may take, before it writes.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfMemory`].
+    fn stock(&mut self) -> Result<(), DriverError> {
+        let wanted = SPARE_BLOCKS - self.spare.len();
+        if !tairix_util::fallible::reserve(&mut self.spare, wanted) {
+            return Err(DriverError::OutOfMemory);
+        }
+        while self.spare.len() < SPARE_BLOCKS {
+            let buf = tairix_util::fallible::filled(self.block_size, 0)
+                .ok_or(DriverError::OutOfMemory)?;
+            self.spare.push(buf);
+        }
+        Ok(())
+    }
+
+    /// Extension block `block` of the file whose header is `file`.
+    fn extension(&mut self, at: Offsets, file: u64, block: u64) -> Result<Extension, DriverError> {
+        let mut buf = self.buffer()?;
+        self.read(block, &mut buf)?;
+        Extension::parse(block, buf, at, file, self.blocks)
     }
 }
 
@@ -178,17 +250,34 @@ struct Hold {
     unnamed: bool,
 }
 
-/// The extension blocks walked of one file, so a sequential read reaches its
-/// next block's pointer without walking the chain again.
-struct Chain {
-    file: u64,
-    extensions: Vec<u32>,
-    guard: guard::Guard,
+/// What a header records of its node, read once as a listing walks its
+/// bucket so handing the entry over reads nothing more.
+#[derive(Clone, Copy)]
+struct Facts {
+    block: u64,
+    kind: Kind,
+    /// A file's bytes, or a soft link's target's in POSIX spelling — or why
+    /// those could not be had, answered for the entry alone.
+    size: Result<u64, DriverError>,
+    date: DateStamp,
+    next_link: u32,
+    real_entry: u32,
+}
+
+/// What a node is to the VFS.
+fn node_kind(kind: Kind) -> Result<NodeKind, DriverError> {
+    match kind {
+        Kind::Root | Kind::Directory => Ok(NodeKind::Directory),
+        Kind::File => Ok(NodeKind::RegularFile),
+        Kind::SoftLink | Kind::DirLink => Ok(NodeKind::Symlink),
+        // A hard link to a file is the file under another name, never a node.
+        Kind::FileLink => Err(DriverError::BadMagic),
+    }
 }
 
 /// The file the last read was of: its header, and the extension block its
 /// last pointer came from, so a sequential read reads only its data. Dropped
-/// by every change.
+/// by every change, which may rewrite either.
 struct Reading {
     header: Header,
     held: Option<(u64, header::Extension)>,
@@ -206,8 +295,10 @@ pub struct Affs<B: Block> {
     bitmap: Option<Bitmap>,
     write_refusal: Option<WriteRefusal>,
     schedule: CommitScheduler,
-    /// The root's bitmap is marked invalid on the medium: a transaction is open.
-    open: bool,
+    /// The root as the open transaction last wrote it, its bitmap marked
+    /// invalid on the medium; none while no transaction is open. Kept so a
+    /// commit publishes it with no read.
+    transaction: Option<Header>,
     /// The change under way has written a block or moved one in the bitmap,
     /// so a failure leaves it part-way.
     mutated: bool,
@@ -215,14 +306,20 @@ pub struct Affs<B: Block> {
     /// next flush must still force them out of the device's cache.
     unflushed: bool,
     held: RadixTree<Hold>,
-    /// Held objects that have lost their last name, whose blocks no name
-    /// reaches until their last unpin frees them.
+    /// Objects that have lost their last name whose blocks are still
+    /// allocated: held ones, freed at their last unpin, and any whose free
+    /// failed, left for AmigaDOS's validator.
     orphans: usize,
     /// The names each hard-linked file was counted to have, kept until a
     /// change, so listing a directory of links walks each chain once.
     linked: RadixTree<u32>,
-    chain: Option<Chain>,
+    /// The extension chains of the files most recently reached, kept in step
+    /// with every change.
+    chains: chain::Chains,
     reading: Option<Reading>,
+    /// The bucket the last listing stopped in, so the next resumes there
+    /// without walking its chain again. Dropped by every change.
+    listing: Option<dir::Bucket>,
 }
 
 impl<B: Block> Affs<B> {
@@ -252,11 +349,13 @@ impl<B: Block> Affs<B> {
         } else {
             None
         };
-        Ok(Self {
+        let mut fs = Self {
             disk: Disk {
                 dev,
                 block_size,
                 blocks: layout.blocks,
+                spare: Vec::new(),
+                spending: false,
             },
             matching: if layout.dos_type.is_international() {
                 NameMatching::Latin1CaseInsensitive
@@ -269,15 +368,20 @@ impl<B: Block> Affs<B> {
             bitmap: None,
             write_refusal,
             schedule: CommitScheduler::new(cost),
-            open: false,
+            transaction: None,
             mutated: false,
             unflushed: false,
             held: RadixTree::new(),
             orphans: 0,
             linked: RadixTree::new(),
-            chain: None,
+            chains: chain::Chains::default(),
             reading: None,
-        })
+            listing: None,
+        };
+        let room = fs.extension_blocks(fs.data_blocks(u64::from(u32::MAX)));
+        fs.chains =
+            chain::Chains::new(usize::try_from(room).map_err(|_| DriverError::Unsupported)?)?;
+        Ok(fs)
     }
 
     /// Lay an empty volume out on `device` as `options` asks, and open it.
@@ -303,12 +407,6 @@ impl<B: Block> Affs<B> {
         self.write_refusal
     }
 
-    /// The volume's identity, as the probe names it.
-    #[must_use]
-    pub fn volume_identity(&self) -> [u8; 16] {
-        self.layout.identity()
-    }
-
     fn root_block(&self) -> u64 {
         self.layout.root
     }
@@ -323,20 +421,50 @@ impl<B: Block> Affs<B> {
     }
 
     fn write_header(&mut self, header: &mut Header) -> Result<(), DriverError> {
-        if header.kind == Kind::Root {
-            // A copy read before the change's transaction opened still says
-            // the bitmap is valid.
-            header.set_long_at(self.at.bm_flag(), 0);
+        if header.kind != Kind::Root {
+            return self.put(header.block, header.sealed());
         }
-        self.put(header.block, header.sealed())
+        // A copy read before the change's transaction opened still says the
+        // bitmap is valid.
+        header.set_long_at(self.at.bm_flag(), 0);
+        self.mutate()?;
+        self.disk.write(header.block, header.sealed())?;
+        if let Some(kept) = self.transaction.as_mut() {
+            kept.copy_from(header);
+        }
+        Ok(())
     }
 
-    /// Write `buf` to `block` as part of a change, the change's transaction
-    /// opened first.
+    /// Write `buf` to `block` as part of a change.
     fn put(&mut self, block: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.writing(block, (buf.len() / self.disk.block_size) as u64)?;
+        self.disk.write(block, buf)
+    }
+
+    /// Zero the `count` blocks from `block` as part of a change.
+    fn put_zeros(&mut self, block: u64, count: u64) -> Result<(), DriverError> {
+        self.writing(block, count)?;
+        self.disk.zero(block, count)
+    }
+
+    /// Ready the `count` blocks from `block` for a change's write, its
+    /// transaction opened first. The root and the bitmap's blocks are refused:
+    /// only damage names one as anything else, and the refusal comes before
+    /// anything is written.
+    fn writing(&mut self, block: u64, count: u64) -> Result<(), DriverError> {
+        if self.with_bitmap(|bitmap, _| Ok(bitmap.reserves(block, count)))? {
+            return Err(DriverError::BadMagic);
+        }
+        self.mutate()
+    }
+
+    /// Open the change's transaction, and count the change as having written:
+    /// from here a buffer it needs is one of the spares.
+    fn mutate(&mut self) -> Result<(), DriverError> {
         self.begin()?;
         self.mutated = true;
-        self.disk.write(block, buf)
+        self.disk.spending = true;
+        Ok(())
     }
 
     /// The header of the node `id` names: the root, a directory, a file or a
@@ -370,6 +498,15 @@ impl<B: Block> Affs<B> {
         Ok(header)
     }
 
+    /// Free the orphan `block`, its last hold gone. It is counted until the
+    /// free completes, so one that fails leaves the root marked invalid for
+    /// AmigaDOS's validator to reclaim its blocks, as a crash would.
+    fn free_orphan(&mut self, block: u64) -> Result<(), DriverError> {
+        self.free_object(block)?;
+        self.orphans = self.orphans.saturating_sub(1);
+        Ok(())
+    }
+
     fn unnamed(&self, block: u64) -> bool {
         self.held.get(block).is_some_and(|hold| hold.unnamed)
     }
@@ -396,9 +533,9 @@ impl<B: Block> Affs<B> {
         self.free_object(block)
     }
 
-    /// The file a hard link names.
-    fn real_file(&mut self, link: &Header) -> Result<Header, DriverError> {
-        let real = self.header(u64::from(link.real_entry()))?;
+    /// The file a hard link naming `block` names.
+    fn real_file(&mut self, block: u32) -> Result<Header, DriverError> {
+        let real = self.header(u64::from(block))?;
         if real.kind != Kind::File {
             return Err(DriverError::BadMagic);
         }
@@ -408,7 +545,7 @@ impl<B: Block> Affs<B> {
     /// The node an entry names: a hard link to a file names the file.
     fn entry_node(&mut self, entry: Header) -> Result<Header, DriverError> {
         if entry.kind == Kind::FileLink {
-            self.real_file(&entry)
+            self.real_file(entry.real_entry())
         } else {
             Ok(entry)
         }
@@ -418,76 +555,97 @@ impl<B: Block> Affs<B> {
         stamp(self.schedule.host().and_then(|(_, host)| host.wall_time()))
     }
 
-    fn times(header: &Header) -> NodeTimes {
-        let at = |date: DateStamp| {
-            if date == DateStamp::default() {
-                return Time64::UNIX_EPOCH;
+    /// The time a date stamp records: the epoch for none, which a volume
+    /// leaves when it knew no time.
+    fn time(date: DateStamp) -> Time64 {
+        if date == DateStamp::default() {
+            return Time64::UNIX_EPOCH;
+        }
+        amiga::datestamp_to_time64(date.days, date.mins, date.ticks).unwrap_or(Time64::UNIX_EPOCH)
+    }
+
+    /// What `header` records of its node without reading anything else.
+    fn facts(&self, header: &Header) -> Facts {
+        let size = match header.kind {
+            Kind::SoftLink => {
+                name::link_target_to_posix(header.link_target(), &self.volume, self.matching)
+                    .map(|target| target.len() as u64)
             }
-            amiga::datestamp_to_time64(date.days, date.mins, date.ticks)
-                .unwrap_or(Time64::UNIX_EPOCH)
+            _ => Ok(u64::from(header.byte_size())),
         };
-        let changed = at(header.date());
-        let created = if header.kind == Kind::Root {
-            at(header.created())
-        } else {
-            changed
-        };
-        NodeTimes {
-            created,
-            modified: changed,
-            accessed: changed,
-            changed,
+        Facts {
+            block: header.block,
+            kind: header.kind,
+            size,
+            date: header.date(),
+            next_link: header.next_link(),
+            real_entry: header.real_entry(),
         }
     }
 
     /// The structural reading of `header`'s node.
     fn info(&mut self, header: &Header) -> Result<NodeInfo, DriverError> {
-        let (kind, size, allocated) = match header.kind {
-            Kind::Root | Kind::Directory => (NodeKind::Directory, 0, 0),
+        let mut info = self.info_of(&self.facts(header))?;
+        if header.kind == Kind::Root {
+            info.times.created = Self::time(header.created());
+        }
+        Ok(info)
+    }
+
+    /// The structural reading of the node `facts` describe, reading what a
+    /// header alone does not answer: a file's other names, the directory a
+    /// directory link names.
+    fn info_of(&mut self, facts: &Facts) -> Result<NodeInfo, DriverError> {
+        let kind = node_kind(facts.kind)?;
+        let (size, allocated) = match facts.kind {
             Kind::File => {
-                let size = u64::from(header.byte_size());
-                (NodeKind::RegularFile, size, self.allocated(size))
+                let size = facts.size?;
+                (size, self.allocated(size))
             }
-            Kind::SoftLink | Kind::DirLink => {
-                let target = self.link_target(header)?;
-                (NodeKind::Symlink, target.len() as u64, 0)
-            }
-            Kind::FileLink => return Err(DriverError::BadMagic),
+            Kind::SoftLink => (facts.size?, 0),
+            Kind::DirLink => (self.linked_dir(facts.real_entry)?.len() as u64, 0),
+            _ => (0, 0),
         };
-        let nlink = if self.unnamed(header.block) {
+        let nlink = if self.unnamed(facts.block) {
             0
-        } else if header.kind == Kind::File {
-            self.link_count(header)?
+        } else if facts.kind == Kind::File {
+            self.link_count(facts.block, facts.next_link)?
         } else {
             NodeInfo::SINGLE_NAME
         };
+        let changed = Self::time(facts.date);
         Ok(NodeInfo {
             kind,
             nlink,
-            ino: header.block,
+            ino: facts.block,
             size,
             allocated,
-            times: Self::times(header),
+            times: NodeTimes {
+                created: changed,
+                modified: changed,
+                accessed: changed,
+                changed,
+            },
             content_gen: NodeInfo::NO_CONTENT_GEN,
         })
     }
 
-    /// The names a file has: its own, and one for each hard link the chain
-    /// from its `next_link` holds.
-    fn link_count(&mut self, file: &Header) -> Result<u32, DriverError> {
-        let mut next = file.next_link();
+    /// The names the file `file` has: its own, and one for each hard link
+    /// the chain from its `next_link` holds.
+    fn link_count(&mut self, file: u64, next_link: u32) -> Result<u32, DriverError> {
+        let mut next = next_link;
         if next == 0 {
             return Ok(1);
         }
-        if let Some(&count) = self.linked.get(file.block) {
+        if let Some(&count) = self.linked.get(file) {
             return Ok(count);
         }
         let mut count = 1u32;
-        let mut guard = guard::Guard::new(file.block, self.disk.blocks);
+        let mut guard = guard::Guard::new(file, self.disk.blocks);
         while next != 0 {
             guard.step(u64::from(next))?;
             let link = self.header(u64::from(next))?;
-            if link.kind != Kind::FileLink || u64::from(link.real_entry()) != file.block {
+            if link.kind != Kind::FileLink || u64::from(link.real_entry()) != file {
                 return Err(DriverError::BadMagic);
             }
             count = count.saturating_add(1);
@@ -497,7 +655,7 @@ impl<B: Block> Affs<B> {
             self.linked.clear();
         }
         // A count the cache has no room for is only counted again.
-        let _ = self.linked.try_insert(file.block, count);
+        let _ = self.linked.try_insert(file, count);
         Ok(count)
     }
 
@@ -507,7 +665,13 @@ impl<B: Block> Affs<B> {
         if header.kind == Kind::SoftLink {
             return name::link_target_to_posix(header.link_target(), &self.volume, self.matching);
         }
-        let dir = self.header(u64::from(header.real_entry()))?;
+        self.linked_dir(header.real_entry())
+    }
+
+    /// The path from the volume's root to the directory `block`, which a
+    /// hard link names.
+    fn linked_dir(&mut self, block: u32) -> Result<alloc::string::String, DriverError> {
+        let dir = self.header(u64::from(block))?;
         if dir.kind != Kind::Directory {
             return Err(DriverError::BadMagic);
         }
@@ -589,13 +753,18 @@ impl<B: Block> Affs<B> {
             .try_reserve(usize::try_from(pages).map_err(|_| DriverError::OutOfMemory)?)
             .map_err(|_| DriverError::OutOfMemory)?;
         let mut extensions = Vec::new();
+        // A page the volume needs with no block is damage, not a gap to close.
         let take = |pointers: &mut Vec<u32>, pointer: u32| {
-            if pointer != 0 && (pointers.len() as u64) < pages {
+            if (pointers.len() as u64) < pages {
+                if pointer == 0 {
+                    return Err(DriverError::BadMagic);
+                }
                 pointers.push(pointer);
             }
+            Ok(())
         };
         for index in 0..BITMAP_PAGES {
-            take(&mut pointers, root.long_at(self.at.bm_pages() + 4 * index));
+            take(&mut pointers, root.long_at(self.at.bm_pages() + 4 * index))?;
         }
         let mut next = root.long_at(self.at.bm_ext());
         let mut guard = guard::Guard::new(root.block, blocks);
@@ -608,7 +777,7 @@ impl<B: Block> Affs<B> {
             }
             self.disk.read(u64::from(next), &mut buf)?;
             for index in 0..per {
-                take(&mut pointers, be32(&buf, 4 * index));
+                take(&mut pointers, be32(&buf, 4 * index))?;
             }
             next = be32(&buf, 4 * per);
         }
@@ -645,12 +814,15 @@ impl<B: Block> Affs<B> {
     ) -> Result<T, DriverError> {
         self.writable()?;
         self.reading = None;
+        self.listing = None;
         self.mutated = false;
+        self.disk.stock()?;
         self.linked.clear();
         let done = op(self);
+        self.disk.spending = false;
         self.linked.clear();
         match &done {
-            Ok(_) if self.open => self.schedule.joined(),
+            Ok(_) if self.transaction.is_some() => self.schedule.joined(),
             Err(err) if self.mutated || *err == DriverError::BadMagic => {
                 self.stop_writing(WriteRefusal::Damaged);
                 return done;
@@ -664,21 +836,22 @@ impl<B: Block> Affs<B> {
     }
 
     /// Write nothing more to the volume, for `why`. The open transaction is
-    /// dropped, leaving the root marked invalid on the medium, and so is the
-    /// bitmap, whose pages may hold a part-way change; the next flush still
-    /// forces out of the device's cache what the device already accepted.
+    /// dropped, leaving the root marked invalid on the medium, and so are the
+    /// bitmap and the chains, which may hold a part-way change; the next flush
+    /// still forces out of the device's cache what the device already accepted.
     fn stop_writing(&mut self, why: WriteRefusal) {
         self.write_refusal = Some(why);
-        self.open = false;
+        self.transaction = None;
         self.unflushed = true;
         self.bitmap = None;
+        self.chains.clear();
         self.schedule.closed();
     }
 
     /// Open a transaction, if none is: the root marked invalid, and that on
     /// the medium before any change reaches it.
     fn begin(&mut self) -> Result<(), DriverError> {
-        if self.open {
+        if self.transaction.is_some() {
             return Ok(());
         }
         self.with_bitmap(|_, _| Ok(()))?;
@@ -686,7 +859,7 @@ impl<B: Block> Affs<B> {
         root.set_long_at(self.at.bm_flag(), 0);
         self.disk.write(root.block, root.sealed())?;
         self.disk.dev.flush()?;
-        self.open = true;
+        self.transaction = Some(root);
         self.schedule.opened();
         Ok(())
     }
@@ -694,32 +867,30 @@ impl<B: Block> Affs<B> {
     /// Publish the open transaction: the bitmap's changed pages and the
     /// device's cache, then the root stamped with the volume's alteration and
     /// marked valid — unless an orphan's blocks are still allocated — and the
-    /// cache again.
+    /// cache again. It reads nothing and allocates nothing, so a heap running
+    /// short never stops a commit.
     fn commit(&mut self) -> Result<(), DriverError> {
-        if !self.open {
+        let Some(mut root) = self.transaction.take() else {
             return Ok(());
-        }
-        let published = self.publish();
+        };
+        let published = self.publish(&mut root);
         if published.is_err() {
             self.stop_writing(WriteRefusal::CommitFailed);
         } else {
-            self.open = false;
             self.schedule.closed();
         }
         published
     }
 
-    fn publish(&mut self) -> Result<(), DriverError> {
+    fn publish(&mut self, root: &mut Header) -> Result<(), DriverError> {
         if let Some(bitmap) = self.bitmap.as_mut() {
             bitmap.commit(&mut self.disk)?;
         }
         // Nothing the root vouches for may land after it.
         self.disk.dev.flush()?;
-        let now = self.now();
-        let mut root = self.header(self.root_block())?;
         let flag = if self.orphans == 0 { BITMAP_VALID } else { 0 };
         root.set_long_at(self.at.bm_flag(), flag);
-        root.set_volume_date(now);
+        root.set_volume_date(self.now());
         self.disk.write(root.block, root.sealed())?;
         self.disk.dev.flush()
     }
@@ -855,15 +1026,26 @@ impl<B: Block> FilesystemRead for Affs<B> {
             hold.count -= 1;
             return Ok(Unpinned::Held);
         }
-        let unnamed = hold.unnamed;
-        self.held.remove(pinned.raw());
-        if !unnamed {
+        if !hold.unnamed {
+            self.held.remove(pinned.raw());
             return Ok(Unpinned::Released);
         }
-        self.orphans = self.orphans.saturating_sub(1);
-        self.change(|fs| fs.free_object(pinned.raw()))
-            .map(|()| Unpinned::Freed)
-            .map_err(|_| DriverError::DeviceFault)
+        hold.count = 0;
+        match self.change(|fs| fs.free_orphan(pinned.raw())) {
+            Ok(()) => {
+                self.held.remove(pinned.raw());
+                Ok(Unpinned::Freed)
+            }
+            // Refused before it wrote: the orphan is owed its free, which
+            // the release of the mount's pins gives it.
+            Err(DriverError::OutOfMemory) if self.write_refusal.is_none() => {
+                Err(DriverError::DeviceFault)
+            }
+            Err(_) => {
+                self.held.remove(pinned.raw());
+                Err(DriverError::DeviceFault)
+            }
+        }
     }
 
     fn release_pins(&mut self) -> Result<(), DriverError> {
@@ -873,8 +1055,7 @@ impl<B: Block> FilesystemRead for Affs<B> {
             if !hold.unnamed {
                 continue;
             }
-            self.orphans = self.orphans.saturating_sub(1);
-            if self.change(|fs| fs.free_object(block)).is_err() {
+            if self.change(|fs| fs.free_orphan(block)).is_err() {
                 freed = Err(DriverError::DeviceFault);
             }
         }
@@ -887,7 +1068,7 @@ impl<B: Block> FilesystemSecurity for Affs<B> {
     /// unrecorded default and the VFS presents the volume.
     fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
         let header = self.node(node)?;
-        Ok(NodeSecurity::unrecorded(self.info(&header)?.kind))
+        Ok(NodeSecurity::unrecorded(node_kind(header.kind)?))
     }
 
     fn set_security(&mut self, node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
@@ -1090,7 +1271,7 @@ impl<B: Block> FilesystemWrite for Affs<B> {
 
     /// Publish the open transaction; the commit itself flushes the device.
     fn flush(&mut self) -> Result<(), DriverError> {
-        if self.open {
+        if self.transaction.is_some() {
             return self.commit();
         }
         if self.unflushed {

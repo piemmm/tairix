@@ -108,15 +108,17 @@ Two clocks bound a soak, and they are deliberately different:
   too coarse to start one that cannot finish in time.
 - **The deadline** is when the orchestrator gives up on a child and kills
   its process group: what is left of that child's budget plus an ordinary
-  step's allowance (the `child_deadline` every soak orchestrator shares,
-  in `tools/xtask/src/commands/soak.rs`). A deadline shorter than the
-  budget would kill every soak longer than it — work doing exactly what it
-  was told to — and report it as a hang.
+  step's allowance, which `TAIRIX_XTASK_TIMEOUT_SECS` raises (`soak::job`,
+  in `tools/xtask/src/commands/soak.rs`, the one job every soak
+  orchestrator builds). The allowance covers the child's own build and its
+  wait behind the build lock. A deadline shorter than the budget would kill
+  every soak longer than it — work doing exactly what it was told to — and
+  report it as a hang.
 
-A budget given as `--until T`, the close of a soak window, is the same
-instant for every target however long each waited to be built: the harness
-stops at the close (`TAIRIX_SOAK_UNTIL`, beside the budget), and one that
-reaches it already shut runs its single smoke pass.
+A budget given as `--until T`, the close of a soak window, soaks one target
+per invocation: the harness stops at the close however long it waited to be
+built (`TAIRIX_SOAK_UNTIL`, beside the budget), and one that reaches it
+already shut runs its single smoke pass.
 
 ## Parallelism
 
@@ -124,7 +126,8 @@ The nightly soak runs every target **in parallel**, one job and one log
 each, through `tools/ci/soak.sh`'s `fssoak` kind (also part of `all`),
 alongside the fuzz, proptest, and repeated-test jobs. The jobs overlap, so
 the soak costs one budget rather than the sum of them, and under
-`soak.sh --window` every job is finished when the window closes. The
+`soak.sh --window` every job stops soaking at the window's close
+(`tools/ci/README.md` says what may still finish after it). The
 registry is the single source of truth —
 `soak.sh` enumerates `cargo xtask fssoak --list` and never hard-codes
 the filesystem list, so the randomized targets run concurrently with the

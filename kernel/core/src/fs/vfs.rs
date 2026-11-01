@@ -633,7 +633,10 @@ pub(super) fn vacancy(walk: &Walk) -> usize {
 /// # Errors
 ///
 /// [`VfsError::NotFound`] for a missing component `mode` requires, and
-/// [`VfsError::InvalidPath`] for an answer this VFS would not take back.
+/// [`VfsError::InvalidPath`] for an answer this VFS would not take back:
+/// past a bound, or holding a name the path grammar refuses, as a link may
+/// store or a foreign volume hold. A working directory's spelling admits
+/// those names, so a shell standing in one still knows where it is.
 pub(super) fn canonical_answer(
     vacant: usize,
     mode: RealpathMode,
@@ -647,7 +650,14 @@ pub(super) fn canonical_answer(
     if !allowed {
         return Err(VfsError::NotFound);
     }
-    spell_canonical(&spelled.ok_or(VfsError::Io)?)
+    let spelled = spelled.ok_or(VfsError::Io)?;
+    if spelled
+        .iter()
+        .any(|name| tairix_path::validate_file_name(name).is_err())
+    {
+        return Err(VfsError::InvalidPath);
+    }
+    spell_canonical(&spelled)
 }
 
 /// What a canonicalisation's posture is under `mode`.

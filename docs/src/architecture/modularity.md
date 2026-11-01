@@ -409,8 +409,8 @@ is, performed once before the first `start_secondary`.
 The mechanism is the §2.2 modularity carve-out (same trait, port
 mechanism): **x86_64** owns a low-memory trampoline, a per-AP stack pool,
 and the boot PML4 — `start_secondary` installs the trampoline, stamps the
-per-AP `ApBootSlot`, runs the SDM INIT-SIPI-SIPI handshake, and waits on
-the AP's long-mode `ready` flag before returning (so the shared frame is
+per-AP `ApBootSlot`, runs the SDM INIT-SIPI-SIPI handshake, and waits for
+the AP's answer, joined or refused, before returning (so the shared frame is
 reusable); **aarch64** issues PSCI `CPU_ON` over the device-tree conduit
 (`hvc`/`smc`) targeting the CPU's `MPIDR_EL1`; **riscv64** issues the SBI
 HSM `hart_start` firmware call targeting the hart id; **wasm32** asks its

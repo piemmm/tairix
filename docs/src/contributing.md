@@ -37,7 +37,8 @@ per-stage totals the pipeline is ordered by; `grep 'done in' ci.log` gives the
 finer per-command lines inside them — sequential steps and concurrent jobs
 alike, so a job running at most of its budget is visible before a slower host
 turns it into a kill. A job that is killed still prints the output it had
-produced, which names the test it was in. A measured warm run:
+produced, which names the test it was in, and a command or check that fails
+says why on the line before its closing `FAILED in`. A measured warm run:
 
 | Stage | Cost | Shape |
 | --- | --- | --- |
@@ -47,12 +48,12 @@ produced, which names the test it was in. A measured warm run:
 | `proptest --once` | 3 s | one iteration, logged seed |
 | `crypto-constant-time` | 5 s | `lib/crypto` re-run under release |
 | `fuzz --once` | 10 s | one iteration per harness, logged seed |
-| `loom` (the interleaving oracle over the sync primitives) | 10 s | one process per crate, concurrent |
+| `loom` (the interleaving oracle over the protocols `commands/loom.rs` enrols) | 10 s | one process per crate, concurrent |
 | `docs-check` (rustdoc + mdBook + link check) | 68 s | sequential |
 | `image` gate | 193 s over 319 spawns | sequential |
 | `clippy` host + 2 feature-lane + 17 target passes | 330 s | sequential |
 | `test --qemu` (host matrix + 226 guests + 3 fixture cross-compiles) | 681 s | guests concurrent, `nproc/3` weighted budget |
-| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, `kernel/core`, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 1836 s | one process per crate, concurrent; `lib/collections`'s, `kernel/core`'s and `lib/spirv`'s libraries, `kernel/mem`, `lib/abi`, `lib/rt`, the aarch64 and x86_64 ports, the DMA translation API and its RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores, at most 64 tests a shard |
+| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, `kernel/core`, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 1836 s | one process per crate, concurrent; `lib/collections`'s, `kernel/core`'s, `lib/spirv`'s and `lib/gpu`'s libraries, `kernel/mem`, `lib/abi`, `lib/rt`, the aarch64 and x86_64 ports, the DMA translation API and its RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores, at most 64 tests a shard |
 
 Miri runs one interpreted thread at a time and reports a single CPU to the
 program, so libtest takes a crate's tests one after another whatever the host
@@ -102,15 +103,31 @@ full-gigabyte window (four hours interpreted) and one carving a page past the
 largest 32 MiB buddy block (some twenty times that), then `lib/abi`'s
 single-byte sweep of the 2.8 KiB machine report and the aarch64 port's
 redistributor that never wakes, half an hour each through safe code. The
-registry names every exclusion and carries its reason.
+registry names every exclusion and carries its reason, and the stage checks
+each against the test binary's own listing: an exclusion that names no listed
+test — the old name of a test renamed since, which would otherwise run
+interpreted unskipped, or a deleted one's — fails the stage, as does a module
+filter naming none, whose module a rename would otherwise drop from the stage
+without a word, and exclusions that leave a target nothing to run. A target
+run in one process lists its tests for that as its own job starts, so the
+check overlaps the rest of the stage; it reports as a step of its own, and its
+time comes out of the job's budget.
 
-A host's own architecture decides one more thing: what the interpreter refuses
-there is skipped there alone (`HOST_REFUSALS`, with its reason) — on an AArch64
-host the NEON blur, whose per-lane shift count the interpreter cannot execute
-— and every interpreted build takes `sha2`'s portable backend
-(`SHA2_PORTABLE`), since an AArch64 host's interpreter executes no SHA-2
-instruction and that backend's constant loads break Stacked Borrows
-(`plans/OPEN-DEFECTS.md` D1588). Every host then interprets the same code.
+The stage builds for the host, so what it interprets follows the host's
+architecture. A crate that compiles its vector kernels by architecture —
+`lib/raster`'s compositor kernels, `lib/collections`' group scan — is
+interpreted as SSE2 on an x86_64 host and as NEON on an AArch64 one, so a green
+stage vouches only for its own host's kernels. What the interpreter refuses on
+a host is skipped there alone (`HOST_REFUSALS`, with its reason): on an AArch64
+host the NEON blur, whose per-lane shift count the interpreter cannot execute,
+so no host interprets that kernel. Only SHA-2 is made the same everywhere:
+every interpreted build takes `sha2`'s portable backend (`SHA2_PORTABLE`, after
+the caller's own flags, as cargo reads them), since an AArch64 host's
+interpreter executes no SHA-2 instruction and the hardware backends' constant
+loads, SHA-256's and SHA-512's alike, break Stacked Borrows
+(`plans/OPEN-DEFECTS.md` D1588). A targeted run outside the stage — `cargo miri
+test -p <crate>` for a crate that reaches `sha2` — needs the same
+`--cfg sha2_backend="soft"` on an AArch64 host.
 
 Figures in this table are wall clock, taken from outside. Miri's own clock is
 virtual: the `finished in …` line a test binary prints under the interpreter is
@@ -189,25 +206,40 @@ ask — never wave the failure through as transient, load, or environment.
 
 ## What `cargo xtask ci` runs
 
-| Step          | What it does                                                |
-| ------------- | ----------------------------------------------------------- |
-| `fmt`         | `cargo fmt --all -- --check`                                |
-| `clippy`      | `-D warnings` for the host **and once per Tier-1 target** (see below) |
+The steps run in this order, the gates from `deps-check` to `model-check`
+concurrently as the one `static gates` stage:
+
+| Step | What it does |
+| --- | --- |
+| `fmt --check` | `cargo fmt --all -- --check` |
 | `deps-check`  | Enforces the [§17.4 modularity graph][modularity]           |
 | `cfg-check`   | Rejects target-conditional `cfg` outside the arch ports, inside a freestanding port one that omits `target_os`, and anywhere but `tools/xtask/` an attribute `cfg` naming `miri` |
 | `board-check` | Rejects a board, SoC or board part named in generic code: the Rust sources and crate READMEs under `lib/`, `kernel/`, `drivers/` and `userland/`, outside the ports, each device's own crate and the Settings application's Raspberry Pi category |
-| `event-ids`   | Rejects an event id outside its crate's range in `tairix_log::registry`, a crate defining ids with no range, and one id defined by two crates |
+| `event-ids`   | Rejects an event id outside its crate's range in `tairix_log::registry`, a crate defining ids with no range, one id defined by two crates, and an id a removed event carried (`registry::RETIRED`) |
 | `driver-exits`| Rejects an exit code or `exit` module declared by a crate built on the driver runtime: every driver ends through `tairix_drvrt::exit` |
+| `help-lint` | Lints every command app's discovered `Help/` tree: the canonical `en-US/` documents, locale completeness, structure, option drift and the content policy |
+| `spec-review` | Rejects an unreviewed AI-drafted-artefact marker that reached the tree |
 | `charter-cite`| Rejects a comment or package description citing a charter section instead of the reason ([§2.11][cite]) |
 | `source-text` | Rejects a control byte other than tab and newline in source and documents, outside the planning and charter files |
-| `test`        | `cargo test --workspace --all-targets`, then the packages the debug image's kernel diagnostics turn a feature on in, with those features (read from the manifests), then the QEMU matrix, run once ([§7][test]); each host pass starts in a randomised order, seed logged (see below); the scene tier is left to `ci-long` (see below) |
-| `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
-| `deny`        | `cargo deny --all-features check` (license + advisory)      |
 | `supply-chain`| Source-hash allow-list + RUSTSEC advisory SLA ([§19.3][sc]) |
-| `fuzz --once` | Runs each fuzz harness once, fresh+logged seed ([§19.6][fz]) |
-| `loom`        | Model-checks the `lib/sync` primitives over every thread interleaving |
 | `abi-check`   | Cross-checks the kernel syscall table against `lib/abi`     |
+| `c-header` | Verifies the generated C header in `include/` against `lib/abi` |
+| `font-atlas` | Verifies the system glyph atlas against the committed faces, regenerated in-process |
+| `devids` | Verifies the PCI, USB and IEEE OUI tables against their vetted snapshots, regenerated in-process |
+| `unicode` | Verifies the Unicode property tables against the pinned UCD snapshot, regenerated in-process |
+| `spirv` | Verifies the SPIR-V grammar tables against the pinned Khronos grammar, regenerated in-process |
+| `artsheet` | Measures the shipped figure art against its bounds and the committed ledger |
+| `model-check` | Exhaustively model-checks the capability + IPC state machine, failing on any invariant counterexample |
+| `deny`        | `cargo deny --all-features check` (license + advisory)      |
+| `proptest --once` | Runs one iteration of each stateful capability model, fresh logged seed |
+| `crypto-constant-time` | Re-runs `lib/crypto`'s tests under release optimisation, where the optimiser can break constant time |
+| `fuzz --once` | Runs each fuzz harness once, fresh+logged seed ([§19.6][fz]) |
+| `loom` | Model-checks every protocol `commands/loom.rs`'s `TARGETS` enrols over every thread interleaving |
+| `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `image`       | Builds every delivered image profile end-to-end (`debug` and `installer` for each image platform), so an image-breaking change cannot land green |
+| `clippy`      | `-D warnings` for the host **and once per Tier-1 target** (see below) |
+| `test --qemu` | `cargo test --workspace --all-targets`, then the packages the debug image's kernel diagnostics turn a feature on in, with those features (read from the manifests), then the QEMU matrix, run once ([§7][test]); each host pass starts in a randomised order, seed logged (see below); the scene tier is left to `ci-long` (see below) |
+| `miri` | Interprets every crate `commands/miri.rs`'s `TARGETS` enrols under the undefined-behaviour oracle |
 
 The tree scans (`cfg-check`, `board-check`, `charter-cite`, `source-text`, `spec-review`)
 walk what a change can carry: `target/`, `.git` and every untracked path git
@@ -332,14 +364,23 @@ the kernel and the programs separately for the same reason.
 
 ## Every step is time-limited
 
-No pipeline step can run forever. Every external command `xtask` spawns is
-given a wall-clock budget; when a step overruns it, its whole process group is
-signalled — `SIGTERM`, a short grace period, then `SIGKILL` — and the step
-fails, naming itself and its budget.
+No pipeline step can run forever. Every external command a pipeline step
+spawns but a QEMU guest, down to a `--version` probe, is given a wall-clock
+budget; when a step overruns it, its whole process group is signalled —
+`SIGTERM`, a short grace period, then `SIGKILL` — and the step fails, naming
+itself, its budget, and any process the kill could not reap.
 
 Killing the *group* rather than the direct child is the point: a `cargo` step
 is really the rustc, test-binary and QEMU processes it spawns, and killing only
 the child would leave those running, holding the build lock and the terminal.
+A Ctrl-C, a hang-up or a `kill` of xtask goes on to every step still running,
+each its whole group, QEMU guests and steps still starting included, and xtask
+ends with that signal once they have all gone; a second one kills them all, and
+xtask then waits only a few seconds for them to be reaped, and a moment more to
+name any it leaves, however full its stderr. A signal xtask was started with
+ignored, as `nohup` leaves a hang-up, stays ignored. A terminal that has hung
+up, or a pipe whose reader has gone, loses xtask's messages but never ends a
+run before its steps have; one that is only full is waited out.
 
 An overrun is a hard failure. It is never retried and never folds into a
 passing result, because a step that hangs is a defect in exactly the way the
@@ -350,9 +391,12 @@ Ordinary steps share one default budget; a step known in advance to need
 longer (the image gate, the QEMU matrix build) asks for a larger one
 explicitly. A slow machine can raise every budget at once with
 `TAIRIX_XTASK_TIMEOUT_SECS=<seconds>`; the override only ever *raises* a
-budget, so it cannot silently shorten one, and a malformed value is rejected
-rather than quietly ignored. The QEMU verticals keep their own per-guest
-budgets — this is an outer backstop, not a replacement for them.
+budget, so it cannot silently shorten one, and a malformed value stops xtask
+as it starts rather than being quietly ignored. It raises a soaking child's
+allowance past its soak budget too. A QEMU guest runs under no step
+budget, and the override does not reach it: its own silence deadline and
+runtime ceiling bound it, and a guest that reaches either is sent `SIGKILL`
+once the interrogation below has read it.
 
 A guest killed for falling silent, for reaching its runtime ceiling, or because
 its kernel wrote a fatal record, is stopped and interrogated over its QEMU

@@ -13,8 +13,11 @@
 //! processor by starting from INIT.
 //!
 //! The boot CPU settles the set from what it offers before any other CPU
-//! starts, and a CPU that cannot hold all of it does not join the kernel, so
-//! the stubs' `clac` is defined on every CPU that runs them.
+//! starts. A CPU that cannot hold all of it answers what it lacks and stops,
+//! taking no interrupt and running no entry stub, so the stubs' `clac` is
+//! defined on every CPU that runs them. What a CPU
+//! offers is read only once it has lifted the limit firmware can put on its
+//! `CPUID` leaves ([`crate::cpuid`]), which would hide every one of these.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -67,6 +70,28 @@ impl Protections {
         self.0
     }
 
+    /// The set whose bits are `bits`, `None` where one names no protection.
+    #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+    pub(crate) const fn from_bits(bits: u8) -> Option<Self> {
+        if bits & !Self::ALL.0 == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
+
+    /// This set, held by a CPU offering `offered`: `Ok` where it offers every
+    /// one, else `Err` of those it lacks, never empty. Offering more is no bar.
+    #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+    pub(crate) const fn held_by(self, offered: Self) -> Result<Self, Self> {
+        let lacking = self.0 & !offered.0;
+        if lacking == 0 {
+            Ok(self)
+        } else {
+            Err(Self(lacking))
+        }
+    }
+
     /// The `CR4` bits that hold a CPU to this set.
     #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
     const fn cr4(self) -> u64 {
@@ -94,9 +119,9 @@ pub fn in_force() -> Protections {
     Protections(IN_FORCE.load(Ordering::Acquire))
 }
 
-/// What the calling CPU offers.
+/// What the calling CPU offers, `CPUID` limit lifted.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn offered_here() -> Protections {
+fn offered_here(_uncapped: &crate::cpuid::Uncapped) -> Protections {
     let leaf7 = crate::cpuid::structured_extended_features();
     Protections::offered(leaf7.ebx, leaf7.ecx)
 }
@@ -107,16 +132,18 @@ fn offered_here() -> Protections {
 /// Called once, by the boot CPU, before any other CPU starts and before the
 /// boot CPU holds itself to them.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub(crate) fn settle() {
-    IN_FORCE.store(offered_here().0, Ordering::Release);
+pub(crate) fn settle(uncapped: &crate::cpuid::Uncapped) {
+    IN_FORCE.store(offered_here(uncapped).0, Ordering::Release);
 }
 
-/// The protections the calling CPU must hold to run the kernel, or [`None`]
-/// on a CPU that does not offer them all.
+/// The protections the calling CPU must hold to run the kernel.
+///
+/// # Errors
+///
+/// Those in force it does not offer.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub(crate) fn to_hold() -> Option<Protections> {
-    let required = in_force();
-    offered_here().contains(required).then_some(required)
+pub(crate) fn to_hold(uncapped: &crate::cpuid::Uncapped) -> Result<Protections, Protections> {
+    in_force().held_by(offered_here(uncapped))
 }
 
 /// Hold the calling CPU to `protections`, with supervisor write protection.
@@ -124,8 +151,8 @@ pub(crate) fn to_hold() -> Option<Protections> {
 /// # Safety
 ///
 /// CPL 0 with interrupts disabled and `RFLAGS.AC` clear, `protections` what
-/// [`to_hold`] answered on this CPU, and no user page mapped in the active
-/// root.
+/// [`to_hold`] answered `Ok` on this CPU, and no user page mapped in the
+/// active root.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub(crate) unsafe fn hold(protections: Protections) {
     const CR0_WP: u64 = 1 << 16;
@@ -178,6 +205,38 @@ mod tests {
         assert_eq!(Protections::UMIP.cr4(), 1 << 11);
         assert_eq!(Protections::ALL.cr4(), (1 << 20) | (1 << 21) | (1 << 11));
         assert_eq!(Protections::offered(0, 0).cr4(), 0);
+    }
+
+    #[test]
+    fn a_cpu_is_told_which_protections_in_force_it_lacks() {
+        let empty = Protections::offered(0, 0);
+        assert_eq!(
+            Protections::ALL.held_by(Protections::offered(1 << 7, 1 << 2)),
+            Err(Protections::SMAP)
+        );
+        assert_eq!(
+            Protections::ALL.held_by(Protections::ALL),
+            Ok(Protections::ALL)
+        );
+        assert_eq!(
+            Protections::SMEP.held_by(Protections::ALL),
+            Ok(Protections::SMEP),
+            "offering more is no bar, and only the set in force is held"
+        );
+        assert_eq!(Protections::ALL.held_by(empty), Err(Protections::ALL));
+        assert_eq!(empty.held_by(empty), Ok(empty));
+    }
+
+    #[test]
+    fn a_protection_set_is_rebuilt_only_from_its_own_bits() {
+        for bits in 0..=Protections::ALL.bits() {
+            assert_eq!(
+                Protections::from_bits(bits).map(Protections::bits),
+                Some(bits)
+            );
+        }
+        assert_eq!(Protections::from_bits(1 << 3), None);
+        assert_eq!(Protections::from_bits(u8::MAX), None);
     }
 
     /// A CPU joins only if it offers every protection in force; offering more

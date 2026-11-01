@@ -130,7 +130,10 @@ pub trait VolumeService: Sync {
     /// [`Errno::Busy`] for a plain detach while a descriptor holds one of
     /// the volume's nodes or another volume is shown beneath it, the
     /// refusal of a volume beneath that a force detach could not detach
-    /// first, or [`Errno::NotImplemented`] before a service is installed.
+    /// first, or [`Errno::NotImplemented`] before a service is installed. A
+    /// [`DetachMode::Lost`](tairix_abi::volume::DetachMode::Lost) detach
+    /// forces only a volume recorded lost, decided under the volume's claim,
+    /// and is refused as a plain detach of any other.
     fn detach(&self, request: &VolumeDetachRequest, caller: &Principal<'_>) -> Result<(), Errno>;
 
     /// Read `len` bytes of whole blocks from `lba` of served volume `volume`,
@@ -402,7 +405,7 @@ mod tests {
             NULL_VOLUME_SERVICE.detach(
                 &VolumeDetachRequest {
                     volume_id: [7; 16],
-                    force: false
+                    mode: tairix_abi::volume::DetachMode::Plain,
                 },
                 &caller
             ),

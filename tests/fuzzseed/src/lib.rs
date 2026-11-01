@@ -97,7 +97,8 @@ pub const RNGSOAK_BYTES_ENV: &str = "TAIRIX_RNGSOAK_BYTES";
 
 /// The close of a soak window, in whole seconds since the Unix epoch, which
 /// an orchestrator given `--until` exports beside the budget: no budgeted run
-/// outlasts it, however long the harness waited to be built.
+/// starts another iteration past it, however long the harness waited to be
+/// built.
 pub const SOAK_UNTIL_ENV: &str = "TAIRIX_SOAK_UNTIL";
 
 /// Hash `x` to a well-spread 64-bit value, so even sequential inputs (a
@@ -115,17 +116,22 @@ pub fn splitmix64(x: u64) -> u64 {
 /// harness) never collide, and two runs of the harness differ.
 #[must_use]
 pub fn entropy_seed() -> u64 {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|d| u64::try_from(d.as_nanos()).ok())
         .unwrap_or(0);
     let pid = u64::from(std::process::id());
-    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let count = next_in_process();
 
     splitmix64(nanos) ^ splitmix64(pid).rotate_left(17) ^ splitmix64(count).rotate_left(43)
+}
+
+/// A number no earlier call in this process drew, so two draws made within
+/// one tick of the clock still differ.
+pub(crate) fn next_in_process() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Resolve the seed for a run: the value of `seed_env` when it is set to a
@@ -226,6 +232,17 @@ pub fn within_budget(deadline: Option<Instant>) -> bool {
 #[must_use]
 pub fn room_for_another_pass(deadline: Option<Instant>, pass: Duration) -> bool {
     matches!(deadline, Some(end) if end.saturating_duration_since(Instant::now()) > pass)
+}
+
+/// The budget `deadline` leaves cut into `parts` equal slices, all measured
+/// from one start: the answer for part `i` is when slice `i` (counting from 1)
+/// ends, the last ending at the deadline, so parts run in turn share the
+/// budget rather than the first taking all of it. With no deadline every
+/// part is `None`, the single smoke pass.
+pub fn budget_slices(deadline: Option<Instant>, parts: u32) -> impl Fn(u32) -> Option<Instant> {
+    let start = Instant::now();
+    let share = deadline.map(|deadline| deadline.saturating_duration_since(start) / parts.max(1));
+    move |part| share.map(|share| start + share * part.min(parts))
 }
 
 /// Greatest common divisor (Euclid), used to pick a stride that makes the
@@ -377,8 +394,11 @@ impl Prng {
     }
 }
 
+pub mod asm;
 pub mod meter;
 pub mod registry;
+pub mod scratch;
+pub mod sources;
 
 /// The shared `proptest` stateful-model runner used by the models.
 ///
@@ -486,13 +506,34 @@ impl Drop for Counted {
 #[cfg(test)]
 mod tests {
     use super::{
-        budget_deadline, budgeted_sweep, entropy_seed, expand_seed, parse_close, resolve_seed,
-        room_for_another_pass, splitmix64, window_span, within_budget, Prng,
+        budget_deadline, budget_slices, budgeted_sweep, entropy_seed, expand_seed, parse_close,
+        resolve_seed, room_for_another_pass, splitmix64, window_span, within_budget, Prng,
     };
     use std::ffi::OsStr;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     const SEEDS: [u64; 5] = [0, 1, 42, 0xDEAD_BEEF, u64::MAX];
+
+    #[test]
+    fn budget_slices_end_in_turn_and_the_last_at_the_deadline() {
+        let deadline = Instant::now() + Duration::from_secs(100);
+        let slices = budget_slices(Some(deadline), 4);
+        let ends: Vec<Instant> = (1..=4)
+            .map(|part| slices(part).expect("budgeted"))
+            .collect();
+        assert!(ends.windows(2).all(|pair| pair[0] < pair[1]), "in turn");
+        assert!(ends[3] <= deadline);
+        assert!(
+            deadline.duration_since(ends[3]) < Duration::from_millis(10),
+            "the last ends at the deadline"
+        );
+        assert_eq!(slices(9), slices(4), "never past the deadline");
+        let smoke = budget_slices(None, 4);
+        assert!(
+            (0..=4).all(|part| smoke(part).is_none()),
+            "no budget, no slice"
+        );
+    }
 
     #[test]
     fn splitmix64_separates_sequential_inputs() {

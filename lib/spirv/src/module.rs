@@ -159,6 +159,20 @@ pub struct Module {
 }
 
 impl Module {
+    /// The bytes of memory it holds past its own size: its words and its
+    /// tables of instructions, operands and definitions.
+    pub(crate) fn held_bytes(&self) -> u64 {
+        use tairix_util::fallible::held;
+        [
+            held(&self.bytes),
+            held(&self.instructions),
+            held(&self.operands),
+            held(&self.definitions),
+        ]
+        .into_iter()
+        .fold(0, u64::saturating_add)
+    }
+
     /// Decode a module in either byte order.
     ///
     /// # Errors
@@ -251,12 +265,18 @@ impl Module {
     /// The instruction that defines `id`.
     #[must_use]
     pub fn definition(&self, id: Id) -> Option<&Instruction> {
+        self.instructions.get(self.position(id)?)
+    }
+
+    /// Where among [`Self::instructions`] the instruction defining `id` is.
+    #[must_use]
+    pub fn position(&self, id: Id) -> Option<usize> {
         let at = self
             .definitions
             .binary_search_by_key(&id, |&(defined, _)| defined)
             .ok()?;
         let (_, index) = self.definitions.get(at)?;
-        self.instructions.get(*index as usize)
+        Some(*index as usize)
     }
 
     /// The words of `instruction`, one of this module's.

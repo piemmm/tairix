@@ -135,7 +135,11 @@ What differs from a removable volume follows from other writers changing it:
 - **Owner detach.** Its owner detaches it without `CAP_FS_MOUNT`. A volume
   whose server withdraws it or dies leaves the namespace at once, unless the
   server held writes it had not published; that one stays `UnavailableLost`
-  until its owner detaches it with `force`.
+  until its owner detaches it with `force`, or with `DetachMode::Lost`, which
+  forces only a volume still lost. A plain detach is refused `Busy`
+  while an image volume's file lies on it, a forced one detaches those images
+  first, and however the volume leaves, the images on it leave with it
+  ([Disk images](./images.md)).
 
 | Id   | Name                       | Meaning |
 |------|----------------------------|---------|

@@ -1477,6 +1477,26 @@ pub trait DriverHost {
     }
 }
 
+/// A user-space [`DriverHost`] for a driver's tests that grants exactly
+/// `granted`, so no driver's suite carries its own.
+#[cfg(feature = "test-util")]
+#[derive(Clone, Copy, Debug)]
+pub struct GrantingHost {
+    /// The capabilities it grants.
+    pub granted: &'static [CapabilityId],
+}
+
+#[cfg(feature = "test-util")]
+impl DriverHost for GrantingHost {
+    fn has_capability(&self, cap: CapabilityId) -> bool {
+        self.granted.contains(&cap)
+    }
+
+    fn kind(&self) -> DriverKind {
+        DriverKind::UserSpace
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -95,10 +95,7 @@ mod kernel {
     /// callback is intercepted before any grant evaluation).
     const EXPECTED_CAP: CapabilityId = CapabilityId::TIME_SET;
 
-    /// Gigapages of identity map the S-mode space holds: `[0, 4 GiB)`
-    /// covers the `virt` board's low MMIO (`SiFive` Test, PLIC, …) and the
-    /// 2 GiB RAM base at `0x8000_0000` where this kernel runs.
-    const IDENTITY_GIGABYTES: usize = 4;
+    use tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES;
 
     /// User virtual address the stub code is aliased at. Chosen at 64 GiB
     /// — far above the 4 GiB identity window — so the alias lands on
@@ -208,9 +205,10 @@ mod kernel {
 
         let page = paging::PAGE_SIZE as u64;
 
-        let Some(mut space) =
-            paging::AddressSpace::new_identity_gigapages(&PAGE_TABLE_POOL, IDENTITY_GIGABYTES)
-        else {
+        let Some(mut space) = paging::AddressSpace::new_identity_gigapages(
+            &PAGE_TABLE_POOL,
+            KERNEL_IDENTITY_GIGAPAGES,
+        ) else {
             note(TEST_FAIL, "page-table pool exhausted (identity map)");
             qemu_exit::exit_failure(FAIL_POOL);
         };

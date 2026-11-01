@@ -21,9 +21,12 @@ werden) — genau wie das GNU-Werkzeug ein deaktiviertes Konto anlegt.
 Setzen Sie anschließend ein Passwort mit dem Befehl `passwd` des
 Werkzeugs `users`.
 
-Wird `-u` weggelassen, wird die Benutzerkennung automatisch vergeben,
-eins über der höchsten vorhandenen Kennung. Wird `-d` weggelassen, folgt
-das Heimatverzeichnis dem Standardlayout `/Users/NAME`. Das Konto
+Wird `-u` weggelassen, wird die Benutzerkennung automatisch vergeben:
+eins über der höchsten vorhandenen Kennung ab 1000 oder, wenn kein
+Konto eine solche hat, 1000. Kennungen unter 1000 gehören dem System
+und werden nie vergeben, und sobald über der höchsten keine Kennung
+mehr übrig ist, wird das Konto nicht angelegt. Wird `-d` weggelassen,
+folgt das Heimatverzeichnis dem Standardlayout `/Users/NAME`. Das Konto
 startet die Standard-Shell des Systems und die gewöhnliche
 Sitzungs-Berechtigungsobergrenze; ein Administrator erweitert sie
 anschließend mit dem Befehl `grant` des Werkzeugs `users`.
@@ -34,7 +37,8 @@ Operand.
 ## OPTIONS
 
 - `-u, --uid UID` — numerische Benutzerkennung; wird bei Weglassen
-  automatisch vergeben (eins über der höchsten vorhandenen).
+  automatisch vergeben (eins über der höchsten vorhandenen ab 1000,
+  sonst 1000).
 - `-g, --gid GID` — numerische Kennung der primären Gruppe.
   Erforderlich: es gibt keine zu erratende Standardgruppen-Politik.
 - `-G, --groups LIST` — kommagetrennte numerische Kennungen der

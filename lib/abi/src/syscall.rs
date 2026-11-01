@@ -1636,18 +1636,20 @@ impl SyscallNumber {
     ///
     /// Arguments: a non-null pointer to an encoded
     /// [`crate::volume::VolumeDetachRequest`] (the volume's stable
-    /// 16-byte identity plus the force byte) and its length (exactly
-    /// [`crate::volume::VOLUME_DETACH_LEN`]). Only a volume attached at
-    /// runtime — through [`SyscallNumber::VOLUME_ATTACH`],
+    /// 16-byte identity plus the [`crate::volume::DetachMode`] byte) and its
+    /// length (exactly [`crate::volume::VOLUME_DETACH_LEN`]). Only a volume
+    /// attached at runtime — through [`SyscallNumber::VOLUME_ATTACH`],
     /// [`SyscallNumber::FSSERVE_ATTACH`] or [`SyscallNumber::IMAGE_ATTACH`] —
     /// can be detached; the boot volumes are permanent and refuse this path.
     /// The volume is flushed first and a plain detach fails closed on a flush
     /// error (or an unavailable, surprise-removed volume) rather than
     /// discarding uncommitted data; a **force** detach (`plans/DEVICES.md`
     /// D4b) retracts the volume anyway, deliberately discarding the retained
-    /// set with its own audit event. A network or disk-image volume's owner
-    /// may detach it; any other volume needs `CAP_FS_MOUNT`, checked by the
-    /// handler once it knows the volume. Every detach decision is audited.
+    /// set with its own audit event; a **lost** detach forces a volume
+    /// recorded lost and is a plain detach of any other. A network or
+    /// disk-image volume's owner may detach it; any other volume needs
+    /// `CAP_FS_MOUNT`, checked by the handler once it knows the volume. Every
+    /// detach decision is audited.
     pub const VOLUME_DETACH: Self = Self(81);
 
     /// Grant the serving task of a call endpoint the right to map a shared

@@ -252,6 +252,31 @@ mod tests {
         assert_eq!(parse(&["a$b"]), Err(GroupaddError::BadName));
     }
 
+    /// The `-g` entry of every locale's OPTIONS says where an omitted
+    /// gid is allocated from: the allocator's own first id, in ASCII digits.
+    #[test]
+    fn help_states_where_an_omitted_gid_is_allocated_from() {
+        extern crate std;
+        use alloc::format;
+        use alloc::string::ToString;
+
+        let first = tairix_users::next_id(tairix_users::IdRange::User, [])
+            .expect("a first id")
+            .to_string();
+        for locale in tairix_help::REQUIRED_LOCALES {
+            let path = format!("{}/Help/{locale}/groupadd.md", env!("CARGO_MANIFEST_DIR"));
+            let text = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            let doc =
+                tairix_help::HelpDoc::parse(&text).unwrap_or_else(|e| panic!("{path}: {e:?}"));
+            let said = tairix_help::options_entry_mentions(&doc, "-g,", &first)
+                .unwrap_or_else(|| panic!("{locale}: no `-g` entry"));
+            assert!(
+                said,
+                "{locale}: the `-g` entry must state {first}, in ASCII digits"
+            );
+        }
+    }
+
     /// Every locale's `OPTIONS` section documents exactly the switches this
     /// parser accepts (`plans/APPS.md` §3.1): the flag tokens are
     /// language-neutral, so each translated document must carry the same

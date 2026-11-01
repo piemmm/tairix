@@ -3,55 +3,20 @@
 //! block, never a whole run's worth.
 //!
 //! A correctness test cannot see this — a write that staged a run's worth of
-//! zeros for every call returns the same answers — so a counting allocator
+//! zeros for every call returns the same answers — so the metered allocator
 //! measures what each write allocates on the calling thread.
-
-use std::alloc::System;
-use std::cell::Cell;
-
-use core::alloc::{GlobalAlloc, Layout};
 
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
 use tairix_drv_fs_ext4::Ext4;
+use tairix_fuzzseed::meter::{metered, Metered};
 use tairix_writeback::RUN_BYTES;
 
 #[path = "support/mem_block.rs"]
 mod mem_block;
 use mem_block::MemBlock;
 
-/// A pass-through allocator that counts the bytes each thread asks for, so a
-/// measured call is not disturbed by tests running beside it.
-struct CountingAlloc;
-
-thread_local! {
-    static ALLOCATED: Cell<usize> = const { Cell::new(0) };
-}
-
-// SAFETY: every call is forwarded unchanged to the system allocator, so its
-// contract is exactly the caller's; the count is a thread-local cell that
-// needs no allocation and no destructor, so reaching it cannot recurse.
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATED.with(|count| count.set(count.get() + layout.size()));
-        // SAFETY: the caller's layout, forwarded unchanged.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: `ptr` came from `alloc` above with this `layout`.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
 #[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-/// The bytes `call` allocated on this thread.
-fn allocated_by(call: impl FnOnce()) -> usize {
-    let before = ALLOCATED.with(Cell::get);
-    call();
-    ALLOCATED.with(Cell::get) - before
-}
+static GLOBAL: Metered = Metered;
 
 #[test]
 fn a_small_write_stages_no_more_than_the_blocks_it_lays_out() {
@@ -70,12 +35,13 @@ fn a_small_write_stages_no_more_than_the_blocks_it_lays_out() {
         .expect("create");
     fs.write_at(f, 0, &[1; 4096]).expect("the first block");
 
-    let over = allocated_by(|| {
+    let ((), over) = metered(|| {
         fs.write_at(f, 100, &[2; 100]).expect("over data in place");
     });
-    let fresh = allocated_by(|| {
+    let ((), fresh) = metered(|| {
         fs.write_at(f, 4096, &[3; 100]).expect("into a fresh block");
     });
+    let (over, fresh) = (over.requested, fresh.requested);
     assert!(
         over < RUN_BYTES / 2 && fresh < RUN_BYTES / 2,
         "a 100-byte write allocated {over} bytes over data in place and {fresh} into a fresh \

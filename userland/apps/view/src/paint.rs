@@ -17,6 +17,7 @@ use tairix_icon::IconArtwork;
 use tairix_raster::{Color, Surface};
 use tairix_sandbox::imagerender::ViewFormat;
 use tairix_theme::Theme;
+use tairix_util::utf8::shown;
 
 use crate::view::View;
 use crate::{Document, Layout};
@@ -126,7 +127,7 @@ pub(crate) fn facts(view: &View) -> Vec<Fact> {
     };
     let natural = document.natural();
     let mut facts = alloc::vec![
-        Fact::new("Name", document.name.clone()),
+        Fact::new("Name", shown(&document.name).into_owned()),
         Fact::new("Format", format_name(document.format())),
         Fact::new("Pixels", format!("{} x {}", natural.0, natural.1)),
         Fact::new("Size", bytes(document.bytes)),
@@ -203,7 +204,7 @@ pub(crate) fn summary(view: &View) -> String {
     let natural = document.natural();
     let mut line = format!(
         "{} — {} {} x {}",
-        document.name,
+        shown(&document.name),
         format_name(document.format()),
         natural.0,
         natural.1

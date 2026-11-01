@@ -32,9 +32,55 @@ pub const DISC_RECORD_IN_BOOT_BLOCK: usize = 0x1C0;
 /// Size of the checksummed boot block.
 pub const BOOT_BLOCK_SIZE: usize = 512;
 
-/// Disc byte address of an E-class volume's bare disc record: byte 4 of map
-/// zone 0, after the zone header.
-pub const BARE_RECORD_OFFSET: u64 = 4;
+/// Size of the header opening every map zone: its check byte, the free-space
+/// link and the cross-check byte (`u32` form first, as for the record).
+pub const ZONE_HEADER_SIZE_U32: u32 = 4;
+
+/// Size of the header opening every map zone.
+pub const ZONE_HEADER_SIZE: usize = ZONE_HEADER_SIZE_U32 as usize;
+
+/// The zone header byte holding the zone's [`zone_check`].
+pub const ZONE_CHECK_BYTE: usize = 0;
+
+/// The bit the zone header's free-space link starts at.
+pub const FREELINK_BIT: u32 = 8;
+
+/// The most bits a free-space link spans; the header link's stop bit follows
+/// its field.
+pub const LINK_BITS_MAX: u32 = 15;
+
+/// The zone header byte whose values across every zone XOR to
+/// [`CROSS_CHECK_SUM`].
+pub const CROSS_CHECK_BYTE: usize = 3;
+
+/// What every zone's cross-check bytes XOR to.
+pub const CROSS_CHECK_SUM: u8 = 0xFF;
+
+/// Map bits the disc record takes in zone 0, after the zone header.
+pub const DISC_RECORD_BITS: u32 = DISC_RECORD_SIZE_U32 * 8;
+
+/// Disc byte address of an E-class volume's bare disc record: in map zone 0,
+/// after the zone header.
+pub const BARE_RECORD_OFFSET: u64 = ZONE_HEADER_SIZE_U32 as u64;
+
+/// Width of a free-space link for fragment ids `idlen` bits long: an id's
+/// width, at most [`LINK_BITS_MAX`].
+#[must_use]
+pub fn link_bits(idlen: u8) -> u32 {
+    u32::from(idlen).min(LINK_BITS_MAX)
+}
+
+/// The bit of zone `zone`'s sector its fragment stream starts at: after the
+/// zone header, and in zone 0 after the disc record too.
+#[must_use]
+pub const fn zone_start_bit(zone: u32) -> u32 {
+    let after_header = ZONE_HEADER_SIZE_U32 * 8;
+    if zone == 0 {
+        after_header + DISC_RECORD_BITS
+    } else {
+        after_header
+    }
+}
 
 /// The reserved "defect" fragment id.
 pub const FRAG_BAD: u32 = 1;
@@ -197,7 +243,9 @@ impl DiscRecord {
     }
 
     /// Structurally validate the record, failing closed on anything a genuine
-    /// `FileCore` volume cannot carry.
+    /// `FileCore` volume cannot carry. A record it admits has a well-defined
+    /// zone geometry: every zone's stream lies inside its sector, and zone 0's
+    /// holds at least one fragment.
     ///
     /// # Errors
     ///
@@ -222,9 +270,13 @@ impl DiscRecord {
         if self.nzones == 0 {
             return Err(DriverError::BadMagic);
         }
-        // A spare consuming the whole zone sector leaves no map.
-        let zone_bits = 8u32 << self.log2secsize;
-        if u32::from(self.zone_spare) + 32 + u32::from(self.idlen) >= zone_bits {
+        // The spare leaves room for the zone header, and zone 0's map bits
+        // hold this record and one whole fragment after it: every zone's
+        // place on the disc, the map's among them, counts from there.
+        let map_bits = (8u32 << self.log2secsize).checked_sub(u32::from(self.zone_spare));
+        if u32::from(self.zone_spare) < ZONE_HEADER_SIZE_U32 * 8
+            || map_bits.is_none_or(|bits| bits <= DISC_RECORD_BITS + u32::from(self.idlen))
+        {
             return Err(DriverError::BadMagic);
         }
         if self.format_version > 1 {
@@ -268,16 +320,33 @@ impl DiscRecord {
         self.zone_bits() / (u32::from(self.idlen) + 1)
     }
 
+    /// The map bits zone `zone`'s fragment stream describes: a zone's map
+    /// bits, less the disc record's in zone 0. Defined for a record
+    /// [`validate`](Self::validate) admits.
+    #[must_use]
+    pub fn zone_stream_bits(&self, zone: u32) -> u32 {
+        ZONE_HEADER_SIZE_U32 * 8 + self.zone_bits() - zone_start_bit(zone)
+    }
+
+    /// The first disc block, in map bits, zone `zone`'s stream describes;
+    /// for `zone == nzones`, where a zone after the last would begin, so the
+    /// blocks the whole map can describe. Defined for a record
+    /// [`validate`](Self::validate) admits.
+    #[must_use]
+    pub fn zone_start_block(&self, zone: u32) -> u64 {
+        if zone == 0 {
+            0
+        } else {
+            u64::from(zone) * u64::from(self.zone_bits()) - u64::from(DISC_RECORD_BITS)
+        }
+    }
+
     /// Disc byte address of the first map zone: the map sits in the middle
-    /// zone of the disc, which on a single-zone volume is sector 0.
+    /// zone of the disc, which on a single-zone volume is sector 0. Defined
+    /// for a record [`validate`](Self::validate) admits.
     #[must_use]
     pub fn map_offset(&self) -> u64 {
-        let half_zones = u64::from(self.nzones >> 1);
-        let mut map_bits = half_zones * u64::from(self.zone_bits());
-        if self.nzones > 1 {
-            map_bits -= (DISC_RECORD_SIZE as u64) * 8;
-        }
-        map_bits * self.bytes_per_map_bit()
+        self.zone_start_block(u32::from(self.nzones >> 1)) * self.bytes_per_map_bit()
     }
 
     /// Size of the whole map in bytes (`nzones` sectors).
@@ -304,6 +373,14 @@ pub fn boot_block_checksum(block: &[u8; BOOT_BLOCK_SIZE]) -> u8 {
         sum += u32::from(byte);
     }
     low_byte(sum)
+}
+
+/// Place `record` in the boot block `block` and seal it with its
+/// [`boot_block_checksum`].
+pub fn seal_boot_block(block: &mut [u8; BOOT_BLOCK_SIZE], record: &DiscRecord) {
+    block[DISC_RECORD_IN_BOOT_BLOCK..DISC_RECORD_IN_BOOT_BLOCK + DISC_RECORD_SIZE]
+        .copy_from_slice(&record.encode());
+    block[BOOT_BLOCK_SIZE - 1] = boot_block_checksum(block);
 }
 
 /// The check byte of one new-map zone sector (`ZoneCheck`): `FileCore`'s
@@ -526,7 +603,7 @@ fn bare_record<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<DiscRecord>, 
     }
     let mut zone = [0u8; 1024];
     let zone = &mut zone[..usize::try_from(record.sector_size()).unwrap_or(1024)];
-    if !read_present(dev, 0, zone)? || zone_check(zone) != zone[0] {
+    if !read_present(dev, 0, zone)? || zone_check(zone) != zone[ZONE_CHECK_BYTE] {
         return Ok(None);
     }
     Ok(Some(record))

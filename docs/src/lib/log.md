@@ -29,14 +29,16 @@ published, an ID is fixed forever. Every component owns one range in
 `tairix_log::registry` — `1_000..2_000` for `kernel/sec`, `4_000..5_000` for
 the kernel's catalogue, boot path and ports, a hundred-wide span for each
 driver-side library — and a new event takes the next free integer in its
-own. A component's local `*_RANGE_START`/`*_RANGE_END` constants are read from
+own that no removed event carried: an event removed or renumbered leaves its
+number in `registry::RETIRED`, since an old record still carries it. A component's local `*_RANGE_START`/`*_RANGE_END` constants are read from
 the registry, never spelled again.
 
 The `ci` stage `cargo xtask event-ids` reads every identifier the workspace
 defines — each `EventId(<literal>)`, and each arm of a catalogue spelled
 `EventId(match self { … })` — outside comments, strings and `cfg(test)` items,
 and fails when a crate defines one outside its range, when a crate defining
-any has no range, or when two crates define one value.
+any has no range, when two crates define one value, or when one defines a
+retired value.
 
 ## Tamper-evident audit chain (§19.4)
 

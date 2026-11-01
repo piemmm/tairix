@@ -24,7 +24,7 @@
 # as-of-last-regeneration.
 #
 artsheet 2
-figure-digest 0x547808c75ccae48f
+figure-digest 0xb42eae46c6c54e2d
 sides [32, 64, 128]
 
 figure human record 01008080808080000100000002800407010000 parts 27 tones 6 reach 103.394645
@@ -3350,9 +3350,9 @@ motion dwarf climb seconds 1.200000 limits 0.820000 continuity 0.021967 closure 
 cell dwarf idle 0 0x0000 32  pixels 0x8f001117b666b21a  coverage 0.082468  regions 7   contrast-dark 6.6172  contrast-light 2.2221  points 880   overdraw 0.170242
 cell dwarf idle 0 0x0000 64  pixels 0x845bde3459d3795a  coverage 0.083422  regions 13  contrast-dark 6.6172  contrast-light 2.2221  points 880   overdraw 0.172255
 cell dwarf idle 0 0x0000 128  pixels 0xf228fc543ba4ba67  coverage 0.084759  regions 14  contrast-dark 6.6172  contrast-light 2.2221  points 880   overdraw 0.172643
-cell dwarf idle 0 0x4000 32  pixels 0x246bd17eb1cbed3a  coverage 0.139285  regions 9   contrast-dark 6.6172  contrast-light 2.2221  points 880   overdraw 0.194626
-cell dwarf idle 0 0x4000 64  pixels 0x265d22e47925b3f6  coverage 0.146757  regions 10  contrast-dark 6.6172  contrast-light 2.2221  points 880   overdraw 0.195192
-cell dwarf idle 0 0x4000 128  pixels 0x49083bd287c440ef  coverage 0.151633  regions 22  contrast-dark 6.6172  contrast-light 2.2221  points 880   overdraw 0.194543
+cell dwarf idle 0 0x4000 32  pixels 0x9494890db24034b9  coverage 0.139277  regions 9   contrast-dark 6.6172  contrast-light 2.2221  points 880   overdraw 0.194626
+cell dwarf idle 0 0x4000 64  pixels 0x04bd962df70349d6  coverage 0.146756  regions 10  contrast-dark 6.6172  contrast-light 2.2221  points 880   overdraw 0.195192
+cell dwarf idle 0 0x4000 128  pixels 0xadc24fc95617120f  coverage 0.151633  regions 22  contrast-dark 6.6172  contrast-light 2.2221  points 880   overdraw 0.194543
 cell dwarf idle 0 0x8000 32  pixels 0x753a041304cbba60  coverage 0.082529  regions 9   contrast-dark 6.6172  contrast-light 2.2221  points 880   overdraw 0.170212
 cell dwarf idle 0 0x8000 64  pixels 0xb435abc534330ab1  coverage 0.083477  regions 12  contrast-dark 6.6172  contrast-light 2.2221  points 880   overdraw 0.172302
 cell dwarf idle 0 0x8000 128  pixels 0x5878f837144366d7  coverage 0.084799  regions 13  contrast-dark 6.6172  contrast-light 2.2221  points 880   overdraw 0.172628
@@ -6658,9 +6658,9 @@ cell dragonkin idle 0 0x4000 128  pixels 0x1af4d72b3b6fae00  coverage 0.137043  
 cell dragonkin idle 0 0x8000 32  pixels 0xdbc974e4874ffa01  coverage 0.076325  regions 7   contrast-dark 5.7743  contrast-light 2.1968  points 976   overdraw 0.159454
 cell dragonkin idle 0 0x8000 64  pixels 0xf29a9599b8dfffd5  coverage 0.077059  regions 12  contrast-dark 5.7743  contrast-light 2.1968  points 976   overdraw 0.160122
 cell dragonkin idle 0 0x8000 128  pixels 0x33730590ea5d23c4  coverage 0.077782  regions 23  contrast-dark 5.7743  contrast-light 2.1968  points 976   overdraw 0.159783
-cell dragonkin idle 0 0xc000 32  pixels 0xf0dc94a78f668d89  coverage 0.120638  regions 8   contrast-dark 5.7743  contrast-light 2.1968  points 976   overdraw 0.165932
-cell dragonkin idle 0 0xc000 64  pixels 0x40e7cf5b7bfb15a8  coverage 0.123971  regions 14  contrast-dark 5.7743  contrast-light 2.1968  points 976   overdraw 0.164949
-cell dragonkin idle 0 0xc000 128  pixels 0x8f00e426a3a0f79a  coverage 0.131230  regions 19  contrast-dark 5.7743  contrast-light 2.1968  points 976   overdraw 0.165377
+cell dragonkin idle 0 0xc000 32  pixels 0xdec90b201185741b  coverage 0.120638  regions 8   contrast-dark 5.7743  contrast-light 2.1968  points 976   overdraw 0.165932
+cell dragonkin idle 0 0xc000 64  pixels 0x77a308d3c8ba2ff0  coverage 0.123970  regions 14  contrast-dark 5.7743  contrast-light 2.1968  points 976   overdraw 0.164949
+cell dragonkin idle 0 0xc000 128  pixels 0x12adb7700a48033c  coverage 0.131231  regions 19  contrast-dark 5.7743  contrast-light 2.1968  points 976   overdraw 0.165377
 cell dragonkin idle 1 0x0000 32  pixels 0xa9bd84d5e9a1adfd  coverage 0.076517  regions 9   contrast-dark 5.7743  contrast-light 2.8830  points 976   overdraw 0.159767
 cell dragonkin idle 1 0x0000 64  pixels 0xadeb40c55e8845ed  coverage 0.076684  regions 16  contrast-dark 5.7743  contrast-light 2.1968  points 976   overdraw 0.159554
 cell dragonkin idle 1 0x0000 128  pixels 0x7dc6ca4207c9bc8f  coverage 0.077422  regions 24  contrast-dark 5.7743  contrast-light 2.1968  points 976   overdraw 0.158903

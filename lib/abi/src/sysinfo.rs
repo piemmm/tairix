@@ -3046,11 +3046,35 @@ pub enum MountAvailability {
     Recovering = 5,
 }
 
+/// What a volume's uncommitted writes have to do with a plain detach it was
+/// refused.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Retention {
+    /// Held, for a verified re-insert or by a recovery conflict: a force
+    /// discards them.
+    Held,
+    /// Already lost with the device: a force acknowledges the loss.
+    Lost,
+}
+
 impl MountAvailability {
     /// The wire byte for this availability state.
     #[must_use]
     pub const fn as_u8(self) -> u8 {
         self as u8
+    }
+
+    /// The refusal a plain detach of a volume in this state earns from its
+    /// writes, and what became of them, or `None` where a plain detach may
+    /// go ahead: the one refusal of the state only a force gets past.
+    #[must_use]
+    pub const fn plain_detach_refusal(self) -> Option<(Errno, Retention)> {
+        match self {
+            Self::UnavailableDirty => Some((Errno::DeviceFault, Retention::Held)),
+            Self::UnavailableLost => Some((Errno::DeviceFault, Retention::Lost)),
+            Self::RecoveryConflict => Some((Errno::NotEmpty, Retention::Held)),
+            Self::Available | Self::Degraded | Self::Recovering => None,
+        }
     }
 
     /// Recover an availability state from its wire byte.
@@ -7365,7 +7389,7 @@ mod tests {
         encoded_query_table, spec_for, BlkHealthState, BlkHealthTransition, CpuTimeRecord,
         KernelMemoryStats, LoadAverage, MemoryTotal, MountAvailability, MountOwner, MountRecord,
         MountVolumeState, OsVersion, PageRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
-        SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        Retention, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
         UserDirectoryRecord, VolumeHealth, VolumeStats, ENCODED_QUERY_TABLE,
         ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MAX_GROUPNAME_LEN,
         MAX_USERNAME_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE,
@@ -7402,6 +7426,29 @@ mod tests {
     use crate::rlimit::{LimitKind, ResourceLimit};
     use crate::time::{Duration64, Time64};
     use crate::{CapabilityId, Errno};
+
+    /// A plain detach is refused for what a vanished or conflicted volume's
+    /// writes need, and nothing else is: the one table the kernel refuses by
+    /// and the client explains by.
+    #[test]
+    fn a_plain_detach_is_refused_only_for_held_or_lost_writes() {
+        use MountAvailability::{
+            Available, Degraded, Recovering, RecoveryConflict, UnavailableDirty, UnavailableLost,
+        };
+        for (state, refusal) in [
+            (Available, None),
+            (
+                UnavailableDirty,
+                Some((Errno::DeviceFault, Retention::Held)),
+            ),
+            (UnavailableLost, Some((Errno::DeviceFault, Retention::Lost))),
+            (RecoveryConflict, Some((Errno::NotEmpty, Retention::Held))),
+            (Degraded, None),
+            (Recovering, None),
+        ] {
+            assert_eq!(state.plain_detach_refusal(), refusal, "{state:?}");
+        }
+    }
 
     #[test]
     fn well_known_query_ids_are_frozen() {

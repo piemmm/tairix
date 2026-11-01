@@ -163,10 +163,17 @@ impl<J, A> WindowReads<J, A> {
     /// Take the next read to run and the window it is for, or `None` when
     /// there is nothing to do.
     pub fn next_job(&mut self) -> Option<(u64, J)> {
-        if self.stopping || self.wanted.is_empty() {
+        self.next_job_where(|_| true)
+    }
+
+    /// Take the next read `mine` admits and the window it is for, in the order
+    /// asked: what a worker takes when its workers each serve their own share.
+    pub fn next_job_where(&mut self, mut mine: impl FnMut(&J) -> bool) -> Option<(u64, J)> {
+        if self.stopping {
             return None;
         }
-        let (window, job) = self.wanted.remove(0);
+        let at = self.wanted.iter().position(|(_, job)| mine(job))?;
+        let (window, job) = self.wanted.remove(at);
         self.reading.push(window);
         Some((window, job))
     }
@@ -254,7 +261,8 @@ pub enum ReadKind {
     /// Where an eject's volume is bound, so the loop takes its windows off it
     /// first.
     Locate,
-    /// An eject, waiting only for the read under way and those writes.
+    /// An eject, waiting only for the read under way on its volume and the
+    /// writes queued there.
     Settle,
     /// A document the user opened: what they are waiting for.
     Open,
@@ -282,9 +290,10 @@ pub enum ReadKind {
     Places,
 }
 
-/// The order the reader takes its work in: the first kind with any waiting.
-/// Nothing starves, since each kind is finite and refilled only by the user
-/// asking again or, for a folder's changes, by a watch the kernel paces.
+/// The order a worker takes its lane's work in: the first kind with any
+/// waiting. Nothing starves, since each kind is finite and refilled only by
+/// the user asking again or, for a folder's changes, by a watch the kernel
+/// paces.
 pub const READ_ORDER: [ReadKind; 14] = [
     ReadKind::Write,
     ReadKind::Locate,
@@ -301,6 +310,20 @@ pub const READ_ORDER: [ReadKind; 14] = [
     ReadKind::Bundles,
     ReadKind::Places,
 ];
+
+/// The first work in [`READ_ORDER`] `of` finds, by kind and the one lane it is
+/// limited to: of each kind on `last` first, so work queued behind a worker's
+/// last read is taken with no other worker woken for it, and a kind the order
+/// puts first is never kept waiting behind a later one on another lane.
+pub fn first_in_order<L: Copy, W>(
+    last: Option<L>,
+    mut of: impl FnMut(ReadKind, Option<L>) -> Option<W>,
+) -> Option<W> {
+    READ_ORDER.iter().find_map(|kind| {
+        last.and_then(|lane| of(*kind, Some(lane)))
+            .or_else(|| of(*kind, None))
+    })
+}
 
 /// The ejects the reader carries out: `A`, each act, located to bindings `P`
 /// and carried out to `D`.
@@ -368,9 +391,10 @@ impl<A, P, D> EjectDesk<A, P, D> {
         self.settling.push_back(act);
     }
 
-    /// The next eject to carry out.
-    pub fn next_settle(&mut self) -> Option<A> {
-        self.settling.pop_front()
+    /// The next eject to carry out that `mine` admits, in the order settled.
+    pub fn next_settle_where(&mut self, mine: impl FnMut(&A) -> bool) -> Option<A> {
+        let at = self.settling.iter().position(mine)?;
+        self.settling.remove(at)
     }
 
     /// What an eject came to.

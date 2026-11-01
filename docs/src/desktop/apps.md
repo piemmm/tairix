@@ -372,6 +372,48 @@ owed) only once the listing is there, so the transactional, fail-closed guarante
 a synchronous listing had is unchanged: a refusal leaves the view precisely where
 it was. `Browser::is_listing` is what the shared renderer draws its cue from.
 
+### A slow device holds up only its own work
+
+Everything the file manager reads or writes off its loop runs on the lane of
+the volume it touches (`lanes::Lane`), routed by the binding covering its place
+in the namespace's view list (`lanes::Routes`, through the
+`tairix_procinfo::covering` rule `mount` and `df` resolve a path by). The view
+list is read with the places rail and again whenever the kernel says the mount
+table moved, so routing touches no device. Work on no place a listing named —
+the System Information and discovery services, the program stores, the system's
+own artwork — has a lane of its own, and a place no published volume answers
+for, such as the `/Storage` catalog, another.
+
+One reader serves a lane at a time, so a volume's work keeps the order
+`deferred::READ_ORDER` states and an eject waits for the read under way on its
+own volume alone. Whenever every reader is busy a spare is started, so work for
+a free volume is taken at once however long another is held up, and a reader
+finding two already waiting leaves (`lanes::Crew`), so work arriving now and
+then is taken by a waiting reader rather than costing a thread. A reader that
+finishes takes its own lane's next job of each kind first, waking no other for
+it, but a kind the order puts first on another volume before it
+(`deferred::first_in_order`), and a reader moving on wakes another for what its
+last lane still holds. A listing of a local folder therefore never waits behind
+a hung read of a dying stick, not even in the window whose read it is: the
+listing desk keeps a window's reads under way by what each was taken for, and
+a window asking again each turn for a read queued or under way wakes no reader:
+only a read the desk newly records, on a lane no reader holds, does
+(`ListingDesk::recorded`). Each
+shared desk hands a reader only its lane's share (`next_job_where`,
+`next_drain_where`, `next_batch_by`); the artwork desk keeps the decodes waiting
+apart by lane, each routed once, and owes the loop a wake once the delivering
+volume's share drains, whatever another's still holds. A spare the kernel
+refuses is said once and tried again once a busy reader rests, never on every
+take, and the work waits for a busy reader: slower, never wrong.
+
+As many artwork decodes run at once as fit in what one document decoder may
+map, and one where none fits (`lanes::Decodes`, `WorkerMemory::pooled`), each
+decoder held to one document and a thumbnail's decode on any machine, so
+however many volumes the windows show, a pool of more than one leaves the
+machine what one document decoder would; below 512 MiB of RAM the one decoder
+may map more. A decode finding none free stays queued: that delays
+decoration, never a listing.
+
 ### Entries, kinds, and the shared sort
 
 An `Entry` carries its name, its `EntryKind`, its apparent `size`, its
@@ -560,8 +602,9 @@ The drawn window chrome — the `lib/controls` toolbar
   left-to-right command order the chrome iterates.
 - `ContextMenuModel::for_browser(browser, has_clipboard)` snapshots which
   `ContextCommand` the right-click menu offers is actionable. **Open**,
-  **Open With…**, **Get Info…**, **Rename**, **Cut**, **Copy** and **Delete**
-  act on the selection (`ContextCommand::acts_on_selection`), so they need one;
+  **Open With…**, **Mount Read-Only**, **Eject**, **Get Info…**, **Rename**,
+  **Cut**, **Copy** and **Delete** act on the selection
+  (`ContextCommand::acts_on_selection`), so they need one;
   the single-entry verbs need exactly one. **Open With…** is offered only for a
   regular file — a directory descends and a bundle launches itself, so neither
   has an application to choose. **Mount Read-Only** is offered for a disk
@@ -823,7 +866,7 @@ associated application from the installed bundles' declared file-type
 associations (the reader's warm scan + `applications_for`, keyed off the file's
 leaf name — never a hard-coded viewer path; a document opened before the first
 scan has landed waits for it), opens the file **in its own table** on its
-reader thread, so a slow disk never stalls the window — read-only, or
+reader serving its volume, so a slow disk never stalls the window — read-only, or
 read-write for an application whose signed manifest claims to edit its
 documents — and spawns that bundle's `Run` with the descriptor wired
 onto the child's `STDIN` slot (`FdWire::Handle`) plus the reserved
@@ -861,7 +904,7 @@ was.
 - **The drop runs as a paste.** Dropped on one of its windows, the manager
   pastes into the folder at the point, in that window; dropped on the desktop,
   into the desktop folder, in the window the drag began in — through the same
-  cancellable transfer Paste uses on the operations worker, after asking the
+  cancellable transfer Paste uses on the operations workers, after asking the
   policy again. A drop that cannot begin — the folder no longer takes it, the
   window is running an operation or still making a change — is stated in the
   window, as a refused paste is.
@@ -1243,7 +1286,9 @@ only ever draws an answer it has:
 - **One probe desk, shared.** The file manager and the desktop both record
   asks on `Probes`, and their workers read each recorded set as one batch
   through `vfs::probe_batch`: a screenful of folders answered one wake at a
-  time would be a screenful of repaints. A refusal is an answer like any
+  time would be a screenful of repaints. The file manager takes one batch per
+  volume (`Probes::next_batch_by`), each settling only its own folders as it
+  lands, and no folder is in two batches at once. A refusal is an answer like any
   other, so a locked folder is asked once. A held answer survives one resolve
   pass; what a whole pass was offered and did not take is for a folder
   scrolled out of view and is dropped, which bounds the desk by the screen. A
@@ -1322,11 +1367,16 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   records the decode on the shared deferred-decode desk
   (`tairix_icon::ArtworkDesk` — the same policy the desktop session's worker
   thread drives) and draws its built-in glyph; the decode itself runs on the
-  app's one reader thread, which owns its **own** sandbox child so no sandbox
-  handle crosses a thread. So the first frame of a folder of picture-bearing
+  reader serving the volume the artwork is read from, through a decoder — a
+  sandbox child of the app's own — taken from those no reader is using and put
+  back after, so a decode held up on a slow device holds up its own decoder
+  alone. So the first frame of a folder of picture-bearing
   bundles does not block on a sandbox round trip per tile, a scroll step does
   not block on the newly revealed row, and a key or a click waits on nothing.
-  The reader nudges the loop once its artwork queue drains rather than after
+  A paint wakes a reader only for a decode it recorded on a volume no reader
+  serves, so a screenful of tiles still pending wakes nobody. A reader nudges
+  the loop once its volume's artwork queue drains, whatever another volume's
+  reader still has queued, rather than after
   each icon, and the desk names what landed: each window repaints only the
   slots drawn through it, found by `render::manager_art`, which walks the
   rail, the toolbar and the listing exactly as the paint draws them. An
@@ -1366,16 +1416,19 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   cues, and each is shown as it lands. Where there is no reader thread no
   thumbnail is drawn: a whole file's read and decode is not worth a frame. The
   desktop draws its picture files the same way.
-- **A thumbnail is decoded once per version.** The reader thread's rasteriser
-  keeps what it decodes in a `tairix_icon::ThumbnailStore` over the blob
+- **A thumbnail is decoded once per version.** The decoders keep what they
+  decode in one `tairix_icon::ThumbnailStore` they share, over the blob
   `thumbnails` of the app's own bulk store, opened through the app-data service
   on the first thumbnail and laid out for the thumbnail decoder's revision
   (`plans/FILES-INTERACTION.md` FI25). Only a file whose
   listing reports a content generation is kept, under (volume, inode,
   generation, reading), so a stale picture cannot be served; a hit is served
   only after the open has matched the listing's stamp, and a decode is kept
-  only when the open handle still reports that version afterwards. The blob
-  holds the grid tile's side, the side of the run's first thumbnail. A store the
+  only when the open handle still reports that version afterwards. A decoder
+  holds the store for one lookup and one insert (`tairix_icon::serve_thumbnail`
+  over `StoreAccess`), never across its read of the document, so a thumbnail
+  read from a slow device keeps no other decoder from the store. The blob holds
+  the grid tile's side, the side of the run's first thumbnail. A store the
   service refuses is said once on stderr and the app decodes as before; a
   second instance shares the blob, which its self-checking slots survive.
 - **The memory is governed and given back.** Every window draws through one
@@ -1641,9 +1694,9 @@ application strip and opens a window on demand (`plans/NEW-TASKBAR.md` T4).
 
 The slot menu's **Network** row (`AppMenuSymbol::Network`, directly above
 *Settings…* in both roles) brings forward the window showing the network,
-or opens one. The browse is the reader thread's: a `netbrowse::Browse` on the
+or opens one. The browse is a reader's: a `netbrowse::Browse` on the
 loop decides each turn whether a window wants the network, submits a collect
-or a close to the reader's latest-wins `network` desk, and takes the answer
+or a close to the readers' latest-wins `network` desk, and takes the answer
 into every such window once (by its generation); the reader holds the
 `lib/discovery` session and `Catalogue` under a lock of their own, so the
 calls to `discoveryd` hold no other desk up. Where the kernel grants no reader
@@ -1715,7 +1768,7 @@ the VFS nor the view. A commit that survives validation is prepared by
 `Browser::prepare_rename`, which builds the two absolute paths, and the move
 itself — an `fs_rename` **under the launching user's own identity, no new
 capability**, gated by the per-inode owner/mode/ACL model exactly as from the
-shell — runs on the app's reader thread, never on the event loop that owes
+shell — runs on the reader serving its volume, never on the event loop that owes
 the user a frame: the editor stays open until the answer lands, taking no
 input and letting no other rename open meanwhile, and `Browser::finish_rename`
 applies it. With no reader thread the move runs where it is asked, slower but
@@ -1956,17 +2009,21 @@ the view is then re-listed so a partial removal is shown honestly (`AGENTS.md`
 
 A long removal — and a long copy/paste — shows **progress** and can be
 **cancelled**, and none of it runs on the window's loop. The confirmed operation
-is handed to an **operations worker**, a thread of its own beside the reader so
-a long copy never holds a listing up, which carries it out one bounded unit at
-a time — one directory read, one unlink, one `fs_mkdir`, one copy chunk, or one
-rename. Each operation has a **progress window of its own**: a modeless dialog
-of the folder window that asked for it, so the folder goes on being browsed,
-and a window may have several running at once. Operations run one after another
-in the order they were asked (`operations::OperationDesk`, a host-tested desk
-holding a fixed number waiting and keyed by each operation's progress window):
-two copies over one disk finish no sooner side by side, so one that touches a
-tree an earlier one is still working in waits behind it, and its window says
-it waits. Before a delete or a paste begins, the worker **counts its whole**
+is handed to an **operations worker**, a thread of its own beside the readers
+so a long copy never holds a listing up, which carries it out one bounded unit
+at a time — one directory read, one unlink, one `fs_mkdir`, one copy chunk, or
+one rename. Each operation has a **progress window of its own**: a modeless
+dialog of the folder window that asked for it, so the folder goes on being
+browsed, and a window may have several running at once. Operations touching one
+volume run one after another in the order they were asked
+(`operations::OperationDesk`, a host-tested desk holding a fixed number waiting
+and keyed by each operation's progress window): two copies over one disk finish
+no sooner side by side, so one waits behind any asked before it that touches
+one of its volumes — the source's, or where it lands — and its window says it
+waits. One touching none of theirs starts at once on a worker of its own, so a
+copy onto a failing stick holds up no delete on the local disk; an operation
+never overtakes an earlier one on a volume they share, so a stream of later ones
+cannot keep it waiting. Before a delete or a paste begins, the worker **counts its whole**
 (`lib/browse::Survey`): one look at a source or one directory listing a unit,
 totalling every item and the bytes of every file a copy streams, so the bar is
 a share of a counted whole and reaches the end as the work does; a tree it
@@ -2171,7 +2228,7 @@ modelled purely in `lib/browse::create` plus `Browser::prepare_entry` and
 one shared `tairix_path::validate_file_name` rule and refuses one a sibling
 holds (`CreateError::Clash`), both *before* any syscall. `prepare_entry` spells
 the absolute path through the same `spell_child` the launch/open targets use,
-making nothing; the app has the reader thread make it under the launching
+making nothing; the app has a reader make it under the launching
 user's own identity — `fs_mkdir` for a folder, and for a document an `fs_open`
 with `CREATE | EXCLUSIVE`, so an existing file is never truncated — and hands
 the answer to `finish_entry`. A refusal (a read-only mount, an unwritable

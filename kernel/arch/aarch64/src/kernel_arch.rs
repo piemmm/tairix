@@ -642,6 +642,9 @@ impl SecondaryBringup for Aarch64Arch {
 
         #[cfg(all(target_arch = "aarch64", target_os = "none"))]
         {
+            let asked = self.monotonic_ns();
+            let out_of_time =
+                || self.monotonic_ns().saturating_sub(asked) >= crate::smp::START_ANSWER_BUDGET_NS;
             let started = match start {
                 // SAFETY: the caller of this HAL method guarantees `.bss`
                 // is zeroed (clear secondary-stack pool), the secondary
@@ -651,7 +654,7 @@ impl SecondaryBringup for Aarch64Arch {
                 // `crate::smp::start_secondary_spintable`. `cpu` was
                 // range-checked via `mpidr_of`.
                 SecondaryStart::Psci(method) => unsafe {
-                    crate::smp::start_secondary(method, cpu, mpidr)
+                    crate::smp::start_secondary(method, cpu, mpidr, out_of_time)
                 },
                 SecondaryStart::SpinTable { release_addrs } => {
                     let release = release_addrs
@@ -668,20 +671,12 @@ impl SecondaryBringup for Aarch64Arch {
                     // `mpidr` is this core's masked affinity — the value
                     // the park loop gate compares against so only this
                     // core (not every parked secondary) proceeds.
-                    unsafe { crate::smp::start_secondary_spintable(cpu, release, mpidr) }
+                    unsafe {
+                        crate::smp::start_secondary_spintable(cpu, release, mpidr, out_of_time)
+                    }
                 }
             };
-            match started {
-                Ok(()) => Ok(()),
-                Err(crate::smp::StartCpuError::CpuIdOutOfRange) => Err(SmpError::InvalidCpu),
-                Err(
-                    crate::smp::StartCpuError::NoEntryInstalled
-                    | crate::smp::StartCpuError::NoAffinityTable,
-                ) => Err(SmpError::NotReady),
-                Err(crate::smp::StartCpuError::Psci(status)) => {
-                    Err(SmpError::StartRejected(i64::from(status)))
-                }
-            }
+            started.map_err(SmpError::from)
         }
         #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
         {

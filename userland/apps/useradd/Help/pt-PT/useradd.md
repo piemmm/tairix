@@ -21,8 +21,11 @@ nenhuma pode ser adivinhada), exatamente como a ferramenta GNU cria uma
 conta desativada. Defina depois uma palavra-passe com o comando
 `passwd` da ferramenta `users`.
 
-Quando `-u` é omitido, o id de utilizador é atribuído automaticamente,
-um acima do id existente mais alto. Quando `-d` é omitido, o diretório
+Quando `-u` é omitido, o id de utilizador é atribuído automaticamente:
+um acima do mais alto dos ids existentes iguais ou superiores a 1000, ou
+1000 quando nenhuma conta tem um id assim. Os ids abaixo de 1000 são do
+sistema e nunca são atribuídos, e, quando já não resta nenhum id acima
+do mais alto, a conta não é criada. Quando `-d` é omitido, o diretório
 pessoal é a disposição padrão `/Users/NAME`. A conta começa com a shell
 por omissão do sistema e o teto ordinário de capacidades de sessão; um
 administrador alarga-o depois com o comando `grant` da ferramenta
@@ -33,8 +36,9 @@ operando.
 
 ## OPTIONS
 
-- `-u, --uid UID` — id numérico do utilizador; atribuído
-  automaticamente quando omitido (um acima do id existente mais alto).
+- `-u, --uid UID` — id numérico do utilizador; atribuído automaticamente
+  quando omitido (um acima do mais alto dos ids existentes iguais ou
+  superiores a 1000, senão 1000).
 - `-g, --gid GID` — id numérico do grupo primário. Obrigatório: não há
   política de grupo por omissão a adivinhar.
 - `-G, --groups LIST` — ids numéricos de grupos suplementares,

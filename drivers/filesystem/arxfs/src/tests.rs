@@ -12083,3 +12083,17 @@ mod reserve;
 
 #[path = "region_tests.rs"]
 mod region;
+
+#[test]
+fn register_needs_the_load_capability() {
+    use tairix_abi::driver::GrantingHost;
+    use tairix_abi::{CapabilityId, DriverError};
+    let loading = GrantingHost {
+        granted: &[CapabilityId::DRV_LOAD],
+    };
+    assert!(crate::register(&loading).is_ok());
+    assert_eq!(
+        crate::register(&GrantingHost { granted: &[] }).err(),
+        Some(DriverError::PermissionDenied)
+    );
+}

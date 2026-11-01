@@ -45,13 +45,14 @@ use tairix_fdt::Fdt;
 use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
 use tairix_kernel_core::console::NULL_CONSOLE_INPUT;
 use tairix_kernel_core::SeatRegistry;
-use tairix_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
+use tairix_kernel_mem::{AddressSpace, HostPageTable, MmioMap, VirtAddr};
 use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::KernelMmioMapper;
 use tairix_seat::SeatOwner;
 use tairix_test_virtio_qemu_support::{
-    bring_up_el1_identity_mmu, define_mmio_boot_harness_aarch64, AArch64QemuEnv, QemuEnv,
+    bring_up_el1_identity_mmu, define_mmio_boot_harness_aarch64, identity_map, AArch64QemuEnv,
+    QemuEnv,
 };
 
 use crate::fixture::{DTB_BLOB, FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
@@ -81,11 +82,6 @@ const MMIO_VBASE: u64 = 0x6000_0000;
 /// bracketed by two guard pages, so 128 pages leaves comfortable
 /// headroom.
 const MMIO_CAP_PAGES: usize = 128;
-
-/// Upper bound of the boot identity map exposed to the MMIO mapper (the
-/// bottom 4 GiB); the `virt` board's RAM and the framebuffer surface both
-/// sit well inside it (and inside the 2 GiB the MMU actually maps).
-const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
 
 /// Synthetic owner process id for the driver context.
 const TASK: ProcessId = ProcessId(0xFB1);
@@ -271,9 +267,7 @@ fn drive_lifecycle(env: &dyn QemuEnv, config: FramebufferConfig) {
     grants.insert(CapabilityId::MMIO_MAP);
     grants.insert(CapabilityId::DRV_LOAD);
     let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, audit);
-    // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let phys = unsafe { DirectPhysMap::identity(IDENTITY_LIMIT) }
-        .expect("the boot direct map addresses its window");
+    let phys = identity_map();
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(MMIO_VBASE),

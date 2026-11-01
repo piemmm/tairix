@@ -38,6 +38,8 @@ tairix-path = { path = "../path", version = "=0.0.0" }
 # questions that name an item draw it through `tairix_util::utf8::shown`, and a
 # budgeted name through `tairix_visible::shown_chars`.
 tairix-util = { path = "../util", version = "=0.0.0" }
+# The UTS #39 restriction level the Network view marks an impersonating name by.
+tairix-unicode = { path = "../unicode", version = "=0.0.0" }
 tairix-visible = { path = "../visible", version = "=0.0.0" }
 # Shared integer screen geometry (`Point`/`Rect`) — the same vocabulary the
 # window manager and taskbar use.

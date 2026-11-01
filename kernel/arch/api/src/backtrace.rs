@@ -251,6 +251,14 @@ pub enum BootStackGuard {
         /// How far below the stack's lowest byte it points.
         bytes: u64,
     },
+    /// An access faulted inside the guard: an overrun a guard mapped
+    /// read-only stopped before it wrote, so the canary still reads intact.
+    Faulted {
+        /// The address the faulting access could not reach.
+        addr: u64,
+        /// How far below the stack's lowest byte it lies.
+        bytes: u64,
+    },
 }
 
 impl BootStackGuard {
@@ -261,6 +269,7 @@ impl BootStackGuard {
             Self::Intact => "intact",
             Self::Disturbed => "disturbed",
             Self::BelowStack { .. } => "sp_below_stack",
+            Self::Faulted { .. } => "faulted",
         }
     }
 }
@@ -279,6 +288,11 @@ impl core::fmt::Display for BootStackGuard {
                 "OVERRUN - sp {sp:#x} is {bytes:#x} bytes below the boot stack's lowest byte, \
                  unless it is on a stack this report cannot see"
             ),
+            Self::Faulted { addr, bytes } => write!(
+                f,
+                "OVERRUN - an access faulted at {addr:#x}, {bytes:#x} bytes below the boot \
+                 stack's lowest byte, inside its guard"
+            ),
         }
     }
 }
@@ -287,8 +301,9 @@ impl core::fmt::Display for BootStackGuard {
 /// immediately below the stack, which its boot stub filled with
 /// [`tairix_memguard::GUARD_BYTE`].
 ///
-/// The MMU is off while the boot stack is in use, so nothing can be
-/// unmapped below it and the guard has to be poison rather than a hole.
+/// The MMU may be off while the boot stack is first used, so the guard is
+/// poison; a port that later maps it read-only turns an overrun into a fault
+/// as well, which [`BootStackGuard::Faulted`] names.
 /// Like [`KernelStackRegion`] the region carries the pointer its bytes are
 /// read *through*: it exists because the linker reserved it, which is a
 /// fact only the port holds.
@@ -362,21 +377,36 @@ impl BootStackGuardRegion {
         self.base.addr().get() as u64 + self.len as u64
     }
 
-    /// What the guard says about a CPU whose stack pointer is `sp`.
+    /// Whether `addr` is one of the guard's bytes.
+    #[must_use]
+    pub fn contains(self, addr: u64) -> bool {
+        (self.base.addr().get() as u64..self.stack_bottom_addr()).contains(&addr)
+    }
+
+    /// What the guard says about a CPU whose stack pointer is `sp`, after a
+    /// fault, if any, on an access to `fault`.
     ///
     /// A stack pointer is tested first and is decisive on its own: it catches
     /// an overrun whose frame was larger than the guard and so stepped over it
     /// without writing a byte, and it keeps the canary read off bytes that are
-    /// currently live frames. `None` — a stack pointer the caller knows is on
-    /// another stack, or has none to give — is judged on the canary alone, as
-    /// is any `sp` at or above the stack's lowest byte.
+    /// currently live frames. A fault address inside the guard comes next: a
+    /// guard mapped read-only stops an overrun before it writes, so the canary
+    /// would read intact. Otherwise — no stack pointer, as a caller with one
+    /// it knows is on another stack gives, or one at or above the stack's
+    /// lowest byte — the canary decides.
     #[must_use]
-    pub fn assess(self, sp: Option<u64>) -> BootStackGuard {
+    pub fn assess(self, sp: Option<u64>, fault: Option<u64>) -> BootStackGuard {
         let bottom = self.stack_bottom_addr();
         if let Some(sp) = sp.filter(|&sp| sp < bottom) {
             return BootStackGuard::BelowStack {
                 sp,
                 bytes: bottom - sp,
+            };
+        }
+        if let Some(addr) = fault.filter(|&addr| self.contains(addr)) {
+            return BootStackGuard::Faulted {
+                addr,
+                bytes: bottom - addr,
             };
         }
         // SAFETY: the constructor vouched that these bytes are the port's
@@ -594,11 +624,12 @@ pub trait CpuStateCapture: Send + Sync {
         None
     }
 
-    /// The boot-stack guard's verdict for a CPU whose stack pointer is `sp`
+    /// The boot-stack guard's verdict for a CPU whose stack pointer is `sp`,
+    /// after a fault on an access to `fault` if there was one
     /// ([`BootStackGuardRegion::assess`]), or `None` when the port reserves
     /// no guard.
-    fn boot_stack_verdict(&self, sp: Option<u64>) -> Option<BootStackGuard> {
-        self.boot_stack_guard().map(|guard| guard.assess(sp))
+    fn boot_stack_verdict(&self, sp: Option<u64>, fault: Option<u64>) -> Option<BootStackGuard> {
+        self.boot_stack_guard().map(|guard| guard.assess(sp, fault))
     }
 
     /// The active translation root, when the port can name it.
@@ -1054,7 +1085,10 @@ mod tests {
     fn a_freshly_poisoned_guard_reads_as_intact() {
         let mut guard = TestGuard::poisoned();
         let sp = guard.stack_bottom();
-        assert_eq!(guard.region().assess(Some(sp)), BootStackGuard::Intact);
+        assert_eq!(
+            guard.region().assess(Some(sp), None),
+            BootStackGuard::Intact
+        );
     }
 
     #[test]
@@ -1063,7 +1097,10 @@ mod tests {
         let sp = guard.stack_bottom();
         let top = guard.bytes.len() - 1;
         guard.bytes[top] = 0;
-        assert_eq!(guard.region().assess(Some(sp)), BootStackGuard::Disturbed);
+        assert_eq!(
+            guard.region().assess(Some(sp), None),
+            BootStackGuard::Disturbed
+        );
     }
 
     #[test]
@@ -1071,7 +1108,10 @@ mod tests {
         let mut guard = TestGuard::poisoned();
         let sp = guard.stack_bottom();
         guard.bytes[0] = 0;
-        assert_eq!(guard.region().assess(Some(sp)), BootStackGuard::Intact);
+        assert_eq!(
+            guard.region().assess(Some(sp), None),
+            BootStackGuard::Intact
+        );
     }
 
     #[test]
@@ -1082,7 +1122,7 @@ mod tests {
         let bottom = guard.stack_bottom();
         let sp = bottom - 8;
         assert_eq!(
-            guard.region().assess(Some(sp)),
+            guard.region().assess(Some(sp), None),
             BootStackGuard::BelowStack { sp, bytes: 8 }
         );
     }
@@ -1094,7 +1134,7 @@ mod tests {
         let len = guard.bytes.len() as u64;
         let sp = bottom - len - 64;
         assert_eq!(
-            guard.region().assess(Some(sp)),
+            guard.region().assess(Some(sp), None),
             BootStackGuard::BelowStack {
                 sp,
                 bytes: len + 64
@@ -1108,10 +1148,10 @@ mod tests {
     #[test]
     fn no_stack_pointer_is_judged_on_the_canary_alone() {
         let mut guard = TestGuard::poisoned();
-        assert_eq!(guard.region().assess(None), BootStackGuard::Intact);
+        assert_eq!(guard.region().assess(None, None), BootStackGuard::Intact);
         let top = guard.bytes.len() - 1;
         guard.bytes[top] = 0;
-        assert_eq!(guard.region().assess(None), BootStackGuard::Disturbed);
+        assert_eq!(guard.region().assess(None, None), BootStackGuard::Disturbed);
     }
 
     /// A stack pointer at or above the stack's lowest byte says nothing
@@ -1120,11 +1160,14 @@ mod tests {
     fn a_stack_pointer_on_the_stack_defers_to_the_canary() {
         let mut guard = TestGuard::poisoned();
         let bottom = guard.stack_bottom();
-        assert_eq!(guard.region().assess(Some(bottom)), BootStackGuard::Intact);
+        assert_eq!(
+            guard.region().assess(Some(bottom), None),
+            BootStackGuard::Intact
+        );
         let top = guard.bytes.len() - 1;
         guard.bytes[top] = 0;
         assert_eq!(
-            guard.region().assess(Some(bottom + 0x100)),
+            guard.region().assess(Some(bottom + 0x100), None),
             BootStackGuard::Disturbed
         );
     }
@@ -1136,7 +1179,10 @@ mod tests {
         let mut guard = TestGuard::poisoned();
         let sp = guard.stack_bottom();
         guard.bytes.fill(0);
-        assert_eq!(guard.region().assess(Some(sp)), BootStackGuard::Disturbed);
+        assert_eq!(
+            guard.region().assess(Some(sp), None),
+            BootStackGuard::Disturbed
+        );
     }
 
     #[test]
@@ -1150,6 +1196,53 @@ mod tests {
         );
     }
 
+    /// A fault inside a guard mapped read-only names the overrun the canary
+    /// cannot: the write never landed.
+    #[test]
+    fn a_fault_inside_the_guard_is_an_overrun_however_intact_the_canary() {
+        let mut guard = TestGuard::poisoned();
+        let bottom = guard.stack_bottom();
+        let addr = bottom - 8;
+        assert_eq!(
+            guard.region().assess(None, Some(addr)),
+            BootStackGuard::Faulted { addr, bytes: 8 }
+        );
+        let len = guard.bytes.len() as u64;
+        assert_eq!(
+            guard.region().assess(None, Some(bottom - len)),
+            BootStackGuard::Faulted {
+                addr: bottom - len,
+                bytes: len
+            },
+            "the guard's lowest byte"
+        );
+    }
+
+    /// A fault outside the guard says nothing about it, and a stack pointer
+    /// below the stack still decides first.
+    #[test]
+    fn a_fault_outside_the_guard_defers_to_the_stack_pointer_and_the_canary() {
+        let mut guard = TestGuard::poisoned();
+        let bottom = guard.stack_bottom();
+        let len = guard.bytes.len() as u64;
+        assert_eq!(
+            guard.region().assess(None, Some(bottom)),
+            BootStackGuard::Intact
+        );
+        assert_eq!(
+            guard.region().assess(None, Some(bottom - len - 1)),
+            BootStackGuard::Intact
+        );
+        let sp = bottom - 16;
+        assert_eq!(
+            guard.region().assess(Some(sp), Some(bottom - 8)),
+            BootStackGuard::BelowStack { sp, bytes: 16 }
+        );
+        assert!(guard.region().contains(bottom - len));
+        assert!(!guard.region().contains(bottom - len - 1));
+        assert!(!guard.region().contains(bottom));
+    }
+
     #[test]
     fn every_verdict_has_a_distinct_label() {
         assert_eq!(BootStackGuard::Intact.label(), "intact");
@@ -1157,6 +1250,10 @@ mod tests {
         assert_eq!(
             BootStackGuard::BelowStack { sp: 1, bytes: 2 }.label(),
             "sp_below_stack"
+        );
+        assert_eq!(
+            BootStackGuard::Faulted { addr: 1, bytes: 2 }.label(),
+            "faulted"
         );
     }
 

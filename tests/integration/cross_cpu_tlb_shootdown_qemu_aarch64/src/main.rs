@@ -94,9 +94,6 @@ mod kernel {
     /// refused the core's own stack.
     const FAIL_STACK_PROBE: NonZeroU16 = fail_point!(5);
 
-    /// `PSTATE.PAN`, as the `PAN` register reads it.
-    const PSTATE_PAN: u64 = 1 << 22;
-
     /// Set to `1` by the secondary core when it found `PSTATE.PAN` set.
     static SECONDARY_PAN: AtomicU32 = AtomicU32::new(0);
 
@@ -110,7 +107,7 @@ mod kernel {
     /// broadcast to reach it, so it signals ready and idles — no GIC or
     /// vector setup is required.
     extern "C" fn secondary_entry(_cpu: CpuId) -> ! {
-        if pan_set() {
+        if protection::held_here() {
             SECONDARY_PAN.store(1, Ordering::SeqCst);
         }
         SECONDARY_READY.store(1, Ordering::SeqCst);
@@ -121,25 +118,6 @@ mod kernel {
                 core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
             }
         }
-    }
-
-    /// Whether the calling core holds PAN; `false` while PAN is not in force,
-    /// when the core may not even have the register.
-    fn pan_set() -> bool {
-        if !protection::pan_in_force() {
-            return false;
-        }
-        let pan: u64;
-        // SAFETY: PAN is in force, so every running core offers the register;
-        // reading it changes nothing.
-        unsafe {
-            core::arch::asm!(
-                "mrs {}, S3_0_C4_C2_3",
-                out(reg) pan,
-                options(nomem, nostack, preserves_flags),
-            );
-        }
-        pan & PSTATE_PAN != 0
     }
 
     /// Forward to the shared aarch64 panic bridge (parks the core; the run
@@ -190,11 +168,21 @@ mod kernel {
         if smp::set_secondary_entry(secondary_entry).is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
+        // The core answers within microseconds; a second is past any doubt.
+        let asked = arch.monotonic_ns();
+        let out_of_time = || arch.monotonic_ns().saturating_sub(asked) >= 1_000_000_000;
         // SAFETY: called on the boot core after the secondary-stack pool
         // was registered (above) and the secondary entry was installed;
         // `SECONDARY_MPIDR` names a real, parked, distinct core.
-        if unsafe { smp::start_secondary(VIRT_PSCI_METHOD, SECONDARY_CPU, SECONDARY_MPIDR) }
-            .is_err()
+        if unsafe {
+            smp::start_secondary(
+                VIRT_PSCI_METHOD,
+                SECONDARY_CPU,
+                SECONDARY_MPIDR,
+                out_of_time,
+            )
+        }
+        .is_err()
         {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
@@ -204,7 +192,7 @@ mod kernel {
         while SECONDARY_READY.load(Ordering::SeqCst) == 0 {
             core::hint::spin_loop();
         }
-        if !pan_set() || SECONDARY_PAN.load(Ordering::SeqCst) == 0 {
+        if !protection::held_here() || SECONDARY_PAN.load(Ordering::SeqCst) == 0 {
             qemu_exit::exit_failure(FAIL_PAN_NOT_HELD);
         }
         let on_stack = 0u64;

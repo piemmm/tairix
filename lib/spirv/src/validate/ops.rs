@@ -3,12 +3,13 @@
 //! operand types alone, so a specialization constant's operation is typed
 //! exactly as the instruction is.
 
+use super::allow::V1_4;
 use super::body::{Args, Typing};
 use super::types::{Scalar, Ty};
 use alloc::vec::Vec;
 
 use super::{Limit, Rule, Validator, MAX_INDEXES, NONE};
-use crate::{Value, Version};
+use crate::Value;
 
 impl Validator<'_> {
     /// Type `args` as `typing`, one of the value operations.
@@ -249,9 +250,6 @@ impl Validator<'_> {
                 }
             }
             Typing::CopyLogical => {
-                if self.enabled.version < (Version { major: 1, minor: 4 }) {
-                    return Err(Rule::InstructionNotEnabled(args.op));
-                }
                 count_args(1)?;
                 let from = operand(0)?;
                 let class = |ty: u32| self.logical.get(ty as usize).copied();
@@ -483,7 +481,8 @@ impl Validator<'_> {
     }
 
     /// `OpSelect`: two objects of the result type, chosen by a Boolean or a
-    /// vector of them as wide as the result.
+    /// vector of them as wide as the result; before 1.4 a vector is chosen a
+    /// component at a time, so only by a vector.
     fn select(&self, args: &Args<'_>) -> Result<(), Rule> {
         let r = args.result_type;
         if args.len() != 3 {
@@ -495,7 +494,7 @@ impl Validator<'_> {
             Ty::Array { .. } | Ty::Struct { .. } | Ty::Matrix { .. }
         );
         let admitted = matches!(info.ty, Ty::Scalar(_) | Ty::Vector { .. })
-            || (composite && self.enabled.version >= (Version { major: 1, minor: 4 }));
+            || (composite && self.enabled.version >= V1_4);
         if !admitted {
             return Err(Rule::ResultType);
         }
@@ -504,8 +503,9 @@ impl Validator<'_> {
                 return Err(args.wrong(n));
             }
         }
+        let vector = matches!(info.ty, Ty::Vector { .. });
         match self.ty(self.arg_type(args, 0)?).ty {
-            Ty::Scalar(Scalar::Bool) => Ok(()),
+            Ty::Scalar(Scalar::Bool) if !vector || self.enabled.version >= V1_4 => Ok(()),
             Ty::Vector {
                 scalar: Scalar::Bool,
                 count,

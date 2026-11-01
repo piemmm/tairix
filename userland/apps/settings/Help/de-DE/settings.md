@@ -33,10 +33,11 @@ und schließen die Liste der Kategorie unter dem Cursor. Ein zu schmales Fenster
 lässt die Seitenleiste weg, und der erste Eintrag der Pfadleiste listet dann die
 Kategorien auf.
 
-Gestartet wird es über die Zeile *Settings…* im Systemmenü des Desktops, über
-die Programmbibliothek oder namentlich aus einer Shell. Es benötigt eine
-laufende grafische Sitzung: ohne sie ist der Fensterkanal unerreichbar, und es
-meldet die Ablehnung auf dem Standardfehlerstrom und beendet sich.
+Gestartet wird es über die Zeile *Settings…* im Systemmenü des Desktops oder
+aus einer Shell über seinen Pfad `/System/Components/settings.app`. Es
+benötigt eine laufende grafische Sitzung: ohne sie ist der Fensterkanal
+unerreichbar, und es meldet die Ablehnung auf dem Standardfehlerstrom und
+beendet sich.
 
 Ton hat zwei Bereiche. *Output & Input* wählt das Gerät, über das der Ton
 spielt, und das, von dem aufgenommen wird, und stellt Lautstärke und
@@ -67,6 +68,14 @@ außerdem die Temperatur des Prozessors und ob der Lüfter läuft. Kann *Automat
 die Temperatur nicht lesen, läuft der Lüfter, bis es wieder gelingt. Wie die
 übrigen Einstellungen des Rechners wartet eine Änderung auf *Apply*, das nach
 einem Konto fragt, das sie ändern darf.
+
+**Storage** listet jeden eingehängten Datenträger auf, außer dem, den ein
+anderer Benutzer privat hält: wo er eingehängt ist, sein Dateisystem, sein Gerät
+und sein Medium, wie voll er ist und ob er in gutem Zustand ist. Es handelt sich
+um einen Bericht, nicht um ein Bedienelement — Ein- und Aushängen sind Sache des
+Dateimanagers und des Befehls `mount` —, und ein Datenträger, dessen Format
+keine feste Kapazität kennt, sagt das, statt einen Balken zu zeigen. `df` meldet
+dieselben Zahlen in einer Shell.
 
 ## EXIT STATUS
 

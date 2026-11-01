@@ -25,9 +25,13 @@ dangos enw ei ffeil na'r cyfeiriaduron y'i rhwymwyd iddynt, felly fe'i
 henwir wrth y man lle mae wedi'i gosod yn `/Storage`.
 
 Mae cyfrol y tynnwyd ei dyfais tra oedd ysgrifeniadau heb eu cadarnhau
-yn aros yn weladwy fel `unavailable-dirty` (neu `unavailable-lost`) yn
-y rhestr osodiadau, ac mae `unmount` plaen yn gwrthod: cedwir ei data
-wedi'i gadw ar gyfer ailfewnosod wedi'i wirio. Mae cyfrol sydd â
+yn aros yn weladwy fel `unavailable-dirty` yn y rhestr osodiadau, ac
+mae `unmount` plaen yn gwrthod: cedwir ei data wedi'i gadw ar gyfer
+ailfewnosod wedi'i wirio. Mae'r un peth yn wir am gyfrol a roddwyd yn
+ôl na ellid dangos ei bod heb ei newid (`recovery-conflict`), sy'n dal
+i gadw'r data hwnnw, ac am un na ellid cadw ei hysgrifeniadau heb eu
+cadarnhau (`unavailable-lost`), fel bod eu colled yn cael ei chydnabod
+yn hytrach na'i hanwybyddu. Mae cyfrol sydd â
 ffeiliau'n dal ar agor arni, neu y mae rhaglen yn ei defnyddio fel ei
 chyfeiriadur gwaith, yn gwrthod `unmount` plaen hefyd. `--force` yw'r
 allanfa fwriadol — caiff ffeiliau sy'n dal ar agor ar y gyfrol eu

@@ -39,8 +39,20 @@ const BLOCK: u64 = 1 << 21;
 
 const _: () = assert!(ENTRIES_PER_TABLE as u64 * BLOCK == IMAGE_SPAN);
 
+// `linker.ld` aligns the text to the block and bounds the image by the span
+// from these symbols, so the window and the layout share one definition.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+core::arch::global_asm!(
+    ".globl kernel_image_block",
+    ".set kernel_image_block, {block}",
+    ".globl kernel_image_span",
+    ".set kernel_image_span, {span}",
+    block = const BLOCK,
+    span = const IMAGE_SPAN,
+);
+
 /// Sections the image window maps.
-const IMAGE_SECTIONS: usize = 4;
+const IMAGE_SECTIONS: usize = 5;
 
 /// Page tables `runs` runs can need: a run shares a 2 MiB block with
 /// anything else only at its two ends, and only such a block needs a table
@@ -93,9 +105,14 @@ struct Run {
 /// out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ImageSections {
-    /// The boot trampoline's data — its page tables, the boot stack and its
-    /// guard, the boot CPU's descriptor tables — which the image window
-    /// reaches by alias.
+    /// The boot stack's guard, which the window maps read-only so an overrun
+    /// of the stack faults on its first byte. The page under it is never
+    /// writable through the window: a frame pushed from the guard's lowest
+    /// byte lands there.
+    stack_guard: Span,
+    /// The boot stack and the boot CPU's descriptor tables, which the window
+    /// reaches by alias; the trampoline's page tables below the guard are
+    /// left to the direct map.
     boot_data: Span,
     /// The kernel's code.
     text: Span,
@@ -109,8 +126,15 @@ impl ImageSections {
     /// The sections, or [`None`] unless each is a non-empty run of whole
     /// pages, they follow one another in link order, and the last ends
     /// within [`IMAGE_SPAN`].
-    fn new(boot_data: Span, text: Span, read_only: Span, data: Span) -> Option<Self> {
+    fn new(
+        stack_guard: Span,
+        boot_data: Span,
+        text: Span,
+        read_only: Span,
+        data: Span,
+    ) -> Option<Self> {
         let sections = Self {
+            stack_guard,
             boot_data,
             text,
             read_only,
@@ -133,6 +157,8 @@ impl ImageSections {
         // Absolute symbols `linker.ld` defines as physical addresses; only
         // their values are read.
         extern "C" {
+            static __image_stack_guard_start: u8;
+            static __image_stack_guard_end: u8;
             static __image_boot_data_start: u8;
             static __image_boot_data_end: u8;
             static __image_text_start: u8;
@@ -147,6 +173,10 @@ impl ImageSections {
             end: end as u64,
         };
         Self::new(
+            span(
+                core::ptr::addr_of!(__image_stack_guard_start),
+                core::ptr::addr_of!(__image_stack_guard_end),
+            ),
             span(
                 core::ptr::addr_of!(__image_boot_data_start),
                 core::ptr::addr_of!(__image_boot_data_end),
@@ -167,12 +197,22 @@ impl ImageSections {
     }
 
     const fn spans(&self) -> [Span; IMAGE_SECTIONS] {
-        [self.boot_data, self.text, self.read_only, self.data]
+        [
+            self.stack_guard,
+            self.boot_data,
+            self.text,
+            self.read_only,
+            self.data,
+        ]
     }
 
     /// How the image window maps each section.
     const fn window_runs(&self) -> [Run; IMAGE_SECTIONS] {
         [
+            Run {
+                span: self.stack_guard,
+                access: KernelAccess::Read,
+            },
             Run {
                 span: self.boot_data,
                 access: KernelAccess::Write,
@@ -351,8 +391,9 @@ pub(crate) fn startup_root() -> Option<u64> {
 }
 
 /// Build the kernel root, settle the protections every CPU runs the kernel
-/// under ([`crate::protection`]), and move the boot CPU onto the root under
-/// them.
+/// under ([`crate::protection`]) from what the boot CPU offers once its
+/// `CPUID` limit is lifted (`uncapped`), and move the boot CPU onto the root
+/// under them.
 ///
 /// The root carries the kernel half every root shares and nothing else: no
 /// user half, and nothing physical mapped as itself. Building it also builds
@@ -374,7 +415,9 @@ pub(crate) fn startup_root() -> Option<u64> {
 /// installed: the trampoline's identity window and the GDT inside it are left
 /// behind here.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub(crate) unsafe fn enter_kernel_root() -> Result<(), &'static str> {
+pub(crate) unsafe fn enter_kernel_root(
+    uncapped: &crate::cpuid::Uncapped,
+) -> Result<(), &'static str> {
     const EXHAUSTED: &str = "the kernel root's page tables ran out";
     const FOREIGN_FLOOR: &str = "the direct map's floor is not the boot trampoline's";
     if PARK_ROOT.published().is_some() || PHYSMAP_PML4[0].load(Ordering::Acquire) != 0 {
@@ -411,21 +454,34 @@ pub(crate) unsafe fn enter_kernel_root() -> Result<(), &'static str> {
     let startup = build_startup_root(image, crate::smp::AP_TRAMPOLINE_PHYS, &ROOT_TABLE_POOL)
         .ok_or(EXHAUSTED)?;
     STARTUP_ROOT.store(startup, Ordering::Release);
-    crate::protection::settle();
+    crate::protection::settle(uncapped);
     PARK_ROOT.publish(root);
     // SAFETY: the caller's contract; the kernel root maps this code and the
     // boot stack through its image window as the trampoline's root does.
-    if unsafe { join_kernel_root() } {
-        Ok(())
-    } else {
-        Err("the kernel root was not published")
-    }
+    unsafe { join_kernel_root(uncapped) }.map_err(|refusal| match refusal {
+        Refusal::NoRoot => "the kernel root was not published",
+        Refusal::Lacks(_) => "the boot CPU cannot hold the protections it settled",
+    })
+}
+
+/// Why a CPU did not join the kernel root.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// The root is not built yet.
+    NoRoot,
+    /// The CPU does not offer these protections in force.
+    Lacks(crate::protection::Protections),
 }
 
 /// Load the kernel root on the calling CPU and hold the CPU to the kernel's
-/// protections ([`crate::protection`]). Returns `false`, changing nothing,
-/// before the root is built or on a CPU that does not offer every protection
-/// in force.
+/// protections ([`crate::protection`]), read once its `CPUID` limit is lifted
+/// (`uncapped`).
+///
+/// # Errors
+///
+/// Why it did not, having changed nothing: the root is not built, or the CPU
+/// lacks a protection in force.
 ///
 /// # Safety
 ///
@@ -433,17 +489,15 @@ pub(crate) unsafe fn enter_kernel_root() -> Result<(), &'static str> {
 /// the calling code and stack as the kernel root does — the boot trampoline's
 /// root and the start-up root both do.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub(crate) unsafe fn join_kernel_root() -> bool {
-    let Some(protections) = crate::protection::to_hold() else {
-        return false;
-    };
+pub(crate) unsafe fn join_kernel_root(uncapped: &crate::cpuid::Uncapped) -> Result<(), Refusal> {
+    let protections = crate::protection::to_hold(uncapped).map_err(Refusal::Lacks)?;
     if !park_kernel_root(true) {
-        return false;
+        return Err(Refusal::NoRoot);
     }
     // SAFETY: the caller's contract, on the kernel root, which maps no user
     // page.
     unsafe { crate::protection::hold(protections) };
-    true
+    Ok(())
 }
 
 #[cfg(test)]

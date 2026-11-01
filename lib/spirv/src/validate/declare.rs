@@ -6,12 +6,12 @@
 //! collected first, which is what lets a type know its layout as it is
 //! declared.
 
-use super::allow::{class, word, Class};
+use super::allow::{class, word, Class, V1_4};
 use super::body::Args;
 use super::types::{Holds, Scalar, Ty};
-use super::{push, Refusal, Rule, Validator, What, NONE};
+use super::{push, with_capacity, Refusal, Rule, Validator, What, NONE};
 use crate::enumerant::{BuiltIn, Capability, Decoration, FPRoundingMode, Scope, StorageClass};
-use crate::{Id, Instruction, Op, Value, Version};
+use crate::{Id, Instruction, Kind, Op, Value};
 
 /// The decoration marking a memory interface block.
 pub(crate) const BLOCK: Decoration = Decoration::BLOCK;
@@ -58,12 +58,11 @@ impl Validator<'_> {
 
     /// Refuse a module-scope declaration naming an id defined after it.
     fn earlier_operands(&self, index: u32, instruction: &Instruction) -> Result<(), Refusal> {
-        let result = self.m.result(instruction);
         for operand in self.m.operands(instruction) {
+            if operand.kind() == Kind::IdResult {
+                continue;
+            }
             if let Value::Id(id) = self.m.value(operand) {
-                if Some(id) == result {
-                    continue;
-                }
                 let defined = self.defining_index(id).map_err(|r| r.at(instruction))?;
                 if defined >= index {
                     return Err(Rule::ForwardReference(id).at(instruction));
@@ -109,6 +108,7 @@ impl Validator<'_> {
     /// Collect, sort and sanity-check the annotation section.
     fn collect_decorations(&mut self) -> Result<(), Refusal> {
         let m = self.m;
+        self.decorations = with_capacity(self.annotations.len())?;
         for index in self.annotations.clone() {
             let instruction = self.instruction(index);
             let operands = m.operands(instruction);
@@ -141,10 +141,12 @@ impl Validator<'_> {
             push(&mut self.decorations, deco)?;
         }
         self.decorations.sort_unstable_by_key(Deco::key);
-        self.rounded = self
-            .decorations
-            .iter()
-            .any(|d| d.decoration == Decoration::FP_ROUNDING_MODE);
+        self.rounded = super::collect(
+            self.decorations
+                .iter()
+                .filter(|d| d.decoration == Decoration::FP_ROUNDING_MODE && d.member == NONE)
+                .map(|d| d.target),
+        )?;
         for pair in self.decorations.windows(2) {
             if let [a, b] = pair {
                 if a.key() == b.key() {
@@ -235,6 +237,11 @@ impl Validator<'_> {
 
     pub(crate) fn decorated(&self, id: Id, decoration: Decoration) -> bool {
         self.decoration_of(id, NONE, decoration).is_some()
+    }
+
+    /// Whether `id` is decorated `FPRoundingMode`.
+    pub(crate) fn rounded(&self, id: Id) -> bool {
+        self.rounded.binary_search(&id).is_ok()
     }
 
     /// The literal `decoration` of `id` carries, if it is decorated so.
@@ -374,9 +381,10 @@ impl Validator<'_> {
                 matches!(info.ty, Ty::Scalar(Scalar::Bool))
             }
             Op::CONSTANT | Op::SPEC_CONSTANT => match info.ty {
-                Ty::Scalar(scalar @ (Scalar::Int { .. } | Scalar::Float { .. })) => {
-                    self.literal_fits(instruction, scalar)
-                }
+                Ty::Scalar(scalar @ (Scalar::Int { .. } | Scalar::Float { .. })) => matches!(
+                    self.m.operands(instruction).get(2).map(|o| self.m.value(o)),
+                    Some(Value::Number(literal)) if scalar.holds(literal)
+                ),
                 _ => false,
             },
             Op::CONSTANT_COMPOSITE | Op::SPEC_CONSTANT_COMPOSITE => {
@@ -422,27 +430,6 @@ impl Validator<'_> {
         Ok(())
     }
 
-    /// Whether a constant's literal holds a value of `scalar`: a type
-    /// narrower than its word zero-extended, or sign-extended if signed.
-    fn literal_fits(&self, instruction: &Instruction, scalar: Scalar) -> bool {
-        let Some(Value::Number(value)) =
-            self.m.operands(instruction).get(2).map(|o| self.m.value(o))
-        else {
-            return false;
-        };
-        match scalar {
-            Scalar::Int {
-                width: 16,
-                signed: true,
-            } => {
-                let low = (value & 0xffff) as u16;
-                value == u64::from(i32::from(low.cast_signed()).cast_unsigned())
-            }
-            Scalar::Int { width: 16, .. } | Scalar::Float { width: 16 } => value <= 0xffff,
-            _ => true,
-        }
-    }
-
     /// Whether a composite constant's constituents are, in order, constants
     /// of its constituent types: non-specialization ones for a constant.
     fn constituents_match(
@@ -483,7 +470,7 @@ impl Validator<'_> {
         };
         let op = crate::Op(code);
         let admitted = match op {
-            Op::U_CONVERT => self.enabled.version >= Version { major: 1, minor: 4 },
+            Op::U_CONVERT => self.enabled.version >= V1_4,
             Op::S_CONVERT
             | Op::F_CONVERT
             | Op::S_NEGATE
@@ -633,7 +620,7 @@ impl Validator<'_> {
             class,
             StorageClass::UNIFORM | StorageClass::STORAGE_BUFFER | StorageClass::PUSH_CONSTANT
         ) || (matches!(class, StorageClass::PRIVATE | StorageClass::FUNCTION)
-            && self.enabled.version <= Version { major: 1, minor: 4 });
+            && self.enabled.version <= V1_4);
         if holds.contains(Holds::LAYOUT) && !layout_allowed {
             return Err(Rule::ExplicitLayout);
         }

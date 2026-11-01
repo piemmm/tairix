@@ -5,11 +5,12 @@
 
 use alloc::vec::Vec;
 
+use super::allow::V1_4;
 use super::declare::Deco;
 use super::types::{Holds, Scalar, Ty};
 use super::{push, Refusal, Rule, Validator, What, NONE};
 use crate::enumerant::{Decoration, StorageClass};
-use crate::{Op, Version};
+use crate::Op;
 
 impl Validator<'_> {
     /// Check every decoration's target.
@@ -153,8 +154,7 @@ impl Validator<'_> {
             StorageClass::STORAGE_BUFFER => true,
             StorageClass::UNIFORM_CONSTANT => pointee.is_some_and(|p| self.storage_image(p)),
             StorageClass::PRIVATE | StorageClass::FUNCTION => {
-                decoration == Decoration::NON_WRITABLE
-                    && self.enabled.version >= (Version { major: 1, minor: 4 })
+                decoration == Decoration::NON_WRITABLE && self.enabled.version >= V1_4
             }
             _ => false,
         };

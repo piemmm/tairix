@@ -30,7 +30,7 @@ use crate::column::ScrollColumn;
 use crate::create::{validate_new_entry_name, CreateError};
 use crate::delete::{DeletePlan, DeleteTarget};
 use crate::entry::{resolve_target, DriveMark, Entry, EntryKind, LinkTarget, Listed};
-use crate::error::BrowseError;
+use crate::error::{BrowseError, Unnamable};
 use crate::layout::{BandMarks, ViewMode};
 use crate::network::{self, NetworkEndpoint, NetworkItem};
 use crate::places::{PlaceKind, Places};
@@ -703,10 +703,10 @@ impl<S: DirectorySource> Browser<S> {
     /// `None` when nothing is chosen.
     ///
     /// Uses the one shared path spelling ([`crate::vfs::absolute_path`]), so
-    /// the stat/open can
-    /// never name a different node than the browser shows; a name that cannot
-    /// be spelled as a valid, bounded absolute path is a fail-closed
-    /// [`BrowseError::Source`]. The engine only *names* the target — reading
+    /// the stat/open can never name a different node than the browser shows;
+    /// a name that cannot be spelled as a valid, bounded absolute path is a
+    /// fail-closed [`BrowseError::Unnamable`]. The engine only *names* the
+    /// target — reading
     /// its metadata stays in the caller's own capability-checked tail under
     /// the user's identity, so composing this grants nothing and the
     /// read-only picker builds the same path.
@@ -1277,8 +1277,9 @@ impl<S: DirectorySource> Browser<S> {
     /// Dispatches by kind through the shared [`Activation`] decision so the
     /// file manager and the trusted picker act identically: a directory is
     /// descended into (as [`open_selected`](Self::open_selected) does) and a
-    /// bundle or file is *named* for the caller to launch or open (the engine
-    /// performs neither — it holds no such authority). `intent` says what the
+    /// bundle, file or disk image is *named* for the caller to launch, open or
+    /// mount (the engine performs none of them — it holds no such
+    /// authority). `intent` says what the
     /// gesture meant for a bundle, which is the one kind that is both a
     /// program and a directory.
     ///
@@ -1287,9 +1288,10 @@ impl<S: DirectorySource> Browser<S> {
     /// * [`BrowseError::NoSuchEntry`] if nothing is
     ///   [chosen](Self::chosen_index) — an empty directory, or a focus the
     ///   user did not select.
-    /// * [`BrowseError::Source`] if a descended directory cannot be listed, or
-    ///   a bundle/file target cannot be named as a valid absolute path; the
-    ///   browser stays on the current directory in either case.
+    /// * [`BrowseError::Source`] if a descended directory cannot be listed,
+    ///   and [`BrowseError::Unnamable`] if a bundle, file or disk-image target
+    ///   cannot be named as a valid absolute path; the browser stays on the
+    ///   current directory in either case.
     pub fn activate_selected(&mut self, intent: BundleIntent) -> Result<Activation, BrowseError> {
         let index = self.chosen_index().ok_or(BrowseError::NoSuchEntry)?;
         self.activate_index(index, intent)
@@ -1301,7 +1303,8 @@ impl<S: DirectorySource> Browser<S> {
     /// # Errors
     ///
     /// * [`BrowseError::NoSuchEntry`] if `index` is out of range.
-    /// * [`BrowseError::Source`] as for [`activate_selected`](Self::activate_selected).
+    /// * [`BrowseError::Source`] and [`BrowseError::Unnamable`] as for
+    ///   [`activate_selected`](Self::activate_selected).
     pub fn activate_index(
         &mut self,
         index: usize,
@@ -1369,10 +1372,13 @@ impl<S: DirectorySource> Browser<S> {
     /// Uses the one shared path spelling ([`crate::vfs::absolute_path`]) so the
     /// named target can never differ from what the VFS fetch would read, and a
     /// name that cannot be spelled as a valid, bounded absolute path is a
-    /// fail-closed [`BrowseError::Source`] — the same outcome descending into
-    /// such a name already produces.
+    /// fail-closed [`BrowseError::Unnamable`] saying which.
     fn child_target_path(&self, name: &str) -> Result<String, BrowseError> {
-        self.spell_child(name).map_err(BrowseError::Source)
+        self.spell_child(name).map_err(|errno| match errno {
+            Errno::OutOfRange => BrowseError::Unnamable(Unnamable::Name),
+            Errno::LengthOutOfRange => BrowseError::Unnamable(Unnamable::Length),
+            other => BrowseError::Source(other),
+        })
     }
 
     /// Climb to the parent directory, listing it.

@@ -33,10 +33,11 @@ spostano il fuoco tra campo di ricerca, percorso, barra laterale e pannello;
 troppo stretta abbandona la barra laterale, e la prima briciola del percorso
 elenca allora le categorie.
 
-Si avvia dalla riga *Settings…* del menu di sistema della scrivania, dalla
-Libreria programmi, o per nome da una shell. Richiede una sessione grafica in
-esecuzione: senza di essa il canale della finestra è irraggiungibile e il
-programma segnala il rifiuto sul flusso di errore standard e termina.
+Si avvia dalla riga *Settings…* del menu di sistema della scrivania, o da una
+shell tramite il suo percorso, `/System/Components/settings.app`. Richiede
+una sessione grafica in esecuzione: senza di essa il canale della finestra è
+irraggiungibile e il programma segnala il rifiuto sul flusso di errore
+standard e termina.
 
 Suono mostra ogni uscita e ingresso con la sua scelta predefinita, il livello
 e il silenziamento, e ciò che sta registrando: le proprie registrazioni per
@@ -58,6 +59,13 @@ del processore e se la ventola sta girando. Quando *Automatic* non riesce a
 leggere la temperatura, la ventola gira finché non ci riesce. Come le altre
 impostazioni della macchina, una modifica attende *Apply*, che chiede un account
 autorizzato a cambiarle.
+
+**Storage** elenca ogni volume montato tranne quelli che un altro utente tiene
+privati: dove è montato, il suo filesystem, il suo dispositivo e il suo
+supporto, quanto è pieno e se è in buono stato. È un rapporto, non un
+controllo — montare e smontare spettano al gestore di file e al comando
+`mount` — e un volume il cui formato non ha una capacità fissa lo dice
+anziché mostrare una barra. `df` riporta le stesse cifre in una shell.
 
 ## EXIT STATUS
 

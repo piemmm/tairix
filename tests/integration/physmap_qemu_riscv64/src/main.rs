@@ -180,7 +180,7 @@ mod kernel {
 
         let Some(mut process) = AddressSpace::new_identity_gigapages(
             &PROBE_POOL,
-            tairix_kernel::riscv64::spawn_producer::identity_gigapages(),
+            tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES,
         ) else {
             return Err("no process root");
         };

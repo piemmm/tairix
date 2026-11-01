@@ -51,6 +51,7 @@ plan's ledger. A `blocked` row names its blocker.
 | H10-REPRO | §19 item 10's supply-chain half — bit-reproducible images and no-post-install-fetch enforcement | planned |
 | H12 | §19 item 12 — Gold (Verus) contracts and the CHERI Tier-2 port | planned |
 | H13-MTE | §19 item 13's remainder — enable Arm MTE on `FEAT_MTE` silicon | planned |
+| SW-PAN | A software PAN for a CPU without SMAP or PAN: user mappings kept out of the kernel's view while it runs | planned |
 | LOG | The rest of the system log: the `log` command bundle, `journald` installed and launched with its vertical, boot-ring import, retention, one machine identity | planned |
 | T64 | §20/§21 — `stdinfo` and 64-bit-native time | done |
 | TSC | Untrusted-timer resolution: the invariant-TSC check and `CAP_TIME_HIRES` | done |
@@ -128,7 +129,7 @@ plan's ledger. A `blocked` row names its blocker.
 | FIX-IO | Storage I/O fault isolation (`plans/FIX-IO.md`) | in progress |
 | DEVICES | `lspci`/`lsusb`, USB mass storage, hotplug automount (`plans/DEVICES.md`) | done |
 | FOREIGN-MEDIA | ISO 9660, UDF, USB optical drives, and copies that keep holes and foreign metadata (`plans/FOREIGN-MEDIA.md`) | in progress |
-| DISK-IMAGES | Disk-image files mounted for their owner: `image_attach`, the AmigaDOS driver, the desktop's and `files.app`'s double-click, `mount IMAGE` and `unmount` (`plans/DISK-IMAGES.md`; DI8–DI11 planned) | in progress |
+| DISK-IMAGES | Disk-image files mounted for their owner: `image_attach`, the AmigaDOS driver, the desktop's and `files.app`'s double-click, `mount IMAGE` and `unmount` (`plans/DISK-IMAGES.md`) | in progress |
 | EXT4-RW | ext2/ext3/ext4 written as Linux leaves them: jbd2 journaling and crash replay, every checksum, lazily initialised groups, extent trees to full depth, indexed directories, POSIX ACLs, over the shared `lib/writeback` core | done |
 | EXFAT | An exFAT driver, for the removable drives other systems format | planned |
 | FS-USERSPACE | `fsserve-v1`, serving a filesystem from user space, and the removable-media drivers moved onto it (`plans/FSSERVE.md` FSS1–FSS5, `plans/OPEN-DEFECTS.md` D1072); network attachments are FSSERVE FSS6, with SMB9a | done |
@@ -307,24 +308,24 @@ README requires this file to name them:
 | `cnum` | `seq`, `printf`, `sleep`, `tail`, `lib/svg`, `lib/image` |
 | `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init`, `tools/signkeys` (`setting_line`); `configure`, Settings (`ValueShape`) |
 | `count`, `tailwindow` | `head`, `tail`; `count` also the QEMU verticals reading a figure from a guest's log |
-| `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, the document host's queue (`lib/window::docapp`) and Paint's decode queue (through `lib/rt`), Date & Time's, Music's and `netmap`'s work queues, WinterSun's client |
-| `fallible` | `lib/audio`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/discovery`, `lib/font`, `lib/fsprobe`, `lib/glob`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/terrain`, `lib/writeback`, the kernel, the ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `sysinfod`, `thermald`, `devmgr`, `cp`, `mv`, `fstree`, the file manager, TextEdit, `view`, Paint, WinterSun, the Life, ray tracer, Retro Games and Starfield screensavers |
-| `flags` | `lib/smb`, `lib/gpu` |
+| `defer` | `lib/rt` (`work::Worker`, over either desk, so every worker a program runs), `lib/browse` (the mount worker), `lib/window` (the document host's queue), the desktop session, the file manager, Settings, Date & Time, Music, Paint, `netmap`, `smbfs`, WinterSun's client |
+| `fallible` | `lib/audio`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/discovery`, `lib/font`, `lib/fscopy`, `lib/fsprobe`, `lib/fsserve`, `lib/glob`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/spirv`, `lib/terrain`, `lib/users`, `lib/writeback`, the kernel, the AmigaDOS, ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `smbfs`, `sysinfod`, `thermald`, `devmgr`, `elsh`, `blendcheck`, `cp`, `mv`, the file manager, TextEdit, `view`, Paint, WinterSun, the Life, ray tracer, Retro Games and Starfield screensavers |
+| `flags` | `lib/gpu`, `lib/smb`, `lib/spirv` |
 | `getopt` | every command app that takes options (`cat`, `cp`, `df`, `du`, `head`, `ls`, `mount`, `ps`, `seq`, `tail`, `useradd`, `servicectl`, `sysinfo`, …), the desktop session's command line (`applib`), the file manager's |
 | `fmt` | `kernel/sec`, `kernel/ipc`, `kernel/syscall`, `kernel/core`, the kernel binary, the xHCI, USB HID, USB mass-storage, RAID and volume-manager drivers, `lib/controls`, `lib/dmaengine`, `lib/sysconfig`, `devmgr`, `xtask`, the QEMU verticals |
-| `hex` | `tools/cc`, `tools/mkimage`, `tools/signkeys`, `tools/tzcompile` |
+| `hex` | `tools/cc`, `tools/mkimage`, `tools/signkeys`, `tools/tzcompile`, `xtask` |
 | `hexdump` | `fstree`, TextEdit |
 | `join` | `lib/procinfo`'s multi-valued readings, `netmap`'s host tooltip |
 | `lanes` | `lib/collections`, TextEdit |
-| `mathf` | `lib/audio`, `lib/colour`, `lib/controls`, `lib/countryside`, `lib/cursor`, `lib/fontface`, `lib/icon`, `lib/image`, `lib/land`, `lib/noise`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/scatter`, `lib/sound`, `lib/svg`, `lib/terrain`, `cinder`, `netmap`, Paint, Patience, WinterSun, the Retro Games and Starfield screensavers |
-| `mode` | `chmod`, `mkdir`, `elsh`'s `umask` (`Mode`); `lib/rt`, `cp`, `elsh`, `edit`, `vim`, `tee`, `flock`, `fstree`, `stress`, the file manager, the desktop session, `applib`, `confd`, `journald`, `settingsd`, `init`, `timed` (`NEW_FILE`, `NEW_DIR` and the bit masks) |
-| `output` | the command apps' engines (`cat`, `ls`, `ss`, `tail`, … — every one that writes through an injected stream), `lib/procinfo`'s line sink, and `lib/rt`'s standard streams, which also answer `at_terminal` for `head`, `tail`, `du`, `wc`, `readlink` and `stat`; `Carried` for `cat`, `chmod`, `chown`, `cp`, `getcap`, `ln`, `mkdir`, `mv`, `rm`, `rmdir`, `setcap` |
+| `mathf` | `lib/audio`, `lib/colour`, `lib/controls`, `lib/countryside`, `lib/cursor`, `lib/fontface`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/noise`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/scatter`, `lib/sound`, `lib/spirv`, `lib/svg`, `lib/terrain`, `cinder`, `netmap`, Paint, Patience, WinterSun, the Retro Games and Starfield screensavers |
+| `mode` | `chmod`, `mkdir`, `elsh`'s `umask` (`Mode`); `mkdir` (`SET_ID`) |
+| `output` | the command apps' engines (`cat`, `ls`, `ss`, `tail`, … — every one that writes through an injected stream), `lib/procinfo`'s line sink, and `lib/rt`'s standard streams, which also answer `at_terminal` for `head`, `tail`, `du`, `wc`, `readlink` and `stat`; `framed` for `lib/fscopy`, `fstree`, `play` and `unmount`; `Carried` for `cat`, `chmod`, `chown`, `cp`, `getcap`, `ln`, `mkdir`, `mv`, `rm`, `rmdir`, `setcap` |
 | `quote` | `ls`, `printf`, `elsh`, `servicectl`, `edit`, `vim`, `man`, `fstree`, the file manager, `lib/fscopy`'s omission report, and every command app that names a file or other text from elsewhere in a message, a prompt, a `-v` report or its standard output (`cat`, `cp`, `du`, `head`, `mv`, `rm`, `stat`, `tail`, `wc`, …) |
 | `report` | `lib/image`'s picture reports, `lib/binfmt`'s executable and manifest reports, `lib/sandbox`'s one report reply, and the `fstree` and TextEdit views that show them |
 | `retry` | `timed`, `init` (`RetryLadder`); `init`, `devmgr`, the desktop session, `lib/sandbox` (`RestartPacer`) |
-| `utf8` | `lib/syntax`, `wc`, TextEdit (`sequence_len`); `lib/controls`, the taskbar (`fold`, `folded`); `lib/tz`, Settings, the taskbar (`reader_order`); `lib/browse`, `lib/procinfo`, `lib/window`, the file manager, `elsh` (`shown`); `lib/browse` (`mixes_scripts`) |
+| `utf8` | `lib/syntax`, `wc`, TextEdit (`sequence_len`); `lib/controls`, the taskbar (`fold`, `folded`); `lib/tz`, Settings, the taskbar (`reader_order`); `lib/browse`, `lib/procinfo`, `lib/window`, the file manager, Music, Settings, `view`, the desktop session, `elsh` (`shown`); `lib/browse`, `lib/window`, the file manager, Music, `view` (`refusal_headline`); `smbfs` (`cut`) |
 | `seconds` | `ping`, `traceroute` |
-| `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, the greeter, the desktop session's elevation prompt, lock and clipboard, `lib/controls`' masked field, the Supervisor's control commands, `signkeys`, `mkimage`, `discoveryd`'s and `netstack`'s keys, `kernel/core`'s boot id, file-watch records and kernel-thread stacks; the caches `lib/font`, `lib/raster`, the compositor and WinterSun erase (`wipe_with`) |
+| `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, the greeter, the desktop session's elevation prompt, lock and clipboard, `lib/controls`' masked field, the Supervisor's control commands, `signkeys`, `mkimage`, `discoveryd`'s and `netstack`'s keys, `lib/netshare`'s and `smbfs`'s share requests, `kernel/core`'s boot id, listed and cached names, syscall copies, file-watch records and kernel-thread stacks; the caches `lib/font`, `lib/raster`, the compositor and WinterSun erase (`wipe_with`) |
 | `size` | `du`, `df` (the GNU spelling); `lib/procinfo`, Settings, the desktop session (`format_binary`) |
 | `space` | `lib/noise`, `lib/raytrace`, the Retro Games screensaver |
 
@@ -729,6 +730,14 @@ user/kernel boundary — so those three are next in line
   (`cargo xtask build --reproducible`) and no-post-install-fetch enforcement.
 - **H12** — Gold (Verus contracts on `lib/caps` and the `kernel/sec`
   capability check) and the CHERI Tier-2 port. Aspirational per the charter.
+- **SW-PAN** — where the CPU offers no hardware barrier (the Raspberry Pi 4's
+  Cortex-A72 has no PAN, older x86 parts no SMAP), the kernel still reaches
+  user memory only through the direct map, but nothing stops a stray access.
+  A software PAN keeps the user half out of the active translation while the
+  kernel runs: aarch64 points `TTBR0_EL1` at an empty table on every entry and
+  restores the task's on the way out, and x86_64 the analogous root swap. The
+  boot already records the hardware's absence at Warn (4115); this item makes
+  that absence a fault rather than a discipline.
 
 ## §20 / §21 — `stdinfo` and 64-bit time
 
@@ -985,6 +994,10 @@ plan's own text is corrected when it is next touched, or sooner.
 
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
+
+- **2026-10-31 — §7, §19.6, §19.7: `ci` runs the fuzz and proptest gates
+  `--once`; the nightly soak is a seven-hour window.** The charter still named
+  the `--quick` gates and a 24 h soak after `ci` and every soak moved to them.
 
 - **2026-10-24 — §17.2: the optional `MsiMultiplexer` Arch HAL slice.** A
   root complex's chained MSI controller lived in the kernel binary, which named

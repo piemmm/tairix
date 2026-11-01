@@ -825,18 +825,20 @@ first, then the force-unmount exit, then the verified re-insert replay.
 - **`unmount`** is a new full command-app bundle
   (`userland/apps/unmount`, the df packaging pattern): the pure engine
   (parse `unmount [-f|--force] [--] NAME`, resolve NAME — catalog name
-  or mount-point path — over the shared `for_each_mount` walk, refuse
+  or mount-point path — over the shared `tairix_procinfo::Namespace` read
+  (`MOUNT_LIST` + `VIEW_LIST`), refuse
   an unknown name or an identity-less mount locally, hand the identity
   to the `Detacher` seam) plus the freestanding `Run` over
   `tairix_rt::volume_detach`; caps `CAP_CONSOLE_WRITE` +
-  `CAP_FS_ACCESS` + `CAP_FS_MOUNT`. A refused plain detach of an
-  unavailable volume spells out the `--force` consequence on stderr and
-  emits the fd-3 `suggestion` record
-  (`fs.volume_unavailable_force_required`, `safe_to_autorun: false`).
+  `CAP_FS_ACCESS` + `CAP_FS_MOUNT`. A plain detach refused for what a
+  vanished or conflicted volume's writes need
+  (`MountAvailability::plain_detach_refusal`) spells out the `--force`
+  consequence on stderr and emits the fd-3 `suggestion` record
+  (`fs.volume_force_required`, `safe_to_autorun: false`).
   Thirteen-locale `Help/` with the switch-pinning test; `mount`'s
   listing renders the additive ` [unavailable-dirty]` /
   ` [unavailable-lost]` marker through the one shared
-  `tairix_procinfo::render_mount` definition.
+  `tairix_procinfo::render_binding` definition.
 - Host-proven: abi round-trips (force byte, availability byte, hostile
   wire images), `discard_all` unit tests (dirty→clean, lost→clean),
   the volume-service lifecycle scenarios (snapshot marks availability +

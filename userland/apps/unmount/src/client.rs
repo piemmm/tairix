@@ -6,13 +6,15 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
-use tairix_abi::sysinfo::{MountAvailability, MountRecord, VOLUME_ID_LEN};
+use tairix_abi::sysinfo::{MountAvailability, MountRecord, ViewBindingRecord, VOLUME_ID_LEN};
 use tairix_abi::{Errno, STORAGE_CATALOG};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{Namespace, Transport};
+use tairix_path::{Root, Step};
+use tairix_procinfo::{availability_marker, Namespace, Transport};
+use tairix_util::quote::quote_if_needed;
 
 use crate::command::Command;
-use crate::error::UnmountError;
+use crate::error::{Retention, UnmountError};
 use crate::io::{Detacher, Output};
 
 /// The one-line usage banner, the short help's fallback when the bundled
@@ -23,18 +25,35 @@ pub const USAGE: &str = "usage: unmount [-f | --force] [--] NAME";
 const OWN_WORD: &str = "unmount";
 
 /// The facts the resolver needs about the matched mount: the volume's
-/// stable identity and whether the listing already marks it unavailable.
+/// stable identity, how the listing shows it, and its catalog name.
 struct Resolved {
     volume_id: [u8; VOLUME_ID_LEN],
-    unavailable: bool,
+    availability: MountAvailability,
+    catalog: Option<String>,
 }
 
 impl Resolved {
     fn of(volume: &MountRecord) -> Self {
+        let catalog = volume
+            .target_bytes()
+            .strip_prefix(format!("/{STORAGE_CATALOG}/").as_bytes())
+            .filter(|name| !name.is_empty() && !name.contains(&b'/'))
+            .and_then(|name| core::str::from_utf8(name).ok())
+            .map(String::from);
         Self {
             volume_id: volume.volume_id(),
-            unavailable: volume.availability() != MountAvailability::Available,
+            availability: volume.availability(),
+            catalog,
         }
+    }
+
+    /// What the volume's writes had to do with `errno`, the kernel's refusal
+    /// of a plain detach: the one refusal its listed state earns.
+    fn retention(&self, errno: Errno) -> Option<Retention> {
+        self.availability
+            .plain_detach_refusal()
+            .filter(|&(refused, _)| refused == errno)
+            .map(|(_, retention)| retention)
     }
 }
 
@@ -57,9 +76,9 @@ impl Resolved {
 ///   detachable volume identity (a permanent boot volume or view
 ///   binding).
 /// * [`UnmountError::Detach`] — the kernel refused or failed the detach;
-///   `unavailable` distinguishes the surprise-removed case whose plain
-///   detach is refused by design (the `--force` suggestion is also
-///   emitted on fd 3, additive and ignorable).
+///   `retention` names the refusal a plain detach of a vanished or
+///   conflicted volume earns by design, which only a force gets past (the
+///   `--force` suggestion is also emitted on fd 3, additive and ignorable).
 /// * [`UnmountError::Service`] — the mount or view listing failed.
 /// * [`UnmountError::Output`] — the short help could not be written.
 pub fn run(
@@ -88,21 +107,28 @@ pub fn run(
     match detacher.detach(resolved.volume_id, force) {
         Ok(()) => Ok(()),
         Err(errno) => {
-            if resolved.unavailable && !force {
-                emit_force_suggestion(err, &name);
+            let retention = if force {
+                None
+            } else {
+                resolved.retention(errno)
+            };
+            if let Some(retention) = retention {
+                emit_force_suggestion(err, &name, &resolved, retention);
             }
             Err(UnmountError::Detach {
                 name,
                 errno,
-                unavailable: resolved.unavailable,
+                retention,
             })
         }
     }
 }
 
 /// Resolve `name` against the namespace: a path — any name holding a slash,
-/// canonicalised first — names the binding at it, a catalog entry or a
-/// directory a volume was bound at, and a bare word the catalog entry it
+/// or `.` or `..` — names the binding at the place it spells, a catalog entry
+/// or a directory a volume was bound at, matched as spelled and canonicalised
+/// only when that names none, so a volume that no longer answers is still
+/// named by where it is mounted; a bare word names the catalog entry it
 /// spells or, failing that, the file a volume was attached from. A binding is
 /// unique, but a file name is not: two users' images may share one, so a
 /// volume the caller attached is taken over another's, and a name two of
@@ -115,23 +141,28 @@ fn resolve(
     transport: &dyn Transport,
 ) -> Result<Resolved, UnmountError> {
     let namespace = Namespace::read(transport)?;
-    let path = name.contains('/');
-    let at = if path {
-        detacher.canonical(name).map_err(|errno| match errno {
-            Errno::NotFound => UnmountError::NotFound(String::from(name)),
-            errno => UnmountError::Path {
-                name: String::from(name),
-                errno,
-            },
-        })?
-    } else {
-        format!("/{STORAGE_CATALOG}/{name}")
+    let bound_at = |at: &str| -> Option<&ViewBindingRecord> {
+        namespace
+            .views()
+            .iter()
+            .find(|view| view.target_bytes() == at.as_bytes())
     };
-    if let Some(view) = namespace
-        .views()
-        .iter()
-        .find(|view| view.target_bytes() == at.as_bytes())
-    {
+    let path = name.contains('/') || matches!(name, "." | "..");
+    let view = if path {
+        match spelled(name, detacher).as_deref().and_then(bound_at) {
+            Some(view) => Some(view),
+            None => bound_at(&detacher.canonical(name).map_err(|errno| match errno {
+                Errno::NotFound => UnmountError::NotFound(String::from(name)),
+                errno => UnmountError::Path {
+                    name: String::from(name),
+                    errno,
+                },
+            })?),
+        }
+    } else {
+        bound_at(&format!("/{STORAGE_CATALOG}/{name}"))
+    };
+    if let Some(view) = view {
         if !view.shows_volume() {
             return Err(UnmountError::NotDetachable(String::from(name)));
         }
@@ -154,6 +185,27 @@ fn resolve(
         UnmountError::NotFound(_) => unseen(),
         err => err,
     })
+}
+
+/// The view path `name` spells, nothing resolved: a `.` dropped, a relative
+/// one joined to the working directory, as util-linux's `umount` reads a
+/// mount point. `None` where only resolving can say: a `..`, or a spelling
+/// the grammar refuses. A bind pins every directory down to its target, so a
+/// target is always a link-free spelling of what it binds.
+fn spelled(name: &str, detacher: &dyn Detacher) -> Option<String> {
+    let (root, steps) = tairix_path::steps(name).ok()?;
+    let mut at = match root {
+        Root::View => String::from("/"),
+        Root::Relative => detacher.canonical(".").ok()?,
+        Root::Alias(_) | Root::VolumeId(_) => return None,
+    };
+    for step in steps {
+        match step.ok()? {
+            Step::Name(part) => tairix_path::push_name(&mut at, part),
+            Step::Up => return None,
+        }
+    }
+    Some(at)
 }
 
 /// The volume attached from the file `name`, in one pass over `volumes`.
@@ -191,32 +243,56 @@ fn by_file_name(
     }
 }
 
-/// Emit the fd-3 `suggestion` record for a refused plain detach of an
-/// unavailable volume: the retained data is held deliberately, and the
-/// audited force-unmount is the explicit way to give it up. Best-effort
-/// and additive — it never changes the diagnostic, exit status, or
-/// pipeline behaviour.
-fn emit_force_suggestion(err: &dyn Output, name: &str) {
-    let message = String::from("The volume holds retained uncommitted data.");
-    let suggestion = format!("Use `unmount --force {name}` to discard it.");
+/// Emit the fd-3 `suggestion` record for a plain detach refused for what
+/// the volume's writes need: the audited force-unmount is the explicit way
+/// to give retained writes up, or to acknowledge lost ones. The volume is
+/// named by its catalog entry, which any directory resolves, else by the
+/// operand as a shell reads it back. Best-effort and additive — it never
+/// changes the diagnostic, exit status, or pipeline behaviour.
+fn emit_force_suggestion(
+    err: &dyn Output,
+    operand: &str,
+    resolved: &Resolved,
+    retention: Retention,
+) {
+    let (message, consequence) = match retention {
+        Retention::Held => ("The volume holds retained uncommitted data.", "discard it"),
+        Retention::Lost => (
+            "The volume's uncommitted data was already lost.",
+            "detach it",
+        ),
+    };
+    let name = resolved.catalog.as_deref().unwrap_or(operand);
+    let dashes = if name.starts_with('-') { "-- " } else { "" };
+    let suggestion = format!(
+        "Use `unmount --force {dashes}{}` to {consequence}.",
+        quote_if_needed(name)
+    );
+    let argv: &[&str] = if dashes.is_empty() {
+        &["unmount", "--force", name]
+    } else {
+        &["unmount", "--force", "--", name]
+    };
     let ai = format!(
         "{{\"subject\":\"volume_detach\",\
-         \"refusal\":{{\"reason\":\"volume_unavailable\",\
-         \"retained_data_would_be_discarded\":true}},\
+         \"refusal\":{{\"availability\":\"{}\",\
+         \"retained_data_would_be_discarded\":{}}},\
          \"suggestion\":{}}}",
-        Suggestion::new(&["unmount", "--force", name])
+        availability_marker(resolved.availability).unwrap_or_default(),
+        retention == Retention::Held,
+        Suggestion::new(argv)
     );
     let record = StdInfoRecord::new(
         OWN_WORD,
         StdInfoKind::Suggestion,
-        "fs.volume_unavailable_force_required",
+        "fs.volume_force_required",
         Severity::Info,
-        Human::with_suggestion(&message, &suggestion),
+        Human::with_suggestion(message, &suggestion),
     )
     .with_ai(&ai);
-    let mut buf = [0u8; 512];
-    if let Ok(len) = record.write_jsonl(&mut buf) {
-        err.info(&buf[..len]);
+    let line = tairix_util::output::framed(&record);
+    if !line.is_empty() {
+        err.info(&line);
     }
 }
 
@@ -226,7 +302,7 @@ mod tests {
 
     use super::{run, USAGE};
     use crate::command::parse;
-    use crate::error::UnmountError;
+    use crate::error::{Retention, UnmountError};
     use crate::io::{Detacher, Output};
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -321,10 +397,18 @@ mod tests {
         force: bool,
     }
 
-    /// Records every detach request, optionally failing it.
+    /// Records every detach request, optionally failing it, and resolves
+    /// paths as `realpath` does from a working directory.
     struct MemDetacher {
         fail: Option<Errno>,
         detached: RefCell<Vec<Detached>>,
+        cwd: &'static str,
+        /// A volume's mount point beneath which nothing answers, as the
+        /// fail-closed stand-in answers for a vanished volume.
+        unanswering: Option<&'static str>,
+        /// Links, each the path it is at and the path it names.
+        links: &'static [(&'static str, &'static str)],
+        canonicalised: RefCell<Vec<String>>,
     }
 
     impl MemDetacher {
@@ -332,13 +416,29 @@ mod tests {
             Self {
                 fail: None,
                 detached: RefCell::new(Vec::new()),
+                cwd: "/Users/ada",
+                unanswering: None,
+                links: &[],
+                canonicalised: RefCell::new(Vec::new()),
             }
         }
         fn failing(errno: Errno) -> Self {
             Self {
                 fail: Some(errno),
-                detached: RefCell::new(Vec::new()),
+                ..Self::new()
             }
+        }
+        fn unanswering(self, at: &'static str) -> Self {
+            Self {
+                unanswering: Some(at),
+                ..self
+            }
+        }
+        fn in_dir(self, cwd: &'static str) -> Self {
+            Self { cwd, ..self }
+        }
+        fn linked(self, links: &'static [(&'static str, &'static str)]) -> Self {
+            Self { links, ..self }
         }
     }
 
@@ -357,22 +457,45 @@ mod tests {
             }
         }
 
-        /// As `realpath` resolves in `/Users/ada`, where nothing named
-        /// `missing` exists and `forbidden` may not be entered.
+        /// As `realpath` resolves in the working directory, where nothing
+        /// named `missing` exists, `forbidden` may not be entered, and nothing
+        /// beneath an unanswering mount point answers.
         fn canonical(&self, path: &str) -> Result<String, Errno> {
+            self.canonicalised.borrow_mut().push(String::from(path));
             let joined = if path.starts_with('/') {
                 String::from(path)
             } else {
-                alloc::format!("/Users/ada/{path}")
+                alloc::format!("{}/{path}", self.cwd)
             };
-            let parts: Vec<&str> = joined
+            let mut at: Vec<String> = Vec::new();
+            for part in joined
                 .split('/')
                 .filter(|part| !part.is_empty() && *part != ".")
-                .collect();
-            match parts.last() {
-                Some(&"missing") => Err(Errno::NotFound),
-                Some(&"forbidden") => Err(Errno::PermissionDenied),
-                _ => Ok(alloc::format!("/{}", parts.join("/"))),
+            {
+                if part == ".." {
+                    at.pop();
+                    continue;
+                }
+                at.push(String::from(part));
+                let spelled = alloc::format!("/{}", at.join("/"));
+                if let Some((_, target)) = self.links.iter().find(|(link, _)| *link == spelled) {
+                    at = target
+                        .split('/')
+                        .filter(|part| !part.is_empty())
+                        .map(String::from)
+                        .collect();
+                }
+                let spelled = alloc::format!("/{}", at.join("/"));
+                if self.unanswering.is_some_and(|dead| {
+                    spelled == dead || spelled.starts_with(&alloc::format!("{dead}/"))
+                }) {
+                    return Err(Errno::DeviceFault);
+                }
+            }
+            match at.last().map(String::as_str) {
+                Some("missing") => Err(Errno::NotFound),
+                Some("forbidden") => Err(Errno::PermissionDenied),
+                _ => Ok(alloc::format!("/{}", at.join("/"))),
             }
         }
     }
@@ -747,7 +870,7 @@ mod tests {
             Err(UnmountError::Detach {
                 name: String::from("usb2"),
                 errno: Errno::DeviceFault,
-                unavailable: true,
+                retention: Some(Retention::Held),
             })
         );
         let infos = err.infos.borrow();
@@ -788,7 +911,7 @@ mod tests {
             Err(UnmountError::Detach {
                 name: String::from("usb1"),
                 errno: Errno::PermissionDenied,
-                unavailable: false,
+                retention: None,
             })
         );
         assert!(err.infos.borrow().is_empty());
@@ -799,7 +922,7 @@ mod tests {
         let detach = |errno| UnmountError::Detach {
             name: String::from("workbench"),
             errno,
-            unavailable: false,
+            retention: None,
         };
         assert_eq!(detach(Errno::Busy).status(), 32, "a failed unmount");
         assert_eq!(UnmountError::NotFound(String::from("usb9")).status(), 32);
@@ -819,20 +942,23 @@ mod tests {
     #[test]
     fn a_failure_names_the_volume_and_ends_its_sentence() {
         use alloc::string::ToString;
-        let refused = |name: &str, errno, unavailable| {
+        let refused = |name: &str, errno, retention| {
             UnmountError::Detach {
                 name: String::from(name),
                 errno,
-                unavailable,
+                retention,
             }
             .to_string()
         };
         assert_eq!(
-            refused("workbench", Errno::Busy, false),
+            refused("workbench", Errno::Busy, None),
             alloc::format!("workbench: {}.", Errno::Busy)
         );
-        assert!(refused("usb2", Errno::DeviceFault, true).starts_with("usb2: volume holds"));
-        assert!(refused("usb2", Errno::DeviceFault, true).ends_with('.'));
+        let held = refused("usb2", Errno::DeviceFault, Some(Retention::Held));
+        assert!(held.starts_with("usb2: volume holds") && held.ends_with('.'));
+        let lost = refused("usb4", Errno::DeviceFault, Some(Retention::Lost));
+        assert!(lost.contains("already lost") && lost.contains("use --force to detach it"));
+        assert!(lost.ends_with('.'));
         assert_eq!(
             UnmountError::NotFound(String::from("usb9")).to_string(),
             "usb9: not mounted."
@@ -853,6 +979,303 @@ mod tests {
             UnmountError::Usage.to_string(),
             "invalid usage",
             "no sentence"
+        );
+    }
+
+    fn detached(detacher: &MemDetacher) -> Vec<Detached> {
+        detacher.detached.borrow().clone()
+    }
+
+    fn forced(id: u8) -> Vec<Detached> {
+        alloc::vec![Detached {
+            volume_id: [id; 16],
+            force: true,
+        }]
+    }
+
+    /// A vanished volume's mount point no longer answers, so it is matched as
+    /// spelled and the dead volume is never resolved through.
+    #[test]
+    fn a_volume_that_no_longer_answers_is_named_by_its_mount_point() {
+        for spelling in ["/Storage/usb2", "/Storage/usb2/", "/Storage/./usb2"] {
+            let detacher = MemDetacher::new().unanswering("/Storage/usb2");
+            let err = Recorder::new();
+            assert_eq!(
+                run_args(&["-f", spelling], &table(), &detacher, &err),
+                Ok(()),
+                "{spelling}"
+            );
+            assert_eq!(detached(&detacher), forced(2), "{spelling}");
+            assert!(detacher.canonicalised.borrow().is_empty(), "{spelling}");
+        }
+        let detacher = MemDetacher::failing(Errno::DeviceFault).unanswering("/Storage/usb2");
+        let err = Recorder::new();
+        assert_eq!(
+            run_args(&["/Storage/usb2"], &table(), &detacher, &err),
+            Err(UnmountError::Detach {
+                name: String::from("/Storage/usb2"),
+                errno: Errno::DeviceFault,
+                retention: Some(Retention::Held),
+            })
+        );
+        assert_eq!(err.infos.borrow().len(), 1);
+    }
+
+    fn lost_image_in_home() -> Fixture {
+        Fixture::of(alloc::vec![record(
+            b"wb.adf",
+            b"/Storage/wb",
+            MountAvailability::UnavailableLost,
+            [5u8; 16],
+        )])
+        .bound_at(b"/Users/ada/Home/wb", [5u8; 16])
+    }
+
+    #[test]
+    fn a_relative_spelling_is_read_from_the_working_directory_without_resolving_it() {
+        for spelling in ["Home/wb", "./Home/wb/"] {
+            let detacher = MemDetacher::new().unanswering("/Users/ada/Home/wb");
+            let err = Recorder::new();
+            assert_eq!(
+                run_args(&["-f", spelling], &lost_image_in_home(), &detacher, &err),
+                Ok(()),
+                "{spelling}"
+            );
+            assert_eq!(detached(&detacher), forced(5), "{spelling}");
+            assert_eq!(
+                detacher.canonicalised.borrow().as_slice(),
+                [String::from(".")],
+                "only the working directory was resolved"
+            );
+        }
+    }
+
+    #[test]
+    fn dot_names_the_directory_it_stands_for() {
+        let detacher = MemDetacher::new().in_dir("/Users/ada/Home/wb");
+        let err = Recorder::new();
+        assert_eq!(
+            run_args(&["-f", "."], &lost_image_in_home(), &detacher, &err),
+            Ok(())
+        );
+        assert_eq!(detached(&detacher), forced(5));
+    }
+
+    /// A `..` is applied to the directory the walk reached, never folded
+    /// into the text before it.
+    #[test]
+    fn a_spelling_that_climbs_is_resolved_never_folded() {
+        let fixture = table().bound_at(b"/Users/ada/usb1", [5u8; 16]);
+        let detacher = MemDetacher::new().linked(&[("/Users/ada/lnk", "/Storage/x")]);
+        let err = Recorder::new();
+        assert_eq!(
+            run_args(&["/Users/ada/lnk/../usb1"], &fixture, &detacher, &err),
+            Ok(())
+        );
+        assert_eq!(
+            detached(&detacher),
+            alloc::vec![Detached {
+                volume_id: [1u8; 16],
+                force: false,
+            }]
+        );
+        assert_eq!(
+            detacher.canonicalised.borrow().as_slice(),
+            [String::from("/Users/ada/lnk/../usb1")]
+        );
+    }
+
+    fn unwell(availability: MountAvailability) -> Fixture {
+        Fixture::of(alloc::vec![record(
+            b"usb3",
+            b"/Storage/usb3",
+            availability,
+            [3u8; 16],
+        )])
+    }
+
+    #[test]
+    fn a_live_unwell_volume_refused_busy_is_told_only_busy() {
+        use alloc::string::ToString;
+        for availability in [MountAvailability::Degraded, MountAvailability::Recovering] {
+            let detacher = MemDetacher::failing(Errno::Busy);
+            let err = Recorder::new();
+            let refused = run_args(&["/Storage/usb3"], &unwell(availability), &detacher, &err)
+                .expect_err("refused");
+            assert_eq!(
+                refused,
+                UnmountError::Detach {
+                    name: String::from("/Storage/usb3"),
+                    errno: Errno::Busy,
+                    retention: None,
+                },
+                "{availability:?}"
+            );
+            assert_eq!(
+                refused.to_string(),
+                alloc::format!("/Storage/usb3: {}.", Errno::Busy)
+            );
+            assert!(err.infos.borrow().is_empty(), "{availability:?}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_of_authority_never_suggests_force() {
+        use alloc::string::ToString;
+        let detacher = MemDetacher::failing(Errno::PermissionDenied);
+        let err = Recorder::new();
+        let refused = run_args(&["usb2"], &table(), &detacher, &err).expect_err("refused");
+        assert_eq!(
+            refused,
+            UnmountError::Detach {
+                name: String::from("usb2"),
+                errno: Errno::PermissionDenied,
+                retention: None,
+            }
+        );
+        assert_eq!(refused.status(), 1);
+        assert_eq!(
+            refused.to_string(),
+            alloc::format!("usb2: {}.", Errno::PermissionDenied)
+        );
+        assert!(err.infos.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_refused_force_is_never_told_to_force() {
+        use alloc::string::ToString;
+        for errno in [Errno::PermissionDenied, Errno::DeviceFault] {
+            let detacher = MemDetacher::failing(errno);
+            let err = Recorder::new();
+            let refused =
+                run_args(&["-f", "usb2"], &table(), &detacher, &err).expect_err("refused");
+            assert!(
+                matches!(
+                    refused,
+                    UnmountError::Detach {
+                        retention: None,
+                        ..
+                    }
+                ),
+                "{errno:?}"
+            );
+            assert!(!refused.to_string().contains("--force"), "{refused}");
+            assert!(err.infos.borrow().is_empty(), "{errno:?}");
+        }
+    }
+
+    #[test]
+    fn a_lost_volume_is_told_its_data_is_already_lost() {
+        use alloc::string::ToString;
+        let fixture = Fixture::of(alloc::vec![record(
+            b"usb4",
+            b"/Storage/usb4",
+            MountAvailability::UnavailableLost,
+            [4u8; 16],
+        )]);
+        let detacher = MemDetacher::failing(Errno::DeviceFault);
+        let err = Recorder::new();
+        let refused = run_args(&["usb4"], &fixture, &detacher, &err).expect_err("refused");
+        assert!(matches!(
+            refused,
+            UnmountError::Detach {
+                retention: Some(Retention::Lost),
+                ..
+            }
+        ));
+        let text = refused.to_string();
+        assert!(text.contains("already lost") && text.contains("use --force to detach it"));
+        let infos = err.infos.borrow();
+        assert_eq!(infos.len(), 1);
+        assert!(
+            infos[0].contains("\"retained_data_would_be_discarded\":false"),
+            "{}",
+            infos[0]
+        );
+        assert!(
+            infos[0].contains("\"availability\":\"unavailable-lost\""),
+            "{}",
+            infos[0]
+        );
+    }
+
+    #[test]
+    fn a_conflicted_volume_is_told_force_only_for_its_held_set() {
+        let conflicted = || unwell(MountAvailability::RecoveryConflict);
+        let detacher = MemDetacher::failing(Errno::NotEmpty);
+        let err = Recorder::new();
+        let refused = run_args(&["usb3"], &conflicted(), &detacher, &err).expect_err("refused");
+        assert!(matches!(
+            refused,
+            UnmountError::Detach {
+                retention: Some(Retention::Held),
+                ..
+            }
+        ));
+        let infos = err.infos.borrow();
+        assert_eq!(infos.len(), 1);
+        assert!(
+            infos[0].contains("\"availability\":\"recovery-conflict\""),
+            "{}",
+            infos[0]
+        );
+        assert!(
+            infos[0].contains("fs.volume_force_required"),
+            "{}",
+            infos[0]
+        );
+        let busy = MemDetacher::failing(Errno::Busy);
+        let quiet = Recorder::new();
+        let refused = run_args(&["usb3"], &conflicted(), &busy, &quiet).expect_err("refused");
+        assert!(matches!(
+            refused,
+            UnmountError::Detach {
+                retention: None,
+                ..
+            }
+        ));
+        assert!(quiet.infos.borrow().is_empty());
+    }
+
+    /// The suggested command reads back as a shell reads it: the volume is
+    /// named by its catalog entry, which any directory resolves, else by the
+    /// operand quoted, with `--` before one beginning `-`.
+    #[test]
+    fn the_suggested_command_reads_back_as_a_shell_reads_it() {
+        let lost = |source: &[u8], target: &[u8]| {
+            Fixture::of(alloc::vec![record(
+                source,
+                target,
+                MountAvailability::UnavailableLost,
+                [6u8; 16],
+            )])
+        };
+        let suggested = |fixture: &Fixture, args: &[&str]| {
+            let detacher = MemDetacher::failing(Errno::DeviceFault);
+            let err = Recorder::new();
+            assert!(run_args(args, fixture, &detacher, &err).is_err());
+            let infos = err.infos.borrow().clone();
+            assert_eq!(infos.len(), 1, "{args:?}");
+            infos[0].clone()
+        };
+        let record = suggested(&lost(b"wb.adf", b"/Storage/extras"), &["wb.adf"]);
+        assert!(record.contains("unmount --force extras"), "{record}");
+        // Within the source bound, and past any fixed line a record might
+        // have been given.
+        let long = "Amiga Workbench 1.3 Extras (1988).adf";
+        let record = suggested(&lost(long.as_bytes(), b"/Users/ada/extras"), &[long]);
+        assert!(record.len() > 512, "{}", record.len());
+        assert!(
+            record.contains(&alloc::format!("unmount --force '{long}'")),
+            "{record}"
+        );
+        let record = suggested(&lost(b"my disk.adf", b"/Users/ada/disk"), &["my disk.adf"]);
+        assert!(record.contains("unmount --force 'my disk.adf'"), "{record}");
+        let record = suggested(&lost(b"-odd.adf", b"/Users/ada/odd"), &["--", "-odd.adf"]);
+        assert!(record.contains("unmount --force -- -odd.adf"), "{record}");
+        assert!(
+            record.contains("\"argv\":[\"unmount\",\"--force\",\"--\",\"-odd.adf\"]"),
+            "{record}"
         );
     }
 

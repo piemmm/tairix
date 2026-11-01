@@ -38,10 +38,7 @@ use tairix_log::{log, Event, EventId, Level};
 // by `build.rs`.
 include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 
-/// Gigabytes of identity map the U-mode address space provides: `[0, 4 GiB)`
-/// covers the `virt` board's low MMIO and the RAM base where this kernel runs.
-/// [`USER_BIAS`] (64 GiB) sits far above, on freshly walked Sv39 tables.
-const IDENTITY_GIGABYTES: usize = 4;
+use tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES;
 
 /// User stack base (1 MiB into the high user region) and size. `tairix-rt`
 /// carves scratch space off the stack, so it must comfortably exceed it.
@@ -220,7 +217,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // in the active translation regime), then install the trap vector + the
     // syscall-dispatch callback before any user task runs.
     let Some(arch_space) =
-        paging::AddressSpace::new_identity_gigapages(&PAGE_TABLE_POOL, IDENTITY_GIGABYTES)
+        paging::AddressSpace::new_identity_gigapages(&PAGE_TABLE_POOL, KERNEL_IDENTITY_GIGAPAGES)
     else {
         qemu_exit::exit_failure(FAIL_POOL);
     };
@@ -246,7 +243,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
 
     let mut space = AddressSpace::new(arch_space);
     // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::identity((IDENTITY_GIGABYTES as u64) << 30) }
+    let physmap = unsafe { DirectPhysMap::identity((KERNEL_IDENTITY_GIGAPAGES as u64) << 30) }
         .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image: &image,

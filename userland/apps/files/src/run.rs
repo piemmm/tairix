@@ -60,7 +60,7 @@
 //! zombie), and a launch refusal is stated fail-loud on `stderr`;
 //! `Backspace` goes up); `F2` renames the selected
 //! item through an inline `lib/controls` text field, committing over
-//! `fs_rename` on the reader thread under the user's own identity (a refusal
+//! `fs_rename` on the reader serving its volume under the user's own identity (a refusal
 //! is stated in the field, never a silent failure or a fabricated success);
 //! `Ctrl+X`/`Ctrl+C` capture the selection onto a cut/copy clipboard and
 //! `Ctrl+V` pastes it into the current directory — a same-volume move is one
@@ -90,6 +90,7 @@ pub mod command;
 pub mod deferred;
 pub mod gesture;
 pub mod icons;
+pub mod lanes;
 pub mod listing;
 pub mod location;
 pub mod netbrowse;
@@ -97,6 +98,7 @@ pub mod notice;
 pub mod operation;
 pub mod operations;
 pub mod preferences;
+pub mod question;
 pub mod rename;
 pub mod route;
 pub mod settings;
@@ -132,10 +134,11 @@ mod program {
     };
     use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
     use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_abi::sysinfo::ViewBindingRecord;
     use tairix_abi::window_ipc::{
-        AlertOutcome, AlertSpec, DialogModality, DocumentName, DragAt, DragItems, DropOperation,
-        DropSite, HandOverDocument, HandOverOutcome, MenuOutcome, PointerAction, WindowEvent,
-        WindowRegion, WindowSizeState, WindowSizing,
+        AlertOutcome, DialogModality, DocumentName, DragAt, DragItems, DropOperation, DropSite,
+        HandOverDocument, HandOverOutcome, MenuOutcome, PointerAction, WindowEvent, WindowRegion,
+        WindowSizeState, WindowSizing,
     };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, RenameFlags,
@@ -145,7 +148,9 @@ mod program {
     use tairix_appstore::{DirEntry as StoreDirEntry, StoreReader, Verdict};
     use tairix_browse::document;
     use tairix_browse::marquee::{self, report_band};
-    use tairix_browse::mount::{MountAct, MountDone, MountWorker, Projection};
+    use tairix_browse::mount::{
+        lost_eject_question, MountAct, MountDone, MountWorker, Projection, LOST_EJECT_INDEX,
+    };
     use tairix_browse::render::{
         chooser_art, delete_alert, draw_open_with_chooser, draw_progress_window,
         draw_properties_window, draw_rename_field, drop_folder_at, manager_art, manager_tool_at,
@@ -185,7 +190,7 @@ mod program {
     use tairix_icon::{
         artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
         ArtworkReader, ArtworkResolver, IconKind, IconRequest, InlineArtwork, Landed, Resolved,
-        ThumbnailStore, MAX_ARTWORK_BYTES,
+        StoreAccess, ThumbnailStore, MAX_ARTWORK_BYTES,
     };
     use tairix_input::{ClickKind, DoubleClickTracker, Key, Modifiers, NamedKey, PointerButton};
     use tairix_procinfo::{IpcTransport, WalkStep};
@@ -210,25 +215,29 @@ mod program {
     use crate::chrome::{Accelerator, Chrome, SelectionVerb};
     use crate::command::{self, Command, Ladder, Role, UsageError, USAGE};
     use crate::deferred::{
-        DriveJob, DriveReading, DriveReads, EjectDesk, FilesClient, FilesClients, PropertyJob,
-        PropertyReads, ReadKind, READ_ORDER,
+        first_in_order, DriveJob, DriveReading, DriveReads, EjectDesk, FilesClient, FilesClients,
+        PropertyJob, PropertyReads, ReadKind,
     };
     use crate::gesture::{
         self, bundle_intent, press_step, DragArm, Keyboard, NamePress, PressHit, PressHold,
         PressInput, PressStep, PrimaryPress, RenameArm, RenameCommit, SelectHow, SelectKeys,
     };
     use crate::icons::IconPipeline;
+    use crate::lanes::{Crew, Decodes, Lane, Rest, Routes, Serving};
     use crate::listing::ViewMark;
     use crate::location::{leave_directory, location_title, retitle, Leave};
-    use crate::notice::{self, next_alert, NextAlert, NoticeSource, Notices};
+    use crate::notice::{next_alert, not_started, NextAlert, NoticeSource, Notices};
     use crate::operation::{
-        change_refusal, completion_closes_at, confirmation_may_open, create_refusal,
-        destination_refusal, empty_confirmation_may_open, item_refusal, mode_flip_allowed,
+        change_refusal, completion_closes_at, create_refusal, delete_confirmation,
+        destination_refusal, empty_confirmation, item_refusal, mode_flip_allowed,
         operation_refusal, progress_control, progress_due, reach_refusal, trash_read_refusal,
-        BarPace, ProgressControl,
+        BarPace, Confirmation, ProgressControl, BUSY_ELSEWHERE,
     };
-    use crate::operations::{run_slice, Ending, Finished, OperationDesk, Reading, Refusal, Step};
+    use crate::operations::{
+        carry, run_slice, Carried, Ending, Finished, OperationDesk, Reading, Refusal, Step,
+    };
     use crate::preferences::Preferences;
+    use crate::question::{Answer, Question, ANSWERING_ANOTHER, UNASKABLE};
     use crate::rename::RenameEdit;
     use crate::settings::{SettingsRequest, SettingsWindow, TITLE as SETTINGS_TITLE};
     use crate::sidebar::{self, press_point};
@@ -238,6 +247,7 @@ mod program {
     };
     use tairix_fscopy::Omissions;
     use tairix_rt::copy::WorkingDirectory;
+    use tairix_util::utf8::refusal_headline;
 
     /// Exit code when the initial directory listing was refused (no
     /// filesystem reach, or a corrupt stream). A reserved, fail-closed
@@ -863,22 +873,33 @@ mod program {
             }
         }
 
-        /// Whether a confirmation of `plan` may open: the window still shows
-        /// the selection it plans, with nothing else open over it.
-        fn awaits_confirmation_of(&self, plan: &DeletePlan) -> bool {
-            confirmation_may_open(
+        /// What becomes of a confirmation of `plan`: asked while the window
+        /// still shows the selection it plans, with nothing else open over it.
+        fn confirmation_of(&self, plan: &DeletePlan) -> Confirmation {
+            delete_confirmation(
                 plan,
                 self.browser.plan_delete().as_ref(),
                 self.is_occupied(),
             )
         }
 
-        /// Whether a confirmation to empty `trash` may open: the window still
-        /// shows it, with nothing else open over it.
-        fn awaits_empty_confirmation_of(&self, trash: &[String]) -> bool {
+        /// What becomes of a confirmation to empty `trash`: asked while the
+        /// window still shows it, with nothing else open over it.
+        fn empty_confirmation_of(&self, trash: &[String]) -> Confirmation {
             self.browser
                 .folder()
-                .is_some_and(|shown| empty_confirmation_may_open(trash, shown, self.is_occupied()))
+                .map_or(Confirmation::MovedOn, |shown| {
+                    empty_confirmation(trash, shown, self.is_occupied())
+                })
+        }
+
+        /// Why a removal was refused unasked, the window being busy.
+        fn busy_reason(&self) -> &'static str {
+            if self.overlays.question.is_pending() {
+                ANSWERING_ANOTHER
+            } else {
+                BUSY_ELSEWHERE
+            }
         }
 
         /// Whether anything is open over the listing that a confirmation
@@ -886,7 +907,7 @@ mod program {
         fn is_occupied(&self) -> bool {
             let overlays = &self.overlays;
             self.listing_is_held()
-                || overlays.delete.is_some()
+                || overlays.question.is_pending()
                 || overlays.open_with.is_some()
                 || overlays.notices.is_showing()
         }
@@ -1119,7 +1140,7 @@ mod program {
             self.overlays.rename_arm = None;
             let settled = !self.browser.listing_elsewhere();
             let free = !self.listing_is_held()
-                && self.overlays.delete.is_none()
+                && !self.overlays.question.is_pending()
                 && !self.overlays.notices.is_showing();
             if !settled || !free || self.browser.chosen_index() != Some(arm.index()) {
                 return Repaint::Nothing;
@@ -2247,13 +2268,19 @@ mod program {
                 let WriteAnswer::Planned(plan, moves) = answer else {
                     return false;
                 };
-                // Asked over a selection the user may have moved on from: a
-                // confirmation opened over anything else would take a key
-                // meant for that as its answer.
-                if !state.awaits_confirmation_of(&plan) {
-                    return false;
+                match state.confirmation_of(&plan) {
+                    Confirmation::Asked => {
+                        ask_delete(&mut state.overlays, plan, moves, state.confirm_trash);
+                    }
+                    Confirmation::MovedOn => return false,
+                    Confirmation::Busy => {
+                        let reason = state.busy_reason();
+                        state
+                            .overlays
+                            .notices
+                            .refuse(NoticeSource::Write, NOT_DELETED, reason);
+                    }
                 }
-                ask_delete(&mut state.overlays, plan, moves, state.confirm_trash);
                 true
             }
             BrowserWrite::Entry(pending) => {
@@ -2264,11 +2291,22 @@ mod program {
                     return false;
                 };
                 match planned {
-                    Ok(Some(plan)) if state.awaits_empty_confirmation_of(&trash) => {
-                        ask_delete(&mut state.overlays, plan, None, true);
-                        true
-                    }
-                    Ok(_) => false,
+                    Ok(Some(plan)) => match state.empty_confirmation_of(&trash) {
+                        Confirmation::Asked => {
+                            ask_delete(&mut state.overlays, plan, None, true);
+                            true
+                        }
+                        Confirmation::MovedOn => false,
+                        Confirmation::Busy => {
+                            let reason = state.busy_reason();
+                            state
+                                .overlays
+                                .notices
+                                .refuse(NoticeSource::Write, NOT_EMPTIED, reason);
+                            true
+                        }
+                    },
+                    Ok(None) => false,
                     Err(reason) => {
                         state
                             .overlays
@@ -2328,9 +2366,9 @@ mod program {
         Closed,
     }
 
-    /// Hand each newly asked operation to the operations worker, and fold
-    /// what the worker reports into the progress windows: a count, at most
-    /// once a frame, and an operation's end.
+    /// Hand each newly asked operation to the operations workers, and fold
+    /// what they report into the progress windows: a count, at most once a
+    /// frame, and an operation's end.
     ///
     /// The desk is read in one critical section and acted on once the lock is
     /// let go, because ending an operation reads its folder's listing again
@@ -2346,7 +2384,11 @@ mod program {
         let mut moved = alloc::vec::Vec::new();
         {
             let mut work = reads.work.lock();
-            let desk = &mut work.operations;
+            let Work {
+                operations: desk,
+                routes,
+                ..
+            } = &mut *work;
             // Looked at from here, so a report landing while this runs still
             // owes a wake.
             desk.acknowledge();
@@ -2364,7 +2406,8 @@ mod program {
                     continue;
                 }
                 if let Some(job) = operation.job.take() {
-                    match desk.submit(id, job) {
+                    let lanes = job.lanes(routes);
+                    match desk.submit(id, job, lanes) {
                         Ok(()) => asked = true,
                         Err((job, Refusal::Stopping)) => operation.here = Some(job),
                         Err((_, Refusal::Busy | Refusal::Full)) => moved.push((
@@ -2721,7 +2764,7 @@ mod program {
 
     /// Serve one event addressed to the progress window at `index`: its
     /// Cancel or Escape asks the operation to stop before its next unit — one
-    /// not yet handed to the worker ends at once, having done nothing — and a
+    /// not yet handed to a worker ends at once, having done nothing — and a
     /// redraw request is answered.
     fn serve_progress_event(
         windows: &mut alloc::vec::Vec<OpenWindow>,
@@ -3140,7 +3183,9 @@ mod program {
         // the alert it holds.
         if let WindowEvent::AlertClosed { alert_id, outcome } = *event {
             if !launcher.borrow_mut().notices.answered(alert_id) {
-                answer_alert(windows, alert_id, outcome);
+                if let Some(eject) = answer_alert(windows, alert_id, outcome) {
+                    launcher.borrow_mut().mount(eject);
+                }
             }
             return None;
         }
@@ -4071,8 +4116,11 @@ mod program {
         /// State that the item `name` could not be opened, because of
         /// `reason`.
         fn not_opened(&mut self, name: &str, reason: &str) {
-            self.notices
-                .refuse(NoticeSource::Open, &notice::not_opened(name), reason);
+            self.notices.refuse(
+                NoticeSource::Open,
+                &refusal_headline(name, "opened"),
+                reason,
+            );
         }
 
         /// Launch the application bundle whose directory is `bundle_path` (the
@@ -4290,8 +4338,7 @@ mod program {
             // so the manager's copy goes either way.
             drop(file);
             if pid < 0 {
-                let reason =
-                    alloc::format!("{label} could not be started: {}", Errno::from_syscall(pid));
+                let reason = not_started(&label, Errno::from_syscall(pid));
                 self.not_opened(display_name, &reason);
                 return;
             }
@@ -4433,18 +4480,24 @@ mod program {
         /// The parser-sandbox seam: one worker, started on the first decode and
         /// replaced by the seam if it ever fails.
         sandbox: ParserSandbox<RtLauncher, tairix_rt::LogSink>,
-        /// Where a thumbnail decoded once per version of its file is kept.
-        store: StoreSlot,
+        /// Where a thumbnail decoded once per version of its file is kept: the
+        /// process's one store, every decoder's.
+        store: SharedStoreSlot,
     }
 
+    /// The process's one thumbnail store, shared by its decoders: one blob
+    /// laid out for one side, rather than a layout per decoder that each
+    /// would reformat in turn.
+    type SharedStoreSlot = alloc::sync::Arc<tairix_rt::sync::Mutex<StoreSlot>>;
+
     impl SandboxRasteriser {
-        fn new() -> Self {
+        fn new(store: SharedStoreSlot) -> Self {
             Self {
                 sandbox: ParserSandbox::new(
-                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
+                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Artwork),
                     tairix_rt::LogSink,
                 ),
-                store: StoreSlot::Unopened,
+                store,
             }
         }
     }
@@ -4477,6 +4530,26 @@ mod program {
                 Self::Open(store) if store.side() == side => Some(store),
                 Self::Open(_) | Self::Unopened | Self::Unavailable => None,
             }
+        }
+    }
+
+    /// The shared store lent at `side` for one lookup or one insert at a time,
+    /// so no decoder holds it while it reads its document.
+    struct LentStore<'a> {
+        slot: &'a tairix_rt::sync::Mutex<StoreSlot>,
+        side: u32,
+    }
+
+    impl StoreAccess for LentStore<'_> {
+        fn find(&mut self, key: tairix_icon::StoreKey) -> Option<tairix_icon::Fitted> {
+            self.slot.lock().at(self.side)?.find(key)
+        }
+
+        fn insert(&mut self, key: tairix_icon::StoreKey, picture: &tairix_icon::Fitted) -> bool {
+            self.slot
+                .lock()
+                .at(self.side)
+                .is_some_and(|store| store.insert(key, picture))
         }
     }
 
@@ -4523,29 +4596,42 @@ mod program {
             document: &mut dyn tairix_icon::ArtworkDocument,
         ) -> Option<tairix_icon::Fitted> {
             let sandbox = &mut self.sandbox;
-            let mut decode = |document: &mut dyn tairix_icon::ArtworkDocument| {
+            let decode = |document: &mut dyn tairix_icon::ArtworkDocument| {
                 tairix_sandbox::imagerender::thumbnail(sandbox, side, reading, document).ok()
             };
-            match self.store.at(side) {
-                Some(store) => store.serve(reading, document, decode),
-                None => decode(document),
-            }
+            let mut store = LentStore {
+                slot: &self.store,
+                side,
+            };
+            tairix_icon::serve_thumbnail(&mut store, reading, document, decode)
         }
     }
 
-    /// Everything the file manager reads off its event loop, and the one worker
-    /// that reads it: each is a read of somebody's disk, which on the loop
+    /// Everything the file manager reads off its event loop, and the workers
+    /// that read it: each is a read of somebody's disk, which on the loop
     /// froze the window for as long as that disk took.
     ///
-    /// One worker serves them in one stated order, [`READ_ORDER`].
+    /// Each piece of work runs on its volume's lane, one reader to a lane at a
+    /// time, in one stated order, [`READ_ORDER`](crate::deferred::READ_ORDER): a slow or failing device
+    /// holds up only the work aimed at it.
     struct Reads {
         work: tairix_rt::sync::Mutex<Work>,
         /// Signalled when a read is recorded, and on teardown.
         signal: tairix_rt::sync::Condvar,
-        /// Signalled when an operation is asked for, and on teardown. Apart
-        /// from `signal`, so a wake meant for one worker is never taken by the
-        /// other.
+        /// Signalled when an operation is asked for or ends, and on teardown.
+        /// Apart from `signal`, so a wake meant for a reader is never taken by
+        /// an operations worker.
         operation_signal: tairix_rt::sync::Condvar,
+        /// Signalled as an operations worker leaves, for the teardown that
+        /// waits them out.
+        left: tairix_rt::sync::Condvar,
+        /// The artwork decoders no reader is using. A decode takes one and puts
+        /// it back, so a decode held up on a slow device holds up its own
+        /// decoder alone, and a reader leaving takes none with it. No more
+        /// are kept than may decode at once.
+        rasterisers: tairix_rt::sync::Mutex<Vec<SandboxRasteriser>>,
+        /// The thumbnail store every decoder shares.
+        store: SharedStoreSlot,
         wake: tairix_rt::sync::WorkerWake,
         /// The wait-set the loop parks in, which each window's watch joins.
         set: u64,
@@ -4568,10 +4654,19 @@ mod program {
         catalogue: Catalogue,
     }
 
-    /// The desks the worker serves, in one lock: they are read by the same
-    /// thread and written by the same worker, so one lock is one ordering
-    /// rather than three that could interleave.
+    /// The desks the workers serve, in one lock: they are read by the same
+    /// thread and written by the workers, so one lock is one ordering rather
+    /// than several that could interleave.
     struct Work {
+        /// The namespace's bindings, by which each piece of work is routed to
+        /// its volume's lane: replaced whenever the places are read.
+        routes: Routes,
+        /// The lanes a reader is working on, each by one at a time.
+        serving: Serving,
+        /// The readers, and the spares that wait while the others work.
+        readers: Crew,
+        /// The operations workers, likewise.
+        operators: Crew,
         /// The documents asked to be opened, each answered in turn.
         opens: tairix_util::defer::JobQueue<DocumentOpen, DocumentOpened>,
         /// The renames committed and not yet answered, and the last ticket.
@@ -4585,7 +4680,9 @@ mod program {
         /// What the paints have asked to be decoded and what has come back.
         /// Only the desk crosses this lock: the cache that keeps a picture
         /// lends it as a borrow, which could not outlive a guard.
-        artwork: ArtworkDesk,
+        artwork: ArtworkDesk<Lane>,
+        /// How many of the artwork decodes may run at once.
+        decodes: Decodes,
         probes: Probes,
         /// What the open Properties windows have asked to be described and
         /// what has come back, keyed by window.
@@ -4607,7 +4704,7 @@ mod program {
         /// watches through `scratch`, itself.
         alone: bool,
         scratch: Vec<u8>,
-        /// The long operations the operations worker carries out.
+        /// The long operations the operations workers carry out.
         operations: OperationDesk<Job>,
         /// The ejects: located, their windows let go, carried out and landed.
         ejects: EjectDesk<MountAct, Vec<Projection>, MountDone>,
@@ -4620,11 +4717,10 @@ mod program {
         ));
     }
 
-    /// The most operations the app holds waiting behind the one running.
+    /// The most operations the app holds waiting to start.
     ///
     /// A containment bound on what one process queues against its disks, not
-    /// a capacity: each window holds at most one, and one past it is refused
-    /// with its reason.
+    /// a capacity: one past it is refused with its reason.
     const OPERATIONS_MAX: usize = 16;
 
     /// The most documents the app holds for opening at once, counting those
@@ -4680,6 +4776,24 @@ mod program {
         PlanTrash(DeletePlan),
         /// Read what the Trash folder holds now and plan its removal.
         PlanEmptyTrash(Vec<String>),
+    }
+
+    impl WriteAct {
+        /// The lane of the volume the act changes: a rename's, its source's,
+        /// since a rename never crosses volumes.
+        fn lane(&self, routes: &Routes) -> Lane {
+            match self {
+                Self::Rename { from: path, .. }
+                | Self::MakeFolder(path)
+                | Self::MakeFile(path)
+                | Self::Change { path, .. } => routes.lane_of_path(path),
+                Self::EnsureTrash(trash) | Self::PlanEmptyTrash(trash) => routes.lane_of(trash),
+                Self::PlanTrash(plan) => plan
+                    .targets()
+                    .first()
+                    .map_or(Lane::Unnamed, |target| routes.lane_of(target.path())),
+            }
+        }
     }
 
     /// A [`WriteJob`] carried out, and what the volume said.
@@ -4804,7 +4918,8 @@ mod program {
         /// Read where an eject's volume is bound, for the loop to take its
         /// windows off it first.
         Locate(MountAct),
-        /// Carry out an eject once the read before it has finished.
+        /// Carry out an eject once the read under way on its volume has
+        /// finished.
         Settle(MountAct),
     }
 
@@ -4814,6 +4929,10 @@ mod program {
         fn new(wake: tairix_rt::sync::WorkerWake, set: u64, doorbell: Result<u64, Errno>) -> Self {
             Self {
                 work: tairix_rt::sync::Mutex::new(Work {
+                    routes: Routes::default(),
+                    serving: Serving::new(),
+                    readers: Crew::new(),
+                    operators: Crew::new(),
                     // A queue refused its room refuses every open, stating why.
                     opens: tairix_util::defer::JobQueue::with_capacity(DOCUMENT_OPENS_MAX)
                         .unwrap_or_default(),
@@ -4824,6 +4943,7 @@ mod program {
                     watches: Watches::new(),
                     listing_clients: FilesClients::default(),
                     artwork: ArtworkDesk::new(),
+                    decodes: Decodes::new(),
                     probes: Probes::new(),
                     properties: PropertyReads::new(),
                     drives: DriveReads::new(),
@@ -4838,6 +4958,9 @@ mod program {
                 }),
                 signal: tairix_rt::sync::Condvar::new(),
                 operation_signal: tairix_rt::sync::Condvar::new(),
+                left: tairix_rt::sync::Condvar::new(),
+                rasterisers: tairix_rt::sync::Mutex::new(Vec::new()),
+                store: alloc::sync::Arc::new(tairix_rt::sync::Mutex::new(StoreSlot::Unopened)),
                 wake,
                 set,
                 network: tairix_rt::sync::Mutex::new(None),
@@ -4846,151 +4969,274 @@ mod program {
             }
         }
 
-        /// One worker's whole life: park until something is wanted, read it,
-        /// deliver it, wake the loop.
-        ///
-        /// The decoder seams are built here and reused for every later decode,
-        /// so no sandbox handle ever crosses a thread boundary.
-        fn serve(&self) {
+        /// One reader's whole life: park until work is wanted on a lane no
+        /// reader serves, read it, deliver it, wake the loop — and leave once
+        /// another reader already waits.
+        fn serve(self: &alloc::sync::Arc<Self>) {
             let mut reader = VfsArtworkReader;
-            let mut rasteriser = SandboxRasteriser::new();
             // Refused, each drain reads its changes a few at a time instead.
             let mut scratch =
                 tairix_util::fallible::filled(WATCH_BUFFER_LEN, 0).unwrap_or_default();
+            let mut last = None;
             loop {
-                let job = {
+                let (lane, job, spare) = {
                     let mut work = self.work.lock();
                     loop {
-                        if work.stopping {
-                            return;
+                        if !work.stopping {
+                            if let Some((lane, job)) = Self::next_read(&mut work, last) {
+                                work.serving.begin(lane);
+                                let spare = work.readers.took();
+                                // What its last lane still holds is another
+                                // reader's to take now.
+                                if last.is_some_and(|last| last != lane) {
+                                    self.signal.notify_one();
+                                }
+                                break (lane, job, spare);
+                            }
                         }
-                        if let Some(job) = Self::next_read(&mut work) {
-                            break job;
+                        match work.readers.rest() {
+                            Rest::Leave => {
+                                drop(work);
+                                self.trim_decoders();
+                                return;
+                            }
+                            Rest::Wait => {
+                                work = self.signal.wait(work);
+                                work.readers.woke();
+                                // A reader that waited served nothing since.
+                                last = None;
+                            }
                         }
-                        work = self.signal.wait(work);
                     }
                 };
-                // The reads themselves, with no lock held: these are the calls
-                // that used to stall the window.
-                let owed = match job {
-                    Read::Open(job) => {
-                        let result = document::open_for(job.file_path.as_bytes(), job.edits);
-                        self.work
-                            .lock()
-                            .opens
-                            .deliver(DocumentOpened { job, result })
-                    }
-                    Read::Write(job) => {
-                        let answer = write_now(job.act);
-                        self.work.lock().writes.deliver(WriteDone {
-                            ticket: job.ticket,
-                            answer,
-                        })
-                    }
-                    Read::List(job) => {
-                        let (client, target) = (job.client(), job.target().to_vec());
-                        // A reload of the folder already watched reads through
-                        // that watch, so its pacing carries on.
-                        let reuse = self.work.lock().watches.relisting(client, &target);
-                        let (listed, armed) = WatchedDirectory::read(&target, reuse, unfollowed);
-                        let (owed, unwanted) = {
-                            let mut work = self.work.lock();
-                            let owed = work.listings.deliver(job, listed);
-                            (owed, work.watches.offer_armed(owed, client, &target, armed))
-                        };
-                        drop(unwanted);
-                        owed
-                    }
-                    Read::Drain(client, location, dir) => {
-                        let update = dir.drain(&mut scratch);
-                        self.work.lock().watches.deliver(client, &location, update)
-                    }
-                    Read::Artwork(job) => {
-                        // The shared decode, so deferring it cannot change
-                        // what a tile draws.
-                        let artwork =
-                            render_artwork(&mut reader, &mut rasteriser, &job.key, job.side);
-                        self.work.lock().artwork.deliver(&job, artwork).wake()
-                    }
-                    Read::Probe(batch) => {
-                        let answers = tairix_browse::vfs::probe_batch(
-                            batch,
-                            tairix_browse::vfs::probe_directory,
-                        );
-                        self.work.lock().probes.deliver(answers)
-                    }
-                    Read::Properties(window, job) => {
-                        let described = describe_node(&job);
-                        self.work.lock().properties.deliver(window, described)
-                    }
-                    Read::Drive(window, job) => {
-                        let read = read_drive(&job);
-                        self.work.lock().drives.deliver(window, read)
-                    }
-                    Read::Bundles => {
-                        let found = scan_bundles();
-                        self.work.lock().bundles.deliver(found)
-                    }
-                    Read::Places => {
-                        let found = places_source();
-                        self.work.lock().places.deliver(found)
-                    }
-                    Read::Network(ask) => {
-                        let answer = self.browse_network(ask);
-                        self.work.lock().network.deliver(answer)
-                    }
-                    // Carried out here, where every read of this app's runs,
-                    // so none of them holds the volume as it goes.
-                    Read::Locate(act) => {
-                        let bound = bindings_of(&act);
-                        self.work.lock().ejects.located(act, bound);
-                        true
-                    }
-                    Read::Settle(act) => {
-                        let done = tairix_browse::mount::carry_out(act);
-                        self.work.lock().ejects.landed(done);
-                        true
-                    }
-                };
+                if spare {
+                    self.start_reader(NO_SPARE_READER);
+                }
+                let owed = self.read(lane, job, &mut reader, &mut scratch);
+                self.work.lock().serving.end(lane);
+                last = Some(lane);
                 if owed {
                     self.wake.nudge();
                 }
             }
         }
 
-        /// The next unit of work, in [`READ_ORDER`].
-        fn next_read(work: &mut Work) -> Option<Read> {
-            READ_ORDER
-                .iter()
-                .find_map(|kind| Self::next_of(work, *kind))
+        /// Carry out `job`, taken on `lane`, and deliver what it found,
+        /// answering whether the loop is owed a wake: the reads themselves,
+        /// with no lock held, which are the calls that used to stall the
+        /// window.
+        fn read(
+            &self,
+            lane: Lane,
+            job: Read,
+            reader: &mut VfsArtworkReader,
+            scratch: &mut [u8],
+        ) -> bool {
+            match job {
+                Read::Open(job) => {
+                    let result = document::open_for(job.file_path.as_bytes(), job.edits);
+                    self.work
+                        .lock()
+                        .opens
+                        .deliver(DocumentOpened { job, result })
+                }
+                Read::Write(job) => {
+                    let answer = write_now(job.act);
+                    self.work.lock().writes.deliver(WriteDone {
+                        ticket: job.ticket,
+                        answer,
+                    })
+                }
+                Read::List(job) => {
+                    let (client, target) = (job.client(), job.target().to_vec());
+                    // A reload of the folder already watched reads through
+                    // that watch, so its pacing carries on.
+                    let reuse = self.work.lock().watches.relisting(client, &target);
+                    let (listed, armed) = WatchedDirectory::read(&target, reuse, unfollowed);
+                    let (owed, unwanted) = {
+                        let mut work = self.work.lock();
+                        let owed = work.listings.deliver(job, listed);
+                        (owed, work.watches.offer_armed(owed, client, &target, armed))
+                    };
+                    drop(unwanted);
+                    owed
+                }
+                Read::Drain(client, location, dir) => {
+                    let update = dir.drain(scratch);
+                    self.work.lock().watches.deliver(client, &location, update)
+                }
+                Read::Artwork(job) => {
+                    // The shared decode, so deferring it cannot change
+                    // what a tile draws.
+                    let mut rasteriser = self.rasteriser();
+                    let artwork = render_artwork(reader, &mut rasteriser, &job.key, job.side);
+                    self.put_back(rasteriser);
+                    let mut work = self.work.lock();
+                    // A decode recorded while every slot was taken woke no one.
+                    if work.decodes.ended() && work.artwork.has_work() {
+                        self.signal.notify_one();
+                    }
+                    let Work {
+                        artwork: desk,
+                        routes,
+                        ..
+                    } = &mut *work;
+                    desk.deliver_where(
+                        &job,
+                        artwork,
+                        |queued| routes.lane_of_artwork(&queued.key),
+                        &lane,
+                    )
+                    .wake()
+                }
+                Read::Probe(batch) => {
+                    let answers =
+                        tairix_browse::vfs::probe_batch(batch, tairix_browse::vfs::probe_directory);
+                    self.work.lock().probes.deliver(answers)
+                }
+                Read::Properties(window, job) => {
+                    let described = describe_node(&job);
+                    self.work.lock().properties.deliver(window, described)
+                }
+                Read::Drive(window, job) => {
+                    let read = read_drive(&job);
+                    self.work.lock().drives.deliver(window, read)
+                }
+                Read::Bundles => {
+                    let found = scan_bundles();
+                    self.work.lock().bundles.deliver(found)
+                }
+                Read::Places => {
+                    let (found, routes) = places_source();
+                    let owed = {
+                        let mut work = self.work.lock();
+                        work.routes = routes;
+                        work.artwork.reroute();
+                        work.places.deliver(found)
+                    };
+                    // Work held behind one lane may now fall on a free one.
+                    self.signal.notify_all();
+                    owed
+                }
+                Read::Network(ask) => {
+                    let answer = self.browse_network(ask);
+                    self.work.lock().network.deliver(answer)
+                }
+                Read::Locate(act) => {
+                    let bound = bindings_of(&act);
+                    self.work.lock().ejects.located(act, bound);
+                    true
+                }
+                // On its volume's lane, after the read under way there, so no
+                // read of this app's holds the volume as it goes.
+                Read::Settle(act) => {
+                    let done = tairix_browse::mount::carry_out(act);
+                    self.work.lock().ejects.landed(done);
+                    true
+                }
+            }
         }
 
-        /// The next unit of work of `kind`, if any waits.
-        fn next_of(work: &mut Work, kind: ReadKind) -> Option<Read> {
+        /// The next unit of work on a lane no reader serves, and its lane, in
+        /// the order [`first_in_order`] takes it, `last` being the lane this
+        /// reader has just served.
+        fn next_read(work: &mut Work, last: Option<Lane>) -> Option<(Lane, Read)> {
+            let last = last.filter(|lane| work.serving.is_free(*lane));
+            first_in_order(last, |kind, only| Self::next_of(work, kind, only))
+        }
+
+        /// The next unit of work of `kind` on a lane no reader serves — `only`,
+        /// where named — and its lane.
+        fn next_of(work: &mut Work, kind: ReadKind, only: Option<Lane>) -> Option<(Lane, Read)> {
+            let Work {
+                routes,
+                serving,
+                writes,
+                ejects,
+                opens,
+                listings,
+                network,
+                watches,
+                properties,
+                drives,
+                artwork,
+                decodes,
+                probes,
+                bundles,
+                places,
+                ..
+            } = work;
+            let open = |lane: Lane| serving.is_free(lane) && only.is_none_or(|only| only == lane);
+            let services = open(Lane::Services);
             match kind {
-                ReadKind::Write => work.writes.next_job().map(Read::Write),
-                ReadKind::Locate => work.ejects.next_locate().map(Read::Locate),
-                ReadKind::Settle => work.ejects.next_settle().map(Read::Settle),
-                ReadKind::Open => work.opens.next_job().map(Read::Open),
-                ReadKind::List => work.listings.next_job().map(Read::List),
-                ReadKind::Network => work.network.next_job().map(Read::Network),
-                ReadKind::Drain => work
-                    .watches
-                    .next_drain()
-                    .map(|(client, location, dir)| Read::Drain(client, location, dir)),
-                ReadKind::Properties => work
-                    .properties
-                    .next_job()
-                    .map(|(window, job)| Read::Properties(window, job)),
-                ReadKind::Drive => work
-                    .drives
-                    .next_job()
-                    .map(|(window, job)| Read::Drive(window, job)),
-                ReadKind::Artwork => work.artwork.next_job().map(Read::Artwork),
-                ReadKind::Probe => work.probes.next_batch().map(Read::Probe),
-                ReadKind::Thumbnail => work.artwork.next_thumbnail().map(Read::Artwork),
-                ReadKind::Bundles => work.bundles.next_job().map(|()| Read::Bundles),
-                ReadKind::Places => work.places.next_job().map(|()| Read::Places),
+                ReadKind::Write => writes
+                    .next_job_where(|job| open(job.act.lane(routes)))
+                    .map(|job| (job.act.lane(routes), Read::Write(job))),
+                ReadKind::Locate => services
+                    .then(|| ejects.next_locate())
+                    .flatten()
+                    .map(|act| (Lane::Services, Read::Locate(act))),
+                ReadKind::Settle => ejects
+                    .next_settle_where(|act| open(routes.lane_of_act(act)))
+                    .map(|act| (routes.lane_of_act(&act), Read::Settle(act))),
+                ReadKind::Open => opens
+                    .next_job_where(|job| open(routes.lane_of_path(&job.file_path)))
+                    .map(|job| (routes.lane_of_path(&job.file_path), Read::Open(job))),
+                ReadKind::List => listings
+                    .next_job_where(|target| open(routes.lane_of(target)))
+                    .map(|job| (routes.lane_of(job.target()), Read::List(job))),
+                ReadKind::Network => services
+                    .then(|| network.next_job())
+                    .flatten()
+                    .map(|ask| (Lane::Services, Read::Network(ask))),
+                ReadKind::Drain => watches
+                    .next_drain_where(|location| open(routes.lane_of(location)))
+                    .map(|(client, location, dir)| {
+                        (
+                            routes.lane_of(&location),
+                            Read::Drain(client, location, dir),
+                        )
+                    }),
+                ReadKind::Properties => properties
+                    .next_job_where(|job| open(routes.lane_of_path(&job.path)))
+                    .map(|(window, job)| {
+                        (
+                            routes.lane_of_path(&job.path),
+                            Read::Properties(window, job),
+                        )
+                    }),
+                ReadKind::Drive => services
+                    .then(|| drives.next_job())
+                    .flatten()
+                    .map(|(window, job)| (Lane::Services, Read::Drive(window, job))),
+                ReadKind::Artwork | ReadKind::Thumbnail if decodes.may_start() => {
+                    let route = |job: &ArtworkJob| routes.lane_of_artwork(&job.key);
+                    let mine = |lane: &Lane| open(*lane);
+                    let taken = if kind == ReadKind::Artwork {
+                        artwork.next_job_where(route, mine)
+                    } else {
+                        artwork.next_thumbnail_where(route, mine)
+                    };
+                    taken.map(|(lane, job)| {
+                        decodes.started();
+                        (lane, Read::Artwork(job))
+                    })
+                }
+                ReadKind::Artwork | ReadKind::Thumbnail => None,
+                ReadKind::Probe => probes
+                    .next_batch_by(|folder| {
+                        let lane = routes.lane_of(folder);
+                        open(lane).then_some(lane)
+                    })
+                    .map(|(lane, batch)| (lane, Read::Probe(batch))),
+                ReadKind::Bundles => services
+                    .then(|| bundles.next_job())
+                    .flatten()
+                    .map(|()| (Lane::Services, Read::Bundles)),
+                ReadKind::Places => services
+                    .then(|| places.next_job())
+                    .flatten()
+                    .map(|()| (Lane::Services, Read::Places)),
             }
         }
 
@@ -5091,10 +5337,11 @@ mod program {
             self.work.lock().watches.unwatch(client)
         }
 
-        /// Have the eject `act` carried out once the read under way, which
-        /// may hold its volume, has finished, by the reader, so no later read
-        /// overlaps it either; here, with no reader, since the loop reads
-        /// then. Its room was taken as it was located.
+        /// Have the eject `act` carried out by the reader of its volume's
+        /// lane, once the read under way there, which may hold the volume, has
+        /// finished, so no later read of it overlaps the eject either; here,
+        /// with no reader, since the loop reads then. Its room was taken as it
+        /// was located.
         fn settle(&self, act: MountAct) {
             let mut work = self.work.lock();
             if !work.alone {
@@ -5153,10 +5400,7 @@ mod program {
             client: FilesClient,
             roots: &[&[String]],
         ) -> [Option<alloc::sync::Arc<WatchedDirectory>>; 2] {
-            self.work
-                .lock()
-                .watches
-                .release_within(client, |at| roots.iter().any(|root| at.starts_with(root)))
+            self.work.lock().watches.release_within(client, roots)
         }
 
         /// The folders among `changes` in `dir` changed, so an answer about one
@@ -5170,8 +5414,9 @@ mod program {
         }
 
         /// Put `client`'s listing request to the desk through `record`, waking
-        /// the worker when it leaves the browser waiting; with no worker to,
-        /// read it on the loop.
+        /// a reader when it records a read whose lane is free; with no reader
+        /// to, read it on the loop. A read already queued or under way wakes
+        /// none, and a busy lane's own reader takes the next on it.
         fn ask(
             &self,
             client: FilesClient,
@@ -5183,13 +5428,17 @@ mod program {
                 if work.stopping {
                     None
                 } else {
-                    Some(record(&mut work))
+                    let before = work.listings.recorded();
+                    let listing = record(&mut work);
+                    let owed = work.listings.recorded() != before
+                        && work.serving.is_free(work.routes.lane_of(components));
+                    Some((listing, owed))
                 }
             };
-            let Some(listing) = deferred else {
+            let Some((listing, owed)) = deferred else {
                 return self.read_here(client, components);
             };
-            if matches!(listing, Ok(Listing::Pending)) {
+            if owed {
                 self.signal.notify_one();
             }
             listing
@@ -5222,12 +5471,12 @@ mod program {
         /// icon is `Pending`, the tile draws its built-in glyph, and the
         /// pixels are drawn a frame later.
         fn resolve_artwork(&self, key: &ArtworkKey, side: u32) -> Resolved {
-            let (answer, wanted) = {
+            let (answer, owed) = {
                 let mut work = self.work.lock();
-                let answer = work.artwork.collect(key, side);
-                (answer, work.artwork.has_work())
+                let (answer, recorded) = work.artwork.collect(key, side);
+                (answer, recorded && work.may_take_artwork(key))
             };
-            if wanted {
+            if owed {
                 self.signal.notify_one();
             }
             answer
@@ -5237,12 +5486,11 @@ mod program {
         /// what a draw site about to show an icon asks for, so the decode
         /// finishes before the frame that needs it.
         fn want_artwork(&self, key: &ArtworkKey, side: u32) {
-            let wanted = {
+            let owed = {
                 let mut work = self.work.lock();
-                work.artwork.want(key, side);
-                work.artwork.has_work()
+                work.artwork.want(key, side) && work.may_take_artwork(key)
             };
-            if wanted {
+            if owed {
                 self.signal.notify_one();
             }
         }
@@ -5469,7 +5717,9 @@ mod program {
                 let mut work = self.work.lock();
                 if work.stopping {
                     drop(work);
-                    return Some(places_source());
+                    let (found, routes) = places_source();
+                    self.work.lock().routes = routes;
+                    return Some(found);
                 }
                 work.places.submit(())
             };
@@ -5577,16 +5827,109 @@ mod program {
             rung
         }
 
-        /// Ask both workers to leave and wake them.
+        /// Ask every worker to leave and wake them.
         fn stop(&self) {
             let mut work = self.work.lock();
             work.halt();
             work.watches.stop();
             work.operations.stop();
+            work.readers.stop();
+            work.operators.stop();
             work.alone = false;
             drop(work);
             self.signal.notify_all();
             self.operation_signal.notify_all();
+        }
+
+        /// Wait until every operations worker has left, so a copy given up
+        /// has removed the file it was writing before the process ends.
+        fn wait_out_operations(&self) {
+            let mut work = self.work.lock();
+            while work.operators.alive() > 0 {
+                work = self.left.wait(work);
+            }
+        }
+
+        /// A decoder for one decode: one no reader is using, or a new one.
+        fn rasteriser(&self) -> SandboxRasteriser {
+            self.rasterisers
+                .lock()
+                .pop()
+                .unwrap_or_else(|| SandboxRasteriser::new(alloc::sync::Arc::clone(&self.store)))
+        }
+
+        /// Put back a decoder a decode is done with.
+        fn put_back(&self, rasteriser: SandboxRasteriser) {
+            self.rasterisers.lock().push(rasteriser);
+            self.trim_decoders();
+        }
+
+        /// End the idle decoders past what the readers alive could use at
+        /// once, their sandboxes with them: outside the lock, since ending one
+        /// waits for its child.
+        fn trim_decoders(&self) {
+            let keep = {
+                let work = self.work.lock();
+                work.readers.alive().min(work.decodes.most())
+            };
+            while let Some(surplus) = {
+                let mut idle = self.rasterisers.lock();
+                if idle.len() > keep {
+                    idle.pop()
+                } else {
+                    None
+                }
+            } {
+                drop(surplus);
+            }
+        }
+
+        /// Start a reader the crew has counted on its way: the first by the
+        /// loop, a spare by a reader that took work while none waited. A
+        /// refusal is stated once in a run of them, with `why`.
+        fn start_reader(self: &alloc::sync::Arc<Self>, why: &str) -> bool {
+            let served = alloc::sync::Arc::clone(self);
+            let started = tairix_rt::thread::Thread::spawn(move || {
+                served.work.lock().readers.arrived();
+                served.serve();
+            });
+            match started {
+                Ok(handle) => {
+                    handle.detach();
+                    true
+                }
+                Err(err) => {
+                    if self.work.lock().readers.refused() {
+                        report_error(&alloc::format!("no reader thread ({err:?}); {why}"));
+                    }
+                    false
+                }
+            }
+        }
+
+        /// Start an operations worker the crew has counted on its way, as
+        /// [`start_reader`](Self::start_reader) starts a reader. A refused
+        /// one is waited out no longer.
+        fn start_operator(self: &alloc::sync::Arc<Self>, why: &str) -> bool {
+            let served = alloc::sync::Arc::clone(self);
+            let started = tairix_rt::thread::Thread::spawn(move || {
+                served.work.lock().operators.arrived();
+                served.serve_operations();
+            });
+            match started {
+                Ok(handle) => {
+                    handle.detach();
+                    true
+                }
+                Err(err) => {
+                    let first = self.work.lock().operators.refused();
+                    self.left.notify_all();
+                    if first {
+                        report_error(&alloc::format!("no operations thread ({err:?}); {why}"));
+                    }
+                    false
+                }
+            }
         }
 
         /// No operations worker will answer: each operation is carried out
@@ -5606,57 +5949,55 @@ mod program {
             self.work.lock().operations.forget(id);
         }
 
-        /// The operations worker's whole life: park until an operation is
-        /// asked for, carry it out a unit at a time, and answer it by its own
-        /// id. A cancel is seen between units, never mid-unit.
-        fn serve_operations(&self) {
+        /// One operations worker's whole life: park until an operation may
+        /// start, carry it out a unit at a time, and answer it by its own id —
+        /// and leave once another worker already waits. A cancel is seen
+        /// between units, never mid-unit.
+        fn serve_operations(self: &alloc::sync::Arc<Self>) {
             loop {
-                let (_, mut job) = {
+                let (turn, job, spare) = {
                     let mut work = self.work.lock();
                     loop {
-                        if work.operations.stopping() {
-                            return;
+                        if let Some((turn, _, job)) = work.operations.next_job() {
+                            let spare = work.operators.took();
+                            break (turn, job, spare);
                         }
-                        if let Some(next) = work.operations.next_job() {
-                            break next;
+                        match work.operators.rest() {
+                            Rest::Leave => {
+                                drop(work);
+                                self.left.notify_all();
+                                return;
+                            }
+                            Rest::Wait => {
+                                work = self.operation_signal.wait(work);
+                                work.operators.woke();
+                            }
                         }
-                        work = self.operation_signal.wait(work);
                     }
                 };
-                let ending = loop {
-                    let step = job.step();
-                    let (owed, cancelled) = {
+                if spare {
+                    self.start_operator(NO_SPARE_OPERATOR);
+                }
+                carry(
+                    job,
+                    |job| {
                         let mut work = self.work.lock();
                         let released = job.sync_hold(&mut work.artwork);
                         (
-                            work.operations.report(job.reading(), &job.current) | released,
-                            work.operations.cancelled(),
+                            work.operations.report(turn, job.reading(), &job.current) | released,
+                            work.operations.cancelled(turn),
                         )
-                    };
-                    if owed {
-                        self.wake.nudge();
-                    }
-                    match step {
-                        Step::Working if cancelled => {
-                            job.abandon();
-                            break Ending::Cancelled;
-                        }
-                        Step::Working => {}
-                        Step::Done => break Ending::Completed,
-                        Step::Stopped(reason) => break Ending::Stopped(reason),
-                    }
-                };
-                // Its files close before its answer lands.
-                let owed = {
-                    let mut work = self.work.lock();
-                    let released = job.release_hold(&mut work.artwork);
-                    let omissions = job.omissions();
-                    drop(job);
-                    work.operations.finish(ending, omissions) | released
-                };
-                if owed {
-                    self.wake.nudge();
-                }
+                    },
+                    |ending, (held, omissions)| {
+                        let mut work = self.work.lock();
+                        let released = held.is_some_and(|tree| work.artwork.release_under(&tree));
+                        work.operations.finish(turn, ending, omissions) | released
+                    },
+                    || self.wake.nudge(),
+                );
+                // Its volumes are free: one that waited for them may start
+                // beside the operation this worker takes next.
+                self.operation_signal.notify_one();
             }
         }
 
@@ -5672,6 +6013,13 @@ mod program {
     }
 
     impl Work {
+        /// Whether a waiting reader is owed a wake for a decode of `key` just
+        /// recorded: no reader serves its lane, so none would come to it, and
+        /// one more decode may start.
+        fn may_take_artwork(&self, key: &ArtworkKey) -> bool {
+            self.decodes.may_start() && self.serving.is_free(self.routes.lane_of_artwork(key))
+        }
+
         /// Stop recording work on every desk but the watches, so what is asked
         /// is done where it is asked.
         fn halt(&mut self) {
@@ -5698,63 +6046,33 @@ mod program {
         Ok(())
     }
 
-    /// Stops the workers on every way out, so neither is left on a disk for
+    /// Stops the workers on every way out, so none is left on a disk for
     /// windows that have gone.
     ///
-    /// The reader is *detached* rather than joined: one mid-read of a slow disk
-    /// would otherwise hold the teardown for as long as that disk takes, and it
-    /// leaves at its next turn round its loop anyway. The operations worker is
-    /// joined: it stops at its next unit, a bounded one, and only once it has
-    /// does a copy it gave up remove the file it was writing.
+    /// The readers are *detached* rather than waited for: one mid-read of a
+    /// slow disk would otherwise hold the teardown for as long as that disk
+    /// takes, and each leaves at its next turn round its loop anyway. The
+    /// operations workers are waited out: each stops at its next unit, a
+    /// bounded one, and only once it has does a copy it gave up remove the
+    /// file it was writing.
     struct ReadsGuard {
         reads: alloc::sync::Arc<Reads>,
-        operations: Option<tairix_rt::thread::JoinHandle<()>>,
     }
 
     impl Drop for ReadsGuard {
         fn drop(&mut self) {
             self.reads.stop();
-            if let Some(worker) = self.operations.take() {
-                let _ = worker.join();
-            }
+            self.reads.wait_out_operations();
         }
     }
 
-    /// Start the operations worker, stating a refusal once.
-    ///
-    /// Without it an operation runs on the event loop to its end: slower, and
-    /// not cancellable, but never wrong.
-    fn spawn_operations(
-        reads: &alloc::sync::Arc<Reads>,
-    ) -> Option<tairix_rt::thread::JoinHandle<()>> {
-        let served = alloc::sync::Arc::clone(reads);
-        match tairix_rt::thread::Thread::spawn(move || served.serve_operations()) {
-            Ok(handle) => Some(handle),
-            Err(err) => {
-                report_error(&alloc::format!(
-                    "no operations thread ({err:?}); copies and deletes run on the event loop"
-                ));
-                None
-            }
-        }
-    }
+    /// Why a reader that took work while none waited may leave other volumes'
+    /// work waiting.
+    const NO_SPARE_READER: &str = "a volume's reads may wait for a reader held up on another";
 
-    /// Start the reader, stating a refusal once.
-    ///
-    /// A kernel that will not grant the thread is not a failure: the reads move
-    /// back onto the event loop, which is exactly where they used to be.
-    fn spawn_reader(reads: &alloc::sync::Arc<Reads>) -> Option<tairix_rt::thread::JoinHandle<()>> {
-        let served = alloc::sync::Arc::clone(reads);
-        match tairix_rt::thread::Thread::spawn(move || served.serve()) {
-            Ok(handle) => Some(handle),
-            Err(err) => {
-                report_error(&alloc::format!(
-                    "no reader thread ({err:?}); directory listings happen on the event loop"
-                ));
-                None
-            }
-        }
-    }
+    /// Why an operations worker that took an operation while none waited may
+    /// leave other volumes' operations waiting.
+    const NO_SPARE_OPERATOR: &str = "an operation may wait for a worker held up on another volume";
 
     /// The paint's artwork seam: whatever the reader has already decoded, and
     /// otherwise a recorded decode and the built-in glyph for this frame.
@@ -6022,7 +6340,7 @@ mod program {
         } else {
             alloc::boxed::Box::new(InlineArtwork::new(
                 VfsArtworkReader,
-                SandboxRasteriser::new(),
+                SandboxRasteriser::new(alloc::sync::Arc::clone(&reads.store)),
             ))
         };
         IconPipeline::new(cache, resolver)
@@ -6206,32 +6524,21 @@ mod program {
         editor: TextField,
     }
 
-    /// The open delete-confirmation dialog and the plan it would carry out.
-    ///
-    /// `None` unless the user pressed `Delete` on a selection: the question
-    /// put to them, and what answering yes removes. The plan is captured when
-    /// the question is asked, so a listing change while it is up cannot move
-    /// what the confirmed delete targets.
-    struct DeleteConfirm {
-        /// The question, until it is up, and then the alert asking it.
-        ask: Ask,
-        /// What the confirmed delete would remove, captured at open time.
-        plan: DeletePlan,
-        /// The recoverable move-to-Trash plan when the removal can be carried
-        /// out as same-volume renames into the user's Trash
-        /// (`plans/NEW-FILEMANAGER.md` `FM10`): the per-target
-        /// source→destination renames, captured at open time so the dialog's
-        /// "Move to Trash" wording and the confirmed action stay in step.
-        /// `None` when Trash is unavailable or cross-volume, in which case the
-        /// removal is the irreversible unlink and the dialog says so.
-        trash_moves: Option<TrashMoves>,
-    }
-
-    /// A question a window asks: what it says until it is up, and then the
-    /// alert asking it.
-    enum Ask {
-        Waiting(Box<AlertSpec>),
-        Up(u64),
+    /// What a window's question carries out once answered yes, captured
+    /// when it is asked, so a listing change while it is up cannot move what
+    /// it acts on.
+    enum Confirms {
+        /// Remove `plan`: as the same-volume renames into the user's Trash
+        /// `trash_moves` holds (`plans/NEW-FILEMANAGER.md` `FM10`), the
+        /// question's "Move to Trash" wording in step with them, or for good
+        /// where there are none, the question saying so.
+        Delete {
+            plan: DeletePlan,
+            trash_moves: Option<TrashMoves>,
+        },
+        /// Eject a volume that went away with what was written to it unsaved,
+        /// letting that go.
+        EjectLost(MountAct),
     }
 
     /// A long file operation a window asked for (`plans/NEW-FILEMANAGER.md`
@@ -6385,7 +6692,7 @@ mod program {
         /// A copy writes a bundle's manifest and icon after the bundle itself
         /// appears, so a decode run meanwhile would picture, or refuse, the
         /// half-written bundle — and that answer would stand.
-        fn sync_hold(&mut self, desk: &mut ArtworkDesk) -> bool {
+        fn sync_hold(&mut self, desk: &mut ArtworkDesk<Lane>) -> bool {
             let writing = match &self.walk {
                 Walk::Paste(paste) => paste.writing.as_deref(),
                 Walk::Delete(_) | Walk::Trash(_) => None,
@@ -6406,10 +6713,42 @@ mod program {
 
         /// The job has ended: release whatever it still held, answering
         /// whether that named anything for the windows to repaint.
-        fn release_hold(&mut self, desk: &mut ArtworkDesk) -> bool {
+        fn release_hold(&mut self, desk: &mut ArtworkDesk<Lane>) -> bool {
             self.held
                 .take()
                 .is_some_and(|tree| desk.release_under(&tree))
+        }
+
+        /// The lanes of the volumes the job touches: its sources' and, where
+        /// it lands anything, its destination's.
+        fn lanes(&self, routes: &Routes) -> alloc::vec::Vec<Lane> {
+            let mut lanes = alloc::vec::Vec::new();
+            let mut touch = |place: &[String]| {
+                let lane = routes.lane_of(place);
+                if !lanes.contains(&lane) {
+                    lanes.push(lane);
+                }
+            };
+            match &self.walk {
+                Walk::Delete(removal) => {
+                    for target in removal.plan.targets() {
+                        touch(target.path());
+                    }
+                }
+                Walk::Paste(paste) => {
+                    touch(&paste.dest);
+                    for item in &paste.items {
+                        touch(item.source());
+                    }
+                }
+                Walk::Trash(run) => {
+                    for (source, landing) in &run.moves {
+                        touch(&source.path);
+                        touch(landing);
+                    }
+                }
+            }
+            lanes
         }
     }
 
@@ -6703,7 +7042,7 @@ mod program {
 
     /// The transient overlay state layered over the browser view, threaded
     /// through the event loop so the painted overlays and the state they
-    /// reflect stay in step. At most one of `rename`/`delete` is open at a
+    /// reflect stay in step. At most one of `rename`/`question` is open at a
     /// time. Properties is not among them: it is a window of its own, so
     /// several nodes can be inspected at once and the listing stays usable
     /// while they are.
@@ -6713,8 +7052,9 @@ mod program {
         /// The entry New ▸ made and the directory it made it in, whose rename
         /// opens once a listing there shows it.
         rename_on_arrival: Option<(Vec<String>, String)>,
-        /// The delete-confirmation dialog, when open (`Delete`).
-        delete: Option<DeleteConfirm>,
+        /// The window's one question, when it asks one: a removal, or the
+        /// eject of a lost volume.
+        question: Question<Confirms>,
         /// The "Open With…" application chooser, when open (chosen from the
         /// context menu on a regular file).
         ///
@@ -7676,16 +8016,33 @@ mod program {
         bound
     }
 
-    /// Everything the places rail is built from, read from the live system:
-    /// the logged-in user's home and whatever is mounted right now.
+    /// Everything the places rail is built from, read from the live system —
+    /// the logged-in user's home and whatever is mounted right now — and the
+    /// routes the namespace's bindings give the readers' lanes.
     ///
     /// The one place the rail's inputs are gathered, so the first build and
     /// every later refresh read exactly the same sources.
-    fn places_source() -> PlacesFound {
-        PlacesFound {
+    fn places_source() -> (PlacesFound, Routes) {
+        let found = PlacesFound {
             home: home_components().unwrap_or_default(),
             volumes: mounted_volumes(),
+        };
+        (found, Routes::new(view_bindings()))
+    }
+
+    /// The namespace's bindings, read from the live view list. A refused or
+    /// failed query yields none, so every place shares one lane rather than
+    /// one guessed from part of the list.
+    fn view_bindings() -> alloc::vec::Vec<ViewBindingRecord> {
+        let mut views = alloc::vec::Vec::new();
+        let read = tairix_procinfo::for_each_view(&IpcTransport, |view| {
+            views.push(*view);
+            Ok(WalkStep::Continue)
+        });
+        if read.is_err() {
+            views.clear();
         }
+        views
     }
 
     /// What the places rail is built from.
@@ -8077,29 +8434,42 @@ mod program {
                 ));
                 overlays.notices.refuse(
                     NoticeSource::Open,
-                    &notice::not_opened(endpoint.name()),
+                    &refusal_headline(endpoint.name(), "opened"),
                     netbrowse::MOUNT_UNAVAILABLE,
                 );
                 false
             }
-            // Nothing was chosen, so nothing was refused.
-            Err(tairix_browse::BrowseError::NoSuchEntry) => false,
             Err(err) => {
-                let name = browser
-                    .chosen_name()
-                    .or_else(|| browser.chosen_network_item().map(NetworkItem::label))
-                    .unwrap_or_default();
-                let reason = command::listing_refusal(err);
-                report_error(&alloc::format!(
-                    "{} could not be opened: {reason}",
-                    tairix_util::utf8::shown(name)
-                ));
-                overlays
-                    .notices
-                    .refuse(NoticeSource::Open, &notice::not_opened(name), reason);
+                refuse_activation(
+                    browser,
+                    &mut overlays.notices,
+                    (NoticeSource::Open, "opened"),
+                    err,
+                );
                 false
             }
         }
+    }
+
+    /// State that the chosen entry could not be `undone` — opened, mounted —
+    /// as `err` says, with `source`'s notices. Nothing chosen refuses nothing.
+    fn refuse_activation<S: DirectorySource>(
+        browser: &Browser<S>,
+        notices: &mut Notices,
+        (source, undone): (NoticeSource, &str),
+        err: tairix_browse::BrowseError,
+    ) {
+        if err == tairix_browse::BrowseError::NoSuchEntry {
+            return;
+        }
+        let name = browser
+            .chosen_name()
+            .or_else(|| browser.chosen_network_item().map(NetworkItem::label))
+            .unwrap_or_default();
+        let headline = refusal_headline(name, undone);
+        let reason = command::listing_refusal(err);
+        report_error(&alloc::format!("{headline}: {reason}"));
+        notices.refuse(source, &headline, reason);
     }
 
     /// Ask whether the selection's removal can be a recoverable move to Trash
@@ -8147,13 +8517,44 @@ mod program {
             DeleteDisposition::Permanent
         };
         let Some(question) = delete_alert(&plan, disposition) else {
+            overlays
+                .notices
+                .refuse(NoticeSource::Write, NOT_DELETED, UNASKABLE);
             return;
         };
-        overlays.delete = Some(DeleteConfirm {
-            ask: Ask::Waiting(Box::new(question)),
-            plan,
-            trash_moves,
-        });
+        let asked = overlays.question.ask(
+            question,
+            DELETE_CONFIRM_INDEX,
+            Confirms::Delete { plan, trash_moves },
+        );
+        if asked.is_err() {
+            overlays
+                .notices
+                .refuse(NoticeSource::Write, NOT_DELETED, ANSWERING_ANOTHER);
+        }
+    }
+
+    /// Eject as `act` asks: one letting a lost volume's unsaved writes go is
+    /// asked first, as the window's question, and one refused unasked says
+    /// why.
+    fn request_eject(act: MountAct, overlays: &mut Overlays, launcher: &mut Launcher) {
+        let MountAct::Eject {
+            lost: true, name, ..
+        } = &act
+        else {
+            launcher.mount(act);
+            return;
+        };
+        let Some(question) = lost_eject_question(name) else {
+            launcher.refuse(&act, UNASKABLE);
+            return;
+        };
+        let asked = overlays
+            .question
+            .ask(question, LOST_EJECT_INDEX, Confirms::EjectLost(act));
+        if let Err(Confirms::EjectLost(act)) = asked {
+            launcher.refuse(&act, ANSWERING_ANOTHER);
+        }
     }
 
     /// Resolve, for a confirmed removal of `plan`, whether it can be carried
@@ -8255,9 +8656,9 @@ mod program {
     }
 
     /// Put up every question and notice a window is waiting to ask, one alert
-    /// a window at a time, the delete question first because the user has
-    /// just asked for it. One the desktop refuses is stated on `stderr`
-    /// instead, and a delete it would not ask about is not carried out.
+    /// a window at a time, the question first because the user has just asked
+    /// for it. One the desktop refuses is stated on `stderr` instead, and what
+    /// it would not ask about is not carried out.
     fn raise_alerts(
         windows: &mut [OpenWindow],
         client: &mut WindowClient<app::RtWindowTransport>,
@@ -8272,30 +8673,28 @@ mod program {
             match &mut win.kind {
                 WindowKind::Browser(state) => {
                     let overlays = &mut state.overlays;
-                    let question = overlays
-                        .delete
-                        .as_ref()
-                        .map(|confirm| matches!(confirm.ask, Ask::Up(_)));
-                    match next_alert(question, overlays.notices.is_up()) {
+                    match next_alert(overlays.question.is_up(), overlays.notices.is_up()) {
                         NextAlert::Question => {
-                            let Some(confirm) = overlays.delete.as_mut() else {
-                                continue;
-                            };
-                            let Ask::Waiting(asked) = &confirm.ask else {
+                            let Some(asked) = overlays.question.waiting() else {
                                 continue;
                             };
                             match client.open_alert(endpoint, Some(window_id), asked) {
-                                Ok(alert) => confirm.ask = Ask::Up(alert),
+                                Ok(alert) => overlays.question.raised(alert),
                                 Err(Errno::LimitExceeded) => {
                                     *full = true;
                                     return;
                                 }
                                 Err(err) => {
+                                    let (kind, undone) = match overlays.question.withdraw() {
+                                        Some(Confirms::EjectLost(_)) => ("eject", "ejected"),
+                                        Some(Confirms::Delete { .. }) | None => {
+                                            ("delete", "removed")
+                                        }
+                                    };
                                     report_error(&alloc::format!(
-                                        "the delete question could not be asked ({err}); \
-                                         nothing was removed"
+                                        "the {kind} question could not be asked ({err}); \
+                                         nothing was {undone}"
                                     ));
-                                    overlays.delete = None;
                                 }
                             }
                         }
@@ -8339,53 +8738,45 @@ mod program {
         }
     }
 
-    /// The answer to alert `alert_id`, given to whichever window asked it.
-    fn answer_alert(windows: &mut [OpenWindow], alert_id: u64, outcome: AlertOutcome) {
+    /// The answer to alert `alert_id`, given to whichever window asked it: a
+    /// removal confirmed begins, and an eject confirmed is handed back for the
+    /// launcher to carry out.
+    fn answer_alert(
+        windows: &mut [OpenWindow],
+        alert_id: u64,
+        outcome: AlertOutcome,
+    ) -> Option<MountAct> {
         for win in windows {
-            let removal = match &mut win.kind {
+            let answered = match &mut win.kind {
                 WindowKind::Browser(state) => {
                     let overlays = &mut state.overlays;
                     if overlays.notices.answered(alert_id) {
-                        return;
+                        return None;
                     }
-                    let asked = overlays.delete.as_ref().is_some_and(
-                        |confirm| matches!(confirm.ask, Ask::Up(up) if up == alert_id),
-                    );
-                    if asked {
-                        answer_delete(overlays, outcome);
+                    match overlays.question.answer(alert_id, outcome) {
+                        Answer::Other => None,
+                        Answer::Declined => Some(None),
+                        Answer::Confirmed(Confirms::Delete { plan, trash_moves }) => {
+                            start_removal(overlays, &plan, trash_moves);
+                            Some(None)
+                        }
+                        Answer::Confirmed(Confirms::EjectLost(act)) => Some(Some(act)),
                     }
-                    asked
                 }
                 WindowKind::Properties(props) => {
                     if props.notices.answered(alert_id) {
-                        return;
+                        return None;
                     }
-                    false
+                    None
                 }
-                WindowKind::Progress(_) | WindowKind::Settings(_) => false,
+                WindowKind::Progress(_) | WindowKind::Settings(_) => None,
             };
-            if removal {
+            if let Some(eject) = answered {
                 win.owed.owe_whole();
-                return;
+                return eject;
             }
         }
-    }
-
-    /// The delete question's answer: the removal begins when the user chose
-    /// it, and nothing changes otherwise. The plan was captured when the
-    /// question was asked, so a listing change while it was up cannot move
-    /// what the removal targets, and the Trash moves match its wording.
-    fn answer_delete(overlays: &mut Overlays, outcome: AlertOutcome) {
-        let Some(confirm) = overlays.delete.take() else {
-            return;
-        };
-        let chosen = matches!(
-            outcome,
-            AlertOutcome::Chosen { index } if usize::from(index) == DELETE_CONFIRM_INDEX
-        );
-        if chosen {
-            start_removal(overlays, &confirm.plan, confirm.trash_moves);
-        }
+        None
     }
 
     /// Start removing `plan`: as moves to the Trash where `trash_moves` carry
@@ -8423,8 +8814,11 @@ mod program {
         }
     }
 
-    /// What one unit of an operation came to.
-    impl Job {
+    impl Carried for Job {
+        /// The tree it still holds off the artwork desk, and the extended
+        /// attributes its copies could not keep.
+        type Remains = (Option<String>, Omissions);
+
         /// Carry out one bounded unit: one listing or one look at an item
         /// while counting, then one removal, one rename, one directory made,
         /// or one copy chunk. Every unit is the user's own permission-checked
@@ -8465,6 +8859,12 @@ mod program {
             }
         }
 
+        fn remains(&mut self) -> Self::Remains {
+            (self.held.take(), self.omissions())
+        }
+    }
+
+    impl Job {
         /// The extended attributes its copies could not keep.
         fn omissions(&self) -> Omissions {
             match &self.walk {
@@ -9635,8 +10035,8 @@ mod program {
                 false,
             ),
             ContextCommand::OpenWith => begin_open_with(browser, overlays, acts, canvas),
-            ContextCommand::MountReadOnly => (mount_selected(browser, acts), false),
-            ContextCommand::Eject => (eject_selected(browser, acts), false),
+            ContextCommand::MountReadOnly => (mount_selected(browser, overlays, acts), false),
+            ContextCommand::Eject => (eject_selected(browser, overlays, acts), false),
             ContextCommand::Rename => begin_rename(
                 browser,
                 &mut overlays.rename,
@@ -9740,7 +10140,7 @@ mod program {
             Some(ContextChoice::Command(ContextCommand::Eject)) => {
                 let mut launcher = acts.launcher.borrow_mut();
                 if let Some(eject) = MountAct::eject_row(&places.rows()[index], launcher.viewer) {
-                    launcher.mount(eject);
+                    request_eject(eject, overlays, &mut launcher);
                 }
                 (Repaint::Nothing, false)
             }
@@ -9750,42 +10150,35 @@ mod program {
 
     /// Mount the selected disk image read-only, as the menu offered it: the
     /// engine names the image, so the path mounted is the one the window shows.
-    fn mount_selected<S: DirectorySource>(browser: &mut Browser<S>, acts: &mut Acts<'_>) -> bool {
-        let offered = ContextMenuModel::for_browser(browser, false);
-        if !offered.is_enabled(ContextCommand::MountReadOnly) {
-            return false;
-        }
-        if let Ok(Activation::MountImage { path }) = browser.activate_selected(BundleIntent::Launch)
-        {
-            acts.launcher.borrow_mut().mount(MountAct::Attach {
-                path,
-                read_only: true,
-            });
+    fn mount_selected<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        acts: &mut Acts<'_>,
+    ) -> bool {
+        match MountAct::read_only_of(browser) {
+            Ok(Some(act)) => acts.launcher.borrow_mut().mount(act),
+            Ok(None) => {}
+            Err(err) => refuse_activation(
+                browser,
+                &mut overlays.notices,
+                (NoticeSource::Mount, "mounted"),
+                err,
+            ),
         }
         false
     }
 
     /// Eject the selected volume, as the menu offered it: one attached for the
     /// user this file manager runs as.
-    fn eject_selected<S: DirectorySource>(browser: &Browser<S>, acts: &mut Acts<'_>) -> bool {
+    fn eject_selected<S: DirectorySource>(
+        browser: &Browser<S>,
+        overlays: &mut Overlays,
+        acts: &mut Acts<'_>,
+    ) -> bool {
         let mut launcher = acts.launcher.borrow_mut();
-        let Some(viewer) = launcher.viewer else {
-            return false;
-        };
-        let offered = ContextMenuModel::for_browser(browser, false).viewed_by(viewer);
-        if !offered.is_enabled(ContextCommand::Eject) {
-            return false;
+        if let Some(eject) = MountAct::eject_chosen(browser, launcher.viewer) {
+            request_eject(eject, overlays, &mut launcher);
         }
-        let Some((entry, facts)) = browser
-            .chosen_entry()
-            .and_then(|entry| entry.volume().map(|facts| (entry, facts)))
-        else {
-            return false;
-        };
-        launcher.mount(MountAct::Eject {
-            volume_id: facts.volume_id,
-            name: String::from(entry.name()),
-        });
         false
     }
 
@@ -11636,7 +12029,7 @@ mod program {
         Overlays {
             rename: RenameEdit::default(),
             rename_on_arrival: None,
-            delete: None,
+            question: Question::default(),
             open_with: None,
             starting: None,
             notices: Notices::default(),
@@ -11969,11 +12362,12 @@ mod program {
         // runs on the fail-closed unknown state before the first draw.
         let _cache_report = tairix_rt::cachereport::ReportGuard;
 
-        // --- The reader: every directory listing, folder cue, and program-store
-        // walk this app makes, run on a worker so a slow or contended disk
-        // cannot stall the window. A pipe the kernel refuses, or a thread it
-        // will not grant, leaves those reads on this task — where they used to
-        // be, and stated once.
+        // --- The readers: every directory listing, folder cue, and
+        // program-store walk this app makes, run on workers, one to a volume
+        // at a time, so a slow or contended disk stalls neither the window nor
+        // another volume's reads. A pipe the kernel refuses, or a first thread
+        // it will not grant, leaves those reads on this task — where they used
+        // to be, and stated once.
         // The network view's doorbell, bound once: a refusal is stated when
         // the network is asked for, and every folder still lists.
         let doorbell = network_doorbell(set);
@@ -11982,27 +12376,27 @@ mod program {
             set,
             doorbell.as_ref().map(PrivatePort::id).map_err(|err| *err),
         ));
-        let reader = if reads.wake.is_armed() {
-            spawn_reader(&reads)
+        let reading = if reads.wake.is_armed() {
+            reads.work.lock().readers.start();
+            reads.start_reader("directory listings happen on the event loop")
         } else {
             report_error("no reader wake pipe; directory listings happen on the event loop");
-            None
+            false
         };
-        if reader.is_none() {
+        if !reading {
             reads.alone();
         }
         // Answers wake the loop over the reader's pipe, so a refused pipe
         // leaves operations on the loop too.
-        let operations = if reads.wake.is_armed() {
-            spawn_operations(&reads)
-        } else {
-            None
+        let operating = reads.wake.is_armed() && {
+            reads.work.lock().operators.start();
+            reads.start_operator("copies and deletes run on the event loop")
         };
-        if operations.is_none() {
+        if !operating {
             reads.operations_alone();
         }
         // A mount waits for its volume's driver, so it has a worker of its
-        // own, detached at teardown as the reader is. With no memory for one,
+        // own, detached at teardown as the readers are. With no memory for one,
         // every mount is refused, saying so, and the rest of the app runs on.
         let mounts = tairix_browse::mount::mount_worker()
             .ok()
@@ -12012,11 +12406,10 @@ mod program {
             None => report_error("no memory for the mount worker; disk images are not mounted"),
         }
         let _mounts_guard = mounts.as_ref().map(tairix_rt::work::WorkerGuard::new);
-        // Declared after the reader's handle, so it runs first: the desks stop,
-        // the operations worker is joined, then the reader detaches.
+        // The desks stop and the operations workers are waited out on every
+        // way out; the readers leave on their own.
         let _reads_guard = ReadsGuard {
             reads: alloc::sync::Arc::clone(&reads),
-            operations,
         };
         if let Err(err) = app::watch_wake(set, &reads.wake, READS_TOKEN) {
             return app::fail(
@@ -12040,14 +12433,18 @@ mod program {
             return app::fail(APP_NAME, app::EXIT_NO_EVENTS, "mount-change wake refused");
         }
 
-        // The machine's memory bounds what decoded artwork may be kept: one
-        // query at bring-up, and a machine that cannot answer keeps a
-        // screenful.
+        // The machine's memory bounds what decoded artwork may be kept and
+        // how many decodes run at once: one query at bring-up, and a machine
+        // that cannot answer keeps a screenful and decodes one at a time.
         let memory_bytes = tairix_procinfo::memory_total_for_budget(&IpcTransport);
+        reads.work.lock().decodes.admit(
+            tairix_sandbox::WorkerMemory::Artwork
+                .pooled(u64::try_from(memory_bytes).unwrap_or(u64::MAX)),
+        );
         let icons = RefCell::new(open_icons(
             (screen_bytes(&desktop), memory_bytes),
             &reads,
-            reader.is_some(),
+            reading,
         ));
 
         // --- The windows, each opened once its first listing lands. An
@@ -12289,9 +12686,10 @@ mod program {
                 });
             }
             // An eject lets go of what this app holds on its volume first, its
-            // windows there going to the catalog once the reader has said where
-            // the volume is bound, and is carried out by the reader once the
-            // read under way, which may hold the volume too, has finished.
+            // windows there going to the catalog once a reader has said where
+            // the volume is bound, and is carried out by the reader of its
+            // volume once the read under way there, which may hold the volume
+            // too, has finished.
             let ejects = core::mem::take(&mut launcher.borrow_mut().ejecting);
             for eject in ejects {
                 if let Err(eject) = reads.locate(eject) {

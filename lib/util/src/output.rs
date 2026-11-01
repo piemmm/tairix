@@ -6,7 +6,22 @@
 //! `lib/rt` implements it for the standard streams, so a `Run` binary hands
 //! its engine `&Stdout` and `&Stderr` themselves.
 
+use alloc::vec::Vec;
+
+use tairix_abi::stdinfo::StdInfoRecord;
 use tairix_abi::Errno;
+
+/// `record` as the one JSONL line [`Output::info`] takes, in a buffer the
+/// record's own length sizes, or empty where the heap refuses it: fd 3 is
+/// advisory, never worth a partial line.
+#[must_use]
+pub fn framed(record: &StdInfoRecord<'_>) -> Vec<u8> {
+    let mut line = crate::fallible::filled(record.jsonl_len(), 0u8).unwrap_or_default();
+    if record.write_jsonl(&mut line).is_err() {
+        line.clear();
+    }
+    line
+}
 
 /// A byte stream an engine writes through.
 pub trait Output {
@@ -149,6 +164,25 @@ mod tests {
             self.0.borrow_mut().extend_from_slice(bytes);
             Ok(())
         }
+    }
+
+    /// A record is framed whole however long its fields, escapes included:
+    /// a path past any fixed line still reaches fd 3.
+    #[test]
+    fn a_record_is_framed_whole_at_its_own_length() {
+        use tairix_abi::stdinfo::{Human, Severity, StdInfoKind};
+        let long = "deep/\"quoted\"\tpath/".repeat(40);
+        let record = StdInfoRecord::new(
+            "fstree",
+            StdInfoKind::Omission,
+            "fs.hidden_entries_omitted",
+            Severity::Info,
+            Human::message(&long),
+        );
+        let line = framed(&record);
+        assert!(line.len() > 1024, "{}", line.len());
+        assert_eq!(line.len(), record.jsonl_len());
+        assert_eq!(line.last(), Some(&b'\n'));
     }
 
     #[test]

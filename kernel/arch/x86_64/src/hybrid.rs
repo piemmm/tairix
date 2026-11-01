@@ -44,19 +44,6 @@ const LEAF_HYBRID_INFO: u32 = 0x1A;
 /// bits 31:24 of leaf 0x1A `EAX` (Intel SDM Vol. 2A, "CPUID — Leaf 1AH").
 const CORE_TYPE_ATOM: u32 = 0x20;
 
-/// CPUID leaf 0 register values for the AMD vendor string `"AuthenticAMD"`.
-///
-/// Leaf 0 returns the 12-byte vendor string in `EBX`, `EDX`, `ECX` (in
-/// that order), each four ASCII bytes packed little-endian.
-const AMD_VENDOR_EBX: u32 = u32::from_le_bytes(*b"Auth");
-const AMD_VENDOR_EDX: u32 = u32::from_le_bytes(*b"enti");
-const AMD_VENDOR_ECX: u32 = u32::from_le_bytes(*b"cAMD");
-
-/// CPUID leaf bounding the maximum supported *extended* leaf, returned in
-/// `EAX`. The AMD topology leaf is probed only when it is within bounds.
-#[cfg_attr(not(all(target_arch = "x86_64", target_os = "none")), allow(dead_code))]
-const LEAF_EXT_MAX: u32 = 0x8000_0000;
-
 /// AMD Extended CPU Topology leaf (AMD64 APM Vol. 2). Sub-leaves
 /// enumerate the topology hierarchy; the per-core fields are valid only
 /// at the Core level.
@@ -106,15 +93,6 @@ pub const fn classify_core_type(leaf_1a_eax: u32) -> CoreClass {
     }
 }
 
-/// Returns `true` when the CPUID leaf 0 vendor registers spell
-/// `"AuthenticAMD"`.
-///
-/// `ebx`, `edx`, `ecx` are the leaf-0 registers in vendor-string order.
-#[must_use]
-pub const fn is_amd_vendor(ebx: u32, edx: u32, ecx: u32) -> bool {
-    ebx == AMD_VENDOR_EBX && edx == AMD_VENDOR_EDX && ecx == AMD_VENDOR_ECX
-}
-
 /// Decode the [`CoreClass`] from a Core-level sub-leaf of AMD CPUID leaf
 /// 0x80000026.
 ///
@@ -152,9 +130,9 @@ pub const fn classify_amd_core(flags_eax: u32, ranking_ebx: u32, level_ecx: u32)
 
 /// Returns the [`CoreClass`] of the CPU this function executes on.
 ///
-/// On the bare-metal target it reads the CPUID vendor string from leaf 0
-/// and dispatches to the matching vendor probe (AMD leaf 0x80000026,
-/// otherwise the Intel leaf 0x1A path). A part that does not advertise a
+/// On the bare-metal target it dispatches on the vendor
+/// ([`crate::cpuid::Vendor`]) to its probe (AMD leaf 0x80000026, otherwise
+/// the Intel leaf 0x1A path). A part that does not advertise a
 /// heterogeneous topology is homogeneous and reports
 /// [`CoreClass::Performance`].
 ///
@@ -164,11 +142,7 @@ pub const fn classify_amd_core(flags_eax: u32, ranking_ebx: u32, level_ecx: u32)
 pub fn detect_current_core_class() -> CoreClass {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        // `CPUID` is unconditionally available on every x86_64 CPU (it
-        // predates the architecture) and is side-effect-free, so these
-        // intrinsics are safe on this target.
-        let vendor = core::arch::x86_64::__cpuid(0);
-        if is_amd_vendor(vendor.ebx, vendor.edx, vendor.ecx) {
+        if crate::cpuid::vendor() == Some(crate::cpuid::Vendor::Amd) {
             detect_amd_core_class()
         } else {
             detect_intel_core_class()
@@ -180,38 +154,28 @@ pub fn detect_current_core_class() -> CoreClass {
     }
 }
 
-/// Intel bare-metal probe: bound the maximum leaf via leaf 0, check the
-/// leaf 0x07 `EDX[15]` "Hybrid" feature, then decode leaf 0x1A.
+/// Intel bare-metal probe: check the leaf 0x07 `EDX[15]` "Hybrid" feature,
+/// then decode leaf 0x1A.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn detect_intel_core_class() -> CoreClass {
-    // The maximum leaf is bounded via leaf 0 before reading the
-    // higher-numbered leaves so an unsupported sub-leaf is never
-    // executed, matching the Intel SDM Vol. 2A usage requirement.
-    let max_leaf = core::arch::x86_64::__cpuid(0).eax;
-    if max_leaf < LEAF_HYBRID_INFO {
-        return CoreClass::Performance;
-    }
     let hybrid = (crate::cpuid::structured_extended_features().edx >> 15) & 1 == 1;
     if !hybrid {
         return CoreClass::Performance;
     }
-    classify_core_type(core::arch::x86_64::__cpuid_count(LEAF_HYBRID_INFO, 0).eax)
+    crate::cpuid::leaf(LEAF_HYBRID_INFO, 0)
+        .map_or(CoreClass::Performance, |leaf| classify_core_type(leaf.eax))
 }
 
-/// AMD bare-metal probe: bound the maximum extended leaf via leaf
-/// 0x80000000, then walk leaf 0x80000026 sub-leaves for the Core level
+/// AMD bare-metal probe: walk leaf 0x80000026 sub-leaves for the Core level
 /// and decode it.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn detect_amd_core_class() -> CoreClass {
-    // Bound the maximum extended leaf before reading it, mirroring the
-    // leaf-0 bound on the Intel path, so an unsupported leaf is never
-    // executed (AMD64 APM Vol. 2 usage requirement).
-    let max_ext_leaf = core::arch::x86_64::__cpuid(LEAF_EXT_MAX).eax;
-    if max_ext_leaf < LEAF_EXT_TOPOLOGY {
+    if crate::cpuid::leaf(LEAF_EXT_TOPOLOGY, 0).is_none() {
         return CoreClass::Performance;
     }
     let mut sub_leaf = 0;
     while sub_leaf <= MAX_TOPOLOGY_SUBLEAF {
+        // The leaf is reported, so each of its sub-leaves is read directly.
         let topo = core::arch::x86_64::__cpuid_count(LEAF_EXT_TOPOLOGY, sub_leaf);
         let level_type = (topo.ecx >> 8) & 0xFF;
         if level_type == 0 {
@@ -252,23 +216,6 @@ mod tests {
         // fall back to the safe homogeneous default, never misclassify.
         assert_eq!(classify_core_type(0x0000_0000), CoreClass::Performance);
         assert_eq!(classify_core_type(0x7F00_0000), CoreClass::Performance);
-    }
-
-    #[test]
-    fn amd_vendor_string_is_recognised() {
-        assert!(is_amd_vendor(
-            AMD_VENDOR_EBX,
-            AMD_VENDOR_EDX,
-            AMD_VENDOR_ECX
-        ));
-        // The other x86_64 vendor string must not match.
-        let intel = (
-            u32::from_le_bytes(*b"Genu"),
-            u32::from_le_bytes(*b"ineI"),
-            u32::from_le_bytes(*b"ntel"),
-        );
-        assert!(!is_amd_vendor(intel.0, intel.1, intel.2));
-        assert!(!is_amd_vendor(0, 0, 0));
     }
 
     /// Build the Core-level sub-leaf registers for an AMD part that

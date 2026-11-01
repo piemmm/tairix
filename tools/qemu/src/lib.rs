@@ -68,6 +68,9 @@
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+// The caller may supervise children a panicking print would orphan, so the
+// library prints nothing itself: its diagnostics go through `Launch::note`.
+#![deny(clippy::print_stderr, clippy::print_stdout, clippy::dbg_macro)]
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -1299,13 +1302,17 @@ impl InterruptControllers {
 }
 
 /// The board a run boots, where it offers a choice: the unit in front of its
-/// PCI devices and its interrupt controllers.
+/// PCI devices, its interrupt controllers, and its CPU model.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Board {
     /// How the board's PCI devices reach memory.
     pub translation: DmaTranslation,
     /// Its interrupt controllers.
     pub interrupts: InterruptControllers,
+    /// Its CPU model, `None` for the architecture's default. A vertical
+    /// whose tree is dumped ahead of the run names the same model for the
+    /// dump as its enrolment does for the run, by hand.
+    pub cpu: Option<&'static str>,
 }
 
 impl Board {
@@ -1315,6 +1322,7 @@ impl Board {
         Self {
             translation,
             interrupts: InterruptControllers::Default,
+            cpu: None,
         }
     }
 
@@ -1322,6 +1330,15 @@ impl Board {
     #[must_use]
     pub const fn with_interrupts(self, interrupts: InterruptControllers) -> Self {
         Self { interrupts, ..self }
+    }
+
+    /// The same board on the CPU model `cpu`.
+    #[must_use]
+    pub const fn with_cpu(self, cpu: &'static str) -> Self {
+        Self {
+            cpu: Some(cpu),
+            ..self
+        }
     }
 }
 
@@ -1950,6 +1967,7 @@ impl Spec {
         Board {
             translation: self.dma_translation,
             interrupts: self.interrupts,
+            cpu: self.cpu,
         }
     }
 
@@ -2208,6 +2226,44 @@ impl Spec {
     }
 }
 
+/// How [`Runner`] starts every process it runs, tells its starter once one
+/// has been reaped, and says what it is doing: the caller's, so a supervisor
+/// that tracks its children, and sets what they inherit, sees each one this
+/// crate starts and decides where its diagnostics go.
+pub trait Launch {
+    /// Spawn `cmd`. Where `on_terminal` holds it must stay in the caller's
+    /// own process group, as a session on the caller's terminal must;
+    /// otherwise it may lead a group of its own.
+    ///
+    /// # Errors
+    ///
+    /// Why `cmd` could not be spawned.
+    fn spawn(&self, cmd: &mut Command, on_terminal: bool) -> io::Result<Child>;
+
+    /// The child `pid`, started by [`Launch::spawn`], has been reaped.
+    fn reaped(&self, pid: u32);
+
+    /// Write the diagnostic `args`, a line of its own.
+    fn note(&self, args: std::fmt::Arguments<'_>);
+}
+
+/// A [`Launch`] that spawns each process as `Command` does, in the caller's
+/// own group whatever `on_terminal` says, and tracks nothing, for a caller
+/// with no children of its own to account for.
+pub struct Direct;
+
+impl Launch for Direct {
+    fn spawn(&self, cmd: &mut Command, _on_terminal: bool) -> io::Result<Child> {
+        cmd.spawn()
+    }
+
+    fn reaped(&self, _pid: u32) {}
+
+    fn note(&self, args: std::fmt::Arguments<'_>) {
+        let _ = writeln!(io::stderr(), "{args}");
+    }
+}
+
 /// QEMU runner.
 ///
 /// `Runner` is intentionally tiny: a single [`Runner::run`] entry point that
@@ -2225,7 +2281,7 @@ impl Runner {
     /// binary, OS-level failure). Test failures are reported through
     /// [`Outcome`], not through `Err` — that distinction is what lets the
     /// caller print a clean failure report instead of an opaque error.
-    pub fn run(spec: &Spec) -> io::Result<Outcome> {
+    pub fn run(spec: &Spec, launch: &dyn Launch) -> io::Result<Outcome> {
         validate_boot_inputs(spec)?;
 
         // Every port boots the kernel ELF directly — x86_64 via QEMU's
@@ -2262,7 +2318,7 @@ impl Runner {
         };
 
         if std::env::var_os("TAIRIX_QEMU_DEBUG").is_some() {
-            eprintln!("tairix-qemu: {cmd:?}");
+            launch.note(format_args!("tairix-qemu: {cmd:?}"));
         }
         // Serial input rides the `-serial stdio` console: pipe stdin only
         // when a vertical asked to type at the guest, otherwise keep it
@@ -2275,8 +2331,11 @@ impl Runner {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let child = cmd.spawn()?;
-        supervise(child, spec, Some(&monitor), control)
+        let child = launch.spawn(&mut cmd, false)?;
+        let pid = child.id();
+        let outcome = supervise(child, spec, Some(&monitor), control);
+        launch.reaped(pid);
+        outcome
     }
 
     /// Launch QEMU as an **interactive** session and wait for it to end.
@@ -2295,7 +2354,7 @@ impl Runner {
     /// spawned. The `Ok` value is QEMU's raw process exit status code
     /// (`-1` when terminated by a signal); an interactive session has no
     /// pass/fail protocol, so no [`Outcome`] is decoded.
-    pub fn run_interactive(spec: &Spec) -> io::Result<i32> {
+    pub fn run_interactive(spec: &Spec, launch: &dyn Launch) -> io::Result<i32> {
         validate_boot_inputs(spec)?;
 
         // A windowed session must open a real host window. QEMU's *implicit*
@@ -2304,7 +2363,7 @@ impl Runner {
         // select a binary and windowing backend explicitly and fail loud if
         // none can present a window.
         let interactive = (spec.session == SessionKind::WindowedInteractive)
-            .then(|| display::select_interactive(spec.arch.qemu_binary()))
+            .then(|| display::select_interactive(spec.arch.qemu_binary(), launch))
             .transpose()
             .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
 
@@ -2324,17 +2383,17 @@ impl Runner {
         if let Some(sel) = &interactive {
             cmd.arg("-display");
             cmd.arg(sel.backend.qemu_name());
-            eprintln!(
+            launch.note(format_args!(
                 "tairix-qemu: [run] interactive display via {} -display {}",
                 program.display(),
                 sel.backend.qemu_name(),
-            );
+            ));
         }
         for a in &spec.extra_args {
             cmd.arg(a);
         }
         if std::env::var_os("TAIRIX_QEMU_DEBUG").is_some() {
-            eprintln!("tairix-qemu: {cmd:?}");
+            launch.note(format_args!("tairix-qemu: {cmd:?}"));
         }
         // The caller's terminal *is* the guest serial console: inherit
         // all three stdio streams and simply wait — in the foreground,
@@ -2342,8 +2401,10 @@ impl Runner {
         cmd.stdin(Stdio::inherit());
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
-        let status = cmd.status()?;
-        Ok(status.code().unwrap_or(-1))
+        let mut child = launch.spawn(&mut cmd, true)?;
+        let status = child.wait();
+        launch.reaped(child.id());
+        Ok(status?.code().unwrap_or(-1))
     }
 }
 
@@ -4542,6 +4603,78 @@ pub fn workspace_relative(root: &Path, rel: impl AsRef<OsStr>) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// A [`Launch`] that starts a shell that exits at once wherever it is
+    /// asked for anything, recording each spawn with its `on_terminal`, and
+    /// each pid it was told of reaping with whether that was still a process;
+    /// what it is told to note goes nowhere.
+    #[derive(Default)]
+    pub(crate) struct Recording {
+        spawned: Mutex<Pids>,
+        reaped: Mutex<Pids>,
+    }
+
+    /// Each pid a [`Recording`] saw, with the flag recorded beside it.
+    pub(crate) type Pids = Vec<(u32, bool)>;
+
+    impl Recording {
+        /// The spawns and the reaps, in order.
+        pub(crate) fn record(&self) -> (Pids, Pids) {
+            let spawned = self.spawned.lock().expect("unpoisoned").clone();
+            let reaped = self.reaped.lock().expect("unpoisoned").clone();
+            (spawned, reaped)
+        }
+    }
+
+    impl Launch for Recording {
+        fn spawn(&self, _cmd: &mut Command, on_terminal: bool) -> io::Result<Child> {
+            let child = Command::new("sh")
+                .args(["-c", "exit 0"])
+                .stdin(Stdio::null())
+                .spawn()?;
+            self.spawned
+                .lock()
+                .expect("unpoisoned")
+                .push((child.id(), on_terminal));
+            Ok(child)
+        }
+
+        fn reaped(&self, pid: u32) {
+            // A zombie is listed until it is waited for.
+            let still = Command::new("ps")
+                .args(["-p", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("ps runs")
+                .success();
+            self.reaped.lock().expect("unpoisoned").push((pid, still));
+        }
+
+        fn note(&self, _args: std::fmt::Arguments<'_>) {}
+    }
+
+    #[test]
+    fn every_guest_spawned_is_reported_reaped_once() {
+        let kernel = std::env::temp_dir().join(format!("launch-kernel-{}", std::process::id()));
+        std::fs::write(&kernel, b"not a kernel").expect("a placeholder kernel");
+        let spec = Spec::for_x86_64_kernel(&kernel).with_timeout(Duration::from_secs(60));
+        let launch = Recording::default();
+        let run = Runner::run(&spec, &launch);
+        let interactive = Runner::run_interactive(&spec, &launch);
+        let _ = std::fs::remove_file(&kernel);
+        assert!(run.is_ok(), "{:?}", run.err());
+        assert_eq!(interactive.ok(), Some(0), "the stand-in's own exit");
+        let (spawned, reaped) = launch.record();
+        let terminal: Vec<bool> = spawned.iter().map(|&(_, on)| on).collect();
+        assert_eq!(
+            terminal,
+            [false, true],
+            "a run's guest leads its own group; a session's stays on the terminal"
+        );
+        let gone: Vec<(u32, bool)> = spawned.iter().map(|&(pid, _)| (pid, false)).collect();
+        assert_eq!(reaped, gone, "each reported reaped once, once it was");
+    }
+
     #[test]
     fn a_screendump_names_the_display_device_it_attached() {
         let path = std::path::Path::new("/tmp/screen.ppm");
@@ -5299,7 +5432,7 @@ mod tests {
     #[test]
     fn missing_kernel_returns_not_found() {
         let s = Spec::for_x86_64_kernel("/definitely/not/a/real/path");
-        let err = Runner::run(&s).expect_err("missing kernel should fail");
+        let err = Runner::run(&s, &Direct).expect_err("missing kernel should fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -5667,6 +5800,20 @@ mod tests {
             let line = format!("[ERROR] id={} {} cpu=0\n", fatal.id.0, fatal.message);
             let watch = watched(vec![line.as_bytes()]);
             assert_eq!(watch.record(), Some(line.trim_end()));
+        }
+    }
+
+    /// The platform page's `Fatal` outcome names every record that ends a run.
+    #[test]
+    fn the_fatal_outcome_documents_every_fatal_record() {
+        const PAGE: &str = include_str!("../../../docs/src/platform/x86_64.md");
+        let (_, rest) = PAGE
+            .split_once("\n- `Fatal` —")
+            .expect("the page documents the Fatal outcome");
+        let bullet = rest.split_once("\n- ").map_or(rest, |(bullet, _)| bullet);
+        for fatal in FATAL_RECORDS {
+            let id = format!("`id={}`", fatal.id.0);
+            assert!(bullet.contains(&id), "the Fatal outcome omits {id}");
         }
     }
 
@@ -6702,7 +6849,7 @@ mod tests {
             reset_success_marker: None,
             completion_gate: None,
         };
-        let err = Runner::run(&s).expect_err("missing backing image should fail");
+        let err = Runner::run(&s, &Direct).expect_err("missing backing image should fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -6742,7 +6889,7 @@ mod tests {
     #[test]
     fn missing_riscv64_kernel_returns_not_found() {
         let s = Spec::for_riscv64_kernel("/definitely/not/a/real/path");
-        let err = Runner::run(&s).expect_err("missing kernel should fail");
+        let err = Runner::run(&s, &Direct).expect_err("missing kernel should fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 

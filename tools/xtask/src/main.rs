@@ -24,11 +24,14 @@
 //!   and removes the older siblings; run automatically before every `build`
 //!   and `image`, and on demand. Unlike `clean` it never touches the live
 //!   build, so the next compile is still incremental
+//! - `keys`         — create the build's secret signing key set (`keys init`),
+//!   kept outside the tree
 //! - `test`         — `cargo test --workspace --all-targets`; `--count N`
 //!   (alias `--iterations N`) repeats the whole matrix N times to surface
 //!   flaky tests, defaulting to one run; `--soak` instead repeats it for a
 //!   wall-clock budget — 24 h, `--secs N`, or until the `--until T` close of a
-//!   soak window — starting no pass it cannot finish inside it.
+//!   soak window — starting another pass only while one as long as the last
+//!   still fits.
 //!   `--shuffle` starts each host pass in a randomised order (the seed is in
 //!   the step's label; `--shuffle-seed N` pins it) so a suite that passes
 //!   only in the harness's alphabetical order fails instead of hiding — `ci`
@@ -53,6 +56,9 @@
 //!   `lib/font/assets/`
 //! - `sound-encode` — encodes authored WAV masters into a sound theme's FLAC
 //!   assets in `lib/soundtheme/assets/`, each decoded back sample for sample
+//! - `artsheet`     — measures `WinterSun`'s figure art against its bounds and
+//!   the committed ledger (`--write` to regenerate the ledger, `--sheets` to
+//!   render the contact sheets)
 //! - `devids`       — verifies the compact PCI, USB and IEEE OUI tables (each
 //!   inside its consuming bundle's `Resources/`) against the vetted
 //!   snapshots in
@@ -87,8 +93,16 @@
 //!   `--write-pins` regenerates the pins from the lockfile
 //! - `fuzz`         — drive the in-tree fuzz harnesses: `--once` (one
 //!   iteration each, the `ci` gate), `--quick` (≥ 5 s each) or `--soak`
-//!   (≥ 24 h each), any budget overridden by `--secs N` or by `--until T`,
-//!   the close of a soak window every harness shares
+//!   (≥ 24 h each), any budget overridden by `--secs N`, or by `--until T`
+//!   for one harness named with `--target`, soaking it to a window's close
+//!   (`tools/ci/soak.sh --window` gives every harness a process of its own)
+//! - `proptest`     — drive the stateful capability models, with the same
+//!   `--once` (the `ci` stage), `--quick`, `--soak`, `--secs N` and
+//!   `--until T` budgets as `fuzz`
+//! - `fssoak`       — soak arxfs, ext4 and fat32 on a RAM volume of at least
+//!   1 GiB for a wall-clock budget
+//! - `rngsoak`      — soak the random generators through the statistical
+//!   battery for a wall-clock budget
 //! - `source-text`  — reject a control byte other than tab and newline in
 //!   source text, which `grep` and its kin then read as binary
 //! - `charter-cite` — reject a comment or package description that cites a
@@ -100,9 +114,14 @@
 //!   Miri, the undefined-behaviour oracle a test suite cannot be: it checks that a
 //!   raw pointer stayed in bounds, that a slot was initialised before it was
 //!   read, and that two `&mut` never aliased
+//! - `loom`         — model-check the concurrent protocols `commands/loom.rs`
+//!   enrols over every thread interleaving, the orderings a test run never
+//!   happened to pick
 //! - `model-check` — exhaustively model-check the Silver capability +
 //!   IPC state machine (an in-tree explicit-state checker; the TLA+
 //!   equivalent), failing closed on any invariant counterexample
+//! - `spec-review`  — reject an unreviewed AI-drafted-artefact marker that
+//!   reached the tree
 //! - `bench`        — host microbenchmarks for the per-pixel desktop paths:
 //!   `Surface::blit`, rounded-rect fill, `box_blur`/`frost_region`/
 //!   `frost_halved_from`,
@@ -113,83 +132,198 @@
 //!   so this is evidence for a completion report and is deliberately **not**
 //!   a `ci` gate; CI may run it only as a smoke check that every family still
 //!   produces a number
-//! - `ci`           — the full pipeline a PR must pass, ordered cheapest-first
-//!   so a failing PR fails fast: `fmt --check`, then the concurrent
-//!   static-gate group (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `help-lint`,
-//!   `spec-review`, `charter-cite`, `source-text`, `supply-chain`, `abi-check`,
-//!   `c-header`, `font-atlas`, `devids`, `model-check` —
-//!   all read-only, non-compiling checks run at once so their costs overlap),
-//!   then `docs-check` (rustdoc/link failures are the common first trip and
-//!   need only a doc build, so they run ahead of the compile-heavy stages),
-//!   `clippy`, `test --qemu` (each test once, in a shuffled order),
-//!   `cargo deny check`, `fuzz --once`, `proptest --once`, `miri`,
-//!   the release crypto constant-time tests, and the image gate
+//! - `ci`           — the full pipeline a PR must pass, each stage cheaper
+//!   than the next so a failing PR fails fast: `fmt --check`; `static gates`,
+//!   the read-only, non-compiling checks run at once so their costs overlap;
+//!   `deny`; `proptest --once`; `crypto-constant-time`, the crypto tests under
+//!   release optimisation; `fuzz --once`; `loom`, the interleaving oracle;
+//!   `docs-check`; `image`, every delivered image profile; `clippy`;
+//!   `test --qemu`, each test once in a shuffled order; and `miri`, the
+//!   undefined-behaviour oracle
 //! - `ci-long`      — the same checks as `ci`, but for a dedicated long-lived
 //!   runner: every test-executing stage (the host test matrix, the scene tier
 //!   `ci` leaves out, the release crypto constant-time tests, the QEMU
 //!   integration tests, the fuzz harnesses, and the proptest models) is run
 //!   20× sequentially and then 20× concurrently, per test, to force out
 //!   timing- and contention-dependent flakes — the scene tier's concurrent
-//!   replicas one at a time, since one run fills the machine; the
-//!   deterministic gates run once. `--dry-run` prints the plan without running
-//!   anything
+//!   replicas one at a time, since one run fills the machine; every other
+//!   `ci` stage runs once, in `ci`'s order, ahead of the hunt. `--dry-run`
+//!   prints the plan without running anything
 //! - `image`        — build platform images via `tools/mkimage`
 //!   (`--target aarch64-rpi`: the Raspberry Pi 4 SD image; the pinned
 //!   firmware blobs are staged build inputs, see
 //!   `tools/mkimage/firmware.lock` and `docs/src/install/raspberry_pi.md`)
+//! - `run`          — build a platform image and boot it interactively in
+//!   QEMU, with a display, keyboard and mouse
 //!
 //! The set above is closed: every subsystem documented in `AGENTS.md` and
 //! `PLAN.md` is reachable through exactly one of these subcommands. New
 //! pipeline steps belong in a *named* subcommand, never inlined into `ci`.
 
+// Output goes through `note` and `out`, which a broken stream cannot panic.
+#![deny(clippy::print_stderr, clippy::print_stdout, clippy::dbg_macro)]
+
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode};
-use std::sync::mpsc;
+use std::process::{Child, Command, ExitCode, ExitStatus, Output, Stdio};
+use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+/// Writes `text` to stderr, waiting out a full stream and giving up on a dead
+/// one: a hung-up terminal or a closed pipe must not end xtask while children
+/// it supervises still run.
+#[cfg(not(test))]
+fn note(text: &str) {
+    let _ = write_whole(&mut std::io::stderr().lock(), text.as_bytes());
+}
+
+/// [`note`] in a test build, through the print macro libtest captures.
+#[cfg(test)]
+#[allow(clippy::print_stderr)] // libtest captures only what the print macros write.
+fn note(text: &str) {
+    eprint!("{text}");
+}
+
+/// `eprintln!` through [`note`].
+macro_rules! noteln {
+    ($($arg:tt)*) => {
+        $crate::note(&format!("{}\n", format_args!($($arg)*)))
+    };
+}
+
+/// Writes `text` to stdout, the output a command exists to produce, failing
+/// the command where it cannot.
+#[cfg(not(test))]
+fn out(text: &str) -> Result<(), String> {
+    write_whole(&mut std::io::stdout().lock(), text.as_bytes())
+        .map_err(|err| format!("cannot write to stdout: {err}"))
+}
+
+/// [`out`] in a test build, through the print macro libtest captures.
+#[cfg(test)]
+#[allow(clippy::print_stdout)] // libtest captures only what the print macros write.
+fn out(text: &str) -> Result<(), String> {
+    print!("{text}");
+    std::io::Write::flush(&mut std::io::stdout())
+        .map_err(|err| format!("cannot write to stdout: {err}"))
+}
+
+/// `println!` through [`out`], answering whether it was written.
+macro_rules! outln {
+    ($($arg:tt)*) => {
+        $crate::out(&format!("{}\n", format_args!($($arg)*)))
+    };
+}
+
+/// Writes all of `bytes` to `stream` and flushes it, waiting for room where it
+/// is full: a stream left non-blocking by whoever shares it is slow, not dead.
+fn write_whole<S: std::io::Write + std::os::fd::AsFd>(
+    stream: &mut S,
+    mut bytes: &[u8],
+) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+
+    while !bytes.is_empty() {
+        match stream.write(bytes) {
+            Ok(0) => return Err(ErrorKind::WriteZero.into()),
+            Ok(written) => bytes = &bytes[written..],
+            Err(err) if err.kind() == ErrorKind::Interrupted => {}
+            Err(err) if err.kind() == ErrorKind::WouldBlock => writable(stream.as_fd())?,
+            Err(err) => return Err(err),
+        }
+    }
+    loop {
+        match stream.flush() {
+            Err(err) if err.kind() == ErrorKind::Interrupted => {}
+            Err(err) if err.kind() == ErrorKind::WouldBlock => writable(stream.as_fd())?,
+            flushed => return flushed,
+        }
+    }
+}
+
+/// Wait until `fd` can take a write, or has failed for good for the next
+/// write to report.
+fn writable(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    let mut ready = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: `ready` is an initialised `pollfd` that outlives the call,
+        // which reads and writes it alone.
+        if unsafe { libc::poll(&raw mut ready, 1, -1) } >= 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+mod children;
 mod commands;
 mod floor;
+#[cfg(test)]
+#[path = "../tests/support/process.rs"]
+mod process;
+mod rustflags;
+mod timeout_env;
 
+use children::Children;
 use commands::Command as Subcommand;
+use timeout_env::TIMEOUT_ENV_VAR;
 
 fn main() -> ExitCode {
     let argv: Vec<OsString> = env::args_os().skip(1).collect();
     let Some((name, rest)) = argv.split_first() else {
-        eprintln!("{}", usage());
+        noteln!("{}", usage());
         return ExitCode::from(2);
     };
 
     let Some(name_str) = name.to_str() else {
-        eprintln!("xtask: command name is not valid UTF-8");
+        noteln!("xtask: command name is not valid UTF-8");
         return ExitCode::from(2);
     };
 
     if matches!(name_str, "-h" | "--help" | "help") {
-        println!("{}", usage());
-        return ExitCode::SUCCESS;
+        return match outln!("{}", usage()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                noteln!("xtask: {err}");
+                ExitCode::FAILURE
+            }
+        };
     }
 
     let Some(command) = Subcommand::parse(name_str) else {
-        eprintln!("xtask: unknown command `{name_str}`\n\n{}", usage());
+        noteln!("xtask: unknown command `{name_str}`\n\n{}", usage());
         return ExitCode::from(2);
     };
 
-    let ctx = match Context::discover() {
+    let ctx = match timeout_override().and_then(Context::discover) {
         Ok(ctx) => ctx,
         Err(err) => {
-            eprintln!("xtask: {err}");
+            noteln!("xtask: {err}");
             return ExitCode::FAILURE;
         }
     };
-
-    match command.run(&ctx, rest) {
+    let supervised = children::supervise(
+        &ctx.children,
+        children::KILL_REAP_GRACE,
+        children::REPORT_GRACE,
+        || command.run(&ctx, rest),
+    );
+    match supervised.and_then(|outcome| outcome) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("xtask: {err}");
+            noteln!("xtask: {err}");
             ExitCode::FAILURE
         }
     }
@@ -204,11 +338,12 @@ fn usage() -> String {
     out
 }
 
-/// Repository-wide paths discovered once per invocation.
+/// Repository-wide paths discovered once per invocation, and the children
+/// spawned under them.
 ///
 /// `Clone` is derived so a concurrent pipeline stage can hand each worker its
-/// own owned copy (both fields are cheap-to-clone owned values), letting the
-/// worker closures be `'static` for the shared concurrency runner.
+/// own owned copy (every field is cheap to clone), letting the worker closures
+/// be `'static` for the shared concurrency runner.
 #[derive(Clone)]
 pub struct Context {
     /// Absolute path to the workspace root (the directory containing the
@@ -218,15 +353,19 @@ pub struct Context {
     /// Honouring `$CARGO` keeps custom toolchains (rustup overrides, CI
     /// matrix shims) consistent across nested calls.
     pub cargo: OsString,
+    /// Every child xtask spawns, and the floor their budgets are raised to.
+    pub(crate) children: Arc<Children>,
 }
 
 impl Context {
-    fn discover() -> Result<Self, String> {
+    /// The workspace's context, its children's budgets raised to `floor`.
+    fn discover(floor: Option<Duration>) -> Result<Self, String> {
         let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
         let workspace_root = workspace_root_from_manifest_dir()?;
         Ok(Self {
             workspace_root,
             cargo,
+            children: Arc::new(Children::new(floor)),
         })
     }
 
@@ -276,98 +415,119 @@ impl Context {
         self.run_with_timeout(label, cmd, DEFAULT_COMMAND_TIMEOUT)
     }
 
-    /// Runs `cmd` inheriting stdio, killing it if it is still running after
-    /// `budget` (widened upward by `$TAIRIX_XTASK_TIMEOUT_SECS`, see
-    /// [`effective_timeout`]).
+    /// Runs `cmd` inheriting stdio, killing it with everything it forked if
+    /// it is still running after `budget`, which `$TAIRIX_XTASK_TIMEOUT_SECS`
+    /// can only raise.
     ///
-    /// This is the one place `xtask` spawns and waits for an external
-    /// command; every pipeline step reaches an external process through
-    /// here (directly via [`run`](Context::run), or with a longer budget for
-    /// a phase that is legitimately long — the QEMU integration-test matrix
-    /// build, the image gate's cross-compiles). A hang in any of them is
-    /// exactly the failure this exists to bound: without it, a single stuck
-    /// `cargo test` invocation stalls `cargo xtask ci` forever, and an
-    /// operator has to notice and kill it by hand.
-    ///
-    /// `std::process::Child` has no timed wait, so the child's blocking
-    /// `wait()` runs on a dedicated thread while this thread races it
-    /// against the deadline with `Receiver::recv_timeout` — no polling loop,
-    /// no sleeping and re-checking `try_wait()`.
-    ///
-    /// A `cargo` invocation is rarely a single process: it forks `rustc`,
-    /// the built test binary, or (for `--qemu`) a QEMU guest as
-    /// grandchildren `Child::kill` cannot reach, so the child is spawned in
-    /// its own process group and a timeout signals the whole group (see
-    /// [`spawn_in_own_group`] and [`await_within`]).
-    ///
-    /// A timeout is always reported as an error naming the step, the budget,
-    /// and that it was killed; it is never retried and never folds into a
-    /// passing result.
-    ///
-    /// [`effective_timeout`]: effective_timeout
-    /// [`spawn_in_own_group`]: spawn_in_own_group
-    /// [`await_within`]: await_within
+    /// It is the parallel runner's run of one job, so a step run alone and
+    /// one run beside others are bounded, killed and reported alike. A
+    /// timeout is an error naming the step and its budget, never retried.
     pub fn run_with_timeout(
         &self,
         label: &str,
-        mut cmd: Command,
+        cmd: Command,
         budget: Duration,
     ) -> Result<(), String> {
-        let budget = effective_timeout(budget)?;
-        eprintln!("xtask: [{label}] {cmd:?} (timeout {budget:?})");
-        let mut child = spawn_in_own_group(&mut cmd)
-            .map_err(|err| format!("{label} could not be spawned: {err}"))?;
-        let pid = child.id();
-        let started = Instant::now();
-        let outcome = await_within(label, pid, budget, move || child.wait());
-        report_elapsed(
-            label,
-            matches!(&outcome, Ok(status) if status.success()),
-            started.elapsed(),
-        );
-        let status = outcome?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("{label} failed with {status}"))
-        }
+        commands::parallel::run(
+            &self.children,
+            vec![commands::parallel::Job::new(label, cmd).with_budget(budget)],
+            1,
+        )
     }
 }
 
-/// Spawns `cmd` as the leader of its own process group.
-///
-/// A `cargo` invocation is rarely a single process: it forks `rustc`, the
-/// built test binary, or a QEMU guest as grandchildren that `Child::kill`
-/// cannot reach. Making the child a group leader (`process_group(0)`, so the
-/// group id equals its own pid) is what lets a timeout later signal every
-/// descendant at once instead of only the direct child.
-pub(crate) fn spawn_in_own_group(cmd: &mut Command) -> std::io::Result<Child> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        cmd.process_group(0);
+/// Runs `cmd` as the leader of its own group in `children` within `budget`,
+/// answering what `wait` makes of the child where `exited` reads a success
+/// from it, and otherwise why not, with whatever the wait yielded.
+pub(crate) fn run_within<T: Send + 'static>(
+    children: &Children,
+    label: &str,
+    cmd: &mut Command,
+    budget: Duration,
+    wait: impl FnOnce(Child) -> std::io::Result<T> + Send + 'static,
+    exited: impl FnOnce(&T) -> ExitStatus,
+) -> Result<T, WaitFailure<T>> {
+    let child = children.spawn(cmd).map_err(|err| WaitFailure {
+        message: format!("{label} could not be spawned: {err}"),
+        reaped: None,
+        overran: false,
+    })?;
+    let pid = child.id();
+    let waited = await_within(label, pid, budget, children::KILL_REAP_GRACE, move || {
+        wait(child)
+    });
+    children.release(pid);
+    let value = waited?;
+    let status = exited(&value);
+    if status.success() {
+        Ok(value)
+    } else {
+        Err(WaitFailure {
+            message: format!("{label} failed with {status}"),
+            reaped: Some(value),
+            overran: false,
+        })
     }
-    cmd.spawn()
+}
+
+/// [`run_within`] with stdin closed and the child's output captured, as
+/// `Command::output` has them, but awaited within `budget`.
+pub(crate) fn output_within(
+    children: &Children,
+    label: &str,
+    cmd: &mut Command,
+    budget: Duration,
+) -> Result<Output, WaitFailure<Output>> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run_within(
+        children,
+        label,
+        cmd,
+        budget,
+        Child::wait_with_output,
+        |output| output.status,
+    )
+}
+
+/// [`output_within`], failing with why and then what the child wrote to
+/// stderr, where it wrote anything.
+pub(crate) fn output_or_reason(
+    children: &Children,
+    label: &str,
+    cmd: &mut Command,
+    budget: Duration,
+) -> Result<Output, String> {
+    output_within(children, label, cmd, budget).map_err(|failure| {
+        let stderr = failure
+            .reaped
+            .as_ref()
+            .map(|output| String::from_utf8_lossy(&output.stderr));
+        match stderr.as_deref().map(str::trim) {
+            Some(stderr) if !stderr.is_empty() => format!("{}: {stderr}", failure.message),
+            _ => failure.message,
+        }
+    })
 }
 
 /// Why a bounded wait ended without the value it was waiting for.
 pub(crate) struct WaitFailure<T> {
     /// What happened, naming the step.
     pub(crate) message: String,
-    /// What the wait yielded once a timed-out group was killed and reaped:
-    /// for a captured job, the output it had produced, which is what names
-    /// the work its budget ran out on.
+    /// What the wait yielded where it yielded anything: a failed child's, or
+    /// a timed-out group's once it was killed and reaped. For a captured job
+    /// that is the output it had produced, which names the work its budget
+    /// ran out on.
     pub(crate) reaped: Option<T>,
-}
-
-impl<T> From<WaitFailure<T>> for String {
-    fn from(failure: WaitFailure<T>) -> Self {
-        failure.message
-    }
+    /// Whether the budget ran out and the group was killed for it, rather
+    /// than the child failing on its own.
+    pub(crate) overran: bool,
 }
 
 /// Races `wait` against `budget`, killing the process group led by `pid` when
-/// the budget expires first.
+/// the budget expires first and then waiting at most `reap_grace` for its
+/// reap.
 ///
 /// `std::process::Child` has no timed wait, so the blocking wait runs on a
 /// dedicated thread while this thread races it against the deadline with
@@ -378,15 +538,17 @@ impl<T> From<WaitFailure<T>> for String {
 /// step that inherits the terminal (waiting for an exit status) and one whose
 /// output is captured for orderly printing (waiting for the output too);
 /// a second copy of this race would be a second thing to get wrong.
-pub(crate) fn await_within<T: Send + 'static>(
+fn await_within<T: Send + 'static>(
     label: &str,
     pid: u32,
     budget: Duration,
+    reap_grace: Duration,
     wait: impl FnOnce() -> std::io::Result<T> + Send + 'static,
 ) -> Result<T, WaitFailure<T>> {
     let failure = |message: String| WaitFailure {
         message,
         reaped: None,
+        overran: false,
     };
     let (done_tx, done_rx) = mpsc::channel();
     let waiter = thread::Builder::new().spawn(move || {
@@ -397,10 +559,10 @@ pub(crate) fn await_within<T: Send + 'static>(
     let waiter = match waiter {
         Ok(handle) => handle,
         Err(err) => {
-            kill_process_tree(pid);
+            children::kill(pid);
             return Err(failure(format!(
                 "{label}: could not start the wait thread ({err}); \
-                 pid {pid} was killed"
+                 pid {pid} was killed and is not waited for"
             )));
         }
     };
@@ -421,22 +583,22 @@ pub(crate) fn await_within<T: Send + 'static>(
             )))
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            kill_process_tree(pid);
+            children::kill(pid);
             // A further bounded wait for the background thread to reap the
-            // now-killed process, so the process table is clean by the time
-            // this call returns. A process stuck in an uninterruptible kernel
-            // sleep would block the underlying wait regardless of what we do
-            // here, so this stays bounded rather than joining unconditionally.
-            let reaped = done_rx
-                .recv_timeout(KILL_REAP_GRACE)
-                .ok()
-                .and_then(Result::ok);
+            // killed process, which one wedged in the kernel never is.
+            let answer = done_rx.recv_timeout(reap_grace);
+            let unreaped = if answer.is_err() {
+                format!("; pid {pid} was not reaped within {reap_grace:?}")
+            } else {
+                String::new()
+            };
             Err(WaitFailure {
                 message: format!(
                     "{label} exceeded its {budget:?} timeout and was killed \
-                     (SIGTERM, then SIGKILL, to its process group)"
+                     (SIGTERM, then SIGKILL, to its process group){unreaped}"
                 ),
-                reaped,
+                reaped: answer.ok().and_then(Result::ok),
+                overran: true,
             })
         }
     }
@@ -468,55 +630,34 @@ pub(crate) const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_mins(45);
 /// build, never by default.
 pub(crate) const LONG_BUILD_COMMAND_TIMEOUT: Duration = Duration::from_hours(2);
 
-/// Environment variable that raises every [`Context::run`] /
-/// [`Context::run_with_timeout`] budget for a slower machine, without
-/// editing either constant above. Unset by default; see
-/// [`effective_timeout`].
-const TIMEOUT_ENV_VAR: &str = "TAIRIX_XTASK_TIMEOUT_SECS";
-
-/// How long the process group is given to exit on `SIGTERM` before
-/// [`kill_process_tree`] escalates to `SIGKILL`. Short, because a timed-out
-/// command has already failed; this only gives a well-behaved child (e.g.
-/// QEMU flushing a disk image) a moment to exit cleanly rather than being
-/// hard-killed outright.
-const SIGTERM_GRACE: Duration = Duration::from_secs(2);
-
-/// How long [`Context::run_with_timeout`] additionally waits, after killing
-/// a timed-out process group, for the background wait thread to reap it.
-/// Bounded for the same reason the outer budget is: a process wedged in an
-/// uninterruptible kernel sleep would block the underlying `wait()` for as
-/// long as we let it, so this cannot be an unconditional join either.
-const KILL_REAP_GRACE: Duration = Duration::from_secs(5);
-
-/// Print one step's closing wall-clock line.
+/// One step's closing wall-clock line, newline included.
 ///
 /// Every step reports its cost in this one shape, sequential and concurrent
 /// alike, so a single grep over a pipeline log profiles the whole run — and so
 /// a job quietly running at most of its budget is visible before the next
 /// slower host turns it into a kill. `docs/src/contributing.md` documents the
 /// grep, which is why the wording lives here rather than at each caller.
-pub(crate) fn report_elapsed(label: &str, ok: bool, elapsed: Duration) {
-    eprintln!(
-        "xtask: [{label}] {} in {elapsed:?}",
+pub(crate) fn elapsed_line(label: &str, ok: bool, elapsed: Duration) -> String {
+    format!(
+        "xtask: [{label}] {} in {elapsed:?}\n",
         if ok { "done" } else { "FAILED" }
-    );
+    )
 }
 
-/// Widens `requested` upward to `$TAIRIX_XTASK_TIMEOUT_SECS` when that
-/// variable is set, and leaves it untouched otherwise.
+/// The floor `$TAIRIX_XTASK_TIMEOUT_SECS` raises every budget to, where the
+/// variable is set.
 ///
 /// The override only ever raises a budget, never lowers one: a step that
 /// asked for [`LONG_BUILD_COMMAND_TIMEOUT`] already knows it needs more than
 /// the default, and an operator's "my machine is slow" knob must not undo
-/// that. A set-but-unparsable value fails closed — returning an error rather
-/// than silently keeping the built-in budget — because that silence would
-/// hide a typo behind the exact kind of unbounded hang this mechanism
-/// exists to prevent.
-fn effective_timeout(requested: Duration) -> Result<Duration, String> {
-    match env::var(TIMEOUT_ENV_VAR) {
-        Ok(raw) => Ok(requested.max(parse_timeout_env_override(&raw)?)),
-        Err(_) => Ok(requested),
-    }
+/// that. A set-but-unparsable value, one that is not even UTF-8 included,
+/// fails closed — returning an error rather than silently keeping the
+/// built-in budget — because that silence would hide a typo behind the exact
+/// kind of unbounded hang this mechanism exists to prevent.
+fn timeout_override() -> Result<Option<Duration>, String> {
+    env::var_os(TIMEOUT_ENV_VAR)
+        .map(|raw| parse_timeout_env_override(&raw))
+        .transpose()
 }
 
 /// Parses a `$TAIRIX_XTASK_TIMEOUT_SECS` value into a duration.
@@ -524,70 +665,23 @@ fn effective_timeout(requested: Duration) -> Result<Duration, String> {
 /// A pure function so the parsing (and its fail-closed rejection of a
 /// malformed value) is unit-testable without touching real process
 /// environment state.
-fn parse_timeout_env_override(raw: &str) -> Result<Duration, String> {
-    let secs: u64 = raw.trim().parse().map_err(|_| {
-        format!("{TIMEOUT_ENV_VAR}={raw:?} is not a positive integer number of seconds")
-    })?;
+fn parse_timeout_env_override(raw: &OsStr) -> Result<Duration, String> {
+    let malformed = || {
+        format!(
+            "{TIMEOUT_ENV_VAR}=\"{}\" is not a positive integer number of seconds",
+            raw.display()
+        )
+    };
+    let secs: u64 = raw
+        .to_str()
+        .ok_or_else(malformed)?
+        .trim()
+        .parse()
+        .map_err(|_| malformed())?;
     if secs == 0 {
         return Err(format!("{TIMEOUT_ENV_VAR}=0 is not a valid timeout"));
     }
     Ok(Duration::from_secs(secs))
-}
-
-/// Kills the process group led by `pid`: `SIGTERM`, a short grace period,
-/// then `SIGKILL`.
-///
-/// The polite signal comes first so a step that installs a handler can tidy
-/// up (a QEMU guest releasing its display, a test removing a scratch file),
-/// and the unconditional one follows so a step that ignores or blocks
-/// `SIGTERM` still cannot outlive its budget. The group having already
-/// exited on the first signal is the expected outcome, not a failure.
-#[cfg(unix)]
-fn kill_process_tree(pid: u32) {
-    send_signal_to_group(pid, libc::SIGTERM);
-    thread::sleep(SIGTERM_GRACE);
-    send_signal_to_group(pid, libc::SIGKILL);
-}
-
-/// `xtask`'s process-management code targets Unix hosts only (as does, for
-/// example, the existing Unix-domain-socket link peer in
-/// `commands/netpeer.rs`); there is no non-Unix process-group primitive to
-/// reach a grandchild through here.
-#[cfg(not(unix))]
-fn kill_process_tree(_pid: u32) {}
-
-/// Sends `signal` to the process group led by `leader`.
-///
-/// [`Context::run_with_timeout`] spawns the child with `process_group(0)`,
-/// which makes the child its own group leader, so its pid is also its
-/// process-group id and every descendant it spawns inherits that group.
-/// Signalling the group is therefore what reaches the grandchildren — the
-/// rustc, test-binary and QEMU processes a `cargo` step really consists of.
-///
-/// This goes through `killpg` rather than the `kill` command because the
-/// command is not dependable for this: measured on a stock Linux host,
-/// procps-ng's `kill -s TERM -<pgid>` ignores the negated-pid group form and
-/// still exits zero, which would leave the runaway processes running while
-/// the pipeline reported them killed. A silent failure in the one mechanism
-/// meant to stop a runaway build is worse than no mechanism at all.
-///
-/// Best-effort by design: the group having already exited on an earlier
-/// signal is the success case, not an error worth reporting.
-#[cfg(unix)]
-fn send_signal_to_group(leader: u32, signal: i32) {
-    let Ok(group) = libc::pid_t::try_from(leader) else {
-        return;
-    };
-    // SAFETY: `killpg` is a plain signal-delivery syscall with no memory
-    // operands, so the only soundness obligation is passing well-formed
-    // scalars. `group` is this process's own just-spawned child's pid,
-    // converted without truncation, and that child was spawned as its own
-    // group leader, so it names that group and no other; `signal` is one of
-    // the two constants its only caller passes. A group that has already
-    // exited answers `ESRCH`, which needs no handling here.
-    unsafe {
-        libc::killpg(group, signal);
-    }
 }
 
 /// Resolve the workspace root from the manifest directory of the xtask crate.
@@ -652,6 +746,7 @@ fn resolve_target_dir(workspace_root: &Path, cargo_target_dir: Option<OsString>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::WHILE_ITS_PARENT_RUNS;
 
     /// xtask keeps its own lint tables only to leave `missing_docs` out, so
     /// its clippy lints are the workspace's, line for line: a default the
@@ -710,78 +805,21 @@ mod tests {
         );
     }
 
-    /// A `Context` whose fields the timeout machinery never reads: it only
-    /// spawns and waits on the `Command` it is handed.
-    fn test_context() -> Context {
-        Context {
-            workspace_root: PathBuf::from("."),
-            cargo: OsString::from("cargo"),
-        }
-    }
-
-    #[test]
-    fn run_with_timeout_succeeds_within_budget() {
-        let ctx = test_context();
-        let cmd = Command::new("true");
-        // Five seconds is generous relative to an instantly-exiting `true`,
-        // so this cannot fail merely because the host happens to be busy.
-        ctx.run_with_timeout("unit-test-ok", cmd, Duration::from_secs(5))
-            .expect("a command finishing well inside its budget must succeed");
-    }
-
-    #[test]
-    fn run_with_timeout_reports_failure_from_the_child_itself() {
-        let ctx = test_context();
-        let cmd = Command::new("false");
-        let err = ctx
-            .run_with_timeout("unit-test-nonzero-exit", cmd, Duration::from_secs(5))
-            .expect_err("a non-zero exit must surface as an error");
-        assert!(err.contains("failed"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn run_with_timeout_kills_and_reports_a_hung_command() {
-        let ctx = test_context();
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "sleep 5"]);
-        let started = std::time::Instant::now();
-        // A 200 ms budget against a 5 s sleep leaves an enormous margin, so a
-        // busy host cannot turn this into a false pass.
-        let err = ctx
-            .run_with_timeout("unit-test-hang", cmd, Duration::from_millis(200))
-            .expect_err("a command that outlives its budget must fail, never pass");
-        // The report must say why it failed and that the command was not
-        // left running, and must name the step so an operator reading a
-        // pipeline log knows which one hung.
-        assert!(err.contains("timeout"), "unexpected error: {err}");
-        assert!(err.contains("killed"), "unexpected error: {err}");
-        assert!(err.contains("unit-test-hang"), "unexpected error: {err}");
-        // Bounded well under the 5 s sleep: the 200 ms budget plus the fixed
-        // SIGTERM grace and the bounded post-kill reap wait, with headroom.
-        assert!(
-            started.elapsed() < Duration::from_secs(4),
-            "run_with_timeout should return promptly once the process group \
-             is killed, took {:?}",
-            started.elapsed()
-        );
-    }
-
     /// A killed job's output is the only record of what it was doing when its
     /// budget ran out — for a test binary, the name of the test in progress.
     #[test]
     fn a_timed_out_wait_hands_back_what_the_killed_group_produced() {
         use std::io::{BufRead as _, BufReader};
-        use std::process::Stdio;
 
         let mut cmd = Command::new("sh");
         cmd.args([
             "-c",
-            "echo test reached::the_hang ... ; echo started >&2; exec sleep 600",
+            &format!("echo test reached::the_hang ... ; echo started >&2; {WHILE_ITS_PARENT_RUNS}"),
         ]);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = spawn_in_own_group(&mut cmd).expect("sh spawns");
+        let mut child = Children::default().spawn(&mut cmd).expect("sh spawns");
         // Wait on the child's own word that the line is in the pipe, so the
         // budget below cannot expire before it is written however busy the
         // host is.
@@ -796,6 +834,7 @@ mod tests {
             "unit-test-partial-output",
             pid,
             Duration::from_millis(200),
+            children::KILL_REAP_GRACE,
             move || child.wait_with_output(),
         )
         .expect_err("a command that outlives its budget must fail, never pass");
@@ -805,6 +844,7 @@ mod tests {
             "unexpected message: {}",
             failure.message
         );
+        assert!(failure.overran, "killed for its budget");
         let output = failure
             .reaped
             .expect("a killed group is reaped within the grace");
@@ -814,70 +854,378 @@ mod tests {
         );
     }
 
+    /// A shell script leading a grandchild that runs while the test does, its
+    /// pid the script's first line.
+    pub(crate) fn with_a_grandchild() -> String {
+        format!("({WHILE_ITS_PARENT_RUNS}) & echo $!; wait")
+    }
+
+    /// The first line `child` writes, its stdout piped.
+    pub(crate) fn first_line(child: &mut Child) -> String {
+        use std::io::{BufRead as _, BufReader};
+
+        let mut line = String::new();
+        BufReader::new(child.stdout.as_mut().expect("stdout is piped"))
+            .read_line(&mut line)
+            .expect("the child writes a line");
+        line.trim().to_owned()
+    }
+
+    /// Long enough for a call that must wait to have shown it does not.
+    pub(crate) const NO_ANSWER: Duration = Duration::from_millis(200);
+
+    /// Set or clear `O_NONBLOCK` on `pipe`.
+    fn nonblocking(pipe: &std::io::PipeWriter, on: bool) {
+        use std::os::fd::AsRawFd as _;
+
+        let fd = pipe.as_raw_fd();
+        // SAFETY: `fcntl` on a descriptor this test owns takes and returns
+        // scalars and touches no memory of ours.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        let flags = if on {
+            flags | libc::O_NONBLOCK
+        } else {
+            flags & !libc::O_NONBLOCK
+        };
+        // SAFETY: as above.
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    }
+
+    /// Fill `pipe` until it takes no more, leaving it blocking, so whatever
+    /// writes to it next waits until it is read.
+    pub(crate) fn fill(pipe: &std::io::PipeWriter) {
+        use std::io::Write as _;
+
+        nonblocking(pipe, true);
+        let mut stream = pipe;
+        while stream.write(&[0_u8; 4096]).is_ok() {}
+        nonblocking(pipe, false);
+    }
+
+    /// This test binary, to run its test `name` alone as a process of its
+    /// own.
+    pub(crate) fn this_test(name: &str) -> Command {
+        let mut cmd = Command::new(env::current_exe().expect("this test binary"));
+        cmd.args(["--exact", name, "--test-threads=1"]);
+        cmd
+    }
+
+    /// Whether `pid` names a live process: neither gone nor a zombie awaiting
+    /// its reaper, as a killed grandchild may briefly be.
+    pub(crate) fn running(pid: u32) -> bool {
+        let stat = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps runs");
+        stat.status.success()
+            && !String::from_utf8_lossy(&stat.stdout)
+                .trim()
+                .starts_with('Z')
+    }
+
+    /// A `cargo` step is the processes it forks, so a timeout kills the
+    /// child's whole group, not the child alone.
     #[test]
-    fn run_with_timeout_kills_the_whole_process_group_not_just_the_direct_child() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-        let ctx = test_context();
-        let marker = std::env::temp_dir().join(format!(
-            "xtask-timeout-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        // The backgrounded `sleep` is a grandchild of the `sh` this spawns:
-        // it is not the direct child `run_with_timeout` sees, so it can only
-        // be dead afterwards if the whole process *group* was signalled.
-        //
-        // Its duration deliberately dwarfs this test's own runtime. A short
-        // sleep would end of its own accord while the assertions ran, so the
-        // test would pass just as happily against a kill that did nothing —
-        // which is exactly the silent failure this test exists to catch.
-        let script = format!("sleep 600 & echo $! > {} ; wait", marker.display());
+    fn a_timed_out_wait_kills_everything_the_group_forked() {
         let mut cmd = Command::new("sh");
-        cmd.args(["-c", &script]);
-        let started = std::time::Instant::now();
-        let result = ctx.run_with_timeout("unit-test-grandchild", cmd, Duration::from_millis(200));
-        assert!(
-            result.is_err(),
-            "the hung command must be reported as a failure"
-        );
-        // Returning at all within a few seconds already proves the kill
-        // landed: without it this call would wait out the full ten minutes.
-        assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "run_with_timeout must return once the group is killed, took {:?}",
-            started.elapsed()
-        );
+        // The grandchild runs as long as this test does, so it is dead
+        // afterwards only if the kill reached the whole group.
+        cmd.args(["-c", &with_a_grandchild()]);
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped());
+        let mut child = Children::default().spawn(&mut cmd).expect("sh spawns");
+        // Read before the budget below starts, so the grandchild exists however
+        // busy the host is.
+        let grandchild: u32 = first_line(&mut child).parse().expect("a pid");
+        assert!(running(grandchild), "the grandchild runs before the kill");
 
-        let grandchild_pid: u32 = std::fs::read_to_string(&marker)
-            .expect("the backgrounded grandchild should have recorded its pid before the kill")
-            .trim()
-            .parse()
-            .expect("the recorded pid should be a plain integer");
-        let _ = std::fs::remove_file(&marker);
-
-        // `kill -0` only probes for the process's existence; its diagnostic
-        // on the expected "already dead" answer is discarded so a passing
-        // run leaves no alarming text in the test log.
-        let still_alive = Command::new("kill")
-            .args(["-0", &grandchild_pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .expect("invoking `kill -0` should not itself fail to spawn")
-            .success();
+        let leader = child.id();
+        let failure = await_within(
+            "unit-test-grandchild",
+            leader,
+            Duration::from_millis(200),
+            children::KILL_REAP_GRACE,
+            move || child.wait(),
+        )
+        .expect_err("a command that outlives its budget must fail, never pass");
+        assert!(failure.message.contains("killed"), "{}", failure.message);
         assert!(
-            !still_alive,
-            "grandchild pid {grandchild_pid} should have been killed along with the rest \
-             of the process group, not left running"
+            !running(grandchild),
+            "grandchild {grandchild} outlived its group's kill"
+        );
+    }
+
+    /// A wait the kill cannot end, as one on a process wedged in the kernel
+    /// is, leaves that process named in the failure.
+    #[test]
+    fn a_kill_never_reaped_names_the_pid_it_left() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", WHILE_ITS_PARENT_RUNS]).stdin(Stdio::null());
+        let mut child = Children::default().spawn(&mut cmd).expect("sh spawns");
+        let pid = child.id();
+        let (unwedge, wedged) = mpsc::channel::<()>();
+        let reap_grace = Duration::from_millis(200);
+        let failure = await_within(
+            "unit-test-wedged",
+            pid,
+            Duration::from_millis(200),
+            reap_grace,
+            move || {
+                let _ = wedged.recv();
+                Ok(())
+            },
+        )
+        .expect_err("a command that outlives its budget must fail, never pass");
+        drop(unwedge);
+        let _ = child.wait();
+        assert!(
+            failure
+                .message
+                .ends_with(&format!("; pid {pid} was not reaped within {reap_grace:?}")),
+            "{}",
+            failure.message
+        );
+        assert!(failure.reaped.is_none());
+    }
+
+    /// A stream whose first write and first flush find it full.
+    struct Full {
+        room: (std::io::PipeReader, std::io::PipeWriter),
+        written: Vec<u8>,
+        /// Whether the next write, and the next flush, find no room.
+        no_room: [bool; 2],
+    }
+
+    impl Full {
+        fn new() -> Self {
+            Self {
+                room: std::io::pipe().expect("a pipe"),
+                written: Vec::new(),
+                no_room: [true; 2],
+            }
+        }
+    }
+
+    impl std::io::Write for Full {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if std::mem::take(&mut self.no_room[0]) {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            self.written.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if std::mem::take(&mut self.no_room[1]) {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            Ok(())
+        }
+    }
+
+    /// An empty pipe stands in for the stream's descriptor, so a wait for
+    /// room returns at once.
+    impl std::os::fd::AsFd for Full {
+        fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+            self.room.1.as_fd()
+        }
+    }
+
+    /// Only the retry is pinned here; the wait for room is pinned on a full
+    /// pipe below.
+    #[test]
+    fn a_full_stream_is_waited_out_rather_than_given_up_on() {
+        let mut stream = Full::new();
+        assert!(write_whole(&mut stream, b"every byte").is_ok());
+        assert_eq!(stream.written, b"every byte");
+        assert_eq!(
+            std::io::Write::write_all(&mut Full::new(), b"every byte").map_err(|err| err.kind()),
+            Err(std::io::ErrorKind::WouldBlock),
+            "where std's own writer gives up"
+        );
+    }
+
+    /// A stream that says each time it is written to, as far as one unread
+    /// word allows.
+    struct Counted {
+        pipe: std::io::PipeWriter,
+        tries: mpsc::SyncSender<()>,
+    }
+
+    impl std::io::Write for Counted {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let _ = self.tries.try_send(());
+            self.pipe.write(bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.pipe.flush()
+        }
+    }
+
+    impl std::os::fd::AsFd for Counted {
+        fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+            self.pipe.as_fd()
+        }
+    }
+
+    #[test]
+    fn a_full_stream_is_waited_on_rather_than_spun_on() {
+        use std::io::Read as _;
+
+        let (mut reader, writer) = std::io::pipe().expect("a pipe");
+        fill(&writer);
+        nonblocking(&writer, true);
+        let (says, tries) = mpsc::sync_channel(1);
+        let writing = thread::spawn(move || {
+            write_whole(
+                &mut Counted {
+                    pipe: writer,
+                    tries: says,
+                },
+                b"every byte",
+            )
+        });
+        let first = tries.recv_timeout(process::MINUTE).is_ok();
+        // Nothing reads the full pipe yet, so a writer that waits for room
+        // makes no second try.
+        let again = tries.recv_timeout(NO_ANSWER).is_ok();
+        let drained = process::within(move || {
+            let mut written = Vec::new();
+            let read = reader.read_to_end(&mut written).is_ok();
+            (read, writing.join(), written)
+        });
+        assert!(first, "it tried");
+        assert!(!again, "and waited for room rather than trying again");
+        let Some((read, wrote, written)) = drained else {
+            panic!("the writer never woke once its pipe had room");
+        };
+        let wrote = wrote.expect("the writer");
+        assert!(read && wrote.is_ok(), "{wrote:?}");
+        assert!(
+            written.ends_with(b"every byte"),
+            "every byte, once there was room"
+        );
+    }
+
+    /// Set to run [`noting_helper`] as the process the capture test starts.
+    const NOTING: &str = "TAIRIX_XTASK_NOTING_HELPER";
+
+    /// What [`noting_helper`] notes.
+    const NOTED: &str = "xtask: a note its test's harness keeps";
+
+    /// Not a test of its own: the process the capture test starts, doing
+    /// nothing unless that test started it.
+    #[test]
+    fn noting_helper() {
+        if env::var_os(NOTING).is_some() {
+            noteln!("{NOTED}");
+        }
+    }
+
+    #[test]
+    fn a_note_from_code_under_test_is_kept_by_its_harness() {
+        let output = this_test("tests::noting_helper")
+            .env(NOTING, "1")
+            .env_remove("RUST_TEST_NOCAPTURE")
+            .stdin(Stdio::null())
+            .output()
+            .expect("the helper runs");
+        assert!(output.status.success(), "{output:?}");
+        let shown = [&output.stdout, &output.stderr]
+            .map(|stream| String::from_utf8_lossy(stream).contains(NOTED));
+        assert_eq!(shown, [false, false], "{output:?}");
+    }
+
+    #[test]
+    fn a_child_that_fails_or_cannot_start_is_a_failure_naming_it() {
+        let children = Children::default();
+        let status = |label: &str, program: &str| {
+            run_within(
+                &children,
+                label,
+                &mut Command::new(program),
+                process::MINUTE,
+                |mut child| child.wait(),
+                |status| *status,
+            )
+        };
+        assert!(status("unit-test-ok", "true").is_ok());
+        let failed = status("unit-test-false", "false").expect_err("a non-zero exit fails");
+        assert!(
+            failed.message.contains("unit-test-false failed with"),
+            "{}",
+            failed.message
+        );
+        assert!(!failed.overran, "failing on its own");
+        assert!(
+            failed.reaped.is_some_and(|status| !status.success()),
+            "with the status it exited with"
+        );
+        let unspawned = status("unit-test-missing", "/nonexistent/xtask-unit-test")
+            .expect_err("nothing to run");
+        assert!(
+            unspawned
+                .message
+                .contains("unit-test-missing could not be spawned"),
+            "{}",
+            unspawned.message
+        );
+        assert!(unspawned.reaped.is_none());
+        assert!(children.live_children().is_empty(), "every group released");
+    }
+
+    #[test]
+    fn a_captured_failure_says_why_and_then_what_it_wrote_to_stderr() {
+        let budget = process::MINUTE;
+        let children = Children::default();
+        let script = |text: &str| {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", text]);
+            cmd
+        };
+        let output = output_or_reason(
+            &children,
+            "unit-test-ok",
+            &mut script("echo listed"),
+            budget,
+        )
+        .expect("a successful child's output");
+        assert_eq!(output.stdout, b"listed\n");
+        let said = output_or_reason(
+            &children,
+            "unit-test-said",
+            &mut script("echo refused >&2; exit 3"),
+            budget,
+        )
+        .expect_err("a non-zero exit fails");
+        assert!(
+            said.contains("unit-test-said failed with") && said.ends_with(": refused"),
+            "{said}"
+        );
+        let silent = output_or_reason(&children, "unit-test-silent", &mut script("exit 3"), budget)
+            .expect_err("a non-zero exit fails");
+        assert!(
+            silent.ends_with("exit status: 3"),
+            "nothing after why: {silent}"
+        );
+        // A probe that hangs is not a tool that is missing: it says so.
+        let hung = output_or_reason(
+            &children,
+            "unit-test-hung",
+            &mut script(WHILE_ITS_PARENT_RUNS),
+            Duration::from_millis(200),
+        )
+        .expect_err("killed at its budget");
+        assert!(
+            hung.starts_with("unit-test-hung exceeded its 200ms timeout and was killed"),
+            "{hung}"
         );
     }
 
     #[test]
     fn timeout_env_override_parses_a_positive_integer() {
         assert_eq!(
-            parse_timeout_env_override("120").expect("120 is a valid override"),
+            parse_timeout_env_override(OsStr::new("120")).expect("120 is a valid override"),
             Duration::from_secs(120)
         );
     }
@@ -885,7 +1233,7 @@ mod tests {
     #[test]
     fn timeout_env_override_rejects_zero() {
         assert!(
-            parse_timeout_env_override("0").is_err(),
+            parse_timeout_env_override(OsStr::new("0")).is_err(),
             "a zero-second override must fail closed, not disable the timeout"
         );
     }
@@ -894,25 +1242,18 @@ mod tests {
     fn timeout_env_override_rejects_malformed_values() {
         for bad in ["", "soon", "-5", "5s", "1.5"] {
             assert!(
-                parse_timeout_env_override(bad).is_err(),
+                parse_timeout_env_override(OsStr::new(bad)).is_err(),
                 "{bad:?} should be rejected, not silently ignored"
             );
         }
     }
 
+    /// Set but not UTF-8, as a no-break space pasted from a Latin-1 terminal
+    /// leaves it, a value is as malformed as any typo.
     #[test]
-    fn effective_timeout_passes_through_when_the_override_is_unset() {
-        // This reads real process environment state, so it only asserts
-        // when the override is genuinely absent; an operator who happens to
-        // have it set is exercising a different, already-covered path
-        // (`timeout_env_override_parses_a_positive_integer`) rather than
-        // making this test flaky.
-        if std::env::var(TIMEOUT_ENV_VAR).is_ok() {
-            return;
-        }
-        assert_eq!(
-            effective_timeout(Duration::from_secs(30)).expect("no override set"),
-            Duration::from_secs(30)
-        );
+    fn timeout_env_override_rejects_a_value_that_is_not_utf_8() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        assert!(parse_timeout_env_override(OsStr::from_bytes(b"7200\xa0")).is_err());
     }
 }

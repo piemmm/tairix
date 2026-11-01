@@ -233,6 +233,10 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    it never becomes a second renderer, and the game is fully playable without
    it. From WS32's 3D view on, the frame budget is the GPU path's to hold, and
    the software path is held to being as fast as the CPU allows (§3).
+   `lib/raster`'s mesh and view are evolved in place into the one software 3D
+   pipeline `lib/gpu`'s software backend drives (`plans/GPU.md` GP3.4, user
+   ruling 2026-10-29): the game's renderer is a configuration of those stages,
+   its pictures unchanged, until WS19 routes it through `lib/gpu`.
 7. **The game is an ordinary app with an ordinary manifest.** It holds only
    what it asks for and is granted: `CAP_SHM` for its window surface, `CAP_NET`
    to reach a realm, `CAP_FS_ACCESS` for its own bundle reads,

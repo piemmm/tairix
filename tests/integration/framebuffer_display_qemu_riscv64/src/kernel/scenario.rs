@@ -24,7 +24,7 @@ use tairix_drvhost::{
     DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
 use tairix_fdt::Fdt;
-use tairix_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
+use tairix_kernel_mem::{AddressSpace, HostPageTable, MmioMap, VirtAddr};
 use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::KernelMmioMapper;
@@ -61,10 +61,6 @@ const FAIL_SCENARIO: NonZeroU16 = fail_point!(1);
 /// (two driver loads + one verification), each bracketed by two guard
 /// pages, so 32 pages leaves comfortable headroom.
 const MMIO_CAP_PAGES: usize = 32;
-
-/// Upper bound of the boot identity map (the bottom 4 GiB); the `virt`
-/// board's RAM and the framebuffer surface both sit well inside it.
-const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
 
 /// Synthetic owner process id for the driver context.
 const TASK: ProcessId = ProcessId(0xFB0);
@@ -269,9 +265,7 @@ fn drive_lifecycle(config: FramebufferConfig) {
     grants.insert(CapabilityId::MMIO_MAP);
     grants.insert(CapabilityId::DRV_LOAD);
     let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK);
-    // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let phys = unsafe { DirectPhysMap::identity(IDENTITY_LIMIT) }
-        .expect("the boot direct map addresses its window");
+    let phys = tairix_test_riscv64_boot::boot::identity_map();
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(MMIO_VBASE),

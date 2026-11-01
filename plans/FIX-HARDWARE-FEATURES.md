@@ -549,9 +549,10 @@ the crypto-availability decision as its first two consumers.
 - **Crypto backend availability decision (capability-gated only — invariant
   8).** *No benchmark.* `lib/crypto::backend` is a `ByPriority` SHA-256 family:
   a hardware-availability candidate (offered only where the audited crate's own
-  detection runs — a hosted `x86_64` build, never a TAIRiX target — via the
-  `crypto_hw_sha256` build cfg, requiring the `ShaNi`/`Sse42`/`Ssse3`/`Sse2`
-  bits `sha2` gates its SHA-NI path on) and the audited constant-time software
+  detection runs — a hosted `x86_64` build with SHA-NI or an `aarch64` Linux,
+  Android or Apple build, never a TAIRiX target — via the `crypto_hw_sha256`
+  build cfg, requiring the bits `sha2` gates that backend on: `ShaNi`/`Sse42`/
+  `Ssse3`/`Sse2`, or `Sha2`) and the audited constant-time software
   baseline. Selection is *availability*, never speed, and the chosen backend
   still comes from the audited `lib/crypto` (§2.12) — the module does **not**
   fork the computation (the audited crate owns backend selection internally;

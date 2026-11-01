@@ -461,15 +461,17 @@ typedef struct tairix_spawn_attach {
 * for EXPLICIT. A network attach may set TAIRIX_ATTACH_FLAG_READ_ONLY and
 * has `own` zero. An image attach may set READ_ONLY or
 * TAIRIX_IMAGE_ATTACH_FLAG_WRITABLE, not both, and
-* TAIRIX_IMAGE_ATTACH_FLAG_EXPECTS, which makes `own` the TAIRIX_VOLUME_FS_*
-* the file must hold; without it `own` is zero. TAIRIX_IMAGE_ATTACH_FLAG_ADOPT
-* takes up a volume of the file attached already for the caller's login
-* session too. Anything else is refused. */
+* TAIRIX_IMAGE_ATTACH_FLAG_EXPECTS, which makes `own` a set of
+* 1u << TAIRIX_VOLUME_FS_* bits naming the filesystems the file must hold one
+* of; without it `own` is zero. `pad` is zero. TAIRIX_IMAGE_ATTACH_FLAG_ADOPT
+* takes up a volume of the file attached already, one as writable as the
+* attach asks, for the caller's login session too. Anything else is
+* refused. */
 #define TAIRIX_IMAGE_ATTACH_VERSION 1u
 #define TAIRIX_FSSERVE_VERSION 1u
-#define TAIRIX_ATTACH_HEAD_LEN 20u
-#define TAIRIX_IMAGE_ATTACH_MAX 116u
-#define TAIRIX_NETWORK_ATTACH_MAX 116u
+#define TAIRIX_ATTACH_HEAD_LEN 24u
+#define TAIRIX_IMAGE_ATTACH_MAX 120u
+#define TAIRIX_NETWORK_ATTACH_MAX 120u
 #define TAIRIX_VOLUME_NAME_MAX 32u
 #define TAIRIX_PRESENTATION_PRIVATE ((uint8_t)1u)
 #define TAIRIX_PRESENTATION_SHARED ((uint8_t)2u)
@@ -494,8 +496,9 @@ typedef struct tairix_attach_head {
     uint16_t dir_mode;
     uint16_t file_mode;
     uint8_t name_len;
-    uint8_t own;
+    uint8_t pad;
     uint16_t target_len;
+    uint32_t own;
 } tairix_attach_head_t;
 
 /* What an attach answers: the volume's identity, which a detach names, and
@@ -507,8 +510,11 @@ typedef struct tairix_attach_head {
 * a TARGET_REFUSED one in `refused_errno` the TAIRIX_E_* the directory the
 * volume was also to be shown at refused it with, and a NAME_REFUSED one
 * there the TAIRIX_E_* the name asked for it was refused with, each
-* leaving `volume` zero and nothing attached; every field an outcome does
-* not name is zero. */
+* leaving `volume` zero and nothing attached, though a volume a
+* TARGET_REFUSED attach mounted first stays until the system takes it
+* out where the caller was being killed or the volume was in use, a retry
+* being refused TAIRIX_E_BUSY until then; every field an outcome does not
+* name is zero. */
 #define TAIRIX_ATTACH_REPLY_LEN 56u
 #define TAIRIX_ATTACH_REPLY_FLAG_READ_ONLY ((uint8_t)0x1u)
 #define TAIRIX_IMAGE_ATTACH_REPLY_LEN 64u
@@ -539,6 +545,14 @@ typedef struct tairix_image_attach_reply {
     int32_t refused_errno;
     tairix_attach_reply_t volume;
 } tairix_image_attach_reply_t;
+
+/* The frame volume_detach() takes: the 16-byte identity an attach
+ * reply names, then one TAIRIX_VOLUME_DETACH_* mode byte. LOST forces a
+ * volume recorded lost and is PLAIN for any other. */
+#define TAIRIX_VOLUME_DETACH_LEN 17u
+#define TAIRIX_VOLUME_DETACH_PLAIN ((uint8_t)0u)
+#define TAIRIX_VOLUME_DETACH_FORCE ((uint8_t)1u)
+#define TAIRIX_VOLUME_DETACH_LOST ((uint8_t)2u)
 
 /* fs_readdir() reads a directory a batch at a time from the open description's
 * position: whole records of at most TAIRIX_READDIR_BATCH_MAX bytes per call,

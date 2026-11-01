@@ -11,7 +11,9 @@
 //! loaded before Rust runs, that each exit reads the saved `CS` and the area
 //! where they are, and that a pending extended-state load precedes the SSE
 //! restore. Shared template macros are expanded from their own definitions,
-//! so a needle can never match itself.
+//! so a needle can never match itself. An assembly stub that forwards to a
+//! naked entry is simulated through it, and each constant the simulation
+//! substitutes is checked bound to the definition it assumes.
 
 extern crate std;
 
@@ -21,19 +23,13 @@ use std::string::{String, ToString};
 use std::vec::Vec;
 
 use crate::fpu::{FP_FRAME_BYTES, FP_FRAME_MXCSR};
-use crate::interrupts::{ISR_FRAME_CS, ISR_FRAME_TOP, WORD_ISR_FRAME_CS, WORD_ISR_FRAME_TOP};
-use crate::sidechannel::sidechannel_tests::{instructions, is_assembly, ASM_SOURCES};
+use crate::interrupts::{
+    SavedRegs, ISR_FRAME_CS, ISR_FRAME_TOP, WORD_ISR_FRAME_CS, WORD_ISR_FRAME_TOP,
+};
+use crate::sidechannel::sidechannel_tests::{assembly_line, instructions, ASM_SOURCES};
 use crate::syscall_entry::SYSCALL_ABOVE_FP_FRAME;
-
-/// Every source a stub or a template macro it splices in lives in.
-const SOURCES: &[&str] = &[
-    include_str!("interrupts.rs"),
-    include_str!("fault.rs"),
-    include_str!("irq.rs"),
-    include_str!("syscall_entry.rs"),
-    include_str!("fpu.rs"),
-    include_str!("sidechannel.rs"),
-];
+use tairix_fuzzseed::asm::{bindings, invocations, mnemonic, template_instructions};
+use tairix_fuzzseed::sources::is_assembly;
 
 /// Offset of the saved `CS` below the frame top.
 const CS_BELOW_TOP: i64 = 32;
@@ -48,64 +44,196 @@ pub(crate) fn literal(line: &str) -> Option<String> {
     Some(body.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
+/// The one Rust source among those inspected with a line holding `needle`,
+/// and that line's byte offset in it.
+fn only_definition(needle: &str) -> (&'static str, usize) {
+    let mut found = ASM_SOURCES
+        .iter()
+        .filter(|(name, _)| !is_assembly(name))
+        .flat_map(|(_, source)| {
+            let mut at = 0;
+            source.split_inclusive('\n').filter_map(move |line| {
+                let start = at;
+                at += line.len();
+                line.contains(needle).then_some((*source, start))
+            })
+        });
+    let definition = found
+        .next()
+        .unwrap_or_else(|| panic!("no `{needle}` in the inspected sources"));
+    assert!(found.next().is_none(), "`{needle}` is defined twice");
+    definition
+}
+
 /// The instructions of the template macro `name`, from its definition.
 fn macro_instructions(name: &str) -> Vec<String> {
     let header = format!("macro_rules! {name} {{");
-    let source = SOURCES
-        .iter()
-        .find(|s| s.contains(&header))
-        .unwrap_or_else(|| panic!("no `{header}` in the inspected sources"));
-    source
+    let (source, at) = only_definition(&header);
+    source[at..]
         .lines()
-        .skip_while(|line| !line.contains(&header))
         .skip(1)
         .take_while(|line| *line != "}")
         .filter_map(literal)
         .collect()
 }
 
-/// The instructions of the naked stub whose definition starts at the line
-/// containing `anchor`, with template macros expanded and each `{name}` in
-/// `consts` replaced by its value.
-pub(crate) fn stub(anchor: &str, consts: &[(&str, usize)]) -> Vec<String> {
-    let source = SOURCES
-        .iter()
-        .find(|s| s.contains(anchor))
-        .unwrap_or_else(|| panic!("no `{anchor}` in the inspected sources"));
-    let mut lines = source.lines().skip_while(|line| !line.contains(anchor));
-    assert!(lines.next().is_some());
+/// `lines` with each splice of a template macro, a `NAME!(),` line,
+/// replaced by the macro's own instructions.
+fn expand<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut out = Vec::new();
-    for line in lines.take_while(|line| !line.contains("options(")) {
-        let trimmed = line.trim();
+    for line in lines {
         if let Some(instruction) = literal(line) {
             out.push(instruction);
-        } else if let Some(call) = trimmed.strip_suffix("!(),") {
-            let name = call.rsplit("::").next().unwrap_or(call);
-            out.extend(macro_instructions(name));
+        } else if let Some(call) = line.trim().strip_suffix("!(),") {
+            out.extend(macro_instructions(call.rsplit("::").next().unwrap_or(call)));
         }
     }
-    out.into_iter()
+    out
+}
+
+/// A constant a stub reads and the simulation substitutes: its operand, the
+/// expression the stub must bind it to, and the value assumed.
+type Bound = (&'static str, &'static str, usize);
+
+const FP_FRAME: Bound = (
+    "fp_frame",
+    "const crate::fpu::FP_FRAME_BYTES",
+    FP_FRAME_BYTES,
+);
+const FP_MXCSR: Bound = (
+    "fp_mxcsr",
+    "const crate::fpu::FP_FRAME_MXCSR",
+    FP_FRAME_MXCSR,
+);
+const ISR_FRAME: [Bound; 2] = [
+    (
+        "frame_cs",
+        "const crate::interrupts::ISR_FRAME_CS",
+        ISR_FRAME_CS,
+    ),
+    (
+        "frame_top",
+        "const crate::interrupts::ISR_FRAME_TOP",
+        ISR_FRAME_TOP,
+    ),
+];
+const WORD_ISR_FRAME: [Bound; 2] = [
+    (
+        "frame_cs",
+        "const crate::interrupts::WORD_ISR_FRAME_CS",
+        WORD_ISR_FRAME_CS,
+    ),
+    (
+        "frame_top",
+        "const crate::interrupts::WORD_ISR_FRAME_TOP",
+        WORD_ISR_FRAME_TOP,
+    ),
+];
+const VECTOR: Bound = (
+    "vector",
+    "const core::mem::size_of::<SavedRegs>()",
+    core::mem::size_of::<SavedRegs>(),
+);
+
+/// The constants every returning stub binds, for its frame.
+fn frame_consts(frame: [Bound; 2]) -> Vec<Bound> {
+    std::vec![FP_FRAME, FP_MXCSR, frame[0], frame[1]]
+}
+
+/// Whether `anchor` names an assembly definition: a label, or the macro a
+/// label is emitted by.
+fn is_assembly_anchor(anchor: &str) -> bool {
+    anchor.starts_with(".macro ") || anchor.ends_with(':')
+}
+
+/// The one assembly source defining `anchor`, its instructions, and the
+/// index of the defining line.
+fn definition(anchor: &str) -> (&'static str, Vec<String>, usize) {
+    let mut found = ASM_SOURCES.iter().flat_map(|(name, source)| {
+        let lines = instructions(name, source);
+        let at: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| *line == anchor || line.starts_with(&format!("{anchor} ")))
+            .map(|(at, _)| at)
+            .collect();
+        at.into_iter()
+            .map(move |at| (*name, lines.clone(), at))
+            .collect::<Vec<_>>()
+    });
+    let definition = found
+        .next()
+        .unwrap_or_else(|| panic!("no `{anchor}` in the inspected sources"));
+    assert!(found.next().is_none(), "`{anchor}` is defined twice");
+    definition
+}
+
+/// What the assembly defined at `lines[at]` runs, up to its macro's end or
+/// its `.size`: every line but its own first label and the symbol
+/// directives that emit nothing, so any other directive stays to be judged.
+fn definition_body(lines: &[String], at: usize) -> Vec<String> {
+    let mut labelled = false;
+    lines[at + 1..]
+        .iter()
+        .take_while(|line| *line != ".endm" && !line.starts_with(".size "))
+        .filter(|line| {
+            let symbol = [".global ", ".globl ", ".type "]
+                .iter()
+                .any(|directive| line.starts_with(directive));
+            let own_label = !labelled && line.ends_with(':');
+            labelled |= own_label;
+            !symbol && !own_label
+        })
+        .cloned()
+        .collect()
+}
+
+/// The entry an assembly stub's closing `jmp` forwards to, if one is listed.
+fn forwarded_to(body: &[String]) -> Option<&'static str> {
+    let target = body.last()?.strip_prefix("jmp ")?;
+    let (function, label) = (format!("fn {target}()"), format!("{target}:"));
+    ENTRIES
+        .iter()
+        .map(|(anchor, _)| *anchor)
+        .find(|anchor| *anchor == function || *anchor == label)
+}
+
+/// The instructions of the stub defined at `anchor` — through the entry it
+/// forwards to, for an assembly one — with template macros expanded and each
+/// `{name}` of `consts` replaced by its value, once the stub is checked to
+/// bind it to the expression the constant assumes.
+pub(crate) fn stub(anchor: &str, consts: &[Bound]) -> Vec<String> {
+    if is_assembly_anchor(anchor) {
+        let (_, lines, at) = definition(anchor);
+        let mut body = definition_body(&lines, at);
+        if let Some(target) = forwarded_to(&body) {
+            body.extend(stub(target, consts));
+        }
+        return body;
+    }
+    let (source, at) = only_definition(anchor);
+    let block = invocations(&source[at..], "naked_asm")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("`{anchor}` defines no naked block"));
+    let bound = bindings(block);
+    expand(block.lines())
+        .into_iter()
         .map(|mut instruction| {
-            for (name, value) in consts {
-                instruction = instruction.replace(&format!("{{{name}}}"), &value.to_string());
+            for (name, expression, value) in consts {
+                let operand = format!("{{{name}}}");
+                if instruction.contains(&operand) {
+                    assert_eq!(
+                        bound.get(*name).map(String::as_str),
+                        Some(*expression),
+                        "{anchor}: `{name}` is bound to another constant"
+                    );
+                    instruction = instruction.replace(&operand, &value.to_string());
+                }
             }
             instruction
         })
         .collect()
-}
-
-/// The constants every returning stub binds.
-fn frame_consts(frame_cs: usize, frame_top: usize) -> Vec<(&'static str, usize)> {
-    std::vec![
-        ("fp_frame", FP_FRAME_BYTES),
-        ("fp_mxcsr", FP_FRAME_MXCSR),
-        ("frame_cs", frame_cs),
-        ("frame_top", frame_top),
-        (
-            "vector",
-            core::mem::size_of::<crate::interrupts::SavedRegs>()
-        ),
-    ]
 }
 
 /// A stack operand `K(%rsp)` in `operand`, as `K`.
@@ -140,6 +268,12 @@ struct Trace {
     area_lea: Option<i64>,
     /// `%rsp` at the `iretq`.
     iret_at: Option<i64>,
+    /// The slot the last `pushq` of an immediate wrote.
+    pushed_immediate: Option<i64>,
+    /// The stack slot `%rsi` was last loaded from.
+    rsi_read: Option<i64>,
+    /// `%rsp` at the first `jmp`.
+    rsp_at_jmp: Option<i64>,
 }
 
 /// Run `instructions` from `entry` bytes below the frame top (`None` for an
@@ -227,7 +361,18 @@ fn simulate(instructions: &[String], entry: Option<i64>) -> Trace {
                 aligned.map(|a| (a - 8).rem_euclid(16)),
             )),
             ["iretq"] => trace.iret_at = rsp,
+            ["movq", operand, "%rsi"] if rsp_offset(operand).is_some() => {
+                trace.rsi_read = at(rsp_offset(operand).expect("a slot"));
+            }
+            ["jmp", _] => {
+                trace
+                    .rsp_at_jmp
+                    .get_or_insert_with(|| rsp.unwrap_or(i64::MIN));
+            }
             _ => {}
+        }
+        if words.first() == Some(&"pushq") && words.get(1).is_some_and(|w| w.starts_with('$')) {
+            trace.pushed_immediate = rsp;
         }
     }
     trace
@@ -268,10 +413,7 @@ fn assert_returning(name: &str, trace: &Trace, reads_cs: bool) {
 /// bytes below a 16-byte boundary.
 #[test]
 fn a_resumable_isr_stub_frames_sse_state_and_loads_pending_state() {
-    let body = stub(
-        "macro_rules! define_isr",
-        &frame_consts(ISR_FRAME_CS, ISR_FRAME_TOP),
-    );
+    let body = stub("macro_rules! define_isr", &frame_consts(ISR_FRAME));
     assert_returning("define_isr!", &simulate(&body, Some(CPU_FRAME)), true);
 }
 
@@ -280,10 +422,7 @@ fn a_resumable_isr_stub_frames_sse_state_and_loads_pending_state() {
 /// the stub starts 16-aligned after the frame and the code.
 #[test]
 fn the_page_fault_stub_frames_sse_state_and_loads_pending_state() {
-    let body = stub(
-        "fn page_fault_isr()",
-        &frame_consts(WORD_ISR_FRAME_CS, WORD_ISR_FRAME_TOP),
-    );
+    let body = stub("fn page_fault_isr()", &frame_consts(WORD_ISR_FRAME));
     let trace = simulate(&body, Some(CPU_FRAME + 8));
     assert_returning("page_fault_isr", &trace, true);
     // Its argument reads: the error code, the frame's `rip` and its address,
@@ -309,33 +448,44 @@ fn the_page_fault_stub_frames_sse_state_and_loads_pending_state() {
     }
 }
 
-/// Each external-IRQ vector's stub pushes its vector word and jumps to the
-/// common trampoline, so the trampoline starts 16-aligned.
+/// Each external-IRQ vector's stub, simulated from the CPU frame through the
+/// trampoline it forwards to: its one pushed word is the vector the
+/// dispatcher is handed, and the Rust side finds the CPU frame exactly that
+/// word above the saved registers.
 #[test]
-fn the_external_irq_trampoline_frames_sse_state_and_loads_pending_state() {
-    let body = stub(
-        "fn tairix_arch_x86_64_external_irq_common()",
-        &frame_consts(WORD_ISR_FRAME_CS, WORD_ISR_FRAME_TOP),
+fn each_external_irq_stub_frames_sse_state_and_loads_pending_state() {
+    let mut consts = frame_consts(WORD_ISR_FRAME);
+    consts.push(VECTOR);
+    let body = stub(".macro external_irq_stub", &consts);
+    let trace = simulate(&body, Some(CPU_FRAME));
+    assert_returning("external_irq_stub", &trace, true);
+    assert_eq!(
+        trace.pushed_immediate,
+        Some(-CPU_FRAME - 8),
+        "the vector word sits just below the CPU frame"
     );
-    assert_returning(
-        "external_irq_common",
-        &simulate(&body, Some(CPU_FRAME + 8)),
-        true,
+    assert_eq!(
+        trace.rsi_read, trace.pushed_immediate,
+        "the dispatcher is handed the word the stub pushed"
     );
-    // The vector word it hands the dispatcher sits just below the CPU frame.
-    let vector = i64::try_from(core::mem::size_of::<crate::interrupts::SavedRegs>()).unwrap();
-    assert!(body
-        .iter()
-        .any(|i| i == &format!("movq {vector}(%rsp), %rsi")));
-    assert_eq!(-(CPU_FRAME + 8) - 15 * 8 + vector, -CPU_FRAME - 8);
+    let pushed = trace.rsp_at_jmp.map(|at| -CPU_FRAME - at);
+    assert_eq!(
+        pushed.and_then(|bytes| usize::try_from(bytes).ok()),
+        Some(crate::irq::EXTERNAL_VECTOR_QWORD_BYTES),
+        "the dispatcher's frame arithmetic is the bytes the stub pushes"
+    );
 }
 
 #[test]
 fn the_syscall_stub_frames_sse_state_and_loads_pending_state() {
     let consts = std::vec![
-        ("fp_frame", FP_FRAME_BYTES),
-        ("fp_mxcsr", FP_FRAME_MXCSR),
-        ("frame_top", FP_FRAME_BYTES + SYSCALL_ABOVE_FP_FRAME),
+        FP_FRAME,
+        FP_MXCSR,
+        (
+            "frame_top",
+            "const crate::fpu::FP_FRAME_BYTES + SYSCALL_ABOVE_FP_FRAME",
+            FP_FRAME_BYTES + SYSCALL_ABOVE_FP_FRAME,
+        ),
     ];
     let body = stub("fn syscall_entry_stub()", &consts);
     assert_returning("syscall_entry_stub", &simulate(&body, None), false);
@@ -363,48 +513,111 @@ fn every_diverging_stub_enters_rust_aligned_under_the_kernel_mxcsr() {
     }
 }
 
-/// How the CPU reaches a naked entry point, which decides what it may assume
-/// of the state it inherits.
+/// How the CPU reaches an entry point, which decides what it may assume of
+/// the state it inherits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Reached {
     /// Interrupt, exception, or trap-gate delivery, which keeps the
-    /// interrupted `DF`.
+    /// interrupted `DF` and `AC`.
     Gate,
-    /// The `syscall` instruction, whose `IA32_FMASK` clears `DF`.
+    /// The `syscall` instruction, whose `IA32_FMASK` clears `DF` and `AC`.
     Syscall,
-    /// A call from Rust or from entry assembly, under `DF=0` already.
+    /// A boot loader's or firmware's hand-off, or a start-up IPI, after which
+    /// the entry assumes nothing of the flags.
+    Boot,
+    /// Kernel code already under the Rust ABI — a call, a jump from entry
+    /// assembly, or the return resuming it after a fault — so `DF=0`.
     Call,
 }
 
-/// Every naked entry point the port defines, by the line its definition
-/// starts at, and how it is reached.
-pub(crate) const NAKED_ENTRIES: &[(&str, Reached)] = &[
+/// Every entry point the port defines, by the line its definition starts
+/// at — `fn NAME()`, `macro_rules! NAME`, `NAME:` for an assembly label, or
+/// `.macro NAME` for a label a macro emits — and how it is reached.
+pub(crate) const ENTRIES: &[(&str, Reached)] = &[
     ("fn syscall_entry_stub()", Reached::Syscall),
     ("macro_rules! define_isr", Reached::Gate),
     ("macro_rules! exception_isr_body", Reached::Gate),
     ("fn page_fault_isr()", Reached::Gate),
     ("fn tairix_arch_x86_64_external_irq_common()", Reached::Gate),
     ("fn tairix_arch_x86_64_isr_default()", Reached::Gate),
+    (".macro external_irq_stub", Reached::Gate),
+    ("_start:", Reached::Boot),
+    ("pvh_start:", Reached::Boot),
+    ("_ap_trampoline_start:", Reached::Boot),
     ("fn tairix_arch_x86_64_fpu_enable()", Reached::Call),
     ("fn tairix_arch_x86_64_xstate_load()", Reached::Call),
     ("fn tairix_arch_x86_64_x87_scrub()", Reached::Call),
+    ("higher_half_entry:", Reached::Call),
+    ("tairix_arch_x86_64_switch:", Reached::Call),
+    ("_takeover_switch_stack:", Reached::Call),
+    ("tairix_x86_64_guarded_user_copy:", Reached::Call),
+    ("tairix_x86_64_uaccess_fixup:", Reached::Call),
+];
+
+/// The global labels nothing enters: data, and markers bounding code entered
+/// elsewhere.
+const NOT_ENTERED: &[&str] = &[
+    "_ap_trampoline_end",
+    "boot_pdpt_physmap",
+    "tairix_arch_x86_64_external_irq_table",
+    "tairix_x86_64_uaccess_window_begin",
+    "tairix_x86_64_uaccess_window_end",
 ];
 
 /// The anchors of the entry points reached as `reached`.
 pub(crate) fn reached_by(reached: Reached) -> impl Iterator<Item = &'static str> {
-    NAKED_ENTRIES
+    ENTRIES
         .iter()
         .filter(move |(_, how)| *how == reached)
         .map(|(anchor, _)| *anchor)
 }
 
-/// Every naked function in the port's sources is in [`NAKED_ENTRIES`], so a
-/// new entry stub cannot escape the tests that read the inventory. A naked
-/// function a template macro emits is named by its macro.
-#[test]
-fn every_naked_entry_is_classified() {
+/// The label `line` defines, if it is one: the text before its first `:`,
+/// non-empty and holding no space, so `movq %gs:0, %rsp` defines none.
+fn label(line: &str) -> Option<&str> {
+    let (name, rest) = line.split_once(':')?;
+    (!name.is_empty() && !name.contains(char::is_whitespace) && rest.trim().is_empty())
+        .then_some(name)
+}
+
+/// Each global label `sources` define, mapped to the anchor that names it:
+/// `LABEL:`, or `.macro NAME` for one a macro emits. A global with no label,
+/// set by `.set` or `=`, is entered by nothing.
+fn assembly_labels(sources: &[(&str, &str)]) -> BTreeMap<String, String> {
+    let mut found = BTreeMap::new();
+    for &(name, source) in sources {
+        let lines = instructions(name, source);
+        let globals: BTreeSet<&str> = lines
+            .iter()
+            .filter_map(|line| {
+                line.strip_prefix(".global ")
+                    .or_else(|| line.strip_prefix(".globl "))
+            })
+            .flat_map(|symbols| symbols.split(',').map(str::trim))
+            .collect();
+        let mut emitted_by = None;
+        for line in &lines {
+            if let Some(header) = line.strip_prefix(".macro ") {
+                emitted_by = header
+                    .split_whitespace()
+                    .next()
+                    .map(|name| format!(".macro {name}"));
+            } else if line == ".endm" {
+                emitted_by = None;
+            } else if let Some(name) = label(line).filter(|name| globals.contains(name)) {
+                let anchor = emitted_by.clone().unwrap_or_else(|| format!("{name}:"));
+                found.insert(name.to_string(), anchor);
+            }
+        }
+    }
+    found
+}
+
+/// Each naked function `sources` define, by its anchor: a naked function a
+/// template macro emits is named by its macro.
+fn naked_anchors(sources: &[(&str, &str)]) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    for &(name, source) in ASM_SOURCES {
+    for &(name, source) in sources {
         if is_assembly(name) {
             continue;
         }
@@ -436,11 +649,305 @@ fn every_naked_entry_is_classified() {
             found.insert(anchor);
         }
     }
-    let listed: BTreeSet<String> = NAKED_ENTRIES
+    found
+}
+
+/// Every naked function and every global label the port's sources define,
+/// assembly and `global_asm!` templates alike, is in [`ENTRIES`] or
+/// [`NOT_ENTERED`], so a new entry point cannot escape the tests that read
+/// the inventory.
+#[test]
+fn every_entry_point_is_classified() {
+    let labels = assembly_labels(ASM_SOURCES);
+    for symbol in NOT_ENTERED {
+        assert!(
+            labels.contains_key(*symbol),
+            "`{symbol}` is no longer defined"
+        );
+    }
+    let mut found = naked_anchors(ASM_SOURCES);
+    found.extend(
+        labels
+            .iter()
+            .filter(|(symbol, _)| !NOT_ENTERED.contains(&symbol.as_str()))
+            .map(|(_, anchor)| anchor.clone()),
+    );
+    let listed: BTreeSet<String> = ENTRIES
         .iter()
         .map(|(anchor, _)| (*anchor).to_string())
         .collect();
     assert_eq!(found, listed);
+}
+
+#[test]
+fn the_entry_scan_reads_assembly_sources_and_global_asm_templates() {
+    let stubs = "
+        .macro forward vec
+            .global forward_\\vec
+        forward_\\vec:
+            pushq $\\vec
+            jmp common
+        .endm
+        .global table
+        table:
+            .quad 0
+        .globl size
+        .set size, 8
+        local:
+            nop
+    ";
+    let glue = r##"
+        core::arch::global_asm!(r#"
+            .global copy
+        copy:  # a comment: with a colon
+            ret
+        "#);
+        #[unsafe(naked)]
+        pub unsafe extern "C" fn trampoline() {
+            core::arch::naked_asm!("ret")
+        }
+    "##;
+    let sources = [("stubs.s", stubs), ("glue.rs", glue)];
+    let labels = assembly_labels(&sources);
+    let expected: BTreeMap<String, String> = [
+        ("forward_\\vec", ".macro forward"),
+        ("table", "table:"),
+        ("copy", "copy:"),
+    ]
+    .into_iter()
+    .map(|(symbol, anchor)| (symbol.to_string(), anchor.to_string()))
+    .collect();
+    assert_eq!(labels, expected);
+    assert_eq!(
+        naked_anchors(&sources),
+        BTreeSet::from([String::from("fn trampoline()")])
+    );
+}
+
+/// Whether an assembly stub's `body` only forwards: pushes immediates, then
+/// jumps. Anything else — another instruction, or a directive that emits
+/// code — could clobber what its target saves.
+fn only_forwards(body: &[String]) -> bool {
+    let Some((last, pushes)) = body.split_last() else {
+        return false;
+    };
+    last.starts_with("jmp ") && pushes.iter().all(|line| line.starts_with("pushq $"))
+}
+
+/// An assembly stub a gate reaches only pushes immediates and jumps to a
+/// checked naked entry, so it clobbers nothing that entry saves and every
+/// gate check runs over the path it starts.
+#[test]
+fn every_gate_entered_assembly_stub_only_forwards() {
+    let mut checked = 0;
+    for anchor in reached_by(Reached::Gate).filter(|anchor| is_assembly_anchor(anchor)) {
+        let (_, lines, at) = definition(anchor);
+        let body = definition_body(&lines, at);
+        assert!(only_forwards(&body), "{anchor}: {body:?}");
+        let target =
+            forwarded_to(&body).unwrap_or_else(|| panic!("{anchor}: forwards nowhere listed"));
+        assert!(
+            reached_by(Reached::Gate).any(|entry| entry == target) && !is_assembly_anchor(target),
+            "{anchor}: forwards to `{target}`, which is no checked gate entry"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no assembly stub is gate-entered");
+
+    let lines =
+        |text: &[&str]| -> Vec<String> { text.iter().map(|line| (*line).to_string()).collect() };
+    let forwarder = lines(&[
+        ".macro f v",
+        ".global f_\\v",
+        "f_\\v:",
+        "pushq $\\v",
+        "jmp common",
+        ".endm",
+    ]);
+    assert!(only_forwards(&definition_body(&forwarder, 0)));
+    for hidden in [
+        lines(&[
+            ".macro f v",
+            "f_\\v:",
+            ".byte 0x31, 0xdb",
+            "pushq $\\v",
+            "jmp common",
+            ".endm",
+        ]),
+        lines(&[
+            ".macro f v",
+            "f_\\v:",
+            ".rept 2",
+            "pushq $\\v",
+            ".endr",
+            "jmp common",
+            ".endm",
+        ]),
+        lines(&[
+            ".macro f v",
+            "f_\\v:",
+            "pushq $\\v",
+            "movq $0, %rbx",
+            "jmp common",
+            ".endm",
+        ]),
+    ] {
+        assert!(!only_forwards(&definition_body(&hidden, 0)), "{hidden:?}");
+    }
+}
+
+/// The external-IRQ stubs span the range `irq` defines, passed in as
+/// operands, so the table the Rust side indexes holds one entry per vector by
+/// construction.
+#[test]
+fn the_external_irq_stubs_span_the_range_irq_defines() {
+    let source = include_str!("external_irq.s");
+    let lines: Vec<String> = source.lines().filter_map(assembly_line).collect();
+    let repeats: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.starts_with(".rept"))
+        .collect();
+    assert!(!repeats.is_empty());
+    assert!(
+        repeats.iter().all(|line| *line == ".rept {vector_count}"),
+        "{repeats:?}"
+    );
+    let starts: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.starts_with(".set vec_no,") && !line.ends_with("vec_no + 1"))
+        .collect();
+    assert!(!starts.is_empty());
+    assert!(
+        starts
+            .iter()
+            .all(|line| *line == ".set vec_no, {first_vector}"),
+        "{starts:?}"
+    );
+    let block = invocations(include_str!("lib.rs"), "global_asm")
+        .into_iter()
+        .find(|block| block.contains("include_str!(\"external_irq.s\")"))
+        .expect("lib.rs assembles the stubs");
+    let bound = bindings(block);
+    assert_eq!(
+        bound.get("first_vector").map(String::as_str),
+        Some("const irq::EXTERNAL_VECTOR_FIRST")
+    );
+    assert_eq!(
+        bound.get("vector_count").map(String::as_str),
+        Some("const irq::EXTERNAL_VECTOR_COUNT")
+    );
+}
+
+/// Operands that mean one thing wherever a block reads them, and the
+/// definition each is bound to.
+const SHARED_OPERANDS: &[(&str, &str)] = &[
+    ("smap", "const crate::protection::Protections::SMAP.bits()"),
+    ("in_force", "sym crate::protection::IN_FORCE"),
+    ("kernel_mxcsr", "sym crate::fpu::KERNEL_MXCSR"),
+    ("verw_sel", "sym crate::sidechannel::VERW_SELECTOR"),
+    (FP_FRAME.0, FP_FRAME.1),
+    (FP_MXCSR.0, FP_MXCSR.1),
+];
+
+/// The template macros the port's sources define, by name.
+fn template_macros() -> Vec<&'static str> {
+    ASM_SOURCES
+        .iter()
+        .filter(|(name, _)| !is_assembly(name))
+        .flat_map(|(_, source)| source.lines())
+        .filter_map(|line| line.strip_prefix("macro_rules! "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .collect()
+}
+
+/// What `block` spells: its own text, each template macro it splices in, and
+/// each assembly source it includes.
+fn block_text(block: &str) -> String {
+    let mut text = String::from(block);
+    for name in template_macros() {
+        if block.contains(&format!("{name}!()")) {
+            for instruction in macro_instructions(name) {
+                text.push('\n');
+                text.push_str(&instruction);
+            }
+        }
+    }
+    for &(name, source) in ASM_SOURCES.iter().filter(|(name, _)| is_assembly(name)) {
+        if block.contains(&format!("include_str!(\"{name}\")")) {
+            text.push('\n');
+            text.push_str(source);
+        }
+    }
+    text
+}
+
+/// Each shared operand `block` reads but binds otherwise, with what it binds.
+fn misbound(block: &str) -> Vec<(&'static str, Option<String>)> {
+    let text = block_text(block);
+    let bound = bindings(block);
+    SHARED_OPERANDS
+        .iter()
+        .filter(|(name, _)| text.contains(&format!("{{{name}}}")))
+        .filter(|(name, expected)| bound.get(*name).map(String::as_str) != Some(*expected))
+        .map(|(name, _)| (*name, bound.get(*name).cloned()))
+        .collect()
+}
+
+/// Every block in the port that reads a shared operand binds it to its one
+/// definition, so a stub cannot test the right bit of the wrong word.
+#[test]
+fn every_shared_template_operand_is_bound_to_its_definition() {
+    let mut read = BTreeSet::new();
+    let mut blocks = 0;
+    for &(name, source) in ASM_SOURCES.iter().filter(|(name, _)| !is_assembly(name)) {
+        for kind in ["asm", "naked_asm", "global_asm"] {
+            for block in invocations(source, kind) {
+                blocks += 1;
+                let text = block_text(block);
+                read.extend(
+                    SHARED_OPERANDS
+                        .iter()
+                        .filter(|(operand, _)| text.contains(&format!("{{{operand}}}")))
+                        .map(|(operand, _)| *operand),
+                );
+                assert_eq!(
+                    misbound(block),
+                    Vec::<(&str, Option<String>)>::new(),
+                    "{name}: `{}`",
+                    block.lines().next().unwrap_or(block)
+                );
+            }
+        }
+    }
+    assert!(blocks > 0, "the scan found no block");
+    let all: BTreeSet<&str> = SHARED_OPERANDS.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        read, all,
+        "a shared operand no scanned block reads is checked by nothing"
+    );
+}
+
+#[test]
+fn a_block_binding_a_shared_operand_elsewhere_is_caught() {
+    let smep = "core::arch::naked_asm!(
+        crate::clear_entry_flags!(),
+        \"iretq\",
+        smap = const $crate::protection::Protections::SMEP.bits(),
+        in_force = sym crate::protection::IN_FORCE,
+    )";
+    assert_eq!(
+        misbound(smep),
+        [(
+            "smap",
+            Some(String::from(
+                "const crate::protection::Protections::SMEP.bits()"
+            ))
+        )]
+    );
+    let unbound = "core::arch::asm!(\"verw {verw_sel}(%rip)\", options(att_syntax))";
+    assert_eq!(misbound(unbound), [("verw_sel", None)]);
+    let right = "core::arch::asm!(\"verw {verw_sel}(%rip)\", verw_sel = sym crate::sidechannel::VERW_SELECTOR)";
+    assert_eq!(misbound(right), []);
 }
 
 /// Every stub entered by interrupt, exception, or trap-gate delivery clears
@@ -491,6 +998,8 @@ fn every_asynchronous_entry_stub_clears_the_alignment_check_flag_under_smap() {
             clac < call,
             "{anchor}: `clac` must precede the first call into Rust"
         );
+        // What `{smap}` and `{in_force}` are bound to is pinned by
+        // `every_shared_template_operand_is_bound_to_its_definition`.
         assert_eq!(
             body[clac - 2..=clac + 1],
             ["testb ${smap}, {in_force}(%rip)", "jz 4f", "clac", "4:"],
@@ -512,20 +1021,8 @@ fn clears_direction_flag(path: &[String], at: usize) -> bool {
 /// straight-line jumps follow.
 #[test]
 fn the_boot_entries_clear_the_direction_flag_before_rust() {
-    for (file, entry) in [
-        ("boot.s", "_start:"),
-        ("boot.s", "pvh_start:"),
-        ("ap_trampoline.s", "_ap_trampoline_start:"),
-    ] {
-        let (_, source) = ASM_SOURCES
-            .iter()
-            .find(|(name, _)| *name == file)
-            .unwrap_or_else(|| panic!("{file} is not inspected"));
-        let lines = instructions(file, source);
-        let from = lines
-            .iter()
-            .position(|line| line == entry)
-            .unwrap_or_else(|| panic!("{file}: no `{entry}`"));
+    for entry in reached_by(Reached::Boot) {
+        let (file, lines, from) = definition(entry);
         let path = &lines[from..];
         let cleared = (0..path.len()).find(|&at| clears_direction_flag(path, at));
         let first_reader = path
@@ -584,13 +1081,69 @@ fn the_boot_entry_writes_rflags_whole() {
     );
 }
 
+/// The boot path leaves nothing on the stack it replaces `%rsp` over when it
+/// re-addresses the stack through the kernel window.
+#[test]
+fn the_boot_path_leaves_nothing_on_the_stack_it_readdresses() {
+    let (_, source) = ASM_SOURCES
+        .iter()
+        .find(|(name, _)| *name == "boot.s")
+        .unwrap_or_else(|| panic!("boot.s is not inspected"));
+    let lines = instructions("boot.s", source);
+    let from = lines
+        .iter()
+        .position(|line| line == "boot_common:")
+        .unwrap_or_else(|| panic!("boot.s: no `boot_common:`"));
+    let to = lines
+        .iter()
+        .position(|line| line == "movabsq $boot_stack_top_high, %rsp")
+        .unwrap_or_else(|| panic!("boot.s: the stack is never re-addressed"));
+    let path = &lines[from..to];
+    let count = |prefix: &str| path.iter().filter(|i| i.starts_with(prefix)).count();
+    assert_eq!(count("push"), count("pop"), "boot.s: a pushed word is live");
+    assert_eq!(count("call"), 0, "boot.s: a return address is live");
+}
+
+/// On the start-up root an AP runs only the FPU enable and its APIC mode
+/// before its entry, which is what lets the docs say what runs there.
+#[test]
+fn an_ap_runs_only_its_fpu_enable_and_apic_mode_before_its_entry() {
+    let (_, source) = ASM_SOURCES
+        .iter()
+        .find(|(name, _)| *name == "ap_trampoline.s")
+        .unwrap_or_else(|| panic!("ap_trampoline.s is not inspected"));
+    let lines = instructions("ap_trampoline.s", source);
+    let called: Vec<&str> = lines
+        .windows(2)
+        .filter(|pair| pair[1] == "call *%rax")
+        .filter_map(|pair| pair[0].strip_prefix("movabsq $")?.strip_suffix(", %rax"))
+        .collect();
+    assert_eq!(
+        called,
+        [
+            "tairix_arch_x86_64_fpu_enable",
+            "tairix_arch_x86_64_ap_apic_mode",
+            "tairix_arch_x86_64_ap_entry",
+        ]
+    );
+    assert_eq!(
+        lines.iter().filter(|i| i.starts_with("call")).count(),
+        called.len(),
+        "ap_trampoline.s: a call is not one of the three"
+    );
+}
+
 /// Each boot entry establishes `CR0` rather than amending it: INIT leaves an
 /// application processor's caches disabled, and multiboot2 leaves the boot
 /// CPU's other bits undefined, so a value read back would carry either into
 /// the kernel.
 #[test]
 fn every_boot_entry_writes_cr0_whole() {
-    for file in ["boot.s", "ap_trampoline.s"] {
+    let files: BTreeSet<&str> = reached_by(Reached::Boot)
+        .map(|entry| definition(entry).0)
+        .collect();
+    assert_eq!(files.len(), 2, "{files:?}");
+    for file in files {
         let (_, source) = ASM_SOURCES
             .iter()
             .find(|(name, _)| *name == file)
@@ -615,7 +1168,237 @@ fn every_boot_entry_writes_cr0_whole() {
     }
 }
 
-/// Mnemonics that leave the status flags as they were: the only ones a block
+/// One way through a boot entry's arming of `EFER`, and what it did.
+#[derive(Clone, Debug, Default)]
+struct ArmingPath {
+    /// What the last execute-disable test found: offered or not.
+    nx: Option<bool>,
+    /// The Intel vendor words matched so far.
+    intel: u32,
+    /// Whether the last XD Bit Disable clear found the control set.
+    xd_was_set: bool,
+    /// Whether the instruction naming `EFER.NXE` ran.
+    arms_nxe: bool,
+    /// Each MSR written, by its operand, with the Intel words and the XD
+    /// finding at the time.
+    written: Vec<(String, u32, bool)>,
+    /// Whether it stopped at a halt rather than writing `EFER`.
+    halted: bool,
+}
+
+/// `lines` as the assembler reads them for the GAS macro `name`: its
+/// definition taken out, and each call replaced by the body the inspected
+/// sources define, its arguments and its own `\@` put in as GAS puts them.
+fn expanded(lines: &[String], name: &str) -> Vec<String> {
+    let header = format!(".macro {name}");
+    let (_, defining, at) = definition(&header);
+    let params: Vec<String> = defining[at]
+        .split_whitespace()
+        .skip(2)
+        .map(|param| param.trim_end_matches(',').to_string())
+        .collect();
+    let body: Vec<&String> = defining[at + 1..]
+        .iter()
+        .take_while(|line| *line != ".endm")
+        .collect();
+    let mut out = Vec::new();
+    let mut expansions = 0;
+    let mut defined = false;
+    for line in lines {
+        if line.starts_with(&header) {
+            defined = true;
+            continue;
+        }
+        if defined {
+            defined = line != ".endm";
+            continue;
+        }
+        let Some(arguments) = line
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix(' '))
+        else {
+            out.push(line.clone());
+            continue;
+        };
+        let arguments: Vec<&str> = arguments.split(',').map(str::trim).collect();
+        assert_eq!(arguments.len(), params.len(), "`{line}` against `{header}`");
+        for instruction in &body {
+            let mut instruction = instruction.replace("\\@", &expansions.to_string());
+            for (param, argument) in params.iter().zip(&arguments) {
+                instruction = instruction.replace(&format!("\\{param}"), argument);
+            }
+            out.push(instruction);
+        }
+        expansions += 1;
+    }
+    out
+}
+
+/// Every path from `file`'s execute-disable test to its `EFER` write or a
+/// halt, following both ways of each conditional jump.
+fn arming_paths(file: &str, lines: &[String]) -> Vec<ArmingPath> {
+    const NX_TEST: &str = "btl ${EXT1_EDX_NX}, %edx";
+    const XD_CLEAR: &str = "btrl ${XD_DISABLE_HIGH}, %edx";
+    let label = |name: &str| {
+        let name = format!("{name}:");
+        lines
+            .iter()
+            .position(|line| *line == name)
+            .unwrap_or_else(|| panic!("{file}: no label `{name}`"))
+    };
+    let start = lines
+        .iter()
+        .position(|i| i == "movl $0x80000001, %eax")
+        .unwrap_or_else(|| panic!("{file}: no execute-disable test"));
+    let mut paths = Vec::new();
+    let mut pending = std::vec![(start, ArmingPath::default(), None::<String>)];
+    while let Some((at, mut path, mut msr)) = pending.pop() {
+        let mut at = at;
+        loop {
+            assert!(
+                paths.len() + pending.len() < 64,
+                "{file}: the arming does not end"
+            );
+            let line = lines
+                .get(at)
+                .unwrap_or_else(|| panic!("{file}: the arming runs off the source"));
+            if line.contains("{EFER_NXE}") {
+                path.arms_nxe = true;
+            }
+            let (mnemonic, operands) = line.split_once(' ').unwrap_or((line, ""));
+            match mnemonic {
+                "hlt" => {
+                    path.halted = true;
+                    paths.push(path);
+                    break;
+                }
+                "cpuid" => msr = None,
+                "wrmsr" => {
+                    let written = msr
+                        .clone()
+                        .unwrap_or_else(|| panic!("{file}: a write to no named MSR"));
+                    path.written
+                        .push((written.clone(), path.intel, path.xd_was_set));
+                    if written == "{IA32_EFER}" {
+                        paths.push(path);
+                        break;
+                    }
+                }
+                "movl" if operands.ends_with(", %ecx") => {
+                    msr = operands
+                        .strip_prefix('$')
+                        .and_then(|value| value.strip_suffix(", %ecx"))
+                        .filter(|value| value.starts_with('{'))
+                        .map(String::from);
+                }
+                "jmp" => {
+                    at = label(operands);
+                    continue;
+                }
+                "jc" | "jnc" | "jne" => {
+                    let previous = lines[at - 1].as_str();
+                    let mut taken = path.clone();
+                    let mut through = path;
+                    if previous == NX_TEST {
+                        taken.nx = Some(mnemonic == "jc");
+                        through.nx = Some(mnemonic == "jnc");
+                    } else if previous.starts_with("cmpl ${INTEL_") && mnemonic == "jne" {
+                        through.intel += 1;
+                    } else if previous == XD_CLEAR && mnemonic == "jnc" {
+                        taken.xd_was_set = false;
+                        through.xd_was_set = true;
+                    } else {
+                        panic!("{file}: `{line}` follows `{previous}`, which no rule reads");
+                    }
+                    pending.push((label(operands), taken, msr.clone()));
+                    path = through;
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+    }
+    paths
+}
+
+/// Each boot entry sets `EFER.NXE` only where the CPU offers execute-disable,
+/// which is otherwise a reserved bit whose setting faults with no table to
+/// report the fault. An Intel part's firmware can withhold it, so that
+/// control is cleared first, only on an Intel part and only where set. An AP
+/// still without it halts unpaged; the boot CPU goes on to its Rust entry,
+/// which refuses it with a report. Every constant is a named operand.
+#[test]
+fn every_boot_entry_arms_execute_disable_only_where_it_is_offered() {
+    for file in ["boot.s", "ap_trampoline.s"] {
+        let (_, source) = ASM_SOURCES
+            .iter()
+            .find(|(name, _)| *name == file)
+            .unwrap_or_else(|| panic!("{file} is not inspected"));
+        let lines = expanded(&instructions(file, source), "nx_probe");
+        assert!(
+            !lines
+                .iter()
+                .any(|i| i.contains("0xC0000080") || i.contains("<< 11") || i.contains("0x1A0")),
+            "{file}: an MSR or `EFER` bit is spelled rather than passed in"
+        );
+        let paths = arming_paths(file, &lines);
+        for path in &paths {
+            assert!(
+                !path.arms_nxe || path.nx == Some(true),
+                "{file}: NXE is armed where execute-disable is not offered: {path:?}"
+            );
+            for (msr, intel, xd_was_set) in &path.written {
+                if msr == "{IA32_MISC_ENABLE}" {
+                    assert!(
+                        *intel == 3 && *xd_was_set,
+                        "{file}: the XD control is written on a path that is not an Intel part's \
+                         with the control set: {path:?}"
+                    );
+                }
+            }
+            let order: Vec<&str> = path.written.iter().map(|(msr, ..)| msr.as_str()).collect();
+            assert!(
+                matches!(
+                    order.as_slice(),
+                    [] | ["{IA32_EFER}" | "{IA32_MISC_ENABLE}"]
+                        | ["{IA32_MISC_ENABLE}", "{IA32_EFER}"]
+                ),
+                "{file}: MSRs written out of order: {order:?}"
+            );
+            if file == "ap_trampoline.s" {
+                assert_eq!(
+                    path.halted, !path.arms_nxe,
+                    "{file}: an AP enters long mode without execute-disable, or halts with it: \
+                     {path:?}"
+                );
+            } else {
+                assert!(
+                    !path.halted,
+                    "{file}: the boot CPU halts unreported: {path:?}"
+                );
+            }
+        }
+        assert!(
+            paths.iter().any(|path| path.arms_nxe),
+            "{file}: no path arms NXE"
+        );
+        assert!(
+            paths.iter().any(|path| path.nx == Some(false)),
+            "{file}: no path finds execute-disable withheld"
+        );
+        assert!(
+            paths.iter().any(|path| path
+                .written
+                .iter()
+                .any(|(msr, ..)| msr == "{IA32_MISC_ENABLE}")),
+            "{file}: no path clears XD Bit Disable"
+        );
+    }
+}
+
+/// Mnemonics that leave what `preserves_flags` covers as it was — the status
+/// flags of `RFLAGS`, the x87 status word and `MXCSR`'s exception flags —
+/// whatever their operands: with [`leaves_status_flags`], the only ones a block
 /// telling the compiler it preserves them may run.
 const LEAVES_STATUS_FLAGS: &[&str] = &[
     "clflush",
@@ -630,7 +1413,6 @@ const LEAVES_STATUS_FLAGS: &[&str] = &[
     "lidt",
     "ltr",
     "mfence",
-    "mov",
     "out",
     "pop",
     "push",
@@ -646,98 +1428,77 @@ const LEAVES_STATUS_FLAGS: &[&str] = &[
     "xsetbv",
 ];
 
-/// The `asm!` invocations in `source`, each up to its closing parenthesis.
-/// `global_asm!` and `naked_asm!` take no `preserves_flags`, so are skipped.
-fn inline_asm_blocks(source: &str) -> Vec<&str> {
-    let mut blocks = Vec::new();
-    let mut rest = source;
-    while let Some(at) = rest.find("asm!(") {
-        let named = rest[..at]
-            .chars()
-            .next_back()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_');
-        let body = &rest[at..];
-        let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
-        let mut end = body.len();
-        for (offset, c) in body.char_indices() {
-            match c {
-                _ if escaped => escaped = false,
-                '\\' if quoted => escaped = true,
-                '"' => quoted = !quoted,
-                '(' if !quoted => depth += 1,
-                ')' if !quoted => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = offset + 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !named {
-            blocks.push(&body[..end]);
-        }
-        rest = &body[end..];
-    }
-    blocks
+/// Whether `instruction` names a control or debug register as an operand.
+fn names_control_or_debug_register(instruction: &str) -> bool {
+    instruction
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(|word| word.trim_start_matches('%').to_ascii_lowercase())
+        .any(|word| {
+            ["cr", "dr"].iter().any(|prefix| {
+                word.strip_prefix(prefix).is_some_and(|number| {
+                    !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+                })
+            })
+        })
 }
 
-/// The instructions a block's template spells, without the registers its
-/// operands are pinned to (`in("dx") port`).
-fn template_instructions(block: &str) -> Vec<String> {
-    let mut instructions = Vec::new();
-    let mut rest = block;
-    while let Some(open) = rest.find('"') {
-        let after = &rest[open + 1..];
-        let close = after.find('"').unwrap_or(after.len());
-        let pinned = rest[..open]
-            .trim_end()
-            .strip_suffix('(')
-            .is_some_and(|head| {
-                ["in", "out", "inout", "lateout", "inlateout"]
-                    .iter()
-                    .any(|kind| head.ends_with(kind))
-            });
-        if !pinned {
-            instructions.extend(
-                after[..close]
-                    .split("\\n")
-                    .flat_map(|line| line.split(';'))
-                    .map(|instruction| instruction.split_whitespace().collect::<Vec<_>>().join(" "))
-                    .filter(|instruction| !instruction.is_empty()),
-            );
-        }
-        rest = after.get(close + 1..).unwrap_or("");
+/// Whether `instruction` leaves what `preserves_flags` covers as it was: a
+/// move to or from a control or debug register leaves the status flags
+/// undefined.
+fn leaves_status_flags(instruction: &str) -> bool {
+    match mnemonic(instruction) {
+        None => true,
+        Some("mov") => !names_control_or_debug_register(instruction),
+        Some(op) => LEAVES_STATUS_FLAGS.contains(&op),
     }
-    instructions
 }
 
-/// The operation `instruction` performs: its first word that is neither a
-/// label nor a prefix, or [`None`] for a line that is only a label.
-fn mnemonic(instruction: &str) -> Option<&str> {
-    instruction.split(' ').find(|word| {
-        !word.ends_with(':') && !["lock", "rep", "repe", "repne", "repz", "repnz"].contains(word)
-    })
+#[test]
+fn a_move_to_or_from_a_control_or_debug_register_writes_the_flags() {
+    for writes in [
+        "mov cr3, {p}",
+        "mov {t}, cr3",
+        "mov {v}, cr8",
+        "mov dr7, {t}",
+        "movq %cr2, %rsi",
+        "mov CR3, {p}",
+        "ldmxcsr [{p}]",
+    ] {
+        assert!(!leaves_status_flags(writes), "{writes}");
+    }
+    for leaves in [
+        "mov {t}, rsp",
+        "mov ds, ax",
+        "mov ax, {kds:x}",
+        "mov {tls}, gs:[{off}]",
+        "mov {cr3}, rax",
+        "2:",
+    ] {
+        assert!(leaves_status_flags(leaves), "{leaves}");
+    }
 }
 
 #[test]
 fn the_flag_scan_reads_templates_and_not_operand_registers() {
-    let source = r#"
-        core::arch::global_asm!("orl %eax, %eax");
+    let source = r##"
+        core::arch::global_asm!(r#"
+            // a lone " and a (
+            orl %eax, %eax
+        "#);
         core::arch::asm!("mov {t}, cr4", "or {t}, {bit}", "mov cr4, {t}",
             t = out(reg) _, options(nostack, preserves_flags));
         unsafe { core::arch::asm!("in al, dx", in("dx") port, out("al") v) };
-    "#;
-    let blocks = inline_asm_blocks(source);
+    "##;
+    let blocks = invocations(source, "asm");
     assert_eq!(blocks.len(), 2, "`global_asm!` is not an inline block");
+    let global = invocations(source, "global_asm");
+    assert_eq!(global.len(), 1);
+    assert!(global[0].ends_with("\"#)"), "cut at its own parenthesis");
     let template = template_instructions(blocks[0]);
     assert_eq!(template, ["mov {t}, cr4", "or {t}, {bit}", "mov cr4, {t}"]);
     assert_eq!(mnemonic(&template[1]), Some("or"));
-    assert!(!LEAVES_STATUS_FLAGS.contains(&"or"));
+    assert!(!leaves_status_flags(&template[1]));
     assert_eq!(template_instructions(blocks[1]), ["in al, dx"]);
-    assert_eq!(mnemonic("2: lock xadd [{p}], {v}"), Some("xadd"));
-    assert_eq!(mnemonic("2:"), None, "a label runs nothing");
 }
 
 /// A block telling the compiler it preserves the status flags runs nothing that
@@ -747,14 +1508,14 @@ fn the_flag_scan_reads_templates_and_not_operand_registers() {
 fn no_block_claiming_to_preserve_the_flags_writes_them() {
     let mut claims = 0usize;
     for &(name, source) in ASM_SOURCES.iter().filter(|(name, _)| !is_assembly(name)) {
-        for block in inline_asm_blocks(source)
+        for block in invocations(source, "asm")
             .into_iter()
             .filter(|block| block.contains("preserves_flags"))
         {
             claims += 1;
             for instruction in template_instructions(block) {
                 assert!(
-                    mnemonic(&instruction).is_none_or(|op| LEAVES_STATUS_FLAGS.contains(&op)),
+                    leaves_status_flags(&instruction),
                     "{name}: `{instruction}` may write the flags its block claims to preserve"
                 );
             }

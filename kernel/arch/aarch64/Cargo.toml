@@ -81,6 +81,8 @@ tairix-fwcfg = { path = "../../../lib/fwcfg", version = "=0.0.0" }
 # Enable the shared DTB builder for this port's `fdt`/`platform` host
 # tests (off in production builds — `[dev-dependencies]` only).
 tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = ["test-fixtures"] }
+# The one walk of the port's own sources its source pins read.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 # The protocol-faithful mock firmware for the video boot-console host
 # tests (QEMU does not model the VideoCore).
 tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0", features = [

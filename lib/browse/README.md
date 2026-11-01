@@ -115,7 +115,12 @@ can never diverge in navigation semantics, listing policy, or look.
 - **The deferral policy is shared** (`ListingDesk<C>`): one request slot and
   one answer slot per consumer, the staleness rule that drops an answer for
   somewhere the caller has since left, and the round-robin that stops one busy
-  consumer starving another. It holds no lock, no thread, and no syscall, so
+  consumer starving another. A consumer's reads in flight are kept by what
+  each was taken for, so one that moves on while a read hangs on a slow device
+  is read where it went at once, and a request already being read is never
+  handed out twice. `recorded` counts the reads a take or refresh gave the
+  workers, so an embedder wakes one only when a call moves it, never for a
+  consumer asking again for a read queued or under way. It holds no lock, no thread, and no syscall, so
   every rule is a host test; the embedder supplies the exclusion and the
   blocking. A consumer is whatever ordered key the program names it by — the
   desktop session's icon column and trusted picker, each file-manager window —
@@ -395,7 +400,12 @@ can never diverge in navigation semantics, listing policy, or look.
   because an attach waits for a driver, and an eject wherever the launcher's
   own holds on the volume have let go (`files.app`'s reader); and
   `MountDone::shown` answers where the volume is or the refusal, in the one
-  wording `files.app` and the desktop both state.
+  wording `files.app` and the desktop both state. `MountAct::eject_chosen` and
+  `MountAct::read_only_of` decide what the menu's *Eject* and *Mount
+  Read-Only* ask for, the latter refusing an image no path can name; an eject
+  of a lost volume asks `lost_eject_question` first and detaches with
+  `DetachMode::Lost`; and `within` is the one rule for a place lying on a
+  volume being ejected.
 - **Places / devices rail** (`places`, `layout::SidebarView`,
   `plans/NEW-FILEMANAGER.md`): the shortcut column down the leading edge of a
   file-manager window — the user's own places above, every mounted volume

@@ -1,43 +1,23 @@
 //! Architecture-neutral kernel panic policy.
 //!
-//! The architecture port owns the `#[panic_handler]` attribute itself
-//! (Stage 3) — `kernel/core` cannot, because in a host-test build
-//! `std` already supplies a handler and registering a second one is a
-//! link error. The arch port's `#[panic_handler]` is therefore a
-//! one-liner that delegates here:
+//! Three causes end the kernel, all through one dump that differs only in
+//! the cause fields and the audit event: a `panic!` ([`handle_panic`]), a
+//! fatal kernel-mode CPU exception ([`fault_dump`], carrying a
+//! [`KernelFault`]), and a task's kernel stack the dispatcher finds corrupt
+//! ([`stack_corruption_dump`]). Each halts through [`KernelArch::halt`] and
+//! never silently resets.
 //!
-//! ```ignore
-//! #[panic_handler]
-//! fn tairix_panic(info: &core::panic::PanicInfo<'_>) -> ! {
-//!     tairix_kernel_core::handle_panic(info, &PANIC_CTX)
-//! }
-//! ```
-//!
-//! `PANIC_CTX` is the [`PanicContext`] the arch port builds at boot
-//! and stores in a once-initialised `static`: set once at boot and never
-//! mutated, so it is not the global mutable state the kernel forbids.
-//!
-//! [`handle_panic`] does the rest: it logs a structured
-//! [`AuditEvent::Panic`] record with the failing file, line, column,
-//! and the current CPU id, then calls [`KernelArch::halt`]. It
-//! **never** silently resets — the `!` return type and the `halt`
-//! contract together encode that.
-//!
-//! A fatal CPU exception taken in kernel mode enters the same reporting
-//! path through [`fault_dump`], carrying a [`KernelFault`] instead of a
-//! source location: the port's synchronous-exception vector has no fix-up
-//! for it, so it is as fatal as a `panic!` and deserves the same register
-//! snapshot and backtrace. Only the cause fields and the audit event id
-//! differ, so there is one dump, not two.
+//! `kernel/core` cannot own the `#[panic_handler]`, because a host-test build
+//! already has `std`'s; each binary's handler forwards here through
+//! `tairix_kernel::fatal_bridge`, which assembles the [`PanicContext`] for
+//! each report.
 //!
 //! # Testability
 //!
-//! `core::panic::PanicInfo` has no public constructor on stable Rust,
-//! so [`handle_panic`] forwards the location into [`panic_dump`], an
-//! inner function that takes `Option<&core::panic::Location<'_>>`
-//! directly. Host-side tests drive [`panic_dump`] with a
-//! [`core::panic::Location::caller`]; integration tests cover the
-//! `panic!`-to-`handle_panic` round-trip end-to-end.
+//! `core::panic::PanicInfo` has no public constructor on stable Rust, so
+//! [`handle_panic`] forwards the location into [`panic_dump`], which host
+//! tests drive with a [`core::panic::Location::caller`]; integration tests
+//! cover the `panic!`-to-`handle_panic` round trip end to end.
 
 use core::panic::PanicInfo;
 
@@ -46,9 +26,9 @@ use tairix_arch_api::backtrace::{
     MAX_NAMED_REGS, MAX_TABLE_LEVELS,
 };
 use tairix_arch_api::fatal::{
-    self, format_hex_word, nested_fields, Cause, CauseWords, Entry, FatalRecord, KernelFault,
-    NestedWords, Processor, StackCorruption, KERNEL_FAULT, KERNEL_PANIC, KERNEL_STACK_CORRUPT,
-    MAX_CAUSE_FIELDS, PANIC_KEYS,
+    self, format_hex_word, nested_fields, panic_fields, Cause, CauseWords, Entry, FatalRecord,
+    KernelFault, NestedWords, Processor, StackCorruption, KERNEL_FAULT, KERNEL_PANIC,
+    KERNEL_STACK_CORRUPT, MAX_CAUSE_FIELDS,
 };
 use tairix_arch_api::fault::SetFaultHandlerError;
 use tairix_arch_api::quiesce::StopOutcome;
@@ -100,19 +80,14 @@ impl StackReader for RawStackReader {
     }
 }
 
-/// Context the architecture port hands to [`handle_panic`].
-///
-/// The struct is borrowed read-only by the panic path, so the arch
-/// port can store it inside a `kernel/sync::Once`-protected `static`
-/// without taking any locks at panic time (the panic path never
-/// blocks).
+/// What a fatal report runs with, assembled for each report by
+/// `tairix_kernel::fatal_bridge`.
 pub struct PanicContext<'a, A: KernelArch + 'static> {
     /// Architecture port instance.
     pub arch: &'a A,
-    /// Sink that receives the [`AuditEvent::Panic`] record.
-    ///
-    /// In production this is the same `audit_sink` passed to
-    /// [`crate::kernel_main`]; host tests reuse `TestSink`.
+    /// Sink the fatal record is written to: in production the port's own
+    /// serial sink, not the boot's audit sink, which may be why the kernel is
+    /// dying.
     pub audit_sink: &'a (dyn Sink + Sync),
     /// The port's post-mortem CPU-state handle, when it has published one.
     ///
@@ -277,8 +252,8 @@ const FIELD_CAP: usize =
 
 /// Stack storage the register and backtrace fields are formatted into.
 ///
-/// Declared in [`dump`]'s frame, like [`CauseBufs`], so the formatted
-/// strings outlive the assembled field list.
+/// Declared in [`dump`]'s frame, like the cause's [`CauseWords`], so the
+/// formatted strings outlive the assembled field list.
 struct CaptureBufs {
     regs: [[u8; 18]; REG_CAP],
     reg_names: [&'static str; REG_CAP],
@@ -371,14 +346,23 @@ fn capture_into(
     (n_regs, n_frames, snap.sp)
 }
 
-/// The boot-stack guard's verdict for `sp`, a stack pointer the record shows.
+/// The boot-stack guard's verdict for `sp`, a stack pointer the record shows,
+/// and `fault`, the address a faulting access could not reach.
 ///
 /// One on the stack of the task switched in on `cpu` is on that stack, not
 /// below the boot stack however the two are laid out, so it is judged on the
 /// canary alone. A stack no registry names — a secondary CPU's, an interrupt
 /// stack — is the verdict's stated limit.
-fn guard_verdict(bt: &dyn CpuStateCapture, cpu: CpuId, sp: Option<u64>) -> Option<BootStackGuard> {
-    bt.boot_stack_verdict(sp.filter(|&sp| crate::kthread::running_stack(cpu, sp).is_none()))
+fn guard_verdict(
+    bt: &dyn CpuStateCapture,
+    cpu: CpuId,
+    sp: Option<u64>,
+    fault: Option<u64>,
+) -> Option<BootStackGuard> {
+    bt.boot_stack_verdict(
+        sp.filter(|&sp| crate::kthread::running_stack(cpu, sp).is_none()),
+        fault,
+    )
 }
 
 /// Audit-and-halt path shared by [`handle_panic`] and the host-side
@@ -482,61 +466,17 @@ pub(crate) fn report_stack_corruption(corruption: StackCorruption) -> ! {
     }
 }
 
-/// Stack storage the cause-specific fields are formatted into.
-///
-/// Declared in [`dump`]'s frame so the formatted strings outlive the
-/// assembled field list; a panic report allocates nothing.
-struct CauseBufs {
-    line: [u8; 11],
-    column: [u8; 11],
-    words: CauseWords,
-}
-
-impl CauseBufs {
-    const fn new() -> Self {
-        Self {
-            line: [0; 11],
-            column: [0; 11],
-            words: CauseWords::new(),
-        }
-    }
-}
-
 /// Format the cause-specific fields and say how many there are: a panic's
 /// source position, a kernel-mode fault's words, or a corrupt stack's check
 /// and words. Never two, and none is fabricated for another.
 fn cause_fields<'b>(
     fatal: &Fatal<'b>,
-    bufs: &'b mut CauseBufs,
+    words: &'b mut CauseWords,
 ) -> ([Field<'b>; MAX_CAUSE_FIELDS], usize) {
     match *fatal {
-        Fatal::Panic(location) => {
-            let (file_str, line_str, col_str) = match location {
-                Some(loc) => (
-                    loc.file(),
-                    format_u32(loc.line(), &mut bufs.line),
-                    format_u32(loc.column(), &mut bufs.column),
-                ),
-                None => ("<unknown>", "0", "0"),
-            };
-            let [file_key, line_key, column_key] = PANIC_KEYS;
-            padded([
-                Field {
-                    key: file_key,
-                    value: FieldValue::Str(file_str),
-                },
-                Field {
-                    key: line_key,
-                    value: FieldValue::Str(line_str),
-                },
-                Field {
-                    key: column_key,
-                    value: FieldValue::Str(col_str),
-                },
-            ])
-        }
-        Fatal::Fault(fault) => padded(fault.fields(&mut bufs.words)),
-        Fatal::Stack(stack) => padded(stack.fields(&mut bufs.words)),
+        Fatal::Panic(location) => padded(panic_fields(location)),
+        Fatal::Fault(fault) => padded(fault.fields(words)),
+        Fatal::Stack(stack) => padded(stack.fields(words)),
     }
 }
 
@@ -869,11 +809,11 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     // it must not depend on the heap, which may itself be the source of
     // the panic (the OOM case).
     let mut cpu_buf = [0u8; 11];
-    let mut cause_bufs = CauseBufs::new();
+    let mut cause_words = CauseWords::new();
     let mut regime_bufs = RegimeBufs::new();
 
     let cpu_str = format_u32(cpu, &mut cpu_buf);
-    let (cause, n_cause) = cause_fields(fatal, &mut cause_bufs);
+    let (cause, n_cause) = cause_fields(fatal, &mut cause_words);
 
     // Stop the world *before* anything about the machine is read: a kernel
     // invariant is already broken and this core cannot resume, so peers left
@@ -920,14 +860,14 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
             (
                 n_regs,
                 n_frames,
-                guard_verdict(bt, cpu, fatal.guard_sp(captured_sp)),
+                guard_verdict(bt, cpu, fatal.guard_sp(captured_sp), fault_address(fatal)),
             )
         }
         None => (0, 0, None),
     };
     let mut overrun_buf = [0u8; 18];
     let overrun_str = match guard {
-        Some(BootStackGuard::BelowStack { bytes, .. }) => {
+        Some(BootStackGuard::BelowStack { bytes, .. } | BootStackGuard::Faulted { bytes, .. }) => {
             Some(format_hex_word(bytes, &mut overrun_buf))
         }
         _ => None,
@@ -1825,7 +1765,10 @@ mod tests {
         assert_eq!(field("task_sp"), Some("0x0000000080408f00"));
         assert_eq!(field("stack_base"), Some("0x0000000080400000"));
         assert_eq!(field("stack_top"), Some("0x0000000080404000"));
-        for other in PANIC_KEYS.iter().chain(&tairix_arch_api::fatal::FAULT_KEYS) {
+        for other in tairix_arch_api::fatal::PANIC_KEYS
+            .iter()
+            .chain(&tairix_arch_api::fatal::FAULT_KEYS)
+        {
             assert_eq!(field(other), None, "`{other}` is another cause's");
         }
         assert_eq!(arch.halt_count(), 1);
@@ -1933,29 +1876,6 @@ mod tests {
         );
         assert_eq!(arch.halt_count(), 1);
         reset_panic_guard();
-    }
-
-    /// A fault's one-line form uses the same field names and hex width the
-    /// structured record does.
-    #[test]
-    fn kernel_fault_displays_as_one_hex_line() {
-        use core::fmt::Write as _;
-        let mut out = String::new();
-        let _ = write!(
-            out,
-            "{}",
-            KernelFault {
-                syndrome: Some(0x9600_0045),
-                address: Some(0xffff_0000_dead_beef),
-                pc: 0x8010_1234,
-                sp: None,
-            }
-        );
-        assert_eq!(
-            out,
-            "syndrome=0x0000000096000045 fault_addr=0xffff0000deadbeef \
-             fault_pc=0x0000000080101234 fault_sp=null"
-        );
     }
 
     /// A fault the CPU gave no address for is recorded with none, and nothing

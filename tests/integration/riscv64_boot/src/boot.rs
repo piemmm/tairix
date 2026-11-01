@@ -14,6 +14,7 @@
 //! test-observer side channel. The boot-completed QEMU bins swap only
 //! the audit sink, exactly as the x86_64 / aarch64 verticals do.
 
+use tairix_kernel_mem::DirectPhysMap;
 use tairix_log::{Level, Sink};
 
 pub use tairix_kernel::riscv64::boot::{try_boot, BootError, RiscvBinArch};
@@ -49,4 +50,15 @@ pub fn boot(
 ) -> ! {
     crate::publish::publish_dtb(dtb);
     tairix_kernel::riscv64::boot::boot(hartid, dtb, heap, log_sink, audit_sink, log_level)
+}
+
+/// The identity window every root the kernel runs under maps — the board's
+/// device registers and the low RAM a vertical's buffers sit in — as a
+/// physical map.
+#[must_use]
+pub fn identity_map() -> DirectPhysMap {
+    let reach = (tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES as u64) << 30;
+    // SAFETY: every root the kernel builds maps `[0, reach)` as itself and
+    // none unmaps it.
+    unsafe { DirectPhysMap::identity(reach) }.expect("the identity window addresses itself")
 }

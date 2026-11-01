@@ -60,7 +60,8 @@ pub enum MountError {
     /// The directory the image was to be shown at, or the catalog entry its
     /// name asked for, refused it.
     Target {
-        /// The directory, as resolved, or the catalog entry.
+        /// The directory as resolved, or as given where it did not resolve, or
+        /// the catalog entry its name asked for.
         target: String,
         /// Its refusal.
         errno: Errno,

@@ -360,3 +360,25 @@ fn capability_gated_empty_directory_cannot_be_removed_without_the_capability() {
         Err(VfsError::PermissionDenied)
     );
 }
+
+/// realpath answers only what a caller could spell back; a working
+/// directory's spelling still names a directory holding such a name.
+#[test]
+fn canonical_answer_refuses_a_name_the_grammar_refuses() {
+    let spelled = |names: &[&str]| Some(names.iter().map(|name| String::from(*name)).collect());
+    for refused in [&["Storage", "a:b"][..], &["x", "new\tdir"]] {
+        assert_eq!(
+            canonical_answer(0, RealpathMode::Final, spelled(refused)),
+            Err(VfsError::InvalidPath),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(
+        canonical_answer(0, RealpathMode::Final, spelled(&["Storage", "usb1"])),
+        Ok(String::from("/Storage/usb1"))
+    );
+    assert_eq!(
+        spell_canonical(&[String::from("Storage"), String::from("a:b")]),
+        Ok(String::from("/Storage/a:b"))
+    );
+}

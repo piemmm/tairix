@@ -243,14 +243,18 @@ offers must be recovered at runtime — and crypto acceleration must be recovere
   intrinsics — that would be hand-rolling the primitive, which the charter
   forbids. What `backend` owns is the availability decision, the self-test, and
   the audit record.
-- **Per-target reach.** On `x86_64` the audited crate selects its SHA-NI path
-  from `CPUID`, which needs no operating system and is therefore correct on the
-  freestanding kernel target, so the hardware-availability candidate is offered
-  and recorded there. On `aarch64`/`riscv64`/`wasm32` no runtime-selected
-  hardware SHA-256 path exists yet, so `backend` records the honest software
-  answer. Recovering hardware SHA-256 on `aarch64` awaits a vetted, driveable
-  audited backend (a supply-chain decision); it is deliberately not faked with
-  a candidate that would not run.
+- **Per-target reach.** No TAIRiX target reaches a hardware SHA-256 path: no
+  floor sets the SHA features, and the audited crate's detection
+  (`cpufeatures`) answers nothing without an operating system, so `backend`
+  records the honest software answer on every target, `x86_64` included
+  (`plans/OPEN-DEFECTS.md` D363). A hosted `x86_64` build with SHA-NI, or an
+  `aarch64` Linux, Android or Apple build, runs the crate's own detection, so
+  the candidate is offered there, mirroring the crate's dispatch exactly — a
+  `soft` backend forced by `sha2_backend` or `sha2_256_backend`, as the
+  interpreted builds force it, offers none. Recovering hardware SHA-256 on a
+  TAIRiX target awaits a vetted, driveable audited backend (a supply-chain
+  decision); it is deliberately not faked with a candidate that would not
+  run.
 
 The kernel resolves this once at boot alongside the CRC-32C family
 (`kernel/core::cpuops`); the chosen backend is on the audit log via

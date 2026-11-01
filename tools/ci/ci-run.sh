@@ -5,9 +5,8 @@
 # Usage:
 #   tools/ci/ci-run.sh [xtask-subcommand and args...]
 #
-# With no arguments it runs `ci` — the full per-PR gate: fmt,
-# clippy, deps-check, cfg-check, test, docs-check, deny, supply-chain,
-# fuzz --once, proptest --once, model-check, spec-review, abi-check.
+# With no arguments it runs `ci`, the full per-PR gate; its stages are listed
+# in tools/xtask/src/main.rs.
 #
 # Examples:
 #   tools/ci/ci-run.sh                                   # full gate

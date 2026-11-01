@@ -60,13 +60,6 @@ tairix-tz = { path = "../../lib/tz", version = "=0.0.0" }
 # The one derivation of the publisher identity a bundle's grants are recorded
 # under — the identity the load gate attests it by.
 tairix-appload = { path = "../../lib/appload", version = "=0.0.0" }
-# `test --qemu` cross-builds the CCOMPAT end-to-end C programs, whose build
-# scripts locate `clang`/`ld.lld` through the audited `tairix-cc` wrapper. xtask
-# resolves that toolchain *once* up front and exports its path so each build
-# script uses the authoritative override instead of re-running the full search
-# per crate/target (the discovery logic lives only in
-# `tairix-cc`; xtask merely primes it). Host-only build glue.
-tairix-cc = { path = "../cc", version = "=0.0.0" }
 # `help-lint` (plans/APPS.md §8.1) judges every discovered Help/ document
 # through the one shared lint in the help engine (`tairix_help::lint_help_trees`,
 # behind its host-only `lint` feature), so the gate and the `tools/syshelp`
@@ -536,8 +529,6 @@ tairix-wintersun-world = { path = "../../userland/games/wintersun/world", versio
 # The desktop an application sizes its window against: the client vertical
 # opens the game's window at the size its own `Desktop` caps it to.
 tairix-window = { path = "../../lib/window", version = "=0.0.0" }
-
-[target.'cfg(unix)'.dependencies]
 # The pipeline's step timeout must be able to kill a hung step's whole
 # process group, because `cargo` runs the work it spawns (rustc, test
 # binaries, QEMU) as grandchildren that survive killing the direct child.
@@ -546,10 +537,13 @@ tairix-window = { path = "../../lib/window", version = "=0.0.0" }
 # measured on a stock Linux host, procps-ng `kill -s TERM -<pgid>` silently
 # ignores the negated-pid group form and still exits 0, so the runaway
 # processes would live on while the pipeline reported them killed. One
-# `killpg` call is the honest way to reach that group. Not a new supply-chain
-# entry: `libc` is already pinned, licence-checked and advisory-audited in
-# this workspace's lockfile and already sits in this crate's own dependency
-# graph. Host-only build glue, never product code.
+# `killpg` call is the honest way to reach that group. The same groups are
+# what xtask passes a Ctrl-C or a hang-up on to, which takes blocking the
+# terminating signals for one thread that waits on them and clearing that
+# mask in each child before it execs, none of which `std` offers either.
+# Not a new supply-chain entry: `libc` is already pinned, licence-checked and
+# advisory-audited in this workspace's lockfile and already sits in this
+# crate's own dependency graph. Host-only build glue, never product code.
 libc = "0.2"
 
 [dev-dependencies]

@@ -59,8 +59,11 @@ republish this device's transport and nothing else.
   force-unmount, and verified re-insert are the kernel's
   (`plans/DEVICES.md` D4), and a detach is `volume_detach`'s.
 - Only the formats a served driver ships for — ARXFS, ext2/3/4, FAT32,
-  ADFS, ISO 9660 and UDF — are attached; anything else is left untouched and
-  logged.
+  ADFS, AmigaDOS, ISO 9660 and UDF — are attached; anything else is left
+  untouched and logged. A disk an Amiga Rigid Disk Block partitions is one
+  such: unless a readable PC table written over its start lays volumes out,
+  none of its partitions is attached (`plans/DISK-IMAGES.md` DI20), and it is
+  never offered for an array as blank.
 - The probe is read-only by construction (`write_blocks` refuses), so a
   hostile or corrupt medium can never be mutated by probing it.
 

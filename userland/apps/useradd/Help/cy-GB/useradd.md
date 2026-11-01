@@ -20,8 +20,11 @@ dyfalu'r un), yn union fel y mae offeryn GNU yn creu cyfrif
 analluogedig. Gosodwch gyfrinair wedyn gyda gorchymyn `passwd` offeryn
 `users`.
 
-Pan hepgorir `-u`, dyrennir id y defnyddiwr yn awtomatig, un uwchlaw'r
-id uchaf sy'n bodoli. Pan hepgorir `-d`, y cyfeiriadur cartref yw
+Pan hepgorir `-u`, dyrennir id y defnyddiwr yn awtomatig: un uwchlaw'r
+id uchaf sy'n bodoli o 1000 neu fwy, neu 1000 pan nad oes gan unrhyw
+gyfrif un. Mae idau islaw 1000 yn eiddo i'r system ac ni chânt byth eu
+dyrannu, ac unwaith na fydd id ar ôl uwchlaw'r uchaf, ni chaiff y
+cyfrif ei greu. Pan hepgorir `-d`, y cyfeiriadur cartref yw
 cynllun safonol `/Users/NAME`. Mae'r cyfrif yn dechrau â chragen
 ragosodedig y system a nenfwd cyffredin galluoedd y sesiwn; mae
 gweinyddwr yn ei ledu wedyn gyda gorchymyn `grant` offeryn `users`.
@@ -32,7 +35,8 @@ yn operand.
 ## OPTIONS
 
 - `-u, --uid UID` — id rhifol y defnyddiwr; fe'i dyrennir yn awtomatig
-  pan hepgorir (un uwchlaw'r id uchaf sy'n bodoli).
+  pan hepgorir (un uwchlaw'r id uchaf sy'n bodoli o 1000 neu fwy, neu
+  1000 fel arall).
 - `-g, --gid GID` — id rhifol y grŵp cynradd. Gofynnol: nid oes polisi
   grŵp rhagosodedig i'w ddyfalu.
 - `-G, --groups LIST` — idau rhifol grwpiau atodol wedi'u gwahanu â

@@ -31,7 +31,8 @@ montado a partir de una imagen.
 
 Un `target` de la forma `/Storage/name` monta el volumen bajo ese
 nombre. Cualquier otro `target`, un directorio vacío de su propiedad
-bajo `/Users`, muestra también el volumen allí.
+bajo `/Users` o en un volumen de `/Storage`, muestra también el volumen
+allí; un directorio en un volumen FAT32 o ADFS no puede mostrarlo.
 
 El volumen sigue montado hasta que usted lo desmonte con `unmount` o
 termine su sesión. Una imagen que contiene un disco particionado, uno
@@ -46,12 +47,19 @@ no se monta, y `mount` indica el motivo.
 - `-w, --rw, --read-write` — montar el volumen en modo de lectura y
   escritura o no montarlo: una imagen en la que usted no puede
   escribir, o cuyo sistema de archivos no admite escritura, no se
-  monta. De `-r`, `-w`, `-o ro` y `-o rw`, prevalece la última.
-- `-t, --types <type>` — el sistema de archivos que debe contener la
-  imagen, tal como lo nombra la lista de montajes (`iso9660`, `udf`,
-  `adfs`, `affs`, `fat32`), o `auto` para cualquiera que contenga. Si
-  la imagen contiene otro o si se indica un tipo que ninguna imagen de
-  disco contiene, no se monta.
+  monta. Un `-r` posterior anula esta opción; un `-o ro` o un `-o rw`
+  posterior no la anula. De `-r`, `-w`, `-o ro` y `-o rw`, la última
+  decide si el volumen queda en modo de solo lectura.
+- `-t, --types <list>` — los sistemas de archivos, separados por comas,
+  de los cuales la imagen debe contener uno, tal como los nombra la
+  lista de montajes (`iso9660`, `udf`, `adfs`, `affs`, `fat32`), o
+  `auto` para cualquiera que contenga; una lista que empieza por `no`
+  nombra los que la imagen no debe contener. Lo que guarda la imagen se
+  reconoce por su contenido, así que el orden no elige nada: un disco
+  que contiene a la vez UDF e ISO 9660 se monta como UDF, salvo que su
+  ISO 9660 conserve registros Rock Ridge o RISC OS. Si la imagen no
+  contiene ninguno de esos sistemas de archivos o si la lista no nombra
+  ningún tipo que una imagen de disco contenga, no se monta.
 - `-o, --options <list>` — una lista separada por comas de `ro`, `rw`
   (lectura y escritura cuando sea posible, el valor predeterminado),
   `noexec`, `loop` y `name=name`, el nombre que ha de tomar el volumen.

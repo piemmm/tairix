@@ -3,13 +3,14 @@
 //! root, so every access is charged to the memory object it reaches and
 //! refused where the object or the path to it forbids it.
 
+use super::allow::V1_4;
 use super::body::{Access, Args, Body, Needs, Root, Typing};
 use super::types::{Holds, Scalar, Ty};
 use super::{Limit, Rule, Validator, What, MAX_INDEXES, NONE};
 use crate::enumerant::{
     BuiltIn, Decoration, Dim, ImageFormat, MemoryAccess, MemorySemantics, Scope, StorageClass,
 };
-use crate::{Id, Instruction, Kind, Value, Version};
+use crate::{Id, Instruction, Kind, Value};
 
 /// How a scope operand is used.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -140,11 +141,7 @@ impl Validator<'_> {
                     return Err(args.wrong(1));
                 }
                 self.whole_access(target)?;
-                let masks = if self.enabled.version >= (Version { major: 1, minor: 4 }) {
-                    2
-                } else {
-                    1
-                };
+                let masks = if self.enabled.version >= V1_4 { 2 } else { 1 };
                 self.memory_operands(args, 2, masks)?;
                 self.access(body, to, Access::WRITE)?;
                 self.access(body, from, Access::READ)
@@ -546,7 +543,7 @@ impl Validator<'_> {
     /// stored.
     fn rounding_store(&self, args: &Args<'_>, pointee: u32) -> Result<(), Rule> {
         let object = self.arg_id(args, 1)?;
-        if !self.decorated(object, Decoration::FP_ROUNDING_MODE) {
+        if !self.rounded(object) {
             return Ok(());
         }
         let (class, _, _) = self.pointer(args, 0, false)?;

@@ -144,7 +144,7 @@ three things on the `BootInfo` hand-off:
   cannot split a typed line between them.
 - **PID 1 spawn seam (`with_init`).** `riscv64::init_spawn::RiscvInitSpawn`
   builds the embedded `init` (`Run`) program's image in its own Sv39
-  address space (the shared 4 GiB `identity_gigapages()` window plus the
+  address space (the shared 4 GiB `KERNEL_IDENTITY_GIGAPAGES` window plus the
   direct physical map, user bias 64 GiB), switches to it,
   and dispatches it into U-mode through the capability-checked, audited
   `kernel_core::spawn_image` + `admit_init` (gated on `CAP_PROC_SPAWN`).
@@ -236,7 +236,10 @@ below — publishes it beside the `IrqTable`, installs its dispatcher and sets
   reading.
 - **No user page within S-mode's reach.** Installing the vector
   (`trap::install_trap_vector`, which `init_traps` runs) clears
-  `sstatus.SUM` on the hart, and nothing sets it again. The kernel reaches
+  `sstatus.SUM` on the hart, and nothing sets it again: `sum_tests` reads
+  every S-mode source, the port's and the kernel binary's, and allow-lists
+  each write that sets an `sstatus` bit, by name or CSR number. The kernel
+  reaches
   user memory only through the direct map, by the user copies, which walk
   the task's registered snapshot; the trap path reads none, not even the
   instruction a task's first use of floating point traps on. An S-mode
@@ -625,7 +628,9 @@ stub avoids the `M` multiply extension — and `register` orders the
 publish ahead of any SBI `hart_start` with a `fence`. Registration is
 set-once and an unstarted system fails closed: `is_valid_hartid` reports
 every id invalid until a pool is registered, so a `hart_start` for an
-unbacked hart is refused (`AGENTS.md` §2.9 / §5.4.5). The per-hart
+unbacked hart is refused (`AGENTS.md` §2.9 / §5.4.5). Each slice's bytes
+are an `UnsafeCell`, so a `static` pool lies in writable memory, not the
+read-only data an immutable static would be. The per-hart
 preemption timer slots are likewise a caller-sized
 `preempt::PreemptStorage<N>` published as `&'static [AtomicU64]` slices.
 The per-stack size (`SECONDARY_STACK_BYTES`, 16 KiB) stays a fixed
@@ -1175,9 +1180,10 @@ discovered map, with no floor/widen split:
   anything reaches a frame, and the boot hart runs alone there, so the local
   `sfence.vma` is the whole publication.
 
-`identity_gigapages()` is the one definition of the 4 GiB window every
-*process* root carries, for the kernel's own identity-linked image, stack,
-leaked state, and the board MMIO below 4 GiB. That is a bound on where the
+`paging::KERNEL_IDENTITY_GIGAPAGES`, in the port's own crate, is the one
+definition of the 4 GiB window every root the kernel runs under carries — the
+process roots and every QEMU vertical's — for the kernel's own identity-linked
+image, stack, leaked state, and the board MMIO below 4 GiB. That is a bound on where the
 hardware puts those things, not a capacity — and a board whose kernel image
 ends above it is refused at boot (`BootError::KernelAboveIdentityWindow`) rather than
 faulting on the first switch into a task's root.

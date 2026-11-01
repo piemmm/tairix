@@ -2002,6 +2002,8 @@ const BULK_QUEUE_CAP: usize = 4 * BULK_SLOTS;
 pub const REPORT_QUEUE_CAP: usize = 16;
 
 const _: () = assert!(REPORT_QUEUE_CAP >= INT_ARM_DEPTH);
+// A queue of the widest report a `u16` length names is addressable.
+const _: () = assert!(REPORT_QUEUE_CAP <= usize::MAX / u16::MAX as usize);
 
 /// One device's captured interrupt-IN reports, [`REPORT_QUEUE_CAP`] deep,
 /// each up to the endpoint's transfer length, with the instant it was
@@ -2027,11 +2029,10 @@ impl ReportQueue {
     ///
     /// # Errors
     ///
-    /// [`DriverError::LengthOutOfRange`] when memory for them runs out.
-    fn size_for(&mut self, slot: usize) -> Result<(), DriverError> {
-        let total = slot
-            .checked_mul(REPORT_QUEUE_CAP)
-            .ok_or(DriverError::LengthOutOfRange)?;
+    /// [`DriverError::OutOfMemory`] when memory for them runs out.
+    fn size_for(&mut self, slot: u16) -> Result<(), DriverError> {
+        let slot = usize::from(slot);
+        let total = slot * REPORT_QUEUE_CAP;
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(total)
@@ -2767,8 +2768,9 @@ impl DeviceState {
     /// # Errors
     ///
     /// [`DriverError::LengthOutOfRange`] for a `request` of zero or past
-    /// [`INT_TRANSFER_MAX`], or when memory for the report queue runs out;
-    /// [`DriverError::OutOfRange`] for a request other than the first.
+    /// [`INT_TRANSFER_MAX`]; [`DriverError::OutOfMemory`] when memory for the
+    /// report queue runs out; [`DriverError::OutOfRange`] for a later
+    /// `request` that names a different length than the first.
     fn fix_int_transfer(&mut self, request: usize) -> Result<usize, DriverError> {
         let wanted = u16::try_from(request)
             .ok()
@@ -2782,7 +2784,7 @@ impl DeviceState {
             };
         }
         let transfer = wanted.max(self.int_payload);
-        self.reports.size_for(usize::from(transfer))?;
+        self.reports.size_for(transfer)?;
         self.int_request = wanted;
         self.int_transfer = Some(transfer);
         Ok(usize::from(transfer))
@@ -5389,9 +5391,10 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
     /// [`DriverError::DeviceFault`] when no device is live at `index` or the
     /// device's interface carries no interrupt endpoint;
     /// [`DriverError::LengthOutOfRange`] for a `request` of zero or past
-    /// [`INT_TRANSFER_MAX`], or when memory for the report queue runs out;
-    /// [`DriverError::OutOfRange`] for a `request` other than the first; a
-    /// report longer than `buf` ([`DriverError::BufferTooSmall`]); a recorded
+    /// [`INT_TRANSFER_MAX`]; [`DriverError::OutOfMemory`] when memory for the
+    /// report queue runs out; [`DriverError::OutOfRange`] for a later
+    /// `request` that names a different length than the first; a report
+    /// longer than `buf` ([`DriverError::BufferTooSmall`]); a recorded
     /// fail-closed report completion, surfaced once; or a fault reading the
     /// event ring.
     pub fn next_report(

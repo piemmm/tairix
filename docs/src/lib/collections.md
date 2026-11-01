@@ -157,10 +157,14 @@ and its generation.
   must tell their keys apart carries its own identity beside it.
 * `try_reserve` makes room for that many insertions, after which none
   allocates; an index past the last a key can carry is
-  `TryReserveError::CapacityOverflow`.
+  `TryReserveError::CapacityOverflow`. `try_reserve_exact` makes exactly that
+  room, `reserve_bytes` says beforehand what it would add, and `held_bytes`
+  what the storage holds, so a holder can charge for the room before it is
+  made.
 
-Its first consumer is `lib/gpu`, which files a device's contexts and jobs and a
-context's allocations, buffers and timelines in it. `smbfs` files its
+Its first consumer is `lib/gpu`, which files a device's contexts and a
+context's objects, jobs and timelines in it, each context's tables charged to
+the context for their room. `smbfs` files its
 connections in one, keying the deadline heap beside it on the dense slot index
 and carrying each entry's key, so a due deadline names its connection.
 

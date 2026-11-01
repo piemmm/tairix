@@ -353,16 +353,19 @@ fn a_module_decodes_to_its_instructions_operands_and_definitions() {
 }
 
 #[test]
-fn the_operand_table_is_reserved_once_at_the_bound_its_words_give() {
+fn the_operand_table_fits_the_bound_its_words_give_and_keeps_only_its_operands() {
     let (bytes, _) = shader();
     let module = Module::decode(&bytes).expect("a valid module");
     let most = bytes.len() / 4 - super::HEADER_WORDS - module.instructions().len();
+    assert!(
+        module.operands.len() < most,
+        "a string spans words but is one operand, so the bound is never reached"
+    );
     assert_eq!(
         module.operands.capacity(),
-        most,
-        "no growth past the one reservation"
+        module.operands.len(),
+        "the room a string's words reserved is given back"
     );
-    assert!(module.operands.len() <= most);
 }
 
 #[test]

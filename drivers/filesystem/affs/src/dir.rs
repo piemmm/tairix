@@ -11,13 +11,33 @@ use tairix_fsprobe::affs::NAME_MAX;
 use crate::guard::Guard;
 use crate::header::{low32, Header, Kind};
 use crate::name::Name;
-use crate::Affs;
+use crate::{Affs, Facts};
 
-/// One entry of a bucket a listing has yet to hand over: where it is filed,
-/// and its name.
+/// One entry of a bucket a listing walked: its name, and what its header
+/// records.
+#[derive(Clone, Copy)]
 struct Listed {
-    block: u64,
     name: Name,
+    facts: Facts,
+}
+
+/// The entries of one bucket of a directory, ascending by header block.
+pub(crate) struct Bucket {
+    dir: u64,
+    index: usize,
+    entries: Vec<Listed>,
+    /// The cursor a call resuming at the entry the listing stopped on comes
+    /// back with: the last entry handed over before the stop, else the cursor
+    /// the stopped call began at.
+    resume: u64,
+}
+
+impl Bucket {
+    /// Whether this is bucket `index` of the directory `dir`.
+    #[cfg(test)]
+    pub(crate) fn is(&self, dir: u64, index: usize) -> bool {
+        self.dir == dir && self.index == index
+    }
 }
 
 impl<B: Block> Affs<B> {
@@ -57,8 +77,11 @@ impl<B: Block> Affs<B> {
     /// The order is the table's buckets, and within one the entries' header
     /// blocks ascending, whatever order its chain holds them in, so an entry
     /// keeps its place however others are filed around it. A cursor is the
-    /// bucket and the last block handed over from it. What an entry names is
-    /// read only as it is handed over.
+    /// bucket and the last block handed over from it. Each bucket's chain is
+    /// walked once, and the one a call stops in is kept for the next, so a
+    /// listing resumed an entry at a time, after the entry it stopped on or at
+    /// it, reads each entry once. What an entry names is read only as it is
+    /// handed over.
     pub(crate) fn list(
         &mut self,
         dir: &Header,
@@ -68,48 +91,78 @@ impl<B: Block> Affs<B> {
         let table_len = self.at.table_len();
         let mut bucket = usize::try_from(cursor >> 32).unwrap_or(usize::MAX);
         let mut after = cursor & u64::from(u32::MAX);
-        let mut listed: Vec<Listed> = Vec::new();
+        match &self.listing {
+            // Resumed at the entry a call stopped on, the first of its bucket:
+            // the buckets before it were empty, and nothing has changed since.
+            Some(held) if held.dir == dir.block && held.resume == cursor && held.index > bucket => {
+                bucket = held.index;
+                after = 0;
+            }
+            Some(held) if held.dir != dir.block || held.index < bucket => self.listing = None,
+            _ => {}
+        }
+        let mut last = cursor;
         let mut text = [0u8; 2 * NAME_MAX];
         while bucket < table_len {
-            listed.clear();
-            let mut next = dir.table(bucket);
-            let mut guard = Guard::new(dir.block, self.disk.blocks);
-            while next != 0 {
-                guard.step(u64::from(next))?;
-                let entry = self.filed(dir, next)?;
-                next = entry.hash_chain();
-                if entry.block <= after {
-                    continue;
-                }
-                let name = entry.name()?;
-                if !tairix_util::fallible::push(
-                    &mut listed,
-                    Listed {
-                        block: entry.block,
-                        name,
-                    },
-                ) {
-                    return Err(DriverError::OutOfMemory);
-                }
-            }
-            listed.sort_unstable_by_key(|entry| entry.block);
-            for entry in &listed {
-                let filed = self.filed(dir, low32(entry.block))?;
-                let node = self.entry_node(filed)?;
+            let held = self
+                .listing
+                .take_if(|held| held.dir == dir.block && held.index == bucket);
+            let entries = match held {
+                Some(held) => held.entries,
+                None => self.sorted_bucket(dir, bucket)?,
+            };
+            let from = entries.partition_point(|entry| entry.facts.block <= after);
+            for at in from..entries.len() {
+                let entry = entries[at];
+                let node = if entry.facts.kind == Kind::FileLink {
+                    let real = self.real_file(entry.facts.real_entry)?;
+                    self.facts(&real)
+                } else {
+                    entry.facts
+                };
                 let handed = DirEntry {
                     node: NodeId::from_raw(node.block),
-                    info: self.info(&node)?,
-                    next_cursor: (bucket as u64) << 32 | entry.block,
+                    info: self.info_of(&node)?,
+                    next_cursor: (bucket as u64) << 32 | entry.facts.block,
                 };
                 let len = entry.name.decode(&mut text);
                 if visit(&handed, &text[..len]) == DirVisit::Stop {
+                    self.listing = Some(Bucket {
+                        dir: dir.block,
+                        index: bucket,
+                        entries,
+                        resume: last,
+                    });
                     return Ok(());
                 }
+                last = handed.next_cursor;
             }
             bucket += 1;
             after = 0;
         }
         Ok(())
+    }
+
+    /// The entries `dir`'s chain for `bucket` files, ascending by header
+    /// block.
+    fn sorted_bucket(&mut self, dir: &Header, bucket: usize) -> Result<Vec<Listed>, DriverError> {
+        let mut entries = Vec::new();
+        let mut next = dir.table(bucket);
+        let mut guard = Guard::new(dir.block, self.disk.blocks);
+        while next != 0 {
+            guard.step(u64::from(next))?;
+            let entry = self.filed(dir, next)?;
+            next = entry.hash_chain();
+            let listed = Listed {
+                name: entry.name()?,
+                facts: self.facts(&entry),
+            };
+            if !tairix_util::fallible::push(&mut entries, listed) {
+                return Err(DriverError::OutOfMemory);
+            }
+        }
+        entries.sort_unstable_by_key(|entry| entry.facts.block);
+        Ok(entries)
     }
 
     /// File `entry` in `dir`'s chain for its name, the chain kept in
@@ -136,12 +189,16 @@ impl<B: Block> Affs<B> {
                 break;
             }
             guard.step(u64::from(next))?;
-            prev = self.filed(dir, next)?;
+            let following = self.filed(dir, next)?;
+            self.disk
+                .recycle(core::mem::replace(&mut prev, following).into_buf());
         }
         entry.set_hash_chain(prev.hash_chain());
         self.write_header(entry)?;
         prev.set_hash_chain(low32(entry.block));
-        self.write_header(&mut prev)
+        self.write_header(&mut prev)?;
+        self.disk.recycle(prev.into_buf());
+        Ok(())
     }
 
     /// Take `entry` out of `dir`'s chain for its name; `dir` is left for the
@@ -164,9 +221,12 @@ impl<B: Block> Affs<B> {
             let mut prev = self.filed(dir, at)?;
             if u64::from(prev.hash_chain()) == entry.block {
                 prev.set_hash_chain(entry.hash_chain());
-                return self.write_header(&mut prev);
+                self.write_header(&mut prev)?;
+                self.disk.recycle(prev.into_buf());
+                return Ok(());
             }
             at = prev.hash_chain();
+            self.disk.recycle(prev.into_buf());
         }
         Err(DriverError::BadMagic)
     }
@@ -191,7 +251,7 @@ impl<B: Block> Affs<B> {
         kind: Kind,
         target: Option<&[u8]>,
     ) -> Result<NodeId, DriverError> {
-        let name = Name::encode(name)?;
+        let name = Name::encode(name)?.given()?;
         self.change(|fs| {
             let mut dir = fs.directory(dir)?;
             if fs.find(&dir, &name)?.is_some() {
@@ -230,16 +290,28 @@ impl<B: Block> Affs<B> {
     /// Take the name `entry` gives an object out of `dir`: a link's own, an
     /// object's promoting its newest link to take its place, or the object's
     /// last, freeing it once no hold remains. Every refusal is decided
-    /// before the first write.
+    /// before the first write, the data a file's last name frees checked
+    /// before the name goes.
     fn drop_name(&mut self, dir: &mut Header, entry: Header) -> Result<(), DriverError> {
         match entry.kind {
             Kind::FileLink | Kind::DirLink => return self.remove_link(dir, &entry),
             _ if entry.next_link() != 0 => return self.promote(dir, entry),
             _ => {}
         }
+        let held = self.held.get(entry.block).is_some();
+        if !held && entry.kind == Kind::File {
+            self.check_data(&entry)?;
+        }
         self.unfile_entry(dir, &entry)?;
         self.touch(dir)?;
-        self.unname(entry.block)
+        if held {
+            self.orphan(entry.block);
+            return Ok(());
+        }
+        if entry.kind == Kind::File {
+            self.give_data(&entry)?;
+        }
+        self.free_header(entry.block)
     }
 
     /// Unfile the hard link `link` from `dir`, take it out of its object's
@@ -273,7 +345,9 @@ impl<B: Block> Affs<B> {
     fn unchain_link(&mut self, mut real: Header, link: &Header) -> Result<(), DriverError> {
         if u64::from(real.next_link()) == link.block {
             real.set_next_link(link.next_link());
-            return self.write_header(&mut real);
+            self.write_header(&mut real)?;
+            self.disk.recycle(real.into_buf());
+            return Ok(());
         }
         let mut guard = Guard::new(real.block, self.disk.blocks);
         let mut at = real.next_link();
@@ -285,9 +359,13 @@ impl<B: Block> Affs<B> {
             }
             if u64::from(prev.next_link()) == link.block {
                 prev.set_next_link(link.next_link());
-                return self.write_header(&mut prev);
+                self.write_header(&mut prev)?;
+                self.disk.recycle(prev.into_buf());
+                self.disk.recycle(real.into_buf());
+                return Ok(());
             }
             at = prev.next_link();
+            self.disk.recycle(prev.into_buf());
         }
         Err(DriverError::BadMagic)
     }
@@ -307,14 +385,16 @@ impl<B: Block> Affs<B> {
     /// remain: as AmigaDOS does, its newest link's name and place pass to the
     /// object, which keeps its block, its data and every other link.
     fn promote(&mut self, dir: &mut Header, mut real: Header) -> Result<(), DriverError> {
-        let link = self.header(u64::from(real.next_link()))?;
+        let mut link = self.header(u64::from(real.next_link()))?;
         if self.linked(&link)?.block != real.block {
             return Err(DriverError::BadMagic);
         }
         self.unfile_entry(dir, &real)?;
         self.touch(dir)?;
         // Unfiling the object may have rewritten the link's own chain pointer.
-        let link = self.header(link.block)?;
+        let fresh = self.header(link.block)?;
+        self.disk
+            .recycle(core::mem::replace(&mut link, fresh).into_buf());
         let mut place = self.header(u64::from(link.parent()))?;
         if !place.kind.is_directory() {
             return Err(DriverError::BadMagic);
@@ -325,7 +405,11 @@ impl<B: Block> Affs<B> {
         real.set_next_link(link.next_link());
         self.file_entry(&mut place, &mut real)?;
         self.touch(&mut place)?;
-        self.unname(link.block)
+        let unnamed = link.block;
+        for done in [link, place, real] {
+            self.disk.recycle(done.into_buf());
+        }
+        self.unname(unnamed)
     }
 
     /// Whether directory `dir` lies within `ancestor`'s subtree, `ancestor`
@@ -370,7 +454,7 @@ impl<B: Block> Affs<B> {
                 // The same entry: a change of spelling at most, filed in the
                 // bucket the fold already chose.
                 if entry.name()? != dst_name {
-                    entry.set_name(&dst_name);
+                    entry.set_name(&dst_name.given()?);
                     fs.write_header(&mut entry)?;
                 }
                 return Ok(());
@@ -401,19 +485,26 @@ impl<B: Block> Affs<B> {
                     fs.check_promotion(occupant)?;
                 }
             }
+            let dst_name = dst_name.given()?;
             if entry.kind == Kind::Directory && !same_dir && fs.within(dst, entry.block)? {
                 return Err(DriverError::DirectoryCycle);
             }
             if let Some(occupant) = occupant {
                 let mut place = fs.header(dst)?;
                 fs.drop_name(&mut place, occupant)?;
+                fs.disk.recycle(place.into_buf());
                 // Dropping the occupant may have rewritten the moved entry's
                 // chain pointer, and the directory both share.
-                src = fs.header(src.block)?;
-                entry = fs.header(entry.block)?;
+                let fresh = fs.header(src.block)?;
+                fs.disk
+                    .recycle(core::mem::replace(&mut src, fresh).into_buf());
+                let fresh = fs.header(entry.block)?;
+                fs.disk
+                    .recycle(core::mem::replace(&mut entry, fresh).into_buf());
             }
             fs.unfile_entry(&mut src, &entry)?;
             fs.touch(&mut src)?;
+            fs.disk.recycle(src.into_buf());
             let mut dst = fs.header(dst)?;
             entry.set_name(&dst_name);
             entry.set_parent(dst.block);
@@ -429,7 +520,7 @@ impl<B: Block> Affs<B> {
         name: &[u8],
         node: NodeId,
     ) -> Result<(), DriverError> {
-        let name = Name::encode(name)?;
+        let name = Name::encode(name)?.given()?;
         self.change(|fs| {
             let mut dir = fs.directory(dir)?;
             let real = fs.node(node)?;
@@ -470,13 +561,17 @@ impl<B: Block> Affs<B> {
         if header.kind == Kind::File {
             self.free_data(&header)?;
         }
+        self.disk.recycle(header.into_buf());
         self.free_header(block)
     }
 
-    /// Wipe and free a header block, so an id that named it names nothing.
+    /// Wipe and free a header block, so an id that named it names nothing and
+    /// no chain is kept under it for whatever takes the block next.
     pub(crate) fn free_header(&mut self, block: u64) -> Result<(), DriverError> {
+        self.chains.forget(block);
         let zeros = self.disk.buffer()?;
         self.put(block, &zeros)?;
+        self.disk.recycle(zeros);
         self.release(block)
     }
 }

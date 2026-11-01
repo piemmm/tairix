@@ -30,8 +30,9 @@ pub enum GroupaddError {
     /// read the group database.
     Lookup(Errno),
     /// Creating the group failed. Carries the underlying [`Errno`] — e.g.
-    /// [`Errno::PermissionDenied`] when the caller lacks `CAP_USER_ADMIN`, or
-    /// [`Errno::OutOfRange`] when the requested gid is already taken.
+    /// [`Errno::PermissionDenied`] when the caller lacks `CAP_USER_ADMIN`,
+    /// [`Errno::AlreadyExists`] when the requested gid is already taken, or
+    /// [`Errno::OutOfRange`] when no gid is left in the user band.
     Create(Errno),
     /// Writing the usage banner to the terminal failed. Carries the underlying
     /// [`Errno`].

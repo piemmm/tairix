@@ -32,7 +32,7 @@ use std::boxed::Box;
 use std::string::String;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc as StdArc, Mutex};
+use std::sync::{Arc as StdArc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::vec;
@@ -57,7 +57,7 @@ use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT, HW_NOD
 use tairix_abi::memory::PAGE_SIZE;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_abi::time::Time64;
-use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
+use tairix_abi::volume::{DetachMode, VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use tairix_abi::{
     CapabilityId, CapabilityQuery, DriverError, DriverHandle, Errno, FileStat, LockRange,
     RenameFlags, UnlinkFlags,
@@ -105,7 +105,7 @@ use tairix_kernel_core::VolumeService as _;
 struct Audit {
     id: u32,
     volume: Option<String>,
-    cause: Option<String>,
+    texts: Vec<(String, String)>,
     counts: Vec<(String, u64)>,
 }
 
@@ -115,16 +115,14 @@ struct Recorded(Mutex<Vec<Audit>>);
 
 impl Sink for Recorded {
     fn write_event(&self, event: &Event<'_>) {
-        let field = |key: &str| {
-            event
-                .fields
-                .iter()
-                .find(|field| field.key == key)
-                .and_then(|field| match field.value {
-                    FieldValue::Str(text) => Some(String::from(text)),
-                    _ => None,
-                })
-        };
+        let texts: Vec<(String, String)> = event
+            .fields
+            .iter()
+            .filter_map(|field| match field.value {
+                FieldValue::Str(text) => Some((String::from(field.key), String::from(text))),
+                _ => None,
+            })
+            .collect();
         let counts = event
             .fields
             .iter()
@@ -135,8 +133,11 @@ impl Sink for Recorded {
             .collect();
         let audit = Audit {
             id: event.id.0,
-            volume: field("volume"),
-            cause: field("cause"),
+            volume: texts
+                .iter()
+                .find(|(key, _)| key == "volume")
+                .map(|(_, text)| text.clone()),
+            texts,
             counts,
         };
         self.0.lock().unwrap().push(audit);
@@ -147,12 +148,23 @@ static SINK: Recorded = Recorded(Mutex::new(Vec::new()));
 
 /// The causes of every `id` event audited for `volume`, in order.
 fn audited(id: u32, volume: &str) -> Vec<Option<String>> {
+    audited_text(id, volume, "cause")
+}
+
+/// The `key` text of every `id` event audited for `volume`, in order.
+fn audited_text(id: u32, volume: &str, key: &str) -> Vec<Option<String>> {
     SINK.0
         .lock()
         .unwrap()
         .iter()
         .filter(|audit| audit.id == id && audit.volume.as_deref() == Some(volume))
-        .map(|audit| audit.cause.clone())
+        .map(|audit| {
+            audit
+                .texts
+                .iter()
+                .find(|(named, _)| named == key)
+                .map(|(_, text)| text.clone())
+        })
         .collect()
 }
 
@@ -1051,7 +1063,7 @@ fn an_unwired_service_fails_closed() {
         service.detach(
             &VolumeDetachRequest {
                 volume_id: [7; 16],
-                force: false
+                mode: DetachMode::Plain,
             },
             &admin()
         ),
@@ -1341,7 +1353,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     // --- Detach. ---
     let detach = VolumeDetachRequest {
         volume_id: expected_identity,
-        force: false,
+        mode: DetachMode::Plain,
     };
     assert_eq!(
         VOLUME_SERVICE.detach(&detach, &member()),
@@ -1538,7 +1550,7 @@ fn a_lost_driver_is_restarted_and_serves_again_scenario(
         Err(Errno::AlreadyExists),
         "no second driver may serve it too"
     );
-    retire(identity, false, round);
+    retire(identity, DetachMode::Plain, round);
     assert!(!TREE.is_live(node), "the detach withdrew its node");
     assert_every_attached_volume_is_served();
 }
@@ -1584,7 +1596,7 @@ fn a_volume_its_driver_cannot_open_is_retracted_scenario(
         VOLUME_SERVICE.detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin()
         ),
@@ -1671,7 +1683,7 @@ fn a_driver_offering_another_format_is_refused_scenario(
         VOLUME_SERVICE.detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin()
         ),
@@ -1743,7 +1755,7 @@ fn a_conflicted_volume_its_driver_refuses_is_kept_scenario(
         VOLUME_SERVICE.detach(
             &VolumeDetachRequest {
                 volume_id: round.identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin()
         ),
@@ -1754,7 +1766,7 @@ fn a_conflicted_volume_its_driver_refuses_is_kept_scenario(
         .detach(
             &VolumeDetachRequest {
                 volume_id: round.identity,
-                force: true,
+                mode: DetachMode::Force,
             },
             &admin(),
         )
@@ -1791,7 +1803,7 @@ fn a_volume_awaiting_its_driver_detaches_scenario(
         .detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin(),
         )
@@ -1839,7 +1851,7 @@ fn a_volume_out_of_the_table_still_detaches_scenario(
         .mounts_write()
         .detach(handle, tairix_kernel_core::BindsWithin::Refuse)
         .expect("the mount leaves the table");
-    retire(identity, false, round);
+    retire(identity, DetachMode::Plain, round);
     assert_eq!(audited(DETACHED, "gone1"), [None]);
     assert_eq!(VOLUME_FOREST.resolve(&identity), None);
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
@@ -1921,7 +1933,7 @@ fn a_changed_medium_retracts_its_volume_and_serves_the_next_scenario(
         .detach(
             &VolumeDetachRequest {
                 volume_id: second_identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin(),
         )
@@ -2271,12 +2283,23 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
         VOLUME_SERVICE.detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin()
         ),
         Err(Errno::DeviceFault),
         "a plain detach never discards the retained set"
+    );
+    assert_eq!(
+        VOLUME_SERVICE.detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                mode: DetachMode::Lost,
+            },
+            &admin()
+        ),
+        Err(Errno::DeviceFault),
+        "nor does one taking the lost, for a volume holding what it retained"
     );
     // The mount snapshot says the volume is unavailable-dirty — never a
     // volume that looks healthy — and still names its identity.
@@ -2294,7 +2317,7 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
         .detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force: true,
+                mode: DetachMode::Force,
             },
             &admin(),
         )
@@ -2417,7 +2440,7 @@ fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
         VOLUME_SERVICE.detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin()
         ),
@@ -2557,11 +2580,11 @@ fn an_unpublished_transaction_is_recorded_lost_scenario(
         .detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force: true,
+                mode: DetachMode::Lost,
             },
             &admin(),
         )
-        .expect("the audited force retracts it");
+        .expect("taking the lost retracts it, as the audited force");
     assert_eq!(
         held.read(0, &mut buf),
         Err(Errno::Stale),
@@ -2786,7 +2809,7 @@ fn verified_reinsert_replays_scenario(window_ptr: *mut u8, facility: &'static Te
         .detach(
             &VolumeDetachRequest {
                 volume_id: round.identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin(),
         )
@@ -2860,7 +2883,7 @@ fn mutated_reinsert_conflicts_scenario(window_ptr: *mut u8, facility: &'static T
         VOLUME_SERVICE.detach(
             &VolumeDetachRequest {
                 volume_id: round.identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin()
         ),
@@ -2871,7 +2894,7 @@ fn mutated_reinsert_conflicts_scenario(window_ptr: *mut u8, facility: &'static T
         .detach(
             &VolumeDetachRequest {
                 volume_id: round.identity,
-                force: true,
+                mode: DetachMode::Force,
             },
             &admin(),
         )
@@ -2922,7 +2945,7 @@ fn forced_unmount_of_a_healthy_volume_scenario(
         .detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force: true,
+                mode: DetachMode::Force,
             },
             &admin(),
         )
@@ -3024,7 +3047,7 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
         .detach(
             &VolumeDetachRequest {
                 volume_id: first_identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin(),
         )
@@ -3047,7 +3070,7 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
         .detach(
             &VolumeDetachRequest {
                 volume_id: second_identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin(),
         )
@@ -3065,7 +3088,7 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
         .detach(
             &VolumeDetachRequest {
                 volume_id: first_identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin(),
         )
@@ -3125,7 +3148,7 @@ fn unrecognised_medium_mounts_as_unknown_scenario(
         .detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin(),
         )
@@ -3233,7 +3256,7 @@ fn a_device_that_stops_answering_holds_up_no_other_scenario(
             .detach(
                 &VolumeDetachRequest {
                     volume_id,
-                    force: false,
+                    mode: DetachMode::Plain,
                 },
                 &admin(),
             )
@@ -3384,7 +3407,7 @@ fn link_round_trip_through_the_real_service_scenario(
         .detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin(),
         )
@@ -3434,12 +3457,12 @@ const EXT_ACL_FIXTURE: &[u8] =
 mod ext_fixture;
 
 /// Detach the volume `identity` and end its serving round.
-fn retire(identity: [u8; 16], force: bool, round: Inserted) {
+fn retire(identity: [u8; 16], mode: DetachMode, round: Inserted) {
     VOLUME_SERVICE
         .detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force,
+                mode,
             },
             &admin(),
         )
@@ -3498,7 +3521,7 @@ fn a_taken_catalog_name_is_answered_as_taken_scenario(
     let n =
         read_as(0, "/Storage/usb8/hello.txt", 0, &mut buf).expect("the first volume still serves");
     assert_eq!(&buf[..n], b"first");
-    retire(identity, false, first);
+    retire(identity, DetachMode::Plain, first);
     second.stop.store(true, Ordering::Relaxed);
     second.server.join().expect("second server thread");
 }
@@ -3538,7 +3561,7 @@ fn a_volume_its_driver_refuses_to_write_mounts_read_only_scenario(
         write_as(0, "/Storage/ext4ro/hello.txt", 0, b"X").err(),
         Some(Errno::ReadOnly)
     );
-    retire(identity, false, round);
+    retire(identity, DetachMode::Plain, round);
 }
 
 /// The mount table names the ext generation a volume's features make it, as
@@ -3564,7 +3587,7 @@ fn an_ext2_volume_mounts_as_ext2_scenario(window_ptr: *mut u8, facility: &'stati
     );
     round.outcome.expect("the volume attaches");
     assert_eq!(mount_record(b"ext2vol").fstype_bytes(), b"ext2");
-    retire(identity, false, round);
+    retire(identity, DetachMode::Plain, round);
 }
 
 /// An ext volume made elsewhere, served as a removable USB stick, is
@@ -3608,7 +3631,7 @@ fn an_ext_volume_keeps_its_on_disk_ownership_scenario(
         .detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force: false,
+                mode: DetachMode::Plain,
             },
             &admin(),
         )
@@ -3791,7 +3814,7 @@ fn a_stick_pulled_mid_commit_returns_read_only_scenario(
         write_as(0, "/Storage/ext4pull/hello.txt", 0, b"X").err(),
         Some(Errno::ReadOnly)
     );
-    retire(identity, false, back);
+    retire(identity, DetachMode::Plain, back);
 }
 
 /// A real `genisoimage` disc with Rock Ridge and Joliet.
@@ -3830,7 +3853,7 @@ fn a_disc_image_attaches_read_only_scenario(window_ptr: *mut u8, facility: &'sta
         write_as(0, "/Storage/disc/README.TXT", 0, b"X").err(),
         Some(Errno::ReadOnly)
     );
-    retire(identity, false, round);
+    retire(identity, DetachMode::Plain, round);
 }
 
 /// A UDF volume attaches writable: a file written through the production
@@ -3862,7 +3885,7 @@ fn a_udf_volume_attaches_writable_scenario(window_ptr: *mut u8, facility: &'stat
     open_as(0, "/Storage/exchange/note.txt", create).expect("a file is made");
     write_as(0, "/Storage/exchange/note.txt", 0, b"udf payload").expect("and written");
     assert_volume_reads("/Storage/exchange/note.txt", b"udf payload");
-    retire(identity, false, round);
+    retire(identity, DetachMode::Plain, round);
 }
 
 /// An ADFS volume attaches writable through the same path.
@@ -3886,7 +3909,7 @@ fn an_adfs_volume_attaches_writable_scenario(window_ptr: *mut u8, facility: &'st
     open_as(0, "/Storage/acorn/ReadMe", create).expect("a file is made");
     write_as(0, "/Storage/acorn/ReadMe", 0, b"filecore").expect("and written");
     assert_volume_reads("/Storage/acorn/ReadMe", b"filecore");
-    retire(identity, false, round);
+    retire(identity, DetachMode::Plain, round);
 }
 
 /// What the volume shown at `/Storage/<name>` reports of its space once
@@ -3922,7 +3945,7 @@ fn a_held_descriptor_holds_its_volume_attached_scenario(
     let held = Descriptor::open(0, "/Storage/held1/hello.txt", OpenFlags::READ).expect("opens");
     let plain = VolumeDetachRequest {
         volume_id: identity,
-        force: false,
+        mode: DetachMode::Plain,
     };
     assert_eq!(VOLUME_SERVICE.detach(&plain, &admin()), Err(Errno::Busy));
     assert_eq!(
@@ -3941,7 +3964,7 @@ fn a_held_descriptor_holds_its_volume_attached_scenario(
         .detach(
             &VolumeDetachRequest {
                 volume_id: identity,
-                force: true,
+                mode: DetachMode::Force,
             },
             &admin(),
         )
@@ -3981,7 +4004,7 @@ fn a_held_descriptor_holds_its_volume_attached_scenario(
         "a revoked descriptor never reaches the volume attached under its name since"
     );
     drop(held);
-    retire(other, false, second);
+    retire(other, DetachMode::Plain, second);
 }
 
 /// A descriptor of an ARXFS file stays with the node it opened: a rename,
@@ -4007,7 +4030,7 @@ fn a_descriptor_stays_with_its_node_scenario(window_ptr: *mut u8, facility: &'st
     a_descriptor_follows_its_node_past_its_names("arxn");
     an_unlinked_file_keeps_its_blocks_until_its_last_close("arxn");
     a_chmod_withdraws_what_a_fresh_open_would_be_refused("arxn");
-    retire(identity, false, round);
+    retire(identity, DetachMode::Plain, round);
 }
 
 /// The descriptor of `volume`'s `target.txt` reads and writes the node it
@@ -4211,7 +4234,7 @@ fn a_fat_files_lock_follows_it_through_writes_and_renames_scenario(
     );
     let _ = filelock::release_owner(owner);
     drop((first, second));
-    retire(identity, false, round);
+    retire(identity, DetachMode::Plain, round);
 }
 
 #[test]
@@ -4295,6 +4318,54 @@ fn member() -> Principal<'static> {
     plain(MEMBER_UID, STORAGE_GID)
 }
 
+/// What a [`Gate`] tells the test waiting on it.
+enum Arrived {
+    /// A call reached the gated server while the gate was shut.
+    Call,
+    /// The attach the test ran beside the server returned.
+    Returned(Result<tairix_abi::netattach::AttachReply, Errno>),
+}
+
+/// A gate a server's answers wait behind: shut, the serve loop reports each
+/// call it receives and waits for it to open.
+struct Gate {
+    shut: Mutex<bool>,
+    opened: Condvar,
+    arrived: mpsc::Sender<Arrived>,
+}
+
+impl Gate {
+    /// An open gate that reports through `arrived`.
+    fn new(arrived: mpsc::Sender<Arrived>) -> StdArc<Self> {
+        StdArc::new(Self {
+            shut: Mutex::new(false),
+            opened: Condvar::new(),
+            arrived,
+        })
+    }
+
+    fn shut(&self) {
+        *self.shut.lock().unwrap() = true;
+    }
+
+    fn open(&self) {
+        *self.shut.lock().unwrap() = false;
+        self.opened.notify_all();
+    }
+
+    /// Let a received call through, reporting it and waiting first while the
+    /// gate is shut.
+    fn pass(&self) {
+        let mut shut = self.shut.lock().unwrap();
+        if *shut {
+            let _ = self.arrived.send(Arrived::Call);
+            while *shut {
+                shut = self.opened.wait(shut).unwrap();
+            }
+        }
+    }
+}
+
 /// A network filesystem server, as `smbfs` runs: the volume it offered, and
 /// the thread answering its lanes until its endpoint goes.
 struct NetServer {
@@ -4313,6 +4384,18 @@ impl NetServer {
         for_uid: u32,
         source: &str,
         fs: tairix_kernel_core::fs::memfs::RwMockFs,
+    ) -> Self {
+        Self::offer_with(facility, key, for_uid, source, fs, None)
+    }
+
+    /// [`Self::offer`], each call answered only as `gate` lets it through.
+    fn offer_with(
+        facility: &'static TestFacility,
+        key: [u8; 16],
+        for_uid: u32,
+        source: &str,
+        fs: tairix_kernel_core::fs::memfs::RwMockFs,
+        gate: Option<StdArc<Gate>>,
     ) -> Self {
         let owner = NEXT_DRIVER.fetch_add(1, Ordering::Relaxed);
         let lanes = net_lanes();
@@ -4385,6 +4468,9 @@ impl NetServer {
                     thread::yield_now();
                     continue;
                 };
+                if let Some(gate) = &gate {
+                    gate.pass();
+                }
                 // SAFETY: the window is a leaked `FSSERVE_WINDOW_LEN`-byte
                 // buffer alive for the process, and each lane leaves its span
                 // alone while a call it posted is in service.
@@ -4485,7 +4571,7 @@ fn a_network_volume_is_attached_by_its_principal_alone_scenario(facility: &'stat
 
     let detach = |volume_id| VolumeDetachRequest {
         volume_id,
-        force: false,
+        mode: DetachMode::Plain,
     };
     assert_eq!(
         VOLUME_SERVICE.detach(&detach(reply.volume_id), &plain(OUTSIDER_UID, OUTSIDER_UID)),
@@ -4619,7 +4705,7 @@ fn a_network_volume_is_presented_as_its_principal_may_ask_scenario(
             .detach(
                 &VolumeDetachRequest {
                     volume_id: reply.volume_id,
-                    force: false,
+                    mode: DetachMode::Plain,
                 },
                 &holder,
             )
@@ -4726,16 +4812,19 @@ fn a_lost_network_volume_waits_for_its_owner_scenario(facility: &'static TestFac
         read_as(MEMBER_UID, "/Storage/lost/hello.txt", 0, &mut buf),
         Err(Errno::DeviceFault)
     );
-    let detach = |force| VolumeDetachRequest {
+    let detach = |mode| VolumeDetachRequest {
         volume_id: reply.volume_id,
-        force,
+        mode,
     };
     assert_eq!(
-        VOLUME_SERVICE.detach(&detach(false), &member()),
+        VOLUME_SERVICE.detach(&detach(DetachMode::Plain), &member()),
         Err(Errno::DeviceFault),
         "the loss is acknowledged by a forced detach alone"
     );
-    assert_eq!(VOLUME_SERVICE.detach(&detach(true), &member()), Ok(()));
+    assert_eq!(
+        VOLUME_SERVICE.detach(&detach(DetachMode::Lost), &member()),
+        Ok(())
+    );
     assert!(FS_SERVICE
         .mount_snapshot()
         .expect("snapshot")
@@ -4746,9 +4835,20 @@ fn a_lost_network_volume_waits_for_its_owner_scenario(facility: &'static TestFac
     let reply = VOLUME_SERVICE
         .attach_offered(&member(), again.offer, &private_attach("lost", None))
         .expect("attached again");
-    VOLUME_SERVICE
-        .detach(&detach_of(reply.volume_id), &member())
-        .expect("detach");
+    // Healthy now, so taking the lost is a plain detach: it revokes nothing.
+    let held =
+        Descriptor::open(MEMBER_UID, "/Storage/lost/hello.txt", OpenFlags::READ).expect("opens");
+    let lost = VolumeDetachRequest {
+        volume_id: reply.volume_id,
+        mode: DetachMode::Lost,
+    };
+    assert_eq!(VOLUME_SERVICE.detach(&lost, &member()), Err(Errno::Busy));
+    assert!(
+        held.read(0, &mut buf).is_ok(),
+        "the descriptor was not revoked"
+    );
+    drop(held);
+    VOLUME_SERVICE.detach(&lost, &member()).expect("detach");
     again.join();
 }
 
@@ -4842,6 +4942,6 @@ fn a_bind_within_a_network_volume_leaves_with_it_scenario(facility: &'static Tes
 fn detach_of(volume_id: [u8; 16]) -> VolumeDetachRequest {
     VolumeDetachRequest {
         volume_id,
-        force: false,
+        mode: DetachMode::Plain,
     }
 }

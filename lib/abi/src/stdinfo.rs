@@ -190,6 +190,19 @@ impl<'a> StdInfoRecord<'a> {
     /// and the `ai` object is embedded verbatim.
     pub fn write_jsonl(&self, buf: &mut [u8]) -> Result<usize, Errno> {
         let mut cur = Cursor { buf, pos: 0 };
+        self.encode(&mut cur)?;
+        Ok(cur.pos)
+    }
+
+    /// The bytes [`write_jsonl`](Self::write_jsonl) writes: a buffer this
+    /// long always holds the line, counted by the one encoder that writes it.
+    #[must_use]
+    pub fn jsonl_len(&self) -> usize {
+        let mut count = Count(0);
+        self.encode(&mut count).map_or(usize::MAX, |()| count.0)
+    }
+
+    fn encode(&self, cur: &mut impl Out) -> Result<(), Errno> {
         cur.raw(b"{\"version\":")?;
         cur.u32(self.version)?;
         cur.raw(b",\"producer\":")?;
@@ -208,8 +221,7 @@ impl<'a> StdInfoRecord<'a> {
         }
         cur.raw(b"},\"ai\":")?;
         cur.raw(self.ai.as_bytes())?;
-        cur.raw(b"}\n")?;
-        Ok(cur.pos)
+        cur.raw(b"}\n")
     }
 }
 
@@ -317,22 +329,9 @@ fn escape_json<E>(value: &str, emit: &mut impl FnMut(&str) -> Result<(), E>) -> 
     emit(&value[run..])
 }
 
-/// A bounds-checked write cursor over a borrowed byte buffer.
-struct Cursor<'b> {
-    buf: &'b mut [u8],
-    pos: usize,
-}
-
-impl Cursor<'_> {
-    fn raw(&mut self, bytes: &[u8]) -> Result<(), Errno> {
-        let end = self.pos.checked_add(bytes.len()).ok_or(Errno::OutOfRange)?;
-        if end > self.buf.len() {
-            return Err(Errno::BufferTooSmall);
-        }
-        self.buf[self.pos..end].copy_from_slice(bytes);
-        self.pos = end;
-        Ok(())
-    }
+/// Where an encoded record's bytes go.
+trait Out {
+    fn raw(&mut self, bytes: &[u8]) -> Result<(), Errno>;
 
     /// Write `value` as JSON-quoted, escaping `"`, `\`, and control bytes.
     fn json_str(&mut self, value: &str) -> Result<(), Errno> {
@@ -359,6 +358,34 @@ impl Cursor<'_> {
     }
 }
 
+/// A bounds-checked write cursor over a borrowed byte buffer.
+struct Cursor<'b> {
+    buf: &'b mut [u8],
+    pos: usize,
+}
+
+impl Out for Cursor<'_> {
+    fn raw(&mut self, bytes: &[u8]) -> Result<(), Errno> {
+        let end = self.pos.checked_add(bytes.len()).ok_or(Errno::OutOfRange)?;
+        if end > self.buf.len() {
+            return Err(Errno::BufferTooSmall);
+        }
+        self.buf[self.pos..end].copy_from_slice(bytes);
+        self.pos = end;
+        Ok(())
+    }
+}
+
+/// Counts the bytes it is given.
+struct Count(usize);
+
+impl Out for Count {
+    fn raw(&mut self, bytes: &[u8]) -> Result<(), Errno> {
+        self.0 = self.0.checked_add(bytes.len()).ok_or(Errno::OutOfRange)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
@@ -375,6 +402,29 @@ mod tests {
         let mut buf = [0u8; 512];
         let len = record.write_jsonl(&mut buf).expect("buffer large enough");
         String::from_utf8(buf[..len].to_vec()).expect("valid utf-8")
+    }
+
+    /// The length a record is counted at is exactly what it writes, every
+    /// escape included: a buffer that long holds it and one byte fewer does
+    /// not.
+    #[test]
+    fn a_record_is_counted_at_the_length_it_writes() {
+        let message = "quote \" backslash \\ tab \t bell \u{7} é";
+        let record = StdInfoRecord::new(
+            "unmount",
+            StdInfoKind::Suggestion,
+            "fs.volume_force_required",
+            Severity::Info,
+            Human::with_suggestion(message, "Use `unmount --force \"x\"`."),
+        )
+        .with_ai("{\"subject\":\"volume_detach\"}");
+        let len = record.jsonl_len();
+        let mut exact = alloc::vec![0u8; len];
+        assert_eq!(record.write_jsonl(&mut exact), Ok(len));
+        assert_eq!(
+            record.write_jsonl(&mut exact[..len - 1]),
+            Err(Errno::BufferTooSmall)
+        );
     }
 
     #[test]

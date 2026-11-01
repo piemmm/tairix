@@ -106,9 +106,10 @@ pub enum InitError {
     /// A descriptor table broke a gate invariant before it was loaded, so
     /// it was never handed to the CPU.
     Idt(crate::interrupts::IdtError),
-    /// This CPU's extended-state configuration differs from the boot CPU's,
-    /// so a task could not migrate between them.
-    XstateMismatch,
+    /// This CPU's extended state could not be set up: its configuration
+    /// differs from the boot CPU's, so a task could not migrate between them,
+    /// or CPUID describes no layout a save fits.
+    Xstate(crate::xstate::InitError),
 }
 
 impl From<gdt::IstError> for InitError {
@@ -354,8 +355,8 @@ fn reset_per_cpu_storage_for_tests() {
 /// * `InitError::Ist` if `PerCpuGdt::set_ist` rejected one of the
 ///   stack-top pointers (only possible if `IST_STACK_BYTES` is
 ///   misconfigured at compile time).
-/// * `InitError::XstateMismatch` if this CPU's extended state differs from
-///   the boot CPU's.
+/// * `InitError::Xstate` if this CPU's extended state differs from the boot
+///   CPU's, or CPUID describes no layout a save fits.
 ///
 /// # Safety
 ///
@@ -400,7 +401,7 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
     unsafe { load(gdt, idt, &ists)? };
     // After the tables, so a fault here is reported rather than a triple
     // fault. SAFETY: CPL 0 on the CPU being brought up, interrupts disabled.
-    unsafe { crate::xstate::init_cpu() }.map_err(|_| InitError::XstateMismatch)?;
+    unsafe { crate::xstate::init_cpu() }.map_err(InitError::Xstate)?;
     // SAFETY: as above, with the root the CPU came up on loaded under PCID 0.
     unsafe { crate::paging::enable_pcids() };
     Ok(())

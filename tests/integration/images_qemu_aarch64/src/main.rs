@@ -8,11 +8,11 @@
 //!
 //! The scripted root shell runs `images`, which copies each image into the
 //! home, mounts it with the real `mount` — the kernel recognising which is
-//! which from its contents, publishing its volume node under the virtual bus,
-//! and `devmgr` loading the format's driver against it — reads what it holds,
-//! writes on the floppies and is refused on the disc and on an image the user
-//! may only read, ejects each with the real `unmount`, and mounts the floppies
-//! again to read back what it wrote.
+//! which from its contents, publishing its volume node under the kernel's
+//! image-volumes node, and `devmgr` loading the format's driver against it —
+//! reads what it holds, writes on the floppies and is refused on the disc and
+//! on an image the user may only read, ejects each with the real `unmount`,
+//! and mounts the floppies again to read back what it wrote.
 //!
 //! A failing fixture states its reason and never exits, so the sink below
 //! never arms and the run times out with the reason in the transcript.

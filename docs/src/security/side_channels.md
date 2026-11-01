@@ -44,7 +44,10 @@ pins every applied mechanism onto every entry and return path in the
 port's own sources: a profile that says `Applied` fails while any path
 lacks the code. The entry and return stubs are assembly no host test can
 run, so the pins read the sources the stubs are built from, as the ports'
-other stub pins (`stub_align_tests`, `eret_tests`, `sret_tests`) do.
+other stub pins (`stub_align_tests`, `eret_tests`, `sret_tests`) do. Each
+port's list of the sources that carry assembly is proven complete by one
+shared walk of its own sources (`tairix_fuzzseed::sources`), so a new file
+holding a block cannot escape the pins unlisted.
 
 ## Per-target declarations
 

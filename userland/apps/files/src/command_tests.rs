@@ -10,7 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_browse::BrowseError;
+use tairix_browse::{BrowseError, Unnamable};
 
 use super::{
     listing_refusal, parse, unlistable_reason, Command, Ladder, Role, Start, UsageError, USAGE,
@@ -279,6 +279,12 @@ fn an_unlistable_location_states_the_place_why_and_the_fallback() {
         unlistable_reason(&home, "you may not read it", &[]),
         "could not list /Users/ada (you may not read it); opening / instead"
     );
+    // A name hiding a direction override reads as what it is.
+    let hiding = vec![String::from("Users"), String::from("Docs\u{202e}x")];
+    assert_eq!(
+        unlistable_reason(&hiding, "it does not exist", &home),
+        "could not list /Users/Docs\u{fffd}x (it does not exist); opening /Users/ada instead"
+    );
 }
 
 #[test]
@@ -302,6 +308,15 @@ fn a_refused_listing_says_why_in_the_users_terms() {
     assert_eq!(
         listing_refusal(BrowseError::Source(Errno::OutOfRange)),
         "it could not be read"
+    );
+    // Nothing was read: the name is what cannot be spelled.
+    assert_eq!(
+        listing_refusal(BrowseError::Unnamable(Unnamable::Name)),
+        "its name holds a character no path may carry"
+    );
+    assert_eq!(
+        listing_refusal(BrowseError::Unnamable(Unnamable::Length)),
+        "its path is too long"
     );
 }
 

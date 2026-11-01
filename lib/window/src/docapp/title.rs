@@ -1,6 +1,12 @@
-//! The title a document host's window shows, kept in step with what it reads.
+//! What a document host's window says of its document: the title, kept in
+//! step with what it reads, and the status it shows while the document opens.
 
 use alloc::string::String;
+
+/// The status a window shows while `name` opens, the name as shown.
+pub(super) fn opening(name: &str) -> String {
+    alloc::format!("Opening {}\u{2026}", tairix_util::utf8::shown(name))
+}
 
 /// The title a window shows and the one it now reads, so a present tells the
 /// session only of a title that changed.
@@ -39,8 +45,16 @@ impl Title {
 
 #[cfg(test)]
 mod tests {
-    use super::Title;
+    use super::{opening, Title};
     use alloc::string::String;
+
+    /// The opening status names the document as its title does, so what
+    /// hides in a name cannot make it read as another's.
+    #[test]
+    fn the_opening_status_names_the_document_as_shown() {
+        assert_eq!(opening("notes.txt"), "Opening notes.txt\u{2026}");
+        assert_eq!(opening("a\u{202e}b.txt"), "Opening a\u{fffd}b.txt\u{2026}");
+    }
 
     /// A tool window's writer writes only a change, and a title it never wrote
     /// is never sent: a new window's title is already shown, so repeated

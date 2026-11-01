@@ -276,7 +276,7 @@ unsafe fn reload_area(area: *const FpArea) {
             out("f18") _, out("f19") _, out("f20") _, out("f21") _, out("f22") _, out("f23") _,
             out("f24") _, out("f25") _, out("f26") _, out("f27") _, out("f28") _, out("f29") _,
             out("f30") _, out("f31") _,
-            options(nostack, preserves_flags)
+            options(nostack)
         );
     }
 }

@@ -490,7 +490,7 @@ A hardware tree the kernel cannot read, or units it cannot record, fail the
 boot (`phase = "irq"`, `cause = "dma_translation_unbuilt"`) rather than leave
 every device untranslated. A unit whose registers overlap RAM is refused
 (`no_registers`), so the kernel never drives frames it hands out as a unit.
-A malformed DMAR, IVRS or VIOT is logged at boot (`4103`) and refused whole.
+A malformed DMAR, IVRS or VIOT is logged at boot (`4218`) and refused whole.
 The machine has units, and none of them can be read, so any segment may sit
 behind one: every segment is stranded. Each function that masters DMA, and
 each bridge, is told to stop, and none is published. The boot setting
@@ -498,7 +498,7 @@ each bridge, is told to stop, and none is published. The boot setting
 untranslated instead, as on a machine with no unit. Either way the outcome is
 audited (`4104`) and `sysinfo dma` lists the table's family as `withheld` or
 `unconfined`. A segment that cannot be confined (unit nodes that could not be
-emitted, or a walk that forms no tree) is logged under `4103`, with the flat
+emitted, or a walk that forms no tree) is logged under `4218`, with the flat
 scan's `stopped` and `refused`, and publishes nothing.
 
 ## The administrator's view

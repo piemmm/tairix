@@ -17,23 +17,20 @@ pub(crate) struct Name {
 }
 
 impl Name {
-    /// The name a volume records for the UTF-8 `name`.
+    /// The ISO 8859-1 spelling of the UTF-8 `name`: what a lookup, a removal
+    /// and a rename's source look for, which finds any name a volume records.
     ///
     /// # Errors
     ///
     /// [`DriverError::LengthOutOfRange`] for an empty name or one past
     /// [`NAME_MAX`] bytes; [`DriverError::OutOfRange`] for a name that is not
-    /// UTF-8, holds a character ISO 8859-1 lacks, a control character, or the
-    /// `:` and `/` AmigaDOS separates paths with.
+    /// UTF-8 or holds a character ISO 8859-1 lacks.
     pub(crate) fn encode(name: &[u8]) -> Result<Self, DriverError> {
         let text = core::str::from_utf8(name).map_err(|_| DriverError::OutOfRange)?;
         let mut bytes = [0u8; NAME_MAX];
         let mut len = 0usize;
         for c in text.chars() {
             let byte = u8::try_from(u32::from(c)).map_err(|_| DriverError::OutOfRange)?;
-            if !storable(byte) {
-                return Err(DriverError::OutOfRange);
-            }
             let slot = bytes.get_mut(len).ok_or(DriverError::LengthOutOfRange)?;
             *slot = byte;
             len += 1;
@@ -58,6 +55,21 @@ impl Name {
             bytes: name,
             len: u8::try_from(bytes.len()).map_err(|_| DriverError::BadMagic)?,
         })
+    }
+
+    /// This name as one a change gives an entry.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] for an empty name, or one holding a control
+    /// character or the `:` and `/` AmigaDOS separates paths with.
+    pub(crate) fn given(self) -> Result<Self, DriverError> {
+        let bytes = self.as_bytes();
+        if !bytes.is_empty() && bytes.iter().all(|&byte| storable(byte)) {
+            Ok(self)
+        } else {
+            Err(DriverError::OutOfRange)
+        }
     }
 
     /// The recorded bytes.
@@ -134,7 +146,8 @@ fn latin1_string(bytes: &[u8]) -> Result<String, DriverError> {
 /// `Volume:a` on this volume are `/a`, an absolute target resolving within
 /// the projection that shows the link. A target on another volume or an
 /// assign (`SYS:C/Dir`) names nothing here and keeps its stored spelling,
-/// which resolves to nothing.
+/// which resolves to nothing while no entry's recorded name holds a `:`, as
+/// on every volume AmigaDOS writes.
 pub(crate) fn link_target_to_posix(
     stored: &[u8],
     volume: &Name,
@@ -153,35 +166,28 @@ pub(crate) fn link_target_to_posix(
         None => (false, stored),
     };
     let mut out = String::new();
+    // A stored byte spells at most three: an empty component's `..` and the
+    // separator after it, or a Latin-1 letter's two UTF-8 bytes.
+    out.try_reserve(3 * path.len() + 1)
+        .map_err(|_| DriverError::OutOfMemory)?;
     if absolute {
         out.push('/');
     }
+    let mut parts = path.split(|&byte| byte == b'/').peekable();
     let mut first = true;
-    let mut push = |out: &mut String, part: &str| -> Result<(), DriverError> {
-        out.try_reserve(part.len() + 1)
-            .map_err(|_| DriverError::OutOfMemory)?;
+    while let Some(part) = parts.next() {
+        if part.is_empty() && parts.peek().is_none() {
+            break;
+        }
         if !first {
             out.push('/');
         }
         first = false;
-        out.push_str(part);
-        Ok(())
-    };
-    let mut name = Vec::new();
-    for &byte in path {
-        if byte == b'/' {
-            if name.is_empty() {
-                push(&mut out, "..")?;
-            } else {
-                push(&mut out, &latin1_string(&name)?)?;
-                name.clear();
-            }
-        } else if !tairix_util::fallible::push(&mut name, byte) {
-            return Err(DriverError::OutOfMemory);
+        if part.is_empty() {
+            out.push_str("..");
+        } else {
+            out.extend(part.iter().map(|&byte| char::from(byte)));
         }
-    }
-    if !name.is_empty() {
-        push(&mut out, &latin1_string(&name)?)?;
     }
     if out.is_empty() {
         return Err(DriverError::BadMagic);

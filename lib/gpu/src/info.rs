@@ -1,9 +1,11 @@
-//! What a device is: its memory heaps and types, its queue families, and its
-//! limits.
+//! What a device is: its memory heaps and types, its queue families, its
+//! limits, and what it states it supports past the portable core.
 
 use tairix_abi::Duration64;
 use tairix_inline::ArrayVec;
+use tairix_spirv::enumerant::Capability;
 
+use crate::format::{Format, FormatFeatures};
 use crate::Error;
 
 tairix_util::flags! {
@@ -28,19 +30,78 @@ tairix_util::flags! {
         const TRANSFER_SRC = 1;
         /// The destination of a copy, a fill or an update.
         const TRANSFER_DST = 1 << 1;
+        /// Bound as a uniform buffer.
+        const UNIFORM = 1 << 2;
+        /// Bound as a storage buffer.
+        const STORAGE = 1 << 3;
+        /// Viewed as a uniform texel buffer.
+        const UNIFORM_TEXEL = 1 << 4;
+        /// Viewed as a storage texel buffer.
+        const STORAGE_TEXEL = 1 << 5;
+        /// Read as an indirect dispatch's arguments.
+        const INDIRECT = 1 << 6;
     }
 }
 
 impl BufferUsage {
     /// Every usage a buffer may declare.
-    pub const ALL: Self = Self::TRANSFER_SRC.with(Self::TRANSFER_DST);
+    pub const ALL: Self = Self::TRANSFER_SRC
+        .with(Self::TRANSFER_DST)
+        .with(Self::UNIFORM)
+        .with(Self::STORAGE)
+        .with(Self::UNIFORM_TEXEL)
+        .with(Self::STORAGE_TEXEL)
+        .with(Self::INDIRECT);
 }
 
 tairix_util::flags! {
     /// The work a queue family runs.
     pub struct QueueCapabilities(u32) {
-        /// Copies, fills and updates.
+        /// Copies, fills, updates and clears.
         const TRANSFER = 1;
+        /// Dispatches.
+        const COMPUTE = 1 << 1;
+    }
+}
+
+impl QueueCapabilities {
+    /// Every kind of work.
+    pub const ALL: Self = Self::TRANSFER.with(Self::COMPUTE);
+}
+
+tairix_util::flags! {
+    /// What a device offers past the portable core.
+    pub struct Features(u32) {
+        /// Anisotropic filtering.
+        const SAMPLER_ANISOTROPY = 1;
+        /// The mirror-clamp-to-edge address mode.
+        const MIRROR_CLAMP_TO_EDGE = 1 << 1;
+    }
+}
+
+impl Features {
+    /// Every feature.
+    pub const ALL: Self = Self::SAMPLER_ANISOTROPY.with(Self::MIRROR_CLAMP_TO_EDGE);
+}
+
+/// What a device states each format can be used for.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FormatTable([FormatFeatures; Format::ALL.len()]);
+
+impl FormatTable {
+    /// A table stating, of each format, what `features` says.
+    #[must_use]
+    pub fn from_fn(features: impl Fn(Format) -> FormatFeatures) -> Self {
+        Self(Format::ALL.map(features))
+    }
+
+    /// What the device states `format` can be used for.
+    #[must_use]
+    pub fn get(&self, format: Format) -> FormatFeatures {
+        self.0
+            .get(format.index())
+            .copied()
+            .unwrap_or(FormatFeatures::NONE)
     }
 }
 
@@ -55,6 +116,9 @@ pub const MAX_QUEUE_FAMILIES: usize = 16;
 
 /// The most queues of one family a context has.
 pub const MAX_QUEUES_PER_FAMILY: u32 = 64;
+
+/// The widest subgroup a device states: a tile's lanes.
+pub const MAX_SUBGROUP_SIZE: u32 = 64;
 
 /// A pool of memory every allocation of the types over it comes out of.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -94,7 +158,55 @@ pub struct Limits {
     pub buffer_alignment: u64,
     /// The longest a submission may run before its context is lost.
     pub max_job_time: Duration64,
+    /// The widest one-dimensional image.
+    pub max_image_dimension_1d: u32,
+    /// The widest and tallest two-dimensional image, cube or attachment.
+    pub max_image_dimension_2d: u32,
+    /// The widest, tallest and deepest three-dimensional image.
+    pub max_image_dimension_3d: u32,
+    /// The most layers an image has.
+    pub max_image_array_layers: u32,
+    /// The most anisotropy a sampler filters with.
+    pub max_sampler_anisotropy: u32,
+    /// The most bind sets a pipeline layout holds.
+    pub max_bind_sets: u32,
+    /// One past the highest binding number a bind set layout names.
+    pub max_binding_number: u32,
+    /// The most descriptors a bind set layout holds, its bindings' together.
+    pub max_bind_set_descriptors: u32,
+    /// The most push-constant bytes a pipeline layout holds.
+    pub max_push_constant_bytes: u32,
+    /// What a uniform buffer binding's offset must be a multiple of: a power
+    /// of two.
+    pub uniform_buffer_alignment: u64,
+    /// What a storage buffer or texel buffer binding's offset must be a
+    /// multiple of: a power of two.
+    pub storage_buffer_alignment: u64,
+    /// The most bytes one uniform buffer binding spans.
+    pub max_uniform_buffer_range: u64,
+    /// The most bytes one storage buffer binding spans.
+    pub max_storage_buffer_range: u64,
+    /// The most bytes an image made for storage takes, every level and
+    /// layer together.
+    pub max_storage_image_bytes: u64,
+    /// The most texels one texel buffer binding spans.
+    pub max_texel_buffer_elements: u64,
+    /// The largest workgroup along each axis.
+    pub max_workgroup_size: [u32; 3],
+    /// The most invocations a workgroup holds.
+    pub max_workgroup_invocations: u32,
+    /// The most workgroups a dispatch makes along each axis.
+    pub max_workgroup_count: [u32; 3],
+    /// The most bytes of workgroup memory a workgroup holds.
+    pub max_workgroup_memory: u32,
+    /// The most bytes of registers and private memory one invocation holds.
+    pub max_invocation_memory: u32,
+    /// The invocations a subgroup holds.
+    pub subgroup_size: u32,
 }
+
+/// The most shader capabilities a device states.
+pub const MAX_CAPABILITIES: usize = 64;
 
 /// What a device is.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,6 +219,12 @@ pub struct DeviceInfo {
     pub queue_families: ArrayVec<QueueFamily, MAX_QUEUE_FAMILIES>,
     /// The bounds it puts on what is asked of it.
     pub limits: Limits,
+    /// The shader capabilities it runs, by ascending value.
+    pub capabilities: ArrayVec<Capability, MAX_CAPABILITIES>,
+    /// What it offers past the portable core.
+    pub features: Features,
+    /// What it states each format can be used for.
+    pub formats: FormatTable,
 }
 
 impl DeviceInfo {
@@ -122,16 +240,29 @@ impl DeviceInfo {
             && self.queue_families.iter().all(|family| {
                 (1..=MAX_QUEUES_PER_FAMILY).contains(&family.queues)
                     && family.capabilities != QueueCapabilities::NONE
+                    && QueueCapabilities::ALL.contains(family.capabilities)
             });
         let limits = &self.limits;
         let bounded = limits.max_allocation_size > 0
             && limits.buffer_alignment.is_power_of_two()
-            && limits.max_job_time.saturating_total_nanos() > 0;
-        if typed && sized && served && bounded && !self.memory_types.is_empty() {
+            && limits.uniform_buffer_alignment.is_power_of_two()
+            && limits.storage_buffer_alignment.is_power_of_two()
+            && limits.max_job_time.saturating_total_nanos() > 0
+            && limits.subgroup_size.is_power_of_two()
+            && limits.subgroup_size <= MAX_SUBGROUP_SIZE
+            && limits.max_bind_sets > 0;
+        let ordered = self.capabilities.windows(2).all(|w| w[0] < w[1]);
+        if typed && sized && served && bounded && ordered && !self.memory_types.is_empty() {
             Ok(())
         } else {
             Err(Error::Malformed)
         }
+    }
+
+    /// Whether it runs modules declaring `capability`.
+    #[must_use]
+    pub fn runs(&self, capability: Capability) -> bool {
+        self.capabilities.binary_search(&capability).is_ok()
     }
 
     /// The memory type `index` names.

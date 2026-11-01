@@ -30,6 +30,30 @@ pub(crate) fn log<const N: usize>(sink: &(dyn Sink + Sync), held: [(&'static str
     );
 }
 
+/// Record whether the boot CPU's `CPUID` limit was lifted. At Warn when it
+/// would not clear: every feature and protection reported past it is then
+/// absent, and the protections record alone would blame the CPU.
+#[cfg(any(test, kernel_isa = "x86_64"))]
+pub(crate) fn log_cpuid_limit(sink: &(dyn Sink + Sync), lifted: bool) {
+    let (level, message) = if lifted {
+        (Level::Info, "the firmware's cpuid limit lifted")
+    } else {
+        (Level::Warn, "the firmware's cpuid limit would not lift")
+    };
+    tairix_log::log(
+        sink,
+        &Event {
+            level,
+            id: crate::KERNEL_BOOT_CPUID_LIMIT,
+            message,
+            fields: &[Field {
+                key: "lifted",
+                value: FieldValue::Bool(lifted),
+            }],
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::string::{String, ToString};
@@ -61,8 +85,12 @@ mod tests {
     }
 
     fn recorded<const N: usize>(held: [(&'static str, bool); N]) -> Record {
+        recorded_by(|sink| super::log(sink, held))
+    }
+
+    fn recorded_by(log: impl FnOnce(&Recorded)) -> Record {
         let sink = Recorded(Mutex::new(Vec::new()));
-        super::log(&sink, held);
+        log(&sink);
         let mut records = sink.0.into_inner().expect("unpoisoned");
         assert_eq!(records.len(), 1, "one record per boot");
         records.remove(0)
@@ -90,5 +118,17 @@ mod tests {
         assert_eq!(held, named(&[("pan", false)]));
         let (level, _, _) = recorded([("smep", true), ("smap", false)]);
         assert_eq!(level, Level::Warn, "one missing protection is enough");
+    }
+
+    #[test]
+    fn a_cpuid_limit_is_recorded_lifted_at_info_and_held_at_warn() {
+        let (level, id, fields) = recorded_by(|sink| super::log_cpuid_limit(sink, true));
+        assert_eq!(level, Level::Info);
+        assert_eq!(id, crate::KERNEL_BOOT_CPUID_LIMIT.0);
+        assert_eq!(fields, named(&[("lifted", true)]));
+        let (level, id, fields) = recorded_by(|sink| super::log_cpuid_limit(sink, false));
+        assert_eq!(level, Level::Warn);
+        assert_eq!(id, crate::KERNEL_BOOT_CPUID_LIMIT.0);
+        assert_eq!(fields, named(&[("lifted", false)]));
     }
 }

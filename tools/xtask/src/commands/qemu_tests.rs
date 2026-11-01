@@ -37,6 +37,7 @@ use tairix_test_audio_wire::ReportedLoss;
 
 use super::image_apps::AppStoreFile;
 use super::parallel::{self, Job};
+use crate::children::Children;
 use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
 
 /// One ordered keyboard step a vertical injects: pressed once `marker` has
@@ -1745,7 +1746,9 @@ const FIQ_SELFSAMPLE_AARCH64: QemuTest = QemuTest {
     expect: Expect::Pass,
 };
 
-/// The aarch64 vertical [`TESTS`] runs on a GICv2 and on a GICv3 board.
+/// The aarch64 vertical [`TESTS`] runs on a GICv2 board on the baseline
+/// model, which lacks PAN (the production boot's Warn path), and on a GICv3
+/// board on the default model, which offers it.
 const KERNEL_ARCH_BOOT_AARCH64: QemuTest = QemuTest {
     package: "tairix-test-kernel-arch-boot-aarch64",
     binary: "tairix-test-kernel-arch-boot-aarch64",
@@ -1764,7 +1767,7 @@ const KERNEL_ARCH_BOOT_AARCH64: QemuTest = QemuTest {
     screendumps: &[],
     pointer_script: None,
     bounded_pointer_script: false,
-    cpu: None,
+    cpu: Some(tairix_qemu::aarch64::BASELINE_CPU),
     serial: &[],
     expect: Expect::Pass,
 };
@@ -1881,7 +1884,7 @@ static TESTS: &[QemuTest] = &[
         expect: Expect::Pass,
     },
     // x86_64 floating-point isolation under the FXSAVE64 (`qemu64`, no XSAVE) save flavour
-    // (`plans/OPEN-DEFECTS.md` D359). One package, three CPU models, so every
+    // (`plans/OPEN-DEFECTS.md` D359). One package, four CPU models, so every
     // XSAVE flavour the port must handle is exercised.
     QemuTest {
         package: "tairix-test-fp-isolation-qemu-x86-64",
@@ -1906,7 +1909,7 @@ static TESTS: &[QemuTest] = &[
         expect: Expect::Pass,
     },
     // x86_64 floating-point isolation under the XSAVE (`max` without XSAVEOPT) save flavour
-    // (`plans/OPEN-DEFECTS.md` D359). One package, three CPU models, so every
+    // (`plans/OPEN-DEFECTS.md` D359). One package, four CPU models, so every
     // XSAVE flavour the port must handle is exercised.
     QemuTest {
         package: "tairix-test-fp-isolation-qemu-x86-64",
@@ -1931,7 +1934,7 @@ static TESTS: &[QemuTest] = &[
         expect: Expect::Pass,
     },
     // x86_64 floating-point isolation under the XSAVEOPT with AVX (`max`) save flavour
-    // (`plans/OPEN-DEFECTS.md` D359). One package, three CPU models, so every
+    // (`plans/OPEN-DEFECTS.md` D359). One package, four CPU models, so every
     // XSAVE flavour the port must handle is exercised.
     QemuTest {
         package: "tairix-test-fp-isolation-qemu-x86-64",
@@ -1952,6 +1955,32 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         cpu: Some("max"),
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    // x86_64 floating-point isolation on an Intel CPU whose basic `CPUID`
+    // leaves stop at 2, as the firmware limit leaves them: XSAVE offered,
+    // leaf 0xD hidden, so FXSAVE64 must save the state (`plans/OPEN-DEFECTS.md`
+    // D1591). The fourth model of the package.
+    QemuTest {
+        package: "tairix-test-fp-isolation-qemu-x86-64",
+        binary: "tairix-test-fp-isolation-capped-cpuid-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: Some("max,vendor=GenuineIntel,level=2"),
         serial: &[],
         expect: Expect::Pass,
     },
@@ -1983,16 +2012,6 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
-    // ramzip b3 aarch64 (`plans/SWAPSWAPSWAP.md`,
-    // `plans/SWAPSWAPSWAP.md`): the software-managed Access Flag
-    // (the cold-page referenced bit) read and cleared through the Arch
-    // HAL, and an access to a cleared-AF leaf resolved by the
-    // synchronous-exception Access-Flag-fault path (setting AF + retry),
-    // driving the cold-page clock scan (`kernel/mem::coldscan`). The QEMU
-    // CPU is `cortex-a72` (no HAFDBS), so the software AF-fault path is
-    // genuinely exercised. Single CPU suffices (the test builds and probes
-    // one address space on the BSP); the 60-second budget matches
-    // `memory_isolation`'s — a strictly bring-up test with no workload.
     // WinterSun's world generator on aarch64 (`plans/WINTERSUN.md` WS2).
     // The whole seed-pure pipeline runs in the guest and folds its output
     // into one number, which must equal the reference constant the host
@@ -2237,10 +2256,12 @@ static TESTS: &[QemuTest] = &[
             "boot_stack_guard=intact",
         ]),
     },
-    // D146 on x86_64: an exception taken on an unusable stack escalates to
-    // `#DF` (vector 8), which the boot tables deliver on a stack of their own;
-    // without it the machine triple-faults and QEMU exits saying nothing. The
-    // `#DF` frame's saved state is undefined, so the record names no stack.
+    // D146 and D1590 on x86_64: a push into the boot stack's guard, which the
+    // kernel root maps read-only, faults, and delivering that fault on the
+    // same stack escalates to `#DF` (vector 8), which the boot tables deliver
+    // on a stack of their own; without it the machine triple-faults and QEMU
+    // exits saying nothing. The `#DF` frame's saved state is undefined, so
+    // the record names no stack, but `CR2` names the push the guard stopped.
     QemuTest {
         package: "tairix-test-fatal-double-fault-qemu-x86_64",
         binary: "tairix-test-fatal-double-fault-qemu-x86_64",
@@ -2265,9 +2286,10 @@ static TESTS: &[QemuTest] = &[
             tairix_arch_api::fatal::KERNEL_FAULT.message,
             "apic_id=0",
             "syndrome=0x0000000800000000",
-            "fault_addr=null",
+            "fault_addr=0xffffffff80",
             "fault_sp=null",
-            "boot_stack_guard=intact",
+            "boot_stack_guard=faulted",
+            "boot_stack_overrun_bytes=0x0000000000000008",
         ]),
     },
     // The compositor's per-pixel kernels on aarch64 (`plans/FIX-DESKTOP-SPEEDUP.md`
@@ -2576,6 +2598,16 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
+    // ramzip b3 aarch64 (`plans/SWAPSWAPSWAP.md`): the software-managed
+    // Access Flag (the cold-page referenced bit) read and cleared through the
+    // Arch HAL, and an access to a cleared-AF leaf resolved by the
+    // synchronous-exception Access-Flag-fault path (setting AF + retry),
+    // driving the cold-page clock scan (`kernel/mem::coldscan`). Pinned to
+    // the baseline model, which lacks HAFDBS: the port leaves `TCR_EL1.HA`
+    // clear on every part, but only a part without it proves the software
+    // fault path ran. Single CPU suffices (the test builds and probes one
+    // address space on the BSP); the 60-second budget matches
+    // `memory_isolation`'s — a strictly bring-up test with no workload.
     QemuTest {
         package: "tairix-test-accessed-bit-qemu-aarch64",
         binary: "tairix-test-accessed-bit-qemu-aarch64",
@@ -2594,7 +2626,7 @@ static TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         bounded_pointer_script: false,
-        cpu: None,
+        cpu: Some(tairix_qemu::aarch64::BASELINE_CPU),
         serial: &[],
         expect: Expect::Pass,
     },
@@ -4082,10 +4114,9 @@ static TESTS: &[QemuTest] = &[
     // `tlbi vaae1is` + `dsb ish`/`isb` — the hardware propagates it to
     // every PE in the domain, so no IPI or software acknowledge is needed.
     // Reaching PASS proves the broadcast executes on a real two-core
-    // machine without faulting. Two CPUs and a 60-second budget, on
-    // `cortex-a76`, which offers PAN, so the run also proves a secondary core
-    // holds it; every other aarch64 SMP run takes the default `cortex-a72`,
-    // which does not.
+    // machine without faulting. Two CPUs and a 60-second budget, on the
+    // default model, which offers PAN, so the run also proves a secondary
+    // core holds it.
     QemuTest {
         package: "tairix-test-cross-cpu-tlb-shootdown-qemu-aarch64",
         binary: "tairix-test-cross-cpu-tlb-shootdown-qemu-aarch64",
@@ -4104,7 +4135,7 @@ static TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         bounded_pointer_script: false,
-        cpu: Some("cortex-a76"),
+        cpu: None,
         serial: &[],
         expect: Expect::Pass,
     },
@@ -4166,6 +4197,31 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         cpu: Some("max"),
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    // `plans/OPEN-DEFECTS.md` D1592: an AP cold-plugged with SMAP off beside a
+    // boot CPU holding it (`x86_64_topology_gates`) answers that it lacks it,
+    // and the start is refused for that rather than timing out.
+    QemuTest {
+        package: "tairix-test-cross-cpu-tlb-shootdown-qemu-x86-64",
+        binary: "tairix-test-ap-lacking-smap-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 2,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
         serial: &[],
         expect: Expect::Pass,
     },
@@ -4238,9 +4294,9 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
-    // The aarch64 member runs on `cortex-a76` (ARMv8.2, the Raspberry Pi 5's
-    // core): the default `cortex-a72` lacks PAN, and the vertical proves the
-    // boot holds a CPU offering it, so a kernel read of an EL0 page faults.
+    // The aarch64 member runs on the default model, which offers PAN: the
+    // vertical proves the boot holds a CPU to it, so a kernel read of an EL0
+    // page faults.
     QemuTest {
         package: "tairix-test-uaccess-fault-qemu-aarch64",
         binary: "tairix-test-uaccess-fault-qemu-aarch64",
@@ -4259,7 +4315,7 @@ static TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         bounded_pointer_script: false,
-        cpu: Some("cortex-a76"),
+        cpu: None,
         serial: &[],
         expect: Expect::Pass,
     },
@@ -4521,9 +4577,10 @@ static TESTS: &[QemuTest] = &[
     // other boot-then-do-fixed-work tests.
     KERNEL_ARCH_BOOT_AARCH64,
     // `plans/IOMMU.md` IOM18.1: the same boot on a GICv3, every secondary
-    // finding its redistributor.
+    // finding its redistributor, on the default model, under PAN.
     QemuTest {
         binary: "tairix-test-kernel-arch-boot-gicv3-aarch64",
+        cpu: None,
         ..KERNEL_ARCH_BOOT_AARCH64
     },
     // PI Stage P6c-3 (`plans/PI.md`): `tairix-test-spawn-init-qemu-aarch64`
@@ -4913,9 +4970,10 @@ static TESTS: &[QemuTest] = &[
     // mid-loop after each preemption — still completed and exited; a preemption
     // that never fires (the `step` spins forever inside ring 3) or a botched
     // resume (the task never exits) times out (fail-loud). Single CPU; a
-    // 120-second budget covers the multi-tick busy loop under QEMU TCG. Plain
-    // `qemu64`, which offers no SMEP, SMAP or UMIP, so every entry runs where
-    // `clac` does not exist; the guest fails if the kernel holds any of them.
+    // 120-second budget covers the multi-tick busy loop under QEMU TCG. A
+    // model offering SMEP and UMIP without SMAP, so every entry is taken where
+    // `clac` does not exist under a non-empty set; the guest fails unless the
+    // kernel holds exactly those two.
     QemuTest {
         package: "tairix-test-preempt-el0-qemu-x86-64",
         binary: "tairix-test-preempt-el0-qemu-x86-64",
@@ -4934,7 +4992,7 @@ static TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         bounded_pointer_script: false,
-        cpu: Some("qemu64"),
+        cpu: Some("qemu64,+smep,+umip"),
         serial: &[],
         expect: Expect::Pass,
     },
@@ -7898,19 +7956,10 @@ static TESTS: &[QemuTest] = &[
         ],
         expect: Expect::Pass,
     },
-    // `plans/DISK-IMAGES.md` DI7: the disk-image vertical. The root volume
-    // holds an Acorn ADFS floppy, an AmigaDOS floppy and the RISC OS disc in
-    // the account's home, the system's (`FsDisk::ImagesRootDisk`). The
-    // scripted root shell runs `images`, which copies each into the home,
-    // mounts the copy with the real `mount` — the kernel recognising which
-    // format each holds, publishing its volume node under the virtual bus,
-    // and `devmgr` loading the format's driver against it — reads it, writes
-    // the floppies and is refused on the disc and on a planted original the
-    // account may only read, ejects each with the real `unmount`, and mounts
-    // the floppies again to read back what it wrote. The guest sink arms on
-    // the fixture's exit and passes on the shell's, typed only once
-    // `IMAGES PASS` appeared; a failing fixture parks with its reason, so the
-    // run times out loudly.
+    // `plans/DISK-IMAGES.md` DI7: the disk-image vertical, whose crate doc
+    // states what it asserts. The guest sink arms on the fixture's exit and
+    // passes on the shell's, typed only once `IMAGES PASS` appeared; a failing
+    // fixture parks with its reason, so the run times out loudly.
     QemuTest {
         package: "tairix-test-images-qemu-aarch64",
         binary: "tairix-test-images-qemu-aarch64",
@@ -11722,11 +11771,7 @@ fn enrolled(only: Option<&str>) -> Result<Vec<&'static QemuTest>, String> {
 /// it — the `--only` debugging filter.
 pub fn build_all(ctx: &Context, only: Option<&str>) -> Result<(), String> {
     let selected = enrolled(only)?;
-    eprintln!("xtask: [test --qemu] {} test(s) enrolled", selected.len());
-    // Resolve the C toolchain once, up front, and export its path so every
-    // CCOMPAT C-program build script uses the authoritative override rather
-    // than re-running the full `clang`/`ld.lld` search per crate and target.
-    prime_c_toolchain();
+    noteln!("xtask: [test --qemu] {} test(s) enrolled", selected.len());
     // Group the selected packages by target triple and build each triple in a
     // single `cargo build`. One invocation per triple (rather than one per
     // enrolment) lets cargo compile that triple's packages concurrently and
@@ -11764,83 +11809,6 @@ pub fn build_all(ctx: &Context, only: Option<&str>) -> Result<(), String> {
         stores_for(ctx, t)?;
     }
     Ok(())
-}
-
-/// Resolve the audited C toolchain once and export its path to the child
-/// build scripts, so the CCOMPAT C-program builds skip the per-crate search.
-///
-/// Each `c_program_qemu_*` build script calls `tairix_cc::Toolchain::discover`,
-/// which — absent an override — searches `PATH` and every known LLVM install
-/// prefix, running `--version` on each candidate until one reports the pinned
-/// release. Doing that independently in every C build script, for every target
-/// triple, repeats the same subprocess "hunt" many times per run. Resolving it
-/// here once and exporting `TAIRIX_CC_CLANG` / `TAIRIX_CC_LLD` makes each build
-/// script take the authoritative-override fast path (a single `--version` on
-/// the known binary) instead.
-///
-/// The discovery logic itself is not duplicated: this only *calls* the one
-/// definition in `tairix-cc` and records its result. It is best-effort — an
-/// operator override is left untouched, and a discovery failure is not fatal
-/// here (a build script that actually needs the toolchain still fails closed
-/// with the full install hint), so a run that builds no C program is never
-/// blocked by an absent C toolchain.
-fn prime_c_toolchain() {
-    let plan = PrimePlan::from_env(
-        std::env::var_os("TAIRIX_CC_CLANG").is_some(),
-        std::env::var_os("TAIRIX_CC_LLD").is_some(),
-    );
-    if !plan.discover {
-        return;
-    }
-    match tairix_cc::Toolchain::discover() {
-        Ok(toolchain) => {
-            if plan.set_clang {
-                std::env::set_var("TAIRIX_CC_CLANG", &toolchain.clang.path);
-            }
-            if plan.set_lld {
-                std::env::set_var("TAIRIX_CC_LLD", &toolchain.lld.path);
-            }
-            eprintln!(
-                "xtask: [test --qemu] C toolchain primed: clang={} ld.lld={}",
-                toolchain.clang.path.display(),
-                toolchain.lld.path.display(),
-            );
-        }
-        Err(err) => {
-            eprintln!(
-                "xtask: [test --qemu] C toolchain not pre-resolved ({err}); \
-                 each C-program build script will resolve it on demand"
-            );
-        }
-    }
-}
-
-/// What [`prime_c_toolchain`] should do given which override variables the
-/// environment already pins — the pure, testable core of the decision.
-///
-/// An operator override is authoritative and must never be clobbered, so a
-/// variable that is already set is left alone; discovery runs only if at least
-/// one variable still needs a value.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct PrimePlan {
-    /// Whether the toolchain must be resolved at all.
-    discover: bool,
-    /// Whether to export `TAIRIX_CC_CLANG` from the resolved toolchain.
-    set_clang: bool,
-    /// Whether to export `TAIRIX_CC_LLD` from the resolved toolchain.
-    set_lld: bool,
-}
-
-impl PrimePlan {
-    fn from_env(clang_pinned: bool, lld_pinned: bool) -> Self {
-        let set_clang = !clang_pinned;
-        let set_lld = !lld_pinned;
-        Self {
-            discover: set_clang || set_lld,
-            set_clang,
-            set_lld,
-        }
-    }
 }
 
 /// The distinct target triples across the enrolled tests, in first-seen
@@ -11947,14 +11915,15 @@ pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
             let weight = qemu_job_weight(t.cpus, budget);
             let target_dir = target_dir.clone();
             let stores = stores_for(ctx, t)?;
+            let children = std::sync::Arc::clone(&ctx.children);
             // The pull-request matrix runs each enrolment exactly once, so
             // every run is replica zero and keeps the plain sidecar names.
             Ok(Job::closure(label, weight, move || {
-                run_one(&target_dir, t, 0, &stores)
+                run_one(&children, &target_dir, t, 0, &stores)
             }))
         })
         .collect::<Result<Vec<Job>, String>>()?;
-    parallel::run(jobs, budget)
+    parallel::run(&ctx.children, jobs, budget)
 }
 
 /// One enrolled QEMU integration test exposed for the long-CI flake hunt
@@ -11988,11 +11957,12 @@ impl Enrolment {
     /// ([`sidecar_path`]).
     pub(crate) fn run(
         &self,
+        children: &Children,
         target_dir: &Path,
         replica: usize,
         stores: &StoreSet,
     ) -> Result<(), String> {
-        run_one(target_dir, self.test, replica, stores)
+        run_one(children, target_dir, self.test, replica, stores)
     }
 
     /// Resolve the `/System`-store bundle sets this enrolment plants,
@@ -12808,6 +12778,7 @@ fn sidecar_path(kernel: &Path, t: &QemuTest, replica: usize, ext: &str) -> PathB
 }
 
 fn run_one(
+    children: &Children,
     target_dir: &Path,
     t: &QemuTest,
     replica: usize,
@@ -12869,7 +12840,7 @@ fn run_one(
         spec = spec.with_virtio_blk(&image);
     }
 
-    finish_run(t, &kernel, replica, spec)
+    finish_run(children, t, &kernel, replica, spec)
 }
 
 /// Decode a dumped scan-out and assert the desktop session composited its
@@ -19215,11 +19186,18 @@ fn message_source_gates(spec: Spec, binary: &str) -> Spec {
 }
 
 /// The binaries [`TESTS`] runs on an x86_64 board whose CPUs are laid out
-/// other than densely from APIC id 0, and how.
-const X86_64_TOPOLOGY_BINARIES: [(&str, tairix_qemu::x86_64::Topology); 1] = [(
-    "tairix-test-cross-cpu-tlb-shootdown-x2apic-qemu-x86-64",
-    tairix_qemu::x86_64::Topology::ApPastXapic,
-)];
+/// other than densely from APIC id 0, or whose AP offers less than the boot
+/// CPU, and how.
+const X86_64_TOPOLOGY_BINARIES: [(&str, tairix_qemu::x86_64::Topology); 2] = [
+    (
+        "tairix-test-cross-cpu-tlb-shootdown-x2apic-qemu-x86-64",
+        tairix_qemu::x86_64::Topology::ApPastXapic,
+    ),
+    (
+        "tairix-test-ap-lacking-smap-qemu-x86-64",
+        tairix_qemu::x86_64::Topology::ApLacking("smap"),
+    ),
+];
 
 /// The CPU layout [`X86_64_TOPOLOGY_BINARIES`] gives `binary` on `spec`, and
 /// the dense default on any other run.
@@ -19633,7 +19611,13 @@ fn shipped_master(event: tairix_soundtheme::SoundEvent) -> Result<Vec<i16>, Stri
 /// scripted serial dialogue) to `spec` and drive the guest to its outcome.
 /// `kernel` is the enrolment's binary path, which names the sibling capture
 /// file.
-fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result<(), String> {
+fn finish_run(
+    children: &Children,
+    t: &QemuTest,
+    kernel: &Path,
+    replica: usize,
+    spec: Spec,
+) -> Result<(), String> {
     // `_wire_socks` is held for the whole run: dropping a reserved socket
     // removes its file, which would pull the wire out from under the guest.
     let (mut spec, peer, _wire_socks) = attach_net_peer(t, kernel, spec)?;
@@ -19735,7 +19719,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
 
     // Always collect the peer's verdict, even when the run itself failed,
     // so the thread never outlives the run unjoined.
-    let run = Runner::run(&spec).map_err(|e| format!("test --qemu ({}): {e}", t.package));
+    let run = Runner::run(&spec, children).map_err(|e| format!("test --qemu ({}): {e}", t.package));
     let peer_verdict = peer.map(super::netpeer::NetPeer::stop_and_join);
     let outcome = run?;
     // Persist the transcript before the outcome is judged, for every run
@@ -19944,9 +19928,9 @@ mod tests {
         handover_pointer_script, login_type_plant, netmap_pointer_script, pass_verdict,
         persist_serial, qemu_host_budget_for, qemu_job_weight, row_holds_track, screendump_ext,
         screendump_path, screensaver_pointer_script, settings_pointer_script, sidecar_path,
-        touch_pointer_script, Expect, FsDisk, NetPeerMode, PrimePlan, QemuTest, TypedStep,
-        AARCH64_TARGET, APPBAR_LAUNCHED_SLOT, APPBAR_SETTLED_MARKER, APPBAR_SLOT_MARKER,
-        AUDIOCUE_LINE, AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX,
+        touch_pointer_script, Expect, FsDisk, NetPeerMode, QemuTest, TypedStep, AARCH64_TARGET,
+        APPBAR_LAUNCHED_SLOT, APPBAR_SETTLED_MARKER, APPBAR_SLOT_MARKER, AUDIOCUE_LINE,
+        AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX,
         AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER,
         DESKTOP_PRESSURE_ICONS_DRAWN_DUMP, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
         IMAGES_COMMAND_LINE, IMAGES_PASS_PREFIX, IPI_SMP_AARCH64, KEYBOARD_ONLY_ARMED_OCCURRENCES,
@@ -20969,10 +20953,42 @@ mod tests {
         assert_eq!(plain.interrupts, InterruptControllers::Default);
     }
 
-    /// Every binary laid out other than densely is enrolled on an x86_64
-    /// board, on a CPU model that has x2APIC, and only those runs are.
+    /// Every aarch64 run boots the default model, which offers PAN, but the
+    /// two whose subject is a CPU without PAN or HAFDBS: the production boot's
+    /// GICv2 run and the software Access-flag run, on the baseline.
     #[test]
-    fn x86_64_topology_binaries_are_enrolled_on_x2apic_cpus_and_alone_laid_out_so() {
+    fn aarch64_runs_leave_the_default_model_only_for_the_baseline() {
+        let mut pinned: Vec<&str> = TESTS
+            .iter()
+            .filter(|test| test.target == super::AARCH64_TARGET)
+            .filter(|test| {
+                assert!(
+                    matches!(test.cpu, None | Some(tairix_qemu::aarch64::BASELINE_CPU)),
+                    "{} pins {:?}",
+                    test.binary,
+                    test.cpu
+                );
+                test.cpu.is_some()
+            })
+            .map(|test| test.binary)
+            .collect();
+        pinned.sort_unstable();
+        assert_eq!(
+            pinned,
+            [
+                "tairix-test-accessed-bit-qemu-aarch64",
+                "tairix-test-kernel-arch-boot-aarch64"
+            ]
+        );
+    }
+
+    /// Every binary laid out other than densely is enrolled on an x86_64
+    /// board, on the CPU model its layout needs — x2APIC past xAPIC, and for
+    /// an AP lacking a feature one whose boot CPU offers it — and only those
+    /// runs are.
+    #[test]
+    fn x86_64_topology_binaries_are_enrolled_on_the_models_their_layout_needs_and_alone_laid_out_so(
+    ) {
         use super::{base_spec, x86_64_topology_gates, X86_64_TOPOLOGY_BINARIES};
         use tairix_qemu::x86_64::Topology;
         use tairix_qemu::Spec;
@@ -20983,7 +20999,20 @@ mod tests {
                 .find(|t| t.binary == binary)
                 .unwrap_or_else(|| panic!("{binary} must be enrolled"));
             assert_eq!(test.target, super::X86_64_TARGET, "{binary}");
-            assert_eq!(test.cpu, Some("max"), "{binary}: a model with x2APIC");
+            match topology {
+                Topology::ApPastXapic => {
+                    assert_eq!(test.cpu, Some("max"), "{binary}: a model with x2APIC");
+                }
+                Topology::ApLacking(feature) => {
+                    assert_eq!(test.cpu, None, "{binary}: the default model");
+                    let offered = std::format!("+{feature}");
+                    assert!(
+                        tairix_qemu::x86_64::CPU.split(',').any(|f| f == offered),
+                        "{binary}: the boot CPU offers {feature}"
+                    );
+                }
+                Topology::Dense => panic!("{binary} is laid out densely"),
+            }
             let spec = base_spec(test.target, std::path::Path::new("/tmp/k"));
             assert_eq!(
                 x86_64_topology_gates(spec, binary).x86_64_topology,
@@ -22131,34 +22160,6 @@ mod tests {
         let actual = std::fs::read_to_string(&path).expect("read transcript");
         std::fs::remove_file(&path).expect("remove transcript");
         assert_eq!(actual, transcript);
-    }
-
-    #[test]
-    fn priming_resolves_and_exports_both_when_nothing_is_pinned() {
-        let plan = PrimePlan::from_env(false, false);
-        assert!(plan.discover, "must resolve the toolchain when unset");
-        assert!(plan.set_clang);
-        assert!(plan.set_lld);
-    }
-
-    #[test]
-    fn priming_never_clobbers_an_operator_override() {
-        // Both pinned: nothing to resolve, and neither variable is touched.
-        let both = PrimePlan::from_env(true, true);
-        assert!(!both.discover);
-        assert!(!both.set_clang);
-        assert!(!both.set_lld);
-
-        // One pinned: resolve, but only export the *unpinned* one.
-        let clang_only = PrimePlan::from_env(true, false);
-        assert!(clang_only.discover);
-        assert!(!clang_only.set_clang, "must not overwrite a pinned clang");
-        assert!(clang_only.set_lld);
-
-        let lld_only = PrimePlan::from_env(false, true);
-        assert!(lld_only.discover);
-        assert!(lld_only.set_clang);
-        assert!(!lld_only.set_lld, "must not overwrite a pinned ld.lld");
     }
 
     #[test]

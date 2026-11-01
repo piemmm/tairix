@@ -49,8 +49,7 @@ use tairix_util::defer::JobQueue;
 use super::closing::{
     next_quit_step, reveal_refusal, save_changes_alert, CloseAnswer, QuitStanding, QuitStep,
 };
-use super::headline;
-use super::title::Title;
+use super::title::{opening, Title};
 use super::{
     AppRequest, AppView, DocumentView, Outcome, Relayout, Request, ToolGone, ToolMove, ViewOutcome,
 };
@@ -64,6 +63,7 @@ use crate::client::{
 use crate::desktop::Desktop;
 use crate::document::{Access, DocumentFile, PickFor, SaveJob, SaveStep, SavedDocument, UNTITLED};
 use crate::mailbox::EventMailbox;
+use tairix_util::utf8::refusal_headline;
 
 /// The descriptor a document is read from and saved through, whether it was
 /// cloned in at spawn or redeemed from a grant: it closes once its last
@@ -1318,7 +1318,7 @@ impl<A: DocumentApp> Host<A> {
     /// would read as an empty file — and a document that is not
     /// [`replaceable`](DocWindow::replaceable) stays as it was.
     pub fn not_opened(&mut self, index: usize, name: &str, why: &dyn Display) {
-        let headline = headline::not_opened(name);
+        let headline = refusal_headline(name, "opened");
         let detail = format!("{why}");
         if self.windows[index].reading == Reading::Alone {
             self.close_window(index);
@@ -1567,11 +1567,11 @@ impl<A: DocumentApp> Host<A> {
         let mut view = match A::placeholder(self, &name, access) {
             Ok(view) => view,
             Err(why) => {
-                self.alert(None, &headline::not_opened(&name), &why);
+                self.alert(None, &refusal_headline(&name, "opened"), &why);
                 return;
             }
         };
-        view.say(format!("Opening {name}\u{2026}"));
+        view.say(opening(&name));
         let index = match into {
             Some(index) => {
                 self.move_on(index);
@@ -1585,7 +1585,7 @@ impl<A: DocumentApp> Host<A> {
             None => match self.open_window(view, Reading::Alone) {
                 Ok(index) => index,
                 Err(why) => {
-                    self.alert(None, &headline::not_opened(&name), &why);
+                    self.alert(None, &refusal_headline(&name, "opened"), &why);
                     return;
                 }
             },
@@ -1666,7 +1666,11 @@ impl<A: DocumentApp> Host<A> {
             "{} was not shown in its folder: {err}",
             tairix_util::utf8::shown(&name)
         ));
-        self.alert(None, &headline::not_shown(&name), reveal_refusal(err));
+        self.alert(
+            None,
+            &refusal_headline(&name, "shown in its folder"),
+            reveal_refusal(err),
+        );
     }
 
     /// Carry out one request of window `index`.
@@ -1703,7 +1707,7 @@ impl<A: DocumentApp> Host<A> {
         };
         if let Some(refusal) = destination.and_then(|name| window.view.refuse_save(name)) {
             self.quitting = false;
-            let headline = headline::not_saved(window.view.name());
+            let headline = refusal_headline(window.view.name(), "saved");
             self.alert(Some(index), &headline, &refusal);
             return;
         }
@@ -1741,7 +1745,7 @@ impl<A: DocumentApp> Host<A> {
             SaveStep::Queued => window.state("Saving\u{2026}"),
             SaveStep::AskWhere { then_close } => self.ask_how(index, then_close),
             SaveStep::NoMemory => {
-                let headline = headline::not_saved(window.view.name());
+                let headline = refusal_headline(window.view.name(), "saved");
                 self.alert(
                     Some(index),
                     &headline,
@@ -1762,7 +1766,11 @@ impl<A: DocumentApp> Host<A> {
             ..
         } = saved;
         if let Err(err) = &result {
-            self.alert(Some(index), &headline::not_saved(&name), &format!("{err}"));
+            self.alert(
+                Some(index),
+                &refusal_headline(&name, "saved"),
+                &format!("{err}"),
+            );
         }
         let window = &mut self.windows[index];
         let landed = window
@@ -1806,7 +1814,7 @@ impl<A: DocumentApp> Host<A> {
             Ok(endings) => endings,
             Err(why) => {
                 self.quitting = false;
-                let headline = headline::not_saved(window.view.name());
+                let headline = refusal_headline(window.view.name(), "saved");
                 self.alert(Some(index), &headline, &why);
                 return;
             }
@@ -2720,7 +2728,7 @@ impl<A: DocumentApp> Host<A> {
                     Ok(file) => self.open_document(file, name, writable, None),
                     Err(raw) => self.alert(
                         None,
-                        &headline::not_opened(name.as_str()),
+                        &refusal_headline(name.as_str(), "opened"),
                         &format!(
                             "The document could not be taken over ({}).",
                             Errno::from_syscall(raw)

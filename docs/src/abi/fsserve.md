@@ -156,4 +156,5 @@ does at `volume_serve`.
   learns the volume is gone by its endpoint going. A volume whose server is
   withdrawn or lost leaves the namespace at once, unless the server last said
   it held writes it had not published: that one stays, reporting
-  `UnavailableLost`, until its owner detaches it with `force`.
+  `UnavailableLost`, until its owner detaches it with `force`, or with
+  `DetachMode::Lost`, which forces only a volume still lost.

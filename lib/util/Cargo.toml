@@ -18,5 +18,8 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The one rule for showing text from elsewhere, which `utf8::shown`, `quote`
 # and `report` show and escape it by.
 tairix-visible = { path = "../visible", version = "=0.0.0" }
-# The UTS #39 restriction level `utf8::mixes_scripts` reads.
-tairix-unicode = { path = "../unicode", version = "=0.0.0" }
+
+[dev-dependencies]
+# The metered allocator that refuses a request past a size, so `trim` is held
+# to leaving a buffer whole when the copy it moves it into is refused.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

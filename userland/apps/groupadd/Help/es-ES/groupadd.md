@@ -14,9 +14,12 @@ decimal. Crear un grupo es una operación administrativa: el registro
 rechaza a un llamante sin la capacidad de administración de usuarios.
 
 Cuando se omite `-g`, el identificador del grupo se asigna
-automáticamente, uno por encima del más alto existente. Un identificador
-solicitado que ya está ocupado se rechaza; el registro es la autoridad
-sobre las colisiones.
+automáticamente: uno por encima del más alto de los identificadores
+existentes de 1000 o más, o 1000 cuando ningún grupo tiene ninguno. Los
+identificadores inferiores a 1000 son del sistema y nunca se asignan, y
+una vez que no queda ningún identificador por encima del más alto, el
+grupo no se crea. Un identificador solicitado que ya está ocupado se
+rechaza; el registro es la autoridad sobre las colisiones.
 
 `--` termina el análisis de opciones: cada argumento posterior es un
 operando.
@@ -25,7 +28,7 @@ operando.
 
 - `-g, --gid GID` — identificador numérico del grupo; asignado
   automáticamente cuando se omite (uno por encima del más alto
-  existente).
+  existente de 1000 o más; si no lo hay, 1000).
 - `-h, -?, --help` — mostrar la ayuda corta de este comando.
 
 ## EXAMPLES

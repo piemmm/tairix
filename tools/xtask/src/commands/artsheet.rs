@@ -862,7 +862,7 @@ fn first_difference(committed: &str, produced: &str) -> String {
 /// Say where the sheets went, so a reviewer can go and look at them.
 fn report(written: &[PathBuf]) {
     for path in written {
-        eprintln!("xtask: [artsheet --sheets] {}", path.display());
+        noteln!("xtask: [artsheet --sheets] {}", path.display());
     }
 }
 

@@ -8,7 +8,9 @@
 //! them (`plans/DISK-IMAGES.md`). Each launcher carries a mount out on a
 //! `MountWorker`, and an eject wherever its own holds on the volume have let
 //! go — `carry_out` is the one body of both — and tells the user what one
-//! came to through [`MountDone::shown`], so both say it in the same words.
+//! came to through [`MountDone::shown`], so both say it in the same words. A
+//! volume that went away before what was written to it was saved is ejected
+//! only once the user agrees to let that go ([`lost_eject_question`]).
 
 #[cfg(feature = "rt")]
 use alloc::collections::TryReserveError;
@@ -16,18 +18,26 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::{format, vec};
 
-use tairix_abi::imageattach::ImageAttachReply;
 #[cfg(any(feature = "rt", test))]
-use tairix_abi::imageattach::{ImageAccess, ImageAttach};
+use tairix_abi::imageattach::ImageAttach;
+use tairix_abi::imageattach::{ImageAccess, ImageAttachReply};
 #[cfg(any(feature = "rt", test))]
 use tairix_abi::netattach::Presentation;
-use tairix_abi::sysinfo::{ViewBindingRecord, VOLUME_ID_UNPUBLISHED};
+use tairix_abi::sysinfo::{
+    MountAvailability, ViewBindingRecord, VOLUME_ID_LEN, VOLUME_ID_UNPUBLISHED,
+};
 #[cfg(feature = "rt")]
-use tairix_abi::volume::{VolumeDetachRequest, VOLUME_DETACH_LEN};
+use tairix_abi::volume::VOLUME_DETACH_LEN;
+#[cfg(any(feature = "rt", test))]
+use tairix_abi::volume::{DetachMode, VolumeDetachRequest};
+use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
 use tairix_abi::{Errno, STORAGE_CATALOG};
 
+use crate::activate::{Activation, BundleIntent};
 use crate::browser::{Browser, Location};
-use crate::places::{Place, Places};
+use crate::chrome::{ContextCommand, ContextMenuModel};
+use crate::error::BrowseError;
+use crate::places::{Place, Places, VolumeFacts};
 use crate::source::DirectorySource;
 use crate::vfs::components_from_absolute_path;
 
@@ -42,26 +52,48 @@ pub const UNSERVED: &str = "there was not enough memory to mount disks";
 pub const MOUNTED_WRITABLE: &str =
     "it is mounted read-write already, so eject it to mount it read-only";
 
+/// How writable a mount asks its volume to be: read-only when `read_only`,
+/// otherwise writable where it can be.
+const fn access(read_only: bool) -> ImageAccess {
+    if read_only {
+        ImageAccess::ReadOnly
+    } else {
+        ImageAccess::WritableWherePossible
+    }
+}
+
 /// The attach a double-click asks for: private to the user, named from the
-/// volume, read-only when `read_only` and otherwise writable where it can be.
+/// volume, as writable as [`access`] asks.
 #[cfg(any(feature = "rt", test))]
 const fn private(read_only: bool) -> ImageAttach<'static> {
     ImageAttach {
         name: None,
         presentation: Presentation::Private,
-        access: if read_only {
-            ImageAccess::ReadOnly
-        } else {
-            ImageAccess::WritableWherePossible
-        },
+        access: access(read_only),
         target: None,
         expects: None,
         adopt: true,
     }
 }
 
+/// The detach of the volume published as `volume_id`: one that takes it as
+/// lost when the user agreed to let go of what was not saved to it, so the
+/// kernel forces it only if it is lost still, and otherwise a plain one.
+#[cfg(any(feature = "rt", test))]
+const fn detach_request(volume_id: [u8; VOLUME_ID_LEN], lost: bool) -> VolumeDetachRequest {
+    VolumeDetachRequest {
+        volume_id,
+        mode: if lost {
+            DetachMode::Lost
+        } else {
+            DetachMode::Plain
+        },
+    }
+}
+
 /// Detach the volume published as `volume_id`, which the caller attached,
-/// once what it holds is written back.
+/// once what it holds is written back, or, `lost`, letting go of what went
+/// with it.
 ///
 /// # Errors
 ///
@@ -69,17 +101,37 @@ const fn private(read_only: bool) -> ImageAttach<'static> {
 /// image volume lies on it, [`Errno::PermissionDenied`] for a volume the
 /// caller may not detach.
 #[cfg(feature = "rt")]
-fn eject(volume_id: [u8; 16]) -> Result<(), Errno> {
+fn eject(volume_id: [u8; VOLUME_ID_LEN], lost: bool) -> Result<(), Errno> {
     let mut frame = [0u8; VOLUME_DETACH_LEN];
-    VolumeDetachRequest {
-        volume_id,
-        force: false,
-    }
-    .encode(&mut frame)?;
+    detach_request(volume_id, lost).encode(&mut frame)?;
     match tairix_rt::volume_detach(&frame) {
         0 => Ok(()),
         err => Err(Errno::from_syscall(err)),
     }
+}
+
+/// The button index of the eject itself in the question
+/// [`lost_eject_question`] builds.
+pub const LOST_EJECT_INDEX: usize = 1;
+
+/// The question put before ejecting `name`, a volume that went away before
+/// what was written to it was saved: ejecting it lets that go and closes
+/// what is open on it, so it destroys, and is never the answer `Enter` gives.
+/// `None` only if the compiled-in button labels were not ones an alert can
+/// carry.
+#[must_use]
+pub fn lost_eject_question(name: &str) -> Option<AlertSpec> {
+    let cancel = AlertButton::new("Cancel", AlertButtonRole::Cancel).ok()?;
+    let eject = AlertButton::new("Eject", AlertButtonRole::Destructive).ok()?;
+    AlertSpec::fitted(
+        AlertSeverity::Warning,
+        &format!("Eject \u{201c}{}\u{201d}?", tairix_util::utf8::shown(name)),
+        "It went away before everything written to it was saved, and what was \
+         not saved is lost. Ejecting it lets that go and closes any file still \
+         open on it.",
+        &[cancel, eject],
+    )
+    .ok()
 }
 
 /// A disk image asked to be mounted, or a volume asked to be ejected.
@@ -95,9 +147,12 @@ pub enum MountAct {
     /// Eject the volume published as `volume_id`, shown as `name`.
     Eject {
         /// The identity a detach names it by.
-        volume_id: [u8; 16],
+        volume_id: [u8; VOLUME_ID_LEN],
         /// What the user calls it.
         name: String,
+        /// It went away with what was written to it unsaved, so ejecting it
+        /// lets that go: the user is asked first.
+        lost: bool,
     },
 }
 
@@ -109,10 +164,57 @@ impl MountAct {
         let facts = row
             .facts()
             .filter(|facts| viewer.is_some_and(|uid| facts.ejectable_by(uid)))?;
-        Some(Self::Eject {
+        Some(Self::eject(facts, row.label()))
+    }
+
+    /// The eject the entry `browser` has chosen asks for: of the volume that
+    /// catalog entry shows, where its menu offers `viewer` an eject.
+    #[must_use]
+    pub fn eject_chosen<S: DirectorySource>(
+        browser: &Browser<S>,
+        viewer: Option<u32>,
+    ) -> Option<Self> {
+        let uid = viewer?;
+        let offered = ContextMenuModel::for_browser(browser, false).viewed_by(uid);
+        if !offered.is_enabled(ContextCommand::Eject) {
+            return None;
+        }
+        let entry = browser.chosen_entry()?;
+        Some(Self::eject(entry.volume()?, entry.name()))
+    }
+
+    /// The read-only mount the entry `browser` has chosen asks for, where its
+    /// menu offers one: `None` where it offers none, or nothing is chosen.
+    ///
+    /// # Errors
+    ///
+    /// Why the image cannot be named, as an open of it is refused: a name no
+    /// path may carry, say.
+    pub fn read_only_of<S: DirectorySource>(
+        browser: &mut Browser<S>,
+    ) -> Result<Option<Self>, BrowseError> {
+        let offered = ContextMenuModel::for_browser(browser, false);
+        if !offered.is_enabled(ContextCommand::MountReadOnly) {
+            return Ok(None);
+        }
+        match browser.activate_selected(BundleIntent::Launch) {
+            Ok(Activation::MountImage { path }) => Ok(Some(Self::Attach {
+                path,
+                read_only: true,
+            })),
+            Ok(_) | Err(BrowseError::NoSuchEntry) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// The eject of the volume `facts` describe, shown as `name`.
+    #[must_use]
+    pub fn eject(facts: &VolumeFacts, name: &str) -> Self {
+        Self::Eject {
             volume_id: facts.volume_id,
-            name: String::from(row.label()),
-        })
+            name: String::from(name),
+            lost: facts.availability == MountAvailability::UnavailableLost,
+        }
     }
 
     /// What the user calls what the act is about: the image's file name, or
@@ -133,10 +235,7 @@ impl MountAct {
             Self::Eject { .. } => "ejected",
         };
         MountRefusal {
-            headline: format!(
-                "\u{201c}{}\u{201d} could not be {undone}",
-                tairix_util::utf8::shown(self.name())
-            ),
+            headline: tairix_util::utf8::refusal_headline(self.name(), undone),
             reason,
         }
     }
@@ -150,9 +249,14 @@ impl MountAct {
                 path: core::mem::take(path),
                 read_only: *read_only,
             },
-            Self::Eject { volume_id, name } => Self::Eject {
+            Self::Eject {
+                volume_id,
+                name,
+                lost,
+            } => Self::Eject {
                 volume_id: *volume_id,
                 name: core::mem::take(name),
+                lost: *lost,
             },
         }
     }
@@ -178,16 +282,15 @@ impl MountDone {
     /// has mounted writable already is refused rather than shown, so a
     /// window onto it is never taken for the read-only one asked for.
     pub fn shown(self) -> Result<Option<Vec<String>>, MountRefusal> {
-        let asked_read_only = matches!(
-            self.act,
-            MountAct::Attach {
-                read_only: true,
-                ..
-            }
-        );
+        let asked = match self.act {
+            MountAct::Attach { read_only, .. } => access(read_only),
+            MountAct::Eject { .. } => ImageAccess::WritableWherePossible,
+        };
         let reason = match self.answer {
+            // Never taken up for this session, so never shown as what was
+            // asked for.
             Ok(Mounted::Image(ImageAttachReply::AlreadyAttached(volume)))
-                if asked_read_only && !volume.read_only() =>
+                if !asked.accepts(volume.read_only()) =>
             {
                 MOUNTED_WRITABLE
             }
@@ -253,7 +356,7 @@ pub const ACTS_WAITING: usize = 8;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Projection {
     /// The identity of the volume shown.
-    pub volume_id: [u8; 16],
+    pub volume_id: [u8; VOLUME_ID_LEN],
     /// Where, root-first.
     pub components: Vec<String>,
 }
@@ -275,16 +378,18 @@ impl Projection {
 }
 
 /// The places the volume published as `volume_id` is shown at — its rail
-/// row in `places` and each of `projections` of it: where a surface's own
-/// windows must leave before an eject of it, or their holds refuse it.
+/// row or, for one the rail does not offer, its catalog entry in `places`,
+/// and each of `projections` of it: where a surface's own windows must leave
+/// before an eject of it, or their holds refuse it.
 pub fn shown_at<'a>(
     places: &'a Places,
     projections: &'a [Projection],
-    volume_id: [u8; 16],
+    volume_id: [u8; VOLUME_ID_LEN],
 ) -> impl Iterator<Item = &'a [String]> {
     places
         .rows()
         .iter()
+        .chain(places.unoffered())
         .filter(move |row| {
             row.facts()
                 .is_some_and(|facts| facts.volume_id == volume_id)
@@ -298,12 +403,19 @@ pub fn shown_at<'a>(
         )
 }
 
+/// Whether the place `at` lies within one of `roots`, the places a volume
+/// being ejected is shown at: by whole components, so a sibling whose name
+/// merely begins with a root's is not.
+#[must_use]
+pub fn within(roots: &[&[String]], at: &[String]) -> bool {
+    roots.iter().any(|root| at.starts_with(root))
+}
+
 /// Whether `browser` shows, or is on its way to, a place within one of
 /// `roots`.
 pub fn holds_within<S: DirectorySource>(browser: &Browser<S>, roots: &[&[String]]) -> bool {
-    let within = |at: &[String]| roots.iter().any(|root| at.starts_with(root));
-    browser.folder().is_some_and(within)
-        || matches!(browser.listing_target(), Some(Location::Folder(at)) if within(at))
+    browser.folder().is_some_and(|at| within(roots, at))
+        || matches!(browser.listing_target(), Some(Location::Folder(at)) if within(roots, at))
 }
 
 /// A [`MountWorker`], not yet started.
@@ -332,7 +444,9 @@ pub fn carry_out(act: MountAct) -> MountDone {
         MountAct::Attach { path, read_only } => {
             tairix_rt::image_attach_path(path.as_bytes(), &private(*read_only)).map(Mounted::Image)
         }
-        MountAct::Eject { volume_id, .. } => eject(*volume_id).map(|()| Mounted::Ejected),
+        MountAct::Eject {
+            volume_id, lost, ..
+        } => eject(*volume_id, *lost).map(|()| Mounted::Ejected),
     };
     MountDone { act, answer }
 }
@@ -342,7 +456,10 @@ const fn attach_refusal(err: Errno) -> &'static str {
     match err {
         Errno::PermissionDenied => "you may not read it",
         Errno::NotFound => "it does not exist",
-        Errno::Busy => "another program is writing it, or it is being mounted already",
+        Errno::Busy => {
+            "another program is writing it, it is being mounted or ejected already, or \
+             the volume mounted from it was lost and must be ejected first"
+        }
         Errno::LimitExceeded => "too many disk images are mounted, or nested too deeply",
         Errno::TimedOut => "its disk's driver did not answer",
         Errno::Interrupted => "mounting it was interrupted",
@@ -370,8 +487,9 @@ const fn eject_refusal(err: Errno) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_refusal, eject_refusal, holds_within, private, shown_at, MountAct, MountDone,
-        MountRefusal, Mounted, Projection, CROWDED, MOUNTED_WRITABLE, UNSERVED,
+        attach_refusal, detach_request, eject_refusal, holds_within, lost_eject_question, private,
+        shown_at, within, MountAct, MountDone, MountRefusal, Mounted, Projection, CROWDED,
+        LOST_EJECT_INDEX, MOUNTED_WRITABLE, UNSERVED,
     };
     use crate::browser::Browser;
     use crate::entry::Entry;
@@ -383,7 +501,9 @@ mod tests {
     use tairix_abi::driver::filesystem::MountFlags;
     use tairix_abi::imageattach::{ImageAccess, ImageAttachReply, ImageRefusal};
     use tairix_abi::netattach::{AttachReply, Presentation};
-    use tairix_abi::sysinfo::ViewBindingRecord;
+    use tairix_abi::sysinfo::{MountAvailability, ViewBindingRecord};
+    use tairix_abi::volume::DetachMode;
+    use tairix_abi::window_ipc::{AlertButtonRole, AlertSeverity};
     use tairix_abi::Errno;
 
     fn attach(path: &str) -> MountAct {
@@ -397,6 +517,7 @@ mod tests {
         MountAct::Eject {
             volume_id: [7; 16],
             name: String::from(name),
+            lost: false,
         }
     }
 
@@ -489,7 +610,9 @@ mod tests {
             done(attach("/Users/ada/Home/disc.iso"), Err(Errno::Busy)).shown(),
             Err(MountRefusal {
                 headline: String::from("\u{201c}disc.iso\u{201d} could not be mounted"),
-                reason: "another program is writing it, or it is being mounted already",
+                reason: "another program is writing it, it is being mounted or ejected \
+                         already, or the volume mounted from it was lost and must be ejected \
+                         first",
             })
         );
         assert_eq!(
@@ -534,6 +657,17 @@ mod tests {
         path.iter().copied().map(String::from).collect()
     }
 
+    /// The facts of an image volume `uid` attached, `availability` as it is.
+    fn image_facts(uid: u32, availability: MountAvailability) -> VolumeFacts {
+        VolumeFacts {
+            filesystem: String::from("affs"),
+            free: None,
+            availability,
+            owner: Some(uid),
+            volume_id: [5; 16],
+        }
+    }
+
     /// A rail holding one image volume `uid` attached, at `/Storage/disk`.
     fn rail(uid: u32) -> Places {
         Places::new(
@@ -542,16 +676,92 @@ mod tests {
                 label: String::from("disk"),
                 target: String::from("/Storage/disk"),
                 medium: None,
-                facts: VolumeFacts {
-                    filesystem: String::from("affs"),
-                    free: None,
-                    availability: tairix_abi::sysinfo::MountAvailability::Available,
-                    owner: Some(uid),
-                    volume_id: [5; 16],
-                },
+                facts: image_facts(uid, MountAvailability::Available),
                 offered: true,
             }],
         )
+    }
+
+    #[test]
+    fn a_place_is_within_a_root_by_whole_components() {
+        let disk = components(&["Storage", "disk"]);
+        let roots = [disk.as_slice()];
+        assert!(within(&roots, &disk), "the root itself");
+        assert!(within(&roots, &components(&["Storage", "disk", "Games"])));
+        assert!(
+            !within(&roots, &components(&["Storage", "disk2"])),
+            "a sibling whose name begins with the root's"
+        );
+        assert!(
+            !within(&roots, &components(&["Storage"])),
+            "the catalog above"
+        );
+        assert!(!within(&[], &disk), "nothing is within no roots");
+    }
+
+    #[test]
+    fn an_eject_reaches_a_volume_no_rail_row_offers() {
+        let places = Places::new(
+            &components(&["Users", "ada"]),
+            &[Volume {
+                label: String::from("game"),
+                target: String::from("/Storage/game"),
+                medium: None,
+                facts: image_facts(1000, MountAvailability::UnavailableLost),
+                offered: false,
+            }],
+        );
+        assert!(places.rows().iter().all(|row| row.facts().is_none()));
+        let roots: Vec<&[String]> = shown_at(&places, &[], [5; 16]).collect();
+        assert_eq!(roots, [components(&["Storage", "game"]).as_slice()]);
+    }
+
+    #[test]
+    fn a_lost_volume_is_ejected_by_a_detach_that_takes_only_the_lost() {
+        let lost = MountAct::eject(
+            &image_facts(1000, MountAvailability::UnavailableLost),
+            "game",
+        );
+        assert_eq!(
+            lost,
+            MountAct::Eject {
+                volume_id: [5; 16],
+                name: String::from("game"),
+                lost: true,
+            }
+        );
+        assert_eq!(detach_request([5; 16], true).mode, DetachMode::Lost);
+        for availability in [
+            MountAvailability::Available,
+            MountAvailability::UnavailableDirty,
+            MountAvailability::Recovering,
+        ] {
+            assert!(matches!(
+                MountAct::eject(&image_facts(1000, availability), "game"),
+                MountAct::Eject { lost: false, .. }
+            ));
+        }
+        let plain = detach_request([5; 16], false);
+        assert_eq!((plain.volume_id, plain.mode), ([5; 16], DetachMode::Plain));
+    }
+
+    #[test]
+    fn ejecting_a_lost_volume_asks_first() {
+        let question = lost_eject_question("game\u{202e}").expect("a question");
+        assert_eq!(question.severity(), AlertSeverity::Warning);
+        assert!(
+            question.headline().contains("\u{201c}game\u{fffd}\u{201d}"),
+            "{}",
+            question.headline()
+        );
+        let buttons: Vec<_> = question.buttons().collect();
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(buttons[0].role(), AlertButtonRole::Cancel);
+        assert_eq!(
+            buttons[LOST_EJECT_INDEX].role(),
+            AlertButtonRole::Destructive
+        );
+        assert_eq!(buttons[LOST_EJECT_INDEX].label(), "Eject");
     }
 
     #[test]
@@ -567,6 +777,7 @@ mod tests {
             Some(MountAct::Eject {
                 volume_id: [5; 16],
                 name: String::from("disk"),
+                lost: false,
             })
         );
         assert_eq!(MountAct::eject_row(row, Some(1001)), None, "another's");

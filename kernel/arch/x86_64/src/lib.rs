@@ -15,7 +15,8 @@
 //! * The kernel's own translation root, process roots, and the page-table
 //!   walk (`paging`).
 //! * The protections every CPU runs the kernel under: `CR0.WP` and, where
-//!   offered, SMEP, SMAP and UMIP (`protection`).
+//!   offered, SMEP, SMAP and UMIP (`protection`), read once each CPU has
+//!   lifted the limit firmware can put on its `CPUID` leaves (`cpuid`).
 //! * The QEMU `isa-debug-exit` helper that translates a Pass/Fail result
 //!   into the exit code `tools/qemu` recognises (`qemu_exit`).
 //!
@@ -40,25 +41,29 @@
 #![no_std]
 #![deny(missing_docs)]
 
-// The boot trampoline is only meaningful on the bare-metal target. When
-// `cargo test` runs the host-target unit tests in this crate the
-// assembly is omitted so the file builds on x86_64-linux too.
-// The boot-stack guard's sentinel is passed in rather than spelled in the
-// assembly, so the poison the stub writes and the poison the panic path
-// checks for are the one definition.
+// The boot trampoline, and the AP startup trampoline: a dedicated
+// `.ap_trampoline` section that `smp::install_trampoline` copies to a low
+// physical frame at run time. Both are bare-metal only, so a host build of
+// this crate omits them. They are assembled together so each constant they
+// read is passed in once from its Rust definition, never spelled in the
+// assembly: the boot-stack guard's sentinel the panic path checks for, and
+// those execute-disable is armed from.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 core::arch::global_asm!(
     include_str!("boot.s"),
+    include_str!("ap_trampoline.s"),
     GUARD_BYTE = const tairix_memguard::GUARD_BYTE,
+    EXT1_EDX_NX = const cpuid::EXT1_EDX_NX_BIT,
+    INTEL_EBX = const cpuid::INTEL_LEAF0[0],
+    INTEL_EDX = const cpuid::INTEL_LEAF0[1],
+    INTEL_ECX = const cpuid::INTEL_LEAF0[2],
+    IA32_MISC_ENABLE = const cpuid::IA32_MISC_ENABLE,
+    XD_DISABLE_HIGH = const cpuid::MISC_ENABLE_XD_DISABLE_BIT - 32,
+    IA32_EFER = const syscall_entry::IA32_EFER,
+    EFER_LME = const syscall_entry::EFER_LME,
+    EFER_NXE = const syscall_entry::EFER_NXE,
     options(att_syntax),
 );
-
-// AP startup trampoline (Stage 3a (b)). Embedded as a dedicated
-// `.ap_trampoline` section of the kernel image; the BSP-side installer
-// in `smp::install_trampoline` copies the bytes to the chosen low
-// physical frame at runtime.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-core::arch::global_asm!(include_str!("ap_trampoline.s"), options(att_syntax));
 
 // Stage 3a (c1) context-switch primitive. The Rust side
 // (`context::switch`) is host-test-compilable; the bare-metal half is
@@ -66,12 +71,15 @@ core::arch::global_asm!(include_str!("ap_trampoline.s"), options(att_syntax));
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 core::arch::global_asm!(include_str!("context.s"), options(att_syntax));
 
-// Stage 4.D Item 2-tail.2 external-IRQ thunks. Reserves the
-// architectural vector range 0x30..=0xFE for external IRQs and
-// publishes the per-vector stub-address table consumed by
-// `kernel/arch/x86_64::irq`, whose shared trampoline the stubs jump to.
+// The external-IRQ stubs and their address table, one per vector of the
+// range `irq` defines.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-core::arch::global_asm!(include_str!("external_irq.s"), options(att_syntax));
+core::arch::global_asm!(
+    include_str!("external_irq.s"),
+    first_vector = const irq::EXTERNAL_VECTOR_FIRST,
+    vector_count = const irq::EXTERNAL_VECTOR_COUNT,
+    options(att_syntax),
+);
 
 // The machine-takeover stack-switch trampoline (`plans/NEW-SUPERVISOR.md` §9)
 // is meaningful only on the bare-metal target; the whole `takeover` module is
@@ -116,7 +124,7 @@ pub mod coreclock;
 /// `tairix-arch-api` dependency this module's traits live in.
 #[cfg(feature = "sched-arch")]
 pub mod cpufeatures;
-mod cpuid;
+pub mod cpuid;
 pub mod cpumap;
 /// Boot-CPU model-name discovery: the CPUID processor brand string
 /// (leaves `0x8000_0002..=0x8000_0004`) the boot facts report.

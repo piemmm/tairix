@@ -62,28 +62,6 @@ use crate::spawn_layout;
 // `USER_IMAGE_BIAS` export, mirrored (one definition, no copied constant).
 pub use crate::spawn_layout::CHILD_USER_BIAS;
 
-/// Gigabytes of identity map every process root on this port carries — the
-/// one definition PID 1 and every spawned child are built from.
-///
-/// The kernel is identity-linked, so a root the kernel may be executing
-/// under has to map the kernel's own image, boot heap, stack, leaked
-/// `KernelState`, and the board's low device MMIO *at their physical
-/// addresses*. `[0, 4 GiB)` covers all of it on the boards this port runs
-/// on: it is a bound on where the hardware puts those things, not a
-/// capacity, and it no longer bounds how much RAM the kernel can reach —
-/// RAM is reached through the direct physical map
-/// ([`ConfiguredPhysMap`]), which lies above the user region entirely. A
-/// board whose kernel image ends above this window is refused at boot
-/// rather than faulting on the first `activate`.
-///
-/// [`CHILD_USER_BIAS`] (64 GiB) sits far above the window, so a program's
-/// pages land on freshly walked Sv39 tables rather than colliding with an
-/// identity gigapage leaf.
-#[must_use]
-pub fn identity_gigapages() -> usize {
-    4
-}
-
 /// A spawned child's four fixed guarded-window bases (`plans/PI.md`
 /// 5d-0-ii (b′)/(c)), derived from the one shared offset set the retained
 /// [`LiveSpace`](tairix_kernel_mem::LiveSpace)'s window allocators are configured with.
@@ -232,8 +210,11 @@ impl ArchImageBuilder for RiscvProcessSpawn {
         // `pre_resume` hook before the scheduler first resumes it as a user
         // task (`plans/SPAWN.md` SP2). An allocator exhausted of even the
         // root table fails closed.
-        let arch = ArchAddressSpace::new_identity_gigapages(table_frames, identity_gigapages())
-            .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
+        let arch = ArchAddressSpace::new_identity_gigapages(
+            table_frames,
+            paging::KERNEL_IDENTITY_GIGAPAGES,
+        )
+        .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.root_phys();
 
         let mut space = AddressSpace::new(arch);

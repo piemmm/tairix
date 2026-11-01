@@ -3,14 +3,16 @@ extern crate std;
 use std::string::{String, ToString};
 use std::vec::Vec;
 
+use core::fmt::Write as _;
 use core::mem::{offset_of, size_of};
 use core::panic::Location;
 use std::format;
 
 use super::{
     decode_kept, enter, enter_without_atomics, file_tail, format_hex_word, kept_image,
-    reset_for_tests, Cause, CauseWords, Entry, Kept, KernelFault, Processor, Reporter, StackCheck,
-    StackCorruption, FATAL_RECORDS, FILE_TAIL, HEX_WORD_LEN, KEPT_BYTES,
+    nested_fields, reset_for_tests, Cause, CauseWords, Entry, Kept, KernelFault, NestedWords,
+    Processor, Reporter, StackCheck, StackCorruption, FATAL_RECORDS, FILE_TAIL, HEX_WORD_LEN,
+    KEPT_BYTES,
 };
 use crate::backtrace::BootStackGuard;
 
@@ -454,7 +456,18 @@ fn a_cause_displays_its_kind_then_its_record_fields() {
     );
     assert_eq!(
         Cause::Fault(VTABLE_BRANCH).to_string(),
-        format!("fault {VTABLE_BRANCH}")
+        "fault syndrome=0x0000000086000000 fault_addr=0x3ff0000000000000 \
+         fault_pc=0x3ff0000000000000 fault_sp=0x0000000040081f40"
+    );
+    let bare = KernelFault {
+        syndrome: None,
+        address: None,
+        pc: 1,
+        sp: None,
+    };
+    assert_eq!(
+        Cause::Fault(bare).to_string(),
+        "fault syndrome=null fault_addr=null fault_pc=0x0000000000000001 fault_sp=null"
     );
     let raised = Location::caller();
     assert_eq!(
@@ -529,23 +542,50 @@ fn an_unknown_kept_kind_decodes_to_nothing() {
     assert_eq!(decode_kept(&image, true), None);
 }
 
+/// A cause's display is its bare record's own fields, so the line the harness
+/// keeps reads as the record does.
 #[test]
-fn a_fault_displays_as_the_records_fields() {
-    assert_eq!(
-        std::format!("{VTABLE_BRANCH}"),
-        "syndrome=0x0000000086000000 fault_addr=0x3ff0000000000000 \
-         fault_pc=0x3ff0000000000000 fault_sp=0x0000000040081f40"
-    );
-    let bare = KernelFault {
-        syndrome: None,
-        address: None,
-        pc: 1,
-        sp: None,
-    };
-    assert_eq!(
-        std::format!("{bare}"),
-        "syndrome=null fault_addr=null fault_pc=0x0000000000000001 fault_sp=null"
-    );
+fn a_cause_displays_the_fields_its_bare_record_carries() {
+    let causes = [
+        Cause::Fault(VTABLE_BRANCH),
+        Cause::Fault(KernelFault {
+            syndrome: None,
+            address: None,
+            pc: 1,
+            sp: None,
+        }),
+        Cause::panic(Some(Location::caller())),
+        Cause::panic(None),
+        Cause::Panic {
+            file: [0xff; FILE_TAIL],
+            len: 4,
+            line: 7,
+            column: 9,
+        },
+        Cause::Panic {
+            file: [b'a'; FILE_TAIL],
+            len: u8::MAX,
+            line: 1,
+            column: 2,
+        },
+        Cause::Stack(OVERRUN),
+        Cause::Stack(StackCorruption {
+            check: StackCheck::Suspension,
+            ..OVERRUN
+        }),
+    ];
+    for cause in &causes {
+        let mut words = NestedWords::new();
+        let fields = nested_fields(Processor::Cpu(0), cause, None, &mut words);
+        let [_, own @ .., _] = fields.as_slice() else {
+            panic!("{cause:?}: no cpu and first around the cause");
+        };
+        let record = own.iter().fold(String::new(), |mut record, field| {
+            write!(record, " {}={}", field.key, field.value).expect("a string takes any write");
+            record
+        });
+        assert_eq!(cause.to_string(), format!("{}{record}", cause.kind()));
+    }
 }
 
 #[test]

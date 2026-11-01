@@ -31,7 +31,9 @@ jamais.
 
 Un opérande `target` de la forme `/Storage/name` monte le volume sous
 ce nom. Tout autre opérande `target`, un répertoire vide vous
-appartenant sous `/Users`, y fait aussi apparaître le volume.
+appartenant sous `/Users` ou sur un volume de `/Storage`, y fait aussi
+apparaître le volume ; un répertoire situé sur un volume FAT32 ou ADFS
+ne peut pas le faire apparaître.
 
 Le volume reste monté jusqu'à ce que vous le détachiez avec `unmount`,
 ou que votre session de connexion se termine. Une image qui contient
@@ -47,12 +49,20 @@ donne la raison.
 - `-w, --rw, --read-write` — monter le volume en lecture-écriture, ou
   pas du tout : une image dans laquelle vous ne pouvez pas écrire, ou
   dont le système de fichiers ne peut pas être écrit, n'est pas montée.
-  Le dernier de `-r`, `-w`, `-o ro` et `-o rw` l'emporte.
-- `-t, --types <type>` — le système de fichiers que l'image doit
-  contenir, tel que la liste des montages le nomme (`iso9660`, `udf`,
-  `adfs`, `affs`, `fat32`), ou `auto` pour celui qu'elle contient,
-  quel qu'il soit. Une image n'est pas montée si elle en contient un
-  autre, ou si aucune image disque ne contient le type demandé.
+  Un `-r` ultérieur annule cette option ; un `-o ro` ou un `-o rw`
+  ultérieur ne l'annule pas. Le dernier de `-r`, `-w`, `-o ro` et
+  `-o rw` détermine si le volume est en lecture seule.
+- `-t, --types <list>` — les systèmes de fichiers, séparés par des
+  virgules, dont l'image doit contenir l'un, tels que la liste des
+  montages les nomme (`iso9660`, `udf`, `adfs`, `affs`, `fat32`), ou
+  `auto` pour celui qu'elle contient, quel qu'il soit ; une liste
+  commençant par `no` nomme ceux que l'image ne doit pas contenir. Ce
+  que renferme l'image se reconnaît à son contenu, si bien que l'ordre
+  ne choisit rien : un disque optique contenant à la fois UDF et
+  ISO 9660 est monté en UDF, sauf si son ISO 9660 conserve des
+  enregistrements Rock Ridge ou RISC OS. Une image n'est pas montée si
+  elle ne contient aucun de ces systèmes de fichiers, ou si la liste ne
+  nomme aucun type que contienne une image disque.
 - `-o, --options <list>` — une liste, séparée par des virgules, de
   `ro`, `rw` (en lecture-écriture lorsque c'est possible, la valeur
   par défaut), `noexec`, `loop` et `name=name`, le nom que doit

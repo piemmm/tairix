@@ -28,9 +28,10 @@ scrittura quando potete scrivere l'immagine e il suo formato consente
 la scrittura, altrimenti in sola lettura, cosa di cui `mount` avvisa.
 Su un volume montato da un'immagine non si eseguono mai programmi.
 
-Un `target` della forma `/Storage/name` monta il volume sotto quel
-nome. Qualsiasi altro `target`, una directory vuota di vostra
-proprietà sotto `/Users`, mostra il volume anche lì.
+Un `target` della forma `/Storage/name` monta il volume sotto quel nome.
+Qualsiasi altro `target`, una directory vuota di vostra proprietà sotto
+`/Users` o su un volume in `/Storage`, mostra il volume anche lì; una
+directory su un volume FAT32 o ADFS non può mostrarlo.
 
 Il volume resta montato finché non lo scollegate con `unmount` o non
 termina la vostra sessione di accesso. Un'immagine che contiene un
@@ -42,14 +43,21 @@ ARXFS) non viene montata, e `mount` ne dice il motivo.
 
 - `-r, --read-only` — montare il volume in sola lettura (come `-o ro`).
 - `-w, --rw, --read-write` — montare il volume in lettura e scrittura,
-  oppure non montarlo affatto: un'immagine che non potete scrivere,
-  o il cui filesystem non consente la scrittura, non viene montata.
-  Vince l'ultima tra `-r`, `-w`, `-o ro` e `-o rw`.
-- `-t, --types <type>` — il filesystem che l'immagine deve contenere,
-  con il nome che gli dà l'elenco dei montaggi (`iso9660`, `udf`,
-  `adfs`, `affs`, `fat32`), oppure `auto` per qualunque filesystem
-  contenga. Un'immagine che ne contiene un altro, o per cui si indica
-  un tipo che nessuna immagine disco contiene, non viene montata.
+  oppure non montarlo affatto: un'immagine che non potete scrivere, o il
+  cui filesystem non consente la scrittura, non viene montata. Un `-r`
+  successivo revoca questa opzione; un `-o ro` o `-o rw` successivo no.
+  L'ultima tra `-r`, `-w`, `-o ro` e `-o rw` decide se il volume è in
+  sola lettura.
+- `-t, --types <list>` — i filesystem, separati da virgole, uno dei
+  quali l'immagine deve contenere, con i nomi che dà loro l'elenco dei
+  montaggi (`iso9660`, `udf`, `adfs`, `affs`, `fat32`), oppure `auto`
+  per qualunque filesystem contenga; una lista che comincia con `no`
+  nomina quelli che non deve contenere. Ciò che l'immagine racchiude è
+  riconosciuto dal suo contenuto, perciò l'ordine non sceglie nulla: un
+  disco ottico che contiene sia UDF sia ISO 9660 viene montato come UDF,
+  a meno che il suo ISO 9660 non conservi record Rock Ridge o RISC OS.
+  Un'immagine che non ne contiene nessuno, o una lista che non nomina
+  alcun tipo che un'immagine disco possa contenere, non viene montata.
 - `-o, --options <list>` — un elenco separato da virgole di `ro`,
   `rw` (in lettura e scrittura quando è possibile, il comportamento
   predefinito), `noexec`, `loop` e `name=name`, il nome che il volume

@@ -46,7 +46,10 @@ The module is `no_std` and allocation-free, in keeping with the rest of
 `lib/abi`: [`StdInfoRecord`] borrows its string fields and serialises into
 a caller-provided byte buffer through [`StdInfoRecord::write_jsonl`],
 which JSON-escapes the string fields, embeds the `ai` object verbatim, and
-fails closed with [`Errno::BufferTooSmall`] rather than truncating.
+fails closed with [`Errno::BufferTooSmall`] rather than truncating. A
+command app frames a record through `tairix_util::output::framed`, which
+sizes the buffer from the record's own length and answers nothing where the
+heap refuses it.
 
 A producer that offers a command writes the `ai` object's `suggestion`
 member through [`Suggestion`], whose `Display` is the member's one spelling —

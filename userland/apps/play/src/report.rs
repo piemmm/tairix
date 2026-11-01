@@ -130,14 +130,7 @@ fn frame(kind: StdInfoKind, code: &str, message: &str, ai: &str) -> Vec<u8> {
         Human::message(message),
     )
     .with_ai(ai);
-    let mut line = alloc::vec![0u8; 256 + message.len() + ai.len()];
-    match record.write_jsonl(&mut line) {
-        Ok(len) => {
-            line.truncate(len);
-            line
-        }
-        Err(_) => Vec::new(),
-    }
+    tairix_util::output::framed(&record)
 }
 
 #[cfg(test)]

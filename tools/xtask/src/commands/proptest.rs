@@ -149,7 +149,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
                 return Err(format!(
                     "proptest: unexpected argument {other:?}; usage: \
                      cargo xtask proptest [--once | --quick | --soak] [--target NAME] \
-                     [--secs N | --until T] [--seed N] [--list]"
+                     [--secs N | --until T (with --target)] [--seed N] [--list]"
                 ));
             }
         }
@@ -166,25 +166,30 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
 /// Resolve the models an [`Options`] selects, preserving registry order.
 ///
 /// # Errors
-/// Returns an error if `--target` names a model that is not registered.
+/// Returns an error if `--target` names a model that is not registered, or a
+/// window would soak more than one ([`soak::one_target_per_window`]).
 pub fn selected(opts: &Options) -> Result<Vec<Model>, String> {
-    let Some(name) = opts.only.as_deref() else {
-        return Ok(MODELS.to_vec());
+    let models = match opts.only.as_deref() {
+        None => MODELS.to_vec(),
+        Some(name) => match MODELS.iter().find(|m| m.name == name) {
+            Some(m) => vec![*m],
+            None => {
+                return Err(format!(
+                    "proptest: unknown model `{name}`; known models: {}",
+                    MODELS.iter().map(|m| m.name).collect::<Vec<_>>().join(", ")
+                ))
+            }
+        },
     };
-    match MODELS.iter().find(|m| m.name == name) {
-        Some(m) => Ok(vec![*m]),
-        None => Err(format!(
-            "proptest: unknown model `{name}`; known models: {}",
-            MODELS.iter().map(|m| m.name).collect::<Vec<_>>().join(", ")
-        )),
-    }
+    soak::one_target_per_window("proptest", opts.budget, models.len())?;
+    Ok(models)
 }
 
 /// Run the selected models for their budget.
 pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
     if opts.list {
         for m in MODELS {
-            println!("{:<10} {}  [{}]", m.name, m.description, m.package);
+            outln!("{:<10} {}  [{}]", m.name, m.description, m.package)?;
         }
         return Ok(());
     }
@@ -200,7 +205,7 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
         .map(|(i, m)| job_for(ctx, m, opts.budget, opts.seed, i))
         .collect();
     let concurrency = parallel::default_concurrency(jobs.len());
-    parallel::run(jobs, concurrency)
+    parallel::run(&ctx.children, jobs, concurrency)
 }
 
 /// Build the `cargo test` [`Job`] that runs one stateful model.
@@ -221,33 +226,27 @@ pub(crate) fn job_for(
     seed: Option<u64>,
     index: usize,
 ) -> Job {
-    let mut cmd = ctx.cargo();
-    cmd.args([
-        "test",
-        "-p",
-        model.package,
-        "--test",
-        model.test,
-        "--locked",
-        "--",
-        "--nocapture",
-    ]);
-    // A budget turns the model into a soak loop; without one the model runs
-    // its single smoke iteration.
-    if let Some(budget) = budget {
-        budget.export(&mut cmd, tairix_fuzzseed::PROPTEST_BUDGET_ENV);
-    }
-    // Each model reseeds its proptest RNG from this value instead of a fixed
-    // seed, so a fresh seed (the default) makes every run draw new programs
-    // while an explicit seed reproduces a logged counterexample.
+    // The model reseeds its proptest RNG from this value, so a fresh seed
+    // draws new programs while an explicit one reproduces a counterexample.
     let job_seed = seed::job_seed(seed, index);
-    cmd.env(seed::PROPTEST_SEED_ENV, job_seed.to_string());
     let label = format!(
         "proptest {} ({}, seed {job_seed})",
         model.name,
         soak::describe(budget)
     );
-    Job::new(label, cmd).with_budget(soak::child_deadline(budget))
+    let harness = soak::Harness {
+        package: model.package,
+        test: model.test,
+        filter: &[],
+        budget_env: tairix_fuzzseed::PROPTEST_BUDGET_ENV,
+    };
+    soak::job(
+        ctx,
+        label,
+        &harness,
+        budget,
+        &[(seed::PROPTEST_SEED_ENV, job_seed.to_string())],
+    )
 }
 
 #[cfg(test)]
@@ -283,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn until_runs_every_model_to_the_window_close() {
+    fn until_names_the_window_close() {
         let opts = parse(&argv(&["--soak", "--until", "1700000000"])).expect("until parses");
         assert_eq!(
             opts.budget,
@@ -291,6 +290,18 @@ mod tests {
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000)
             ))
         );
+    }
+
+    /// A window over the registry is refused, so no target queues past the
+    /// close to make one smoke iteration and pass; one named target soaks.
+    #[test]
+    fn a_window_over_the_registry_is_refused() {
+        let opts = parse(&argv(&["--until", "1700000000"])).expect("until parses");
+        assert!(selected(&opts).is_err_and(|why| why.contains("--target")));
+        let opts = parse(&argv(&["--until", "1700000000", "--target", "sec"]))
+            .expect("until with a target parses");
+        let selected = selected(&opts).expect("one target soaks to the close");
+        assert_eq!(selected.iter().map(|m| m.name).collect::<Vec<_>>(), ["sec"]);
     }
 
     #[test]

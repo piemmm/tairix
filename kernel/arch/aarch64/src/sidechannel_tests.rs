@@ -35,6 +35,7 @@ const ASM_SOURCES: &[(&str, &str)] = &[
     ("paging.rs", include_str!("paging.rs")),
     ("percpu_hal.rs", include_str!("percpu_hal.rs")),
     ("preempt.rs", include_str!("preempt.rs")),
+    ("protection.rs", include_str!("protection.rs")),
     ("psci.rs", include_str!("psci.rs")),
     ("qemu_exit.rs", include_str!("qemu_exit.rs")),
     ("smp.rs", include_str!("smp.rs")),
@@ -49,20 +50,13 @@ const ASM_SOURCES: &[(&str, &str)] = &[
     ("vectors.s", include_str!("vectors.s")),
 ];
 
-/// Whether `name` is an assembly source rather than a Rust one.
-fn is_assembly(name: &str) -> bool {
-    std::path::Path::new(name)
-        .extension()
-        .is_some_and(|extension| extension == "s")
-}
-
 /// The instructions of `source`: every non-comment line of an assembly
 /// source, every string-literal line of a Rust one.
 fn instructions(name: &str, source: &str) -> Vec<String> {
     instruction_lines(source)
         .into_iter()
         .filter_map(|line| {
-            let text = if is_assembly(name) {
+            let text = if tairix_fuzzseed::sources::is_assembly(name) {
                 line.split("//")
                     .next()
                     .unwrap_or_default()
@@ -137,5 +131,63 @@ fn the_trap_trampoline_zeroes_what_it_saved_before_the_handler_runs() {
     assert_eq!(
         zeroed, expected,
         "the handler would run with interrupted values live in a register"
+    );
+}
+
+#[test]
+fn every_source_carrying_assembly_is_inspected() {
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+    assert_eq!(
+        tairix_fuzzseed::sources::unlisted_assembly(root, ASM_SOURCES).expect("the port's sources"),
+        Vec::<String>::new(),
+        "each carries assembly but is not inspected"
+    );
+}
+
+/// The kernel never clears `PSTATE.PAN` to reach a user page, and translation
+/// comes on with `SPAN` clear under PAN: the only write to the PAN register is
+/// `protection::hold`'s, which sets it, and every `SCTLR_EL1` write installs
+/// the MMU-off constant or [`crate::protection::sctlr_mmu_on`]'s value.
+#[test]
+fn only_hold_writes_pan_and_every_sctlr_write_is_a_known_value() {
+    const MMU_OFF: [&str; 2] = ["mov x0, #0x0800", "movk x0, #0x30D0, lsl #16"];
+    const MMU_ON: &str =
+        "sctlr = in(reg) crate::protection::sctlr_mmu_on(crate::protection::pan_in_force()),";
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+    let mut pan_writes = Vec::new();
+    let mut sctlr_writes = 0;
+    for source in tairix_fuzzseed::sources::crate_sources(root).expect("the port's sources") {
+        let lines = instructions(source.name(), source.text());
+        for (at, line) in lines.iter().enumerate() {
+            let lower = line.to_ascii_lowercase();
+            if !lower.starts_with("msr ") {
+                continue;
+            }
+            if lower.starts_with("msr s3_0_c4_c2_3,") || lower.starts_with("msr pan,") {
+                pan_writes.push(format!("{}: {line}", source.relative()));
+            }
+            if lower.starts_with("msr sctlr_el1,") {
+                sctlr_writes += 1;
+                let known = if tairix_fuzzseed::sources::is_assembly(source.name()) {
+                    at >= 2 && lines[at - 2..at] == MMU_OFF
+                } else {
+                    source.text().matches(MMU_ON).count() == 1
+                };
+                assert!(
+                    known,
+                    "{}: `{line}` writes an unknown SCTLR_EL1",
+                    source.relative()
+                );
+            }
+        }
+    }
+    assert_eq!(pan_writes, ["protection.rs: msr S3_0_C4_C2_3, {pan}"]);
+    assert!(
+        include_str!("protection.rs").contains("pan = in(reg) PSTATE_PAN,"),
+        "the one PAN write sets it"
+    );
+    assert_eq!(
+        sctlr_writes, 4,
+        "the three MMU-off writes and the one MMU-on write"
     );
 }

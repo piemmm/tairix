@@ -71,6 +71,28 @@ pub const fn interrupted_kernel_sp(vector: u8, from_user: bool, rsp: u64) -> Opt
     }
 }
 
+/// The address a `#DF` names: `cr2` where it lies inside the boot stack's
+/// guard. The kernel root maps the guard read-only and no fault in it is ever
+/// handled, so such a `CR2` can only be the push whose delivery
+/// double-faulted. Any other `CR2` names whichever page fault came last.
+#[must_use]
+pub fn double_fault_address(
+    cr2: u64,
+    guard: Option<tairix_arch_api::BootStackGuardRegion>,
+) -> Option<u64> {
+    guard.filter(|guard| guard.contains(cr2)).map(|_| cr2)
+}
+
+/// `CR2`: the address the last page fault could not reach.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn read_cr2() -> u64 {
+    let cr2: u64;
+    // SAFETY: reading `CR2` touches no memory and changes no state but the
+    // status flags, which a move from a control register leaves undefined.
+    unsafe { core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack)) };
+    cr2
+}
+
 /// Ring the exception was taken from, decoded from the saved `CS`.
 ///
 /// The low two bits of a code selector are its RPL, which for the saved
@@ -143,8 +165,10 @@ const fn origin_of(vector: u8) -> Origin {
 /// ([`crate::fault::exception_syndrome`]) and hands it to the installed
 /// fatal handler, which records one `KernelFault` audit line and halts.
 ///
-/// No address is reported: outside `#PF` no x86_64 exception supplies one,
-/// and `CR2` would name whichever page fault happened *last*.
+/// Outside `#PF` no x86_64 exception supplies an address and `CR2` names
+/// whichever page fault came last, so none is reported, but for a `#DF`
+/// whose `CR2` lies inside the boot stack's guard ([`double_fault_address`]):
+/// the overrun the guard stopped.
 ///
 /// With no handler installed the port writes its own report and parks the
 /// CPU. Never a silent reset, and never through QEMU's debug-exit port: a
@@ -185,7 +209,16 @@ unsafe fn fatal_exception(
         syndrome: Some(crate::fault::exception_syndrome(
             vector, error_code, from_user,
         )),
-        address: None,
+        address: (vector == DOUBLE_FAULT_VECTOR)
+            .then(read_cr2)
+            .and_then(|cr2| {
+                double_fault_address(
+                    cr2,
+                    tairix_arch_api::CpuStateCapture::boot_stack_guard(
+                        &crate::backtrace::Backtracer,
+                    ),
+                )
+            }),
         pc: rip,
         sp: interrupted_kernel_sp(vector, from_user, interrupted_rsp),
     };
@@ -453,6 +486,40 @@ mod tests {
             None
         );
         assert_eq!(DOUBLE_FAULT_VECTOR, 8);
+    }
+
+    /// A `#DF`'s `CR2` is reported only inside the boot stack's guard, where
+    /// nothing but the double-faulting push could have put it.
+    #[test]
+    fn a_double_fault_names_only_an_address_inside_the_boot_stack_guard() {
+        let mut bytes = [tairix_memguard::GUARD_BYTE; 64];
+        let base = core::ptr::NonNull::from(&mut bytes).cast::<u8>();
+        // SAFETY: the region roots this test's own buffer for its lifetime.
+        let guard = unsafe { tairix_arch_api::BootStackGuardRegion::from_root(base, bytes.len()) };
+        let bottom = guard.stack_bottom_addr();
+        assert_eq!(
+            double_fault_address(bottom - 8, Some(guard)),
+            Some(bottom - 8)
+        );
+        assert_eq!(
+            double_fault_address(bottom - 64, Some(guard)),
+            Some(bottom - 64)
+        );
+        assert_eq!(
+            double_fault_address(bottom, Some(guard)),
+            None,
+            "the stack itself"
+        );
+        assert_eq!(
+            double_fault_address(bottom - 65, Some(guard)),
+            None,
+            "below the guard"
+        );
+        assert_eq!(
+            double_fault_address(bottom - 8, None),
+            None,
+            "a port with no guard"
+        );
     }
 
     #[test]

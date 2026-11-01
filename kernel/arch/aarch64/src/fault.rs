@@ -103,10 +103,9 @@ pub const ESR_ISS_FSC_MASK: u64 = 0b11_1111;
 /// The fault-status-code value for an **Access Flag fault**, minus the
 /// low two bits that carry the translation *level* (`0b001000`..`0b001011`
 /// for levels 0–3). ARM ARM Table D17-3 / D17-4: an access to a valid
-/// leaf whose Access Flag (AF, bit 10) is clear raises this fault on a PE
-/// without ARMv8.1 HAFDBS hardware AF management (cortex-a57/a72, the
-/// default QEMU CPU). It is the software referenced-bit mechanism the
-/// cold-page scanner drives.
+/// leaf whose Access Flag (AF, bit 10) is clear raises this fault while
+/// `TCR_EL1.HA` is clear, as the port leaves it on every part. It is the
+/// software referenced-bit mechanism the cold-page scanner drives.
 pub const FSC_ACCESS_FLAG_BASE: u64 = 0b00_1000;
 
 /// `true` iff a data or instruction abort's `esr` reports an **Access

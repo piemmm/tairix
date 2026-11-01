@@ -28,14 +28,14 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             .map_err(|_| io::Error::other("the host entropy source is unavailable"))
     };
     match tairix_signkeys::create(&ctx.workspace_root, &mut entropy) {
-        Ok(path) => println!(
+        Ok(path) => noteln!(
             "keys: created {}: every kernel built with it trusts only what it signs. Keep it \
              secret, and back it up to rebuild those kernels' programs.",
             path.display()
         ),
         Err(KeyError::Exists(path)) => {
             tairix_signkeys::load(&ctx.workspace_root).map_err(|err| format!("keys: {err}"))?;
-            println!("keys: kept the signing key set at {}", path.display());
+            noteln!("keys: kept the signing key set at {}", path.display());
         }
         Err(err) => return Err(format!("keys: {err}")),
     }

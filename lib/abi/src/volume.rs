@@ -6,10 +6,11 @@
 //! — asks the kernel to **attach** a filesystem driver to it with a
 //! [`VolumeAttachRequest`] (the `volume_attach` syscall) and to take it
 //! back out of service with a [`VolumeDetachRequest`] (`volume_detach`).
-//! Both operations require `CAP_FS_MOUNT` and are audited; every field is
-//! validated fail-closed here *and* re-checked kernel-side against live
-//! state (the endpoint, the window, the device geometry) before anything
-//! is mounted.
+//! An attach requires `CAP_FS_MOUNT`; a detach requires it too, unless the
+//! caller owns the network or disk-image volume it names. Both are audited;
+//! every field is validated fail-closed here *and* re-checked kernel-side
+//! against live state (the endpoint, the window, the device geometry) before
+//! anything is mounted.
 //!
 //! The frames are fixed-shape and bounded: the attach request carries the
 //! partition extent the caller probed (`lib/partition`), the filesystem
@@ -28,7 +29,7 @@
 use crate::blkio::{BlkMedium, BLK_MEDIUM_LEN};
 use crate::driver::block::{DiscLayout, DiscardCapability, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE};
 use crate::driver::filesystem::MountFlags;
-use crate::le::{decode_bool, exact_len, put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::le::{exact_len, put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::sysinfo::MOUNT_TARGET_MAX;
 use crate::Errno;
 
@@ -106,6 +107,48 @@ impl VolumeFsType {
             Self::Adfs => b"tairix,volume-adfs",
             Self::Affs => b"tairix,volume-affs",
         }
+    }
+}
+
+/// A set of filesystem types, one bit a [`VolumeFsType`]'s wire value: the
+/// filesystems a caller accepts a volume holding. Never empty.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct VolumeFsTypes(u32);
+
+impl VolumeFsTypes {
+    /// The set of `types`, or `None` where there are none.
+    #[must_use]
+    pub fn of(types: impl IntoIterator<Item = VolumeFsType>) -> Option<Self> {
+        let bits = types
+            .into_iter()
+            .fold(0, |bits, fstype| bits | 1 << fstype.as_u8());
+        (bits != 0).then_some(Self(bits))
+    }
+
+    /// Whether the set holds `fstype`.
+    #[must_use]
+    pub const fn contains(self, fstype: VolumeFsType) -> bool {
+        self.0 & 1 << fstype.as_u8() != 0
+    }
+
+    /// The set's wire bits.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// The set `bits` spells.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a bit naming no filesystem type, or none
+    /// set.
+    pub const fn from_bits(bits: u32) -> Result<Self, Errno> {
+        let known = (1 << VolumeFsType::ALL.len()) - 1;
+        if bits == 0 || bits & !known != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self(bits))
     }
 }
 
@@ -243,7 +286,7 @@ const ATTACH_FIXED_LEN: usize = 8 + 8 + 8 + 8 + 1 + 1;
 pub const VOLUME_ATTACH_MAX_LEN: usize = ATTACH_FIXED_LEN + VOLUME_NAME_MAX;
 
 /// Encoded length of a [`VolumeDetachRequest`]: the volume identity plus
-/// the force byte.
+/// the [`DetachMode`] byte.
 pub const VOLUME_DETACH_LEN: usize = VOLUME_ID_LEN + 1;
 
 /// The most one `volume_read` or `volume_write` moves: one served window,
@@ -569,25 +612,76 @@ impl<'a> VolumeAttachRequest<'a> {
     }
 }
 
+/// How a [`VolumeDetachRequest`] takes its volume down.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum DetachMode {
+    /// Flush first and fail closed.
+    Plain = 0,
+    /// The audited force-unmount.
+    Force = 1,
+    /// A force for a volume recorded lost, a plain detach for any other: the
+    /// kernel decides from the volume's state as it stands, so a stale view
+    /// can never force a healthy volume that took a lost one's identity.
+    Lost = 2,
+}
+
+impl DetachMode {
+    /// The wire byte for this mode.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Recover a mode from its wire byte.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `value` names no mode.
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::Plain),
+            1 => Ok(Self::Force),
+            2 => Ok(Self::Lost),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Whether a detach in this mode forces a volume that is, or is not,
+    /// `lost`.
+    #[must_use]
+    pub const fn forces(self, lost: bool) -> bool {
+        match self {
+            Self::Plain => false,
+            Self::Force => true,
+            Self::Lost => lost,
+        }
+    }
+}
+
 /// One runtime volume-detach request: take the volume published under
 /// `volume_id` out of service.
 ///
-/// A plain detach (`force == false`) flushes first and fails closed — a
-/// volume whose uncommitted data cannot be committed (a flush failure, or
-/// a surprise-removed *unavailable* volume), a volume a descriptor still
-/// holds a node of, and one another volume is shown beneath all stay
-/// attached. A **force** detach (`force == true`) is the deliberate,
-/// separately-audited force-unmount: it detaches the volumes shown beneath
-/// first, revokes the descriptors still holding its nodes, and retracts the
-/// volume even when nothing can be committed, discarding any retained
-/// uncommitted writes; what it gave up is logged with its own audit event.
+/// A plain detach flushes first and fails closed, each refusal its own errno:
+/// [`Errno::PermissionDenied`] without authority over the volume;
+/// [`Errno::NotFound`] for an identity not attached; [`Errno::Busy`] while a
+/// descriptor, a working directory, an image on it or another operation
+/// holds it; [`Errno::NotEmpty`] while a binding stands within it; a refused
+/// flush's own errno; and, from its writes, the refusal
+/// [`MountAvailability::plain_detach_refusal`](crate::sysinfo::MountAvailability::plain_detach_refusal)
+/// names for a vanished or conflicted volume. A **forced** detach is the
+/// deliberate, separately-audited force-unmount: it detaches the volumes
+/// shown beneath first, revokes the descriptors still holding its nodes, and
+/// retracts the volume even when nothing can be committed, discarding any
+/// retained uncommitted writes; what it gave up is logged with its own audit
+/// event. [`DetachMode`] says which a request is. None widens the authority
+/// a detach needs.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct VolumeDetachRequest {
     /// The volume's stable 16-byte identity, as the forest published it.
     pub volume_id: [u8; VOLUME_ID_LEN],
-    /// `true` for the audited force-unmount that discards retained
-    /// uncommitted data rather than failing closed.
-    pub force: bool,
+    /// How the volume is taken down.
+    pub mode: DetachMode,
 }
 
 impl VolumeDetachRequest {
@@ -607,7 +701,7 @@ impl VolumeDetachRequest {
             return Err(Errno::BufferTooSmall);
         }
         buf[..VOLUME_ID_LEN].copy_from_slice(&self.volume_id);
-        buf[VOLUME_ID_LEN] = u8::from(self.force);
+        buf[VOLUME_ID_LEN] = self.mode.as_u8();
         Ok(VOLUME_DETACH_LEN)
     }
 
@@ -618,8 +712,8 @@ impl VolumeDetachRequest {
     /// * [`Errno::LengthOutOfRange`] if `bytes` is not exactly
     ///   [`VOLUME_DETACH_LEN`] bytes.
     /// * [`Errno::OutOfRange`] for the reserved all-zero identity (fail
-    ///   closed; it can never name a published volume), or a force byte
-    ///   that is neither `0` nor `1` (wire corruption is refused, never
+    ///   closed; it can never name a published volume), or a mode byte
+    ///   naming no [`DetachMode`] (wire corruption is refused, never
     ///   guessed at).
     pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() != VOLUME_DETACH_LEN {
@@ -630,8 +724,8 @@ impl VolumeDetachRequest {
         if volume_id == [0u8; VOLUME_ID_LEN] {
             return Err(Errno::OutOfRange);
         }
-        let force = decode_bool(bytes[VOLUME_ID_LEN])?;
-        Ok(Self { volume_id, force })
+        let mode = DetachMode::from_u8(bytes[VOLUME_ID_LEN])?;
+        Ok(Self { volume_id, mode })
     }
 }
 
@@ -1053,10 +1147,10 @@ mod tests {
 
     #[test]
     fn detach_round_trips_and_rejects_nil_and_wrong_lengths() {
-        for force in [false, true] {
+        for mode in [DetachMode::Plain, DetachMode::Force, DetachMode::Lost] {
             let req = VolumeDetachRequest {
                 volume_id: [7; 16],
-                force,
+                mode,
             };
             let mut buf = [0u8; VOLUME_DETACH_LEN];
             let n = req.encode(&mut buf).expect("encodes");
@@ -1068,7 +1162,7 @@ mod tests {
         assert_eq!(
             VolumeDetachRequest {
                 volume_id: [0; 16],
-                force: false,
+                mode: DetachMode::Plain,
             }
             .encode(&mut buf),
             Err(Errno::OutOfRange)
@@ -1079,7 +1173,7 @@ mod tests {
         );
         let n = VolumeDetachRequest {
             volume_id: [7; 16],
-            force: true,
+            mode: DetachMode::Force,
         }
         .encode(&mut buf)
         .expect("encodes");
@@ -1087,12 +1181,24 @@ mod tests {
             VolumeDetachRequest::decode(&buf[..n - 1]),
             Err(Errno::LengthOutOfRange)
         );
-        // A force byte outside {0, 1} is wire corruption, refused whole.
-        let mut bad = buf;
-        bad[VOLUME_ID_LEN] = 2;
-        assert_eq!(
-            VolumeDetachRequest::decode(&bad[..n]),
-            Err(Errno::OutOfRange)
-        );
+        // A mode byte naming no mode is wire corruption, refused whole.
+        for byte in [3, 255] {
+            let mut bad = buf;
+            bad[VOLUME_ID_LEN] = byte;
+            assert_eq!(
+                VolumeDetachRequest::decode(&bad[..n]),
+                Err(Errno::OutOfRange)
+            );
+        }
+    }
+
+    #[test]
+    fn a_detach_taking_the_lost_forces_only_a_lost_volume() {
+        for lost in [false, true] {
+            assert!(!DetachMode::Plain.forces(lost));
+            assert!(DetachMode::Force.forces(lost));
+        }
+        assert!(DetachMode::Lost.forces(true));
+        assert!(!DetachMode::Lost.forces(false));
     }
 }

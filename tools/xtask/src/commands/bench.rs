@@ -162,37 +162,41 @@ pub fn run(opts: &Options) -> Result<(), String> {
     let chosen = |decision: Option<Decision>| {
         decision.map_or("already resolved", |decision| decision.chosen)
     };
-    println!(
+    outln!(
         "bench: raster kernels {}, {} and {}",
         chosen(decisions.blend),
         chosen(decisions.blur),
         chosen(decisions.scan)
-    );
+    )?;
     let clock = NanoClock::new();
     let harness = BenchHarness::with_budget(&clock, opts.iters, opts.rounds);
     // The harness clamps its budget, so report what it will actually run
     // rather than what was asked for.
     let iters = harness.iters();
-    println!(
+    outln!(
         "bench: {iters} iterations x {} rounds per case, median round, host clock in ns",
         harness.rounds()
-    );
-    println!("bench: evidence for a completion report, never a pass/fail gate");
-    println!(
+    )?;
+    outln!("bench: evidence for a completion report, never a pass/fail gate")?;
+    outln!(
         "\n{:<10} {:<34} {:>10} {:>14} {:>9}",
-        "family", "case", "px", "ns/frame", "ns/px"
-    );
+        "family",
+        "case",
+        "px",
+        "ns/frame",
+        "ns/px"
+    )?;
     for family in families {
-        eprintln!("xtask: [bench] {} — {}", family.name, family.what);
+        noteln!("xtask: [bench] {} — {}", family.name, family.what);
         for row in (family.measure)(&harness)? {
-            println!(
+            outln!(
                 "{:<10} {:<34} {:>10} {:>14.1} {:>9.3}",
                 family.name,
                 row.case,
                 row.pixels,
                 row.ns_per_call(iters),
                 row.ns_per_pixel(iters)
-            );
+            )?;
         }
     }
     Ok(())
