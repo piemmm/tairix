@@ -70,10 +70,9 @@ fast path:
 
 1. **Lock-free closed-state check.** An `AtomicU32` is consulted before
    the mailbox lock; sends to destroyed ports return `Errno::NotFound`
-   without acquiring the lock. The loom harness in
-   `kernel/ipc/tests/loom.rs` models this state machine; it is built only
-   under `--cfg loom` and no stage runs it until `plans/OPEN-DEFECTS.md`
-   D131 is resolved.
+   without acquiring the lock. `kernel/ipc/tests/loom.rs` models this
+   state machine against `destroy` over every interleaving
+   (`cargo xtask loom`).
 2. **Capability check** against the sender's `TaskCapabilities`.
 3. **Size check** against the per-port `max_payload`, additionally
    bounded by the global ABI cap `IPC_MESSAGE_MAX_PAYLOAD_LEN` (1 MiB

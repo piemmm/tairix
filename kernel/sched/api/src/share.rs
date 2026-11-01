@@ -107,7 +107,7 @@ impl Default for WeightLedger {
 impl WeightLedger {
     /// A ledger for a task counted nowhere.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             counted: SpinLock::new(None),
         }

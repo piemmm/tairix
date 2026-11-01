@@ -160,3 +160,30 @@ fn loom_one_bit_has_exactly_one_winner() {
         );
     });
 }
+
+tairix_sync::global! {
+    static FRESH: SpinLock<u32> = SpinLock::new(0);
+}
+
+// Loom's own visibility arms take a visibility as plain tokens, so each form
+// `global!` accepts is built here, where the model checker expands it.
+tairix_sync::global! {
+    pub static PUBLIC: SpinLock<u32> = SpinLock::new(1);
+}
+
+tairix_sync::global! {
+    pub(crate) static SCOPED: SpinLock<u32> = SpinLock::new(2);
+}
+
+/// A `global!` static is built afresh by each model execution, both threads
+/// racing its first use, so no execution starts from what an earlier one left.
+#[test]
+fn loom_a_global_is_fresh_in_every_execution() {
+    loom::model(|| {
+        let peer = thread::spawn(|| *FRESH.lock() += 1);
+        *FRESH.lock() += 1;
+        peer.join().unwrap();
+        assert_eq!(*FRESH.lock(), 2);
+        assert_eq!(*PUBLIC.lock() + *SCOPED.lock(), 3);
+    });
+}

@@ -36,8 +36,7 @@ proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = ["proptest"] }
 
 
-# Loom is only pulled in when the caller opts in with
-# `RUSTFLAGS="--cfg loom" cargo test ...`. Mirrors `kernel/sync` and
-# `kernel/sched`.
+# Loom, linked only into the models `cargo xtask loom` builds under
+# `--cfg loom`.
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"

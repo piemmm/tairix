@@ -22,6 +22,9 @@ tairix-cpuops = { path = "../cpuops", version = "=0.0.0", default-features = fal
 # The arch-neutral capability vocabulary (`CpuFeature`/`CpuFeatureSet`) a
 # candidate's required-feature gate is expressed in.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The static the resolved implementation is published through, in the form
+# the model checker can build.
+tairix-sync = { path = "../sync", version = "=0.0.0" }
 # The one shared non-cryptographic hash the self-verify fingerprint is taken
 # with, so this crate does not carry a private copy of a hash function.
 tairix-hash = { path = "../hash", version = "=0.0.0" }

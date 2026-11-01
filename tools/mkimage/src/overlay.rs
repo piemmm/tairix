@@ -254,16 +254,13 @@ mod tests {
 
     /// Every label the overlay names is one the pinned base tree exports, on
     /// the node it means: a label the tree lacks would leave the loader
-    /// refusing the whole overlay on the card. Skipped where the firmware
-    /// cache is not populated.
+    /// refusing the whole overlay on the card. Skipped only where nothing
+    /// stages the firmware, as in an offline `cargo test`.
     #[test]
     fn the_display_overlay_names_labels_the_pinned_tree_exports() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../target/pi-firmware/bcm2711-rpi-4-b.dtb"
-        );
-        let Ok(base) = std::fs::read(path) else {
-            eprintln!("SKIP: no firmware DTB at {path}");
+        let workspace = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let Some(base) = tairix_fuzzseed::firmware::pi4_dtb(workspace) else {
+            eprintln!("SKIP: no pinned Pi 4 firmware tree is staged");
             return;
         };
         let fdt = Fdt::new(&base).expect("the pinned tree");

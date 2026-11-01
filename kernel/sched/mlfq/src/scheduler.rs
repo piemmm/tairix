@@ -197,7 +197,7 @@ pub struct Scheduler<A: SchedulerArch> {
     ///
     /// The slot is the publication point read by the syscall entry
     /// path (`kernel/tairix-kernel::dispatch::production_dispatch`,
-    /// Stage 2.7 follow-up (f5)). Per the `kernel/sync::RwLock`
+    /// Stage 2.7 follow-up (f5)). Per the `tairix_sync::RwLock`
     /// process-context rule, readers must run in
     /// process context on the issuing CPU — which is how syscall
     /// entry is reached on every architecture. There is no global
@@ -659,17 +659,16 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// `step` takes a reader lock on the task registry
     /// (`RwLock<BTreeMap<TaskId, _>>`) and a `SpinLock` on the
     /// overflow list. Both are forbidden from interrupt context by
-    /// `kernel/sync` (see `rwlock.rs` module docs: "Process /
+    /// `lib/sync` (see `rwlock.rs` module docs: "Process /
     /// kernel-thread context only. Never from an interrupt handler.").
     /// An ISR-driven `step` would deadlock against the same CPU's
     /// in-progress `spawn` (writer-held registry lock) or a mid-
     /// `drain_overflow_to` (held overflow `SpinLock`). The arch port's
     /// timer ISR therefore restricts itself to bumping the observable
     /// counter; the cooperative `step` loop driven by the kernel-
-    /// thread context is the only writer of run-queue state. A future
-    /// commit that lands IRQ-safe locks (e.g. `irq::SpinLock` from
-    /// `kernel/sync`) can extend this entry point to drive a real
-    /// preemption step — the public surface need not change.
+    /// thread context is the only writer of run-queue state. Holding both
+    /// under `lib/sync`'s `IrqSafeSpinLock` would let this entry point drive
+    /// a real preemption step without changing its public surface.
     ///
     /// # Why this is on `Scheduler<A>` and not on `SchedulerArch`
     ///
@@ -1156,7 +1155,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// This is the lookup the syscall entry path uses to recover the
     /// caller's [`TaskId`] before consulting the capability table
     /// (step 1: identify the caller — kernel-provided,
-    /// not caller-supplied). Per the `kernel/sync::RwLock`
+    /// not caller-supplied). Per the `tairix_sync::RwLock`
     /// process-context rule, this method must be
     /// called only in process context on the issuing CPU; it must not
     /// be invoked from an interrupt handler.
@@ -1700,7 +1699,9 @@ mod tests {
         };
         let sched = Arc::new(Scheduler::new(cfg, arch.clone()).expect("sched"));
         let a2 = arch.clone();
-        let s2 = sched.clone();
+        // Weak: the scheduler owns the task, so a strong reference held by the
+        // task's own body would keep both alive past the test.
+        let s2 = Arc::downgrade(&sched);
         let seen_cpu = Arc::new(AtomicU64::new(0));
         let seen_task = Arc::new(AtomicU64::new(0));
         let seen_cpu2 = seen_cpu.clone();
@@ -1710,6 +1711,7 @@ mod tests {
                 // Simulate 50 ticks of work, then observe *before* the
                 // body returns (while the task is still current).
                 a2.advance_ticks(50);
+                let s2 = s2.upgrade().expect("the scheduler runs this body");
                 seen_cpu2.store(s2.cpu_busy_ticks(ctx.cpu).unwrap(), Ordering::Release);
                 seen_task2.store(s2.cpu_ticks_of(ctx.task_id).unwrap(), Ordering::Release);
                 TaskAction::Yield

@@ -22,6 +22,7 @@
 use std::ffi::OsString;
 use std::process::Command;
 
+use crate::commands::libtest::Account;
 use crate::commands::parallel::{self, Job};
 use crate::Context;
 
@@ -43,7 +44,9 @@ pub struct Target {
 /// How a harness is built against loom.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Build {
-    /// The crate swaps its own atomics for loom's under `--cfg loom`.
+    /// Built under `--cfg loom`, which swaps loom's atomics into every crate
+    /// of the build that reaches its atomics through a loom shim, `lib/sync`'s
+    /// primitives among them.
     SwappedAtomics,
     /// The models drive generic code over loom's types themselves, so only
     /// this feature, which links loom, is needed.
@@ -88,6 +91,32 @@ pub const TARGETS: &[Target] = &[
                       secondary-start handshake: an answer racing the \
                       withdrawal on one compare-and-swap, and a core waiting \
                       on the verdict that took its answer",
+    },
+    Target {
+        package: "tairix-kernel-mem",
+        dir: "kernel/mem",
+        harness: "loom",
+        build: Build::SwappedAtomics,
+        description: "the frame allocator: two allocations never share a frame, \
+                      and an allocation and free on each of two threads returns \
+                      every frame",
+    },
+    Target {
+        package: "tairix-kernel-ipc",
+        dir: "kernel/ipc",
+        harness: "loom",
+        build: Build::SwappedAtomics,
+        description: "a port's lock-free send fast path against its destroy: no \
+                      delivered message outlives the drain, and a port seen \
+                      closed stays closed",
+    },
+    Target {
+        package: "tairix-kernel-sched-mlfq",
+        dir: "kernel/sched/mlfq",
+        harness: "loom",
+        build: Build::SwappedAtomics,
+        description: "the run queue's lock-free deque: each task goes to exactly \
+                      one party, never lost and never duplicated",
     },
 ];
 
@@ -168,9 +197,10 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     parallel::run(&ctx.children, jobs, concurrency)
 }
 
-/// One package's model-checked harness.
+/// One package's model-checked harness, held to running every model in it.
 fn job_for(ctx: &Context, target: &Target) -> Job {
     Job::new(format!("loom {}", target.package), command_for(ctx, target))
+        .accounted(Account::Everything)
 }
 
 /// The command that builds and runs one package's harness.
@@ -198,8 +228,9 @@ fn command_for(ctx: &Context, target: &Target) -> Command {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_for, parse, selected, Build, TARGETS};
+    use super::{command_for, job_for, parse, selected, Build, TARGETS};
     use crate::children::Children;
+    use crate::commands::libtest::Account;
     use crate::rustflags::tests::flags_of;
     use crate::Context;
     use std::ffi::OsString;
@@ -230,6 +261,24 @@ mod tests {
             "the cfg closes the encoded flags"
         );
         assert!(removes_plain);
+    }
+
+    /// Every model of every target runs, none ignored or filtered.
+    #[test]
+    fn every_loom_job_is_held_to_running_every_model() {
+        let ctx = Context {
+            workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            cargo: OsString::from("true"),
+            children: Arc::new(Children::new(None)),
+        };
+        for target in TARGETS {
+            assert_eq!(
+                job_for(&ctx, target).account(),
+                Some(Account::Everything),
+                "{}",
+                target.package
+            );
+        }
     }
 
     #[test]
@@ -273,6 +322,46 @@ mod tests {
                 .join(format!("{}.rs", target.harness));
             assert!(path.exists(), "missing loom harness: {}", path.display());
         }
+    }
+
+    /// Every harness gated on loom, under any name, is the one a target runs,
+    /// so no model builds empty in every other stage and is model-checked by
+    /// none.
+    #[test]
+    fn every_loom_harness_in_the_workspace_is_enrolled() {
+        let root = crate::workspace_root_from_manifest_dir().expect("the workspace root");
+        let mut unenrolled = Vec::new();
+        for (_, (dir, _)) in crate::commands::feature_lane::workspace_manifests(&root)
+            .expect("the workspace manifests")
+        {
+            let Ok(entries) = std::fs::read_dir(root.join(&dir).join("tests")) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.expect("a test entry").path();
+                let Some(harness) = path
+                    .extension()
+                    .filter(|extension| *extension == "rs")
+                    .and_then(|_| path.file_stem())
+                    .and_then(|stem| stem.to_str())
+                else {
+                    continue;
+                };
+                let text = std::fs::read_to_string(&path).expect("a test source");
+                let gated =
+                    text.contains("#![cfg(loom)]") || text.contains("#![cfg(feature = \"loom\")]");
+                let enrolled = TARGETS
+                    .iter()
+                    .any(|target| target.dir == dir && target.harness == harness);
+                if gated && !enrolled {
+                    unenrolled.push(format!("{dir}/tests/{harness}.rs"));
+                }
+            }
+        }
+        assert!(
+            unenrolled.is_empty(),
+            "loom harnesses no stage runs: {unenrolled:?}"
+        );
     }
 
     /// A harness gated on anything but the switch its build mode sets compiles

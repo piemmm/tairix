@@ -272,7 +272,12 @@ is installed automatically when `rustup` is present. External tools used by
 
 ```sh
 cargo install --locked cargo-deny mdbook
+npm ci --prefix tests/integration   # with Node.js: the wasm32 harnesses' pinned browser
 ```
+
+Its test stage also checks device discovery against the pinned Raspberry Pi
+firmware, fetching what `target/pi-firmware` lacks; offline, set
+`TAIRIX_PI_FIRMWARE` to a directory staged per `tools/mkimage/firmware.lock`.
 
 The C-ABI conformance tests (`cargo xtask test --qemu`) additionally need the
 pinned `clang` / `ld.lld` (`tairix_cc::REQUIRED_CLANG_VERSION`). Install them

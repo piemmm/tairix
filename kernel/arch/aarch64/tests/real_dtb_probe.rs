@@ -8,12 +8,11 @@
 //! order, depth, and property layout), where a parser defect would
 //! otherwise only surface as a silent on-metal boot death.
 //!
-//! The blob is the checksummed firmware input `tools/xtask` fetches into
-//! `target/pi-firmware/` for the Pi image build. When that cache has not
-//! been populated the test reports a skip and passes: the fixture-based
-//! unit tests still cover the logic, and an absent download must not
-//! fail an offline `cargo test` (fail closed is for
-//! authority, not for missing optional inputs).
+//! The blob is the checksummed firmware input `tools/xtask` stages for the Pi
+//! image build, located by `tairix_fuzzseed::firmware`'s one rule. The gate's
+//! test stage stages it and names it, and a run so handed the firmware fails
+//! without the tree rather than passing; only an offline `cargo test` with
+//! no cache skips, since an absent download must not fail it.
 //!
 //! Note: the on-disk file's `/memory@0` carries a zero `reg` — the
 //! firmware patches the real RAM ranges in at boot — so the memory walk
@@ -27,16 +26,10 @@ use tairix_vcmailbox::SD_HOST_COMPATIBLE;
 
 #[test]
 fn real_pi4_dtb_discovery() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../target/pi-firmware/bcm2711-rpi-4-b.dtb"
-    );
-    let blob = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("SKIP: no firmware DTB at {path}: {e}");
-            return;
-        }
+    let workspace = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.."));
+    let Some(blob) = tairix_fuzzseed::firmware::pi4_dtb(workspace) else {
+        eprintln!("SKIP: no pinned Pi 4 firmware tree is staged");
+        return;
     };
     let fdt = Fdt::new(&blob).expect("real DTB parses");
 

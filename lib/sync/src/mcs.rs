@@ -52,30 +52,19 @@ pub struct McsNode {
 }
 
 impl McsNode {
-    /// Construct a fresh, unused node.
-    #[cfg(not(loom))]
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            locked: AtomicBool::new(false),
-            next: AtomicPtr::new(ptr::null_mut()),
-            _pin: PhantomPinned,
-        }
-    }
-
-    /// Construct a fresh, unused node (non-`const` under `loom`).
-    #[cfg(loom)]
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            locked: AtomicBool::new(false),
-            next: AtomicPtr::new(ptr::null_mut()),
-            _pin: PhantomPinned,
+    crate::const_fn! {
+        /// Construct a fresh, unused node.
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                locked: AtomicBool::new(false),
+                next: AtomicPtr::new(ptr::null_mut()),
+                _pin: PhantomPinned,
+            }
         }
     }
 }
 
-#[cfg(not(loom))]
 impl Default for McsNode {
     fn default() -> Self {
         Self::new()
@@ -101,23 +90,14 @@ unsafe impl<T: ?Sized + Send> Send for McsLock<T> {}
 unsafe impl<T: ?Sized + Send> Sync for McsLock<T> {}
 
 impl<T> McsLock<T> {
-    /// Construct a new lock wrapping `value`.
-    #[cfg(not(loom))]
-    #[must_use]
-    pub const fn new(value: T) -> Self {
-        Self {
-            tail: AtomicPtr::new(ptr::null_mut()),
-            data: SyncUnsafeCell::new(value),
-        }
-    }
-
-    /// Construct a new lock wrapping `value` (non-`const` under `loom`).
-    #[cfg(loom)]
-    #[must_use]
-    pub fn new(value: T) -> Self {
-        Self {
-            tail: AtomicPtr::new(ptr::null_mut()),
-            data: SyncUnsafeCell::new(value),
+    crate::const_fn! {
+        /// Construct a new lock wrapping `value`.
+        #[must_use]
+        pub fn new(value: T) -> Self {
+            Self {
+                tail: AtomicPtr::new(ptr::null_mut()),
+                data: SyncUnsafeCell::new(value),
+            }
         }
     }
 

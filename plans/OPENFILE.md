@@ -134,7 +134,7 @@ service's groups cache is a leaf as well, consulted before any driver is
 locked; a miss resolves from the identity table outside it. Nothing parks
 under a spin lock, and no interrupt handler touches any of these. The release
 queue's interleavings are enumerated by a deterministic host test, since loom
-cannot build `kernel/core` (D131); a close against an open, an unlink against
+cannot build `kernel/core` (D1643); a close against an open, an unlink against
 a read, a detach against a descriptor and a rename against an open are
 host-tested in each order.
 

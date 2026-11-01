@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use super::source_tree;
+use super::source_tree::{self, Finding};
 use crate::children::Children;
 
 /// The distinctive token of the draft marker (`// SPEC-DRAFT:`). Matching the
@@ -25,17 +25,8 @@ const MARKER: &str = "SPEC-DRAFT";
 /// The checker's own file, skipped because it necessarily contains [`MARKER`].
 const SELF_FILE: &str = "spec_review.rs";
 
-/// A single offending occurrence: a workspace-relative path and the 1-based
-/// line number that carries an unreviewed draft marker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Violation {
-    pub path: String,
-    pub line: usize,
-    pub text: String,
-}
-
 /// Scan the workspace rooted at `root` and return every draft marker found.
-pub fn scan(root: &Path, children: &Children) -> Result<Vec<Violation>, String> {
+pub fn scan(root: &Path, children: &Children) -> Result<Vec<Finding>, String> {
     let mut out = Vec::new();
     source_tree::for_each_file(root, children, "spec-review", |path, rel, name| {
         if source_tree::is_rust(name) && name != SELF_FILE {
@@ -43,20 +34,16 @@ pub fn scan(root: &Path, children: &Children) -> Result<Vec<Violation>, String> 
         }
         Ok(())
     })?;
-    out.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+    source_tree::sort(&mut out);
     Ok(out)
 }
 
-fn scan_file(path: &Path, rel: &str, out: &mut Vec<Violation>) -> Result<(), String> {
+fn scan_file(path: &Path, rel: &str, out: &mut Vec<Finding>) -> Result<(), String> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| format!("spec-review: cannot read {}: {e}", path.display()))?;
     for (idx, line) in src.lines().enumerate() {
         if line.contains(MARKER) {
-            out.push(Violation {
-                path: rel.to_string(),
-                line: idx + 1,
-                text: line.trim().to_string(),
-            });
+            out.push(Finding::at(rel, idx, line));
         }
     }
     Ok(())
@@ -65,20 +52,12 @@ fn scan_file(path: &Path, rel: &str, out: &mut Vec<Violation>) -> Result<(), Str
 /// Run the check, printing a report and returning an error if any draft
 /// marker remains in the tree.
 pub fn run(root: &Path, children: &Children) -> Result<(), String> {
-    use std::fmt::Write as _;
-    let violations = scan(root, children)?;
-    if violations.is_empty() {
-        return Ok(());
-    }
-    let mut msg = String::from(
+    source_tree::refuse(
         "spec-review: unreviewed draft markers must not reach `main` \
          (AGENTS.md §19.7); review the artefact under the §2.6 bar and \
-         remove the marker:\n",
-    );
-    for v in &violations {
-        let _ = writeln!(msg, "  {}:{}: {}", v.path, v.line, v.text);
-    }
-    Err(msg)
+         remove the marker:",
+        &scan(root, children)?,
+    )
 }
 
 #[cfg(test)]

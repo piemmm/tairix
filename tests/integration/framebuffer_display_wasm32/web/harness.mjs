@@ -100,7 +100,7 @@ async function run() {
     headless: true,
     args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
   };
-  const exe = args.chrome || process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/google-chrome";
+  const exe = args.chrome || process.env.PUPPETEER_EXECUTABLE_PATH;
   if (exe) launchOpts.executablePath = exe;
 
   const browser = await puppeteer.launch(launchOpts);

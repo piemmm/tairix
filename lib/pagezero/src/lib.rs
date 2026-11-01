@@ -102,10 +102,12 @@ pub fn zero_portable(buf: &mut [u8]) {
     buf.fill(0);
 }
 
-/// The implementation in force once [`resolve`] runs. Before that, [`zero`]
-/// falls closed to the portable baseline: the kernel resolves explicitly and
-/// is delivered no feature set, so nothing resolves it earlier.
-static RESOLVED: Resolved<PageZeroFn> = Resolved::new();
+tairix_sync::global! {
+    /// The implementation in force once [`resolve`] runs. Before that, [`zero`]
+    /// falls closed to the portable baseline: the kernel resolves explicitly and
+    /// is delivered no feature set, so nothing resolves it earlier.
+    static RESOLVED: Resolved<PageZeroFn> = Resolved::new();
+}
 
 /// The accelerated candidates available on this build, in descending declared
 /// priority. A target with no block-zero instruction has none and the baseline

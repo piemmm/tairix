@@ -175,7 +175,7 @@ pub struct DamageRect {
 /// so a present never makes its receiver convert a pixel twice. `N` is at
 /// most 255, the most a wire's count byte holds; a wider list does not build:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0080
 /// use tairix_abi::driver::display::DamageRects;
 /// let _ = DamageRects::<256>::new(&[]);
 /// ```

@@ -86,22 +86,24 @@ const DRAW_ATTEMPTS: usize = 8;
 /// early, so a deterministic prefix discloses nothing a user can observe.
 const TASK_ID_BOOT_SEED: u64 = 0x5441_534B_5F49_4400;
 
-/// The one process-wide task-id generator.
-///
-/// System-wide rather than per-policy so no two schedulers can mint the same
-/// id: a process-global keyed by task id (the signal kill gate, a wait queue,
-/// the endpoint registry) cannot tell two schedulers' tasks apart, so a
-/// second instance drawing from its own counter would alias them.
-///
-/// The generator is the *unpredictable* one, and that matters even though an
-/// id is not an authority. Reaching a task is gated by capability and never
-/// by naming its id, so guessing one grants nothing — but the endpoint
-/// registry answers whether an id is live, and that is an existence oracle. A
-/// predictable generator turns a handful of observed ids into the whole
-/// stream, and thus into every live and future task and endpoint id on the
-/// machine, across every tenant sharing it. Admitting a task costs thousands
-/// of cycles, so a cipher-backed draw is free by comparison.
-static TASK_IDS: SpinLock<FastRng> = SpinLock::new(FastRng::seed_from_u64(TASK_ID_BOOT_SEED));
+tairix_sync::global! {
+    /// The one process-wide task-id generator.
+    ///
+    /// System-wide rather than per-policy so no two schedulers can mint the same
+    /// id: a process-global keyed by task id (the signal kill gate, a wait queue,
+    /// the endpoint registry) cannot tell two schedulers' tasks apart, so a
+    /// second instance drawing from its own counter would alias them.
+    ///
+    /// The generator is the *unpredictable* one, and that matters even though an
+    /// id is not an authority. Reaching a task is gated by capability and never
+    /// by naming its id, so guessing one grants nothing — but the endpoint
+    /// registry answers whether an id is live, and that is an existence oracle. A
+    /// predictable generator turns a handful of observed ids into the whole
+    /// stream, and thus into every live and future task and endpoint id on the
+    /// machine, across every tenant sharing it. Admitting a task costs thousands
+    /// of cycles, so a cipher-backed draw is free by comparison.
+    static TASK_IDS: SpinLock<FastRng> = SpinLock::new(FastRng::seed_from_u64(TASK_ID_BOOT_SEED));
+}
 
 /// Re-seed the process-wide generator from the platform's randomness, so ids
 /// differ across boots as well as across tasks.
@@ -148,18 +150,21 @@ pub fn choose_task_id(
     draw_id(&mut TASK_IDS.lock(), taken)
 }
 
-/// Ids withheld from the draw while the kernel holds state keyed by them.
-///
-/// Bounded by the live user threads, the exited processes whose parents have
-/// yet to reap them, and one per driver unloaded through the immediate path
-/// that never returns its number (`plans/OPEN-DEFECTS.md` D271).
-///
-/// Built on first use under the per-boot hash key, which is published before
-/// userland can admit anything: which ids are held is shaped by what an
-/// unprivileged user spawns and keeps, so an unkeyed table would let one pile
-/// its threads into one bucket. A boot that never got a key hashes unkeyed,
-/// the same honest fallback the futex table takes.
-static RESERVED_TASK_IDS: SpinLock<Option<HashSet<TaskId, BuildSipHash13>>> = SpinLock::new(None);
+tairix_sync::global! {
+    /// Ids withheld from the draw while the kernel holds state keyed by them.
+    ///
+    /// Bounded by the live user threads, the exited processes whose parents have
+    /// yet to reap them, and one per driver unloaded through the immediate path
+    /// that never returns its number (`plans/OPEN-DEFECTS.md` D271).
+    ///
+    /// Built on first use under the per-boot hash key, which is published before
+    /// userland can admit anything: which ids are held is shaped by what an
+    /// unprivileged user spawns and keeps, so an unkeyed table would let one pile
+    /// its threads into one bucket. A boot that never got a key hashes unkeyed,
+    /// the same honest fallback the futex table takes.
+    static RESERVED_TASK_IDS: SpinLock<Option<HashSet<TaskId, BuildSipHash13>>> =
+        SpinLock::new(None);
+}
 
 /// Hold `id` against the draw until [`release_task_id`] returns it.
 ///

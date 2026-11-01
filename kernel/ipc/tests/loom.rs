@@ -1,15 +1,5 @@
-//! Loom model-checking harness for the lock-free send fast path of
-//! [`tairix_kernel_ipc::port::Port`].
-//!
-//! Run with:
-//!
-//! ```text
-//! RUSTFLAGS="--cfg loom" cargo test --test loom \
-//!     -p tairix-kernel-ipc --release
-//! ```
-//!
-//! When `loom` is *not* enabled, this file compiles to an empty test
-//! binary. No stage runs it until `plans/OPEN-DEFECTS.md` D131 is resolved.
+//! Loom models of [`tairix_kernel_ipc::port::Port`]'s lock-free send fast
+//! path against `destroy`, run by `cargo xtask loom`.
 //!
 //! The invariant under test is:
 //!
@@ -21,11 +11,9 @@
 //! > `destroy` drained the mailbox (which would constitute a leaked
 //! > delivery on a dead port).
 //!
-//! The model is small enough to enumerate every interleaving in
-//! seconds. The properties checked are the same ones the
-//! deterministic stress test in `tests/integration.rs` asserts; loom
-//! adds confidence by exhaustively exploring orderings the host
-//! scheduler may not produce on its own.
+//! Each model keeps to two contending threads: loom cannot exhaust a schedule
+//! in which two threads spin on a lock whose holder it has preempted, since
+//! every spin adds a branch the search must then explore.
 
 #![cfg(loom)]
 
@@ -58,7 +46,7 @@ fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
 
 fn make_creator() -> TaskCapabilities {
     TaskCapabilities::derive(
-        TaskId(1),
+        ProcessId(1),
         UserId(1),
         caps_of(&[CapabilityId::IPC_BIND_PRIVILEGED, CapabilityId::NET_RAW]),
         caps_of(&[CapabilityId::IPC_BIND_PRIVILEGED, CapabilityId::NET_RAW]),
@@ -68,7 +56,7 @@ fn make_creator() -> TaskCapabilities {
 
 fn make_sender() -> TaskCapabilities {
     TaskCapabilities::derive(
-        TaskId(7),
+        ProcessId(7),
         UserId(1),
         caps_of(&[CapabilityId::NET_RAW]),
         caps_of(&[CapabilityId::NET_RAW]),
@@ -128,11 +116,11 @@ fn loom_send_versus_destroy_never_leaks() {
     });
 }
 
+/// Two sends racing a destroy: neither may leave a message the destroy does
+/// not drain, and a send that found the port closed is never followed by one
+/// that finds it open.
 #[test]
 fn loom_send_fast_path_observes_closed_state() {
-    // Two senders racing while destroy runs concurrently. None of
-    // them may end up with a buffered message that survives the
-    // destroy.
     loom::model(|| {
         let port = Arc::new(
             Port::create(
@@ -147,24 +135,30 @@ fn loom_send_fast_path_observes_closed_state() {
             )
             .expect("open"),
         );
-
-        let s1 = {
+        let destroyer = {
             let port = port.clone();
-            let task = make_sender();
-            thread::spawn(move || port.send(&task, b"a", &DiscardSink))
+            thread::spawn(move || port.destroy(&DiscardSink))
         };
-        let s2 = {
-            let port = port.clone();
-            let task = make_sender();
-            thread::spawn(move || port.send(&task, b"b", &DiscardSink))
-        };
-        port.destroy(&DiscardSink);
 
-        let _ = s1.join().expect("s1 joined");
-        let _ = s2.join().expect("s2 joined");
+        let task = make_sender();
+        let first = port.send(&task, b"a", &DiscardSink);
+        let second = port.send(&task, b"b", &DiscardSink);
+        destroyer.join().expect("destroyer joined");
 
-        // Mailbox must be empty no matter who won.
-        assert!(port.recv().is_none());
+        for result in [first, second] {
+            assert!(
+                matches!(result, Ok(()) | Err(Errno::NotFound)),
+                "unexpected send result: {result:?}"
+            );
+        }
+        assert!(
+            !(first.is_err() && second.is_ok()),
+            "a send found the port open after an earlier one found it closed"
+        );
+        assert!(
+            port.recv().is_none(),
+            "destroy drained every delivered message"
+        );
         assert!(port.is_closed());
     });
 }

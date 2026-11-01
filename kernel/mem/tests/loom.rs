@@ -1,19 +1,7 @@
-//! Loom model-checking harness for the frame allocator.
+//! Loom models of the frame allocator, run by `cargo xtask loom`.
 //!
-//! Run with:
-//!
-//! ```text
-//! RUSTFLAGS="--cfg loom" cargo test --test loom \
-//!     -p tairix-kernel-mem --release
-//! ```
-//!
-//! When the `loom` cfg is *not* set this file compiles to an empty test
-//! binary so the default `cargo test` workflow stays fast (mirrors the
-//! convention established by `kernel/sync/tests/loom.rs`).
-//!
-//! We exercise only the public allocator API. Loom traps every
-//! `SpinLock::lock` / `unlock` performed by `FrameAllocator`'s internal
-//! lock and explores every legal interleaving.
+//! They drive the public allocator API only, and loom explores every
+//! interleaving of the allocator's internal `SpinLock`.
 
 #![cfg(loom)]
 
@@ -24,10 +12,13 @@ use tairix_kernel_mem::{
     BootMemoryMap, FrameAllocator, MemoryClass, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
 
+/// Above the frame at physical zero, which the allocator never enrols.
+const RAM_BASE: u64 = 0x10_0000;
+
 fn small_map(pages: usize) -> BootMemoryMap {
     let mut m = BootMemoryMap::new();
     m.push(MemoryRegion {
-        start: PhysAddr::new(0),
+        start: PhysAddr::new(RAM_BASE),
         length: (pages * PAGE_SIZE) as u64,
         kind: RegionKind::Usable,
     });
@@ -44,13 +35,10 @@ fn concurrent_alloc_does_not_double_hand_out() {
         let f0 = a.alloc(MemoryClass::Kernel).ok();
         let f1 = t1.join().unwrap();
 
-        match (f0, f1) {
-            (Some(x), Some(y)) => assert_ne!(x, y, "two threads got the same frame"),
-            (Some(_), None) | (None, Some(_)) | (None, None) => {
-                // Either ordering is allowed; only "both got a frame and
-                // they collide" is a bug.
-            }
-        }
+        let (Some(x), Some(y)) = (f0, f1) else {
+            panic!("four free frames refused one of two requests: {f0:?} {f1:?}");
+        };
+        assert_ne!(x, y, "two threads got the same frame");
     });
 }
 
@@ -58,18 +46,20 @@ fn concurrent_alloc_does_not_double_hand_out() {
 fn alloc_then_free_round_trip_concurrent() {
     loom::model(|| {
         let a = Arc::new(FrameAllocator::new(&small_map(2)).unwrap());
+        let before = a.free_frames();
         let a1 = a.clone();
         let t1 = thread::spawn(move || {
-            if let Ok(f) = a1.alloc(MemoryClass::Kernel) {
-                a1.free(f).unwrap();
-            }
+            let f = a1
+                .alloc(MemoryClass::Kernel)
+                .expect("two frames for two requests");
+            a1.free(f).unwrap();
         });
-        if let Ok(f) = a.alloc(MemoryClass::Kernel) {
-            a.free(f).unwrap();
-        }
+        let f = a
+            .alloc(MemoryClass::Kernel)
+            .expect("two frames for two requests");
+        a.free(f).unwrap();
         t1.join().unwrap();
-        // After both threads have completed all allocs+frees, every
-        // frame must be free again.
-        assert_eq!(a.free_frames(), 2);
+        assert_eq!(before, 2, "both frames enrolled");
+        assert_eq!(a.free_frames(), before, "every frame drawn came back");
     });
 }

@@ -692,11 +692,16 @@ impl Iterator for DistinctArrays<'_> {
 /// ceiling on the number of arrays; the caller drives it to build one
 /// [`ArrayIdentity`] per array:
 ///
-/// ```ignore
+/// ```
+/// # use tairix_raidmeta::{distinct_arrays, ArrayIdentity, AssemblyError, Candidate};
+/// # fn assemble(candidates: Vec<Candidate>) -> Result<(), AssemblyError> {
 /// for uuid in distinct_arrays(&candidates) {
 ///     let identity = ArrayIdentity::resolve(uuid, &candidates)?;
 ///     // …assemble this array from its members in `candidates`…
+/// #   drop(identity);
 /// }
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// A `Candidate` is only offered once its superblock passed

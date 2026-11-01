@@ -118,6 +118,19 @@ jobs:
       - name: Install pinned QEMU
         run: tools/ci/install-qemu.sh
 
+      # The wasm32 verticals run under Node, and the two browser ones drive the
+      # headless Chrome that the puppeteer pinned by
+      # tests/integration/package-lock.json installs into ~/.cache/puppeteer,
+      # which persists on the runner. `npm ci` installs exactly the lockfile,
+      # every package checked against its recorded integrity hash.
+      - name: Set up Node.js 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+
+      - name: Install the wasm32 harnesses' pinned browser
+        run: npm ci --prefix tests/integration
+
       # Every build signs with a secret key set and the kernels it builds trust
       # only that set. A runner draws its own once and keeps it in its home.
       - name: cargo xtask keys init

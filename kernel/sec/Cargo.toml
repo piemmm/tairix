@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 # Stage 2.4 dependency rules (issue brief): kernel/sec may depend only on
-# kernel/sync, kernel/mem, and the shared lib/* crates `abi`, `caps`,
+# lib/sync, kernel/mem, and the shared lib/* crates `abi`, `caps`,
 # `crypto`, `log`, and `util`. `kernel/mem` is pulled in at Stage 4.D
 # (DMA capability gate) to wrap the per-process DMA pool
 # in a `CapabilityId::MEM_DMA` check that emits a structured audit

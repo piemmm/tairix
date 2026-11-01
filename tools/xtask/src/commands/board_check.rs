@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use super::source_tree;
+use super::source_tree::{self, Finding};
 use crate::children::Children;
 
 /// The roots the rule binds.
@@ -93,17 +93,9 @@ const DENIED_WORDS: &[&str] = &[
 /// `Pi`; `PI` and `pi` are the constant, as in `FRAC_PI_4` and `pi/4`.
 const PI_MODELS: &[&str] = &["3", "3b", "4", "4b", "5", "400", "500"];
 
-/// A single offending occurrence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Violation {
-    pub path: String,
-    pub line: usize,
-    pub text: String,
-}
-
 /// Scan the workspace rooted at `root` and return every violation outside
 /// the allow-list and grandfather list.
-pub fn scan(root: &Path, children: &Children) -> Result<Vec<Violation>, String> {
+pub fn scan(root: &Path, children: &Children) -> Result<Vec<Finding>, String> {
     let mut out = Vec::new();
     source_tree::for_each_file(root, children, "board-check", |path, rel, name| {
         if !SCANNED.iter().any(|p| rel.starts_with(p))
@@ -117,16 +109,12 @@ pub fn scan(root: &Path, children: &Children) -> Result<Vec<Violation>, String> 
             .map_err(|e| format!("board-check: cannot read {}: {e}", path.display()))?;
         for (idx, line) in src.lines().enumerate() {
             if names_a_board(line) {
-                out.push(Violation {
-                    path: rel.to_string(),
-                    line: idx + 1,
-                    text: line.trim().to_string(),
-                });
+                out.push(Finding::at(rel, idx, line));
             }
         }
         Ok(())
     })?;
-    out.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+    source_tree::sort(&mut out);
     Ok(out)
 }
 
@@ -185,19 +173,11 @@ fn camel_parts(word: &str) -> impl Iterator<Item = &str> {
 /// Run the check, printing a report and returning an error if any
 /// non-grandfathered violation remains.
 pub fn run(root: &Path, children: &Children) -> Result<(), String> {
-    use std::fmt::Write as _;
-    let violations = scan(root, children)?;
-    if violations.is_empty() {
-        return Ok(());
-    }
-    let mut msg = String::from(
+    source_tree::refuse(
         "board-check: generic code names no board, SoC or board part; the \
-         hardware is learnt by discovery (AGENTS.md §2.20):\n",
-    );
-    for v in &violations {
-        let _ = writeln!(msg, "  {}:{}: {}", v.path, v.line, v.text);
-    }
-    Err(msg)
+         hardware is learnt by discovery (AGENTS.md §2.20):",
+        &scan(root, children)?,
+    )
 }
 
 #[cfg(test)]
@@ -239,7 +219,7 @@ mod tests {
             path.strip_prefix("kernel/tairix-kernel/src/")
                 .is_some_and(|file| WIRING.contains(&file) || file.starts_with("floor_"))
         };
-        let violations: Vec<Violation> = scan(&workspace_root(), &Children::default())
+        let violations: Vec<Finding> = scan(&workspace_root(), &Children::default())
             .expect("scan")
             .into_iter()
             .filter(|violation| in_wiring(&violation.path))
@@ -301,7 +281,7 @@ mod tests {
             "kernel/tairix-kernel/src/aarch64_messages.rs",
             "kernel/tairix-kernel/src/riscv64/boot.rs",
         ];
-        let violations: Vec<Violation> = scan(&workspace_root(), &Children::default())
+        let violations: Vec<Finding> = scan(&workspace_root(), &Children::default())
             .expect("scan")
             .into_iter()
             .filter(|violation| NEUTRAL.contains(&violation.path.as_str()))

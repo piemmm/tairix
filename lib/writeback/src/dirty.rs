@@ -77,7 +77,7 @@ impl DirtySet {
     /// A size of zero, which every later division would trip over, is not a
     /// value the type admits:
     ///
-    /// ```compile_fail
+    /// ```compile_fail,E0308
     /// let _ = tairix_writeback::DirtySet::new(0usize);
     /// ```
     #[must_use]

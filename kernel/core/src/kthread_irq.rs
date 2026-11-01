@@ -45,14 +45,25 @@ use crate::kthread::YieldHandle;
 /// [`YieldHandle`] the core supplied is in
 /// scope:
 ///
-/// ```ignore
+/// ```no_run
+/// # use tairix_arch_api::ContextSwitch;
+/// # use tairix_kernel_core::{CooperativeYield, KthreadIrqWaiter, Yielder, YielderHandle};
+/// # use tairix_kernel_irq::{block_until_ready, IrqTable, WaitOutcome};
+/// # fn wait<C: ContextSwitch + Copy>(
+/// #     yielder: &mut Yielder<C>,
+/// #     monotonic_ns: impl Fn() -> u64,
+/// #     table: &IrqTable,
+/// #     irq_handle: tairix_abi::IrqHandle,
+/// #     owner: tairix_kernel_sec::ProcessId,
+/// # ) {
 /// let mut handle = YielderHandle::new(yielder);
 /// let coop = CooperativeYield::new(&mut handle);
-/// let waiter = KthreadIrqWaiter::new(&coop, || arch.monotonic_ns(cpu));
+/// let waiter = KthreadIrqWaiter::new(&coop, monotonic_ns);
 /// match block_until_ready(table, irq_handle, owner, u64::MAX, &waiter) {
 ///     WaitOutcome::Ready => { /* the device line fired */ }
-///     other => { /* timeout / forged / aborted — fail closed */ }
+///     _ => { /* timeout / forged / aborted — fail closed */ }
 /// }
+/// # }
 /// ```
 ///
 /// # Why a shared [`CooperativeYield`]

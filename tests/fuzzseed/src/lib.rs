@@ -395,6 +395,7 @@ impl Prng {
 }
 
 pub mod asm;
+pub mod firmware;
 pub mod meter;
 pub mod registry;
 pub mod scratch;

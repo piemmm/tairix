@@ -2360,10 +2360,6 @@ pub(crate) mod tests {
         assert_eq!(client.caches.glyphs.as_ref().expect("installed").len(), 3);
     }
 
-    // Only meaningful without a transport feature: with `test-util` (or `rt`)
-    // the client installs a default transport lazily, so there is never a
-    // "no transport" state to observe.
-    #[cfg(not(any(feature = "rt", feature = "test-util")))]
     #[test]
     fn no_transport_composites_nothing() {
         let mut client = LocalClient::new();

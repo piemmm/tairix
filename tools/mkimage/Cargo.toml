@@ -65,3 +65,8 @@ tairix-proglib = { path = "../../lib/proglib", version = "=0.0.0" }
 # `tairix_proglib` answers with a document, and this is what turns it into
 # the bytes the image plants.
 tairix-appconf = { path = "../../lib/appconf", version = "=0.0.0" }
+
+[dev-dependencies]
+# The one rule for where the pinned Raspberry Pi firmware is staged, which the
+# overlay's labels are checked against.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

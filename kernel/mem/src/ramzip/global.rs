@@ -34,11 +34,13 @@ use tairix_sync::SpinLock;
 
 use super::tier::{FaultError, Ramzip};
 
-/// The one installed tier. `None` until boot installs it; a port whose
-/// entropy path cannot supply a key never installs one and every live
-/// caller falls closed (fault-in reports [`RamzipFaultOutcome::NoEntry`],
-/// the reclaim sweep compresses nothing).
-static TIER: OnceCell<SpinLock<Ramzip>> = OnceCell::new();
+tairix_sync::global! {
+    /// The one installed tier. `None` until boot installs it; a port whose
+    /// entropy path cannot supply a key never installs one and every live
+    /// caller falls closed (fault-in reports [`RamzipFaultOutcome::NoEntry`],
+    /// the reclaim sweep compresses nothing).
+    static TIER: OnceCell<SpinLock<Ramzip>> = OnceCell::new();
+}
 
 /// Install the boot-constructed tier. First install wins.
 ///

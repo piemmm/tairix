@@ -132,7 +132,7 @@ pub struct Port {
     mailbox_capacity: usize,
     // State word read on every send before taking the lock.
     state: AtomicU32,
-    // Mailbox under a spinlock. We use `kernel/sync`'s `SpinLock`
+    // Mailbox under a spinlock. We use `lib/sync`'s `SpinLock`
     // because IPC sends never block on I/O and contention is bounded
     // by the mailbox capacity.
     mailbox: tairix_sync::SpinLock<Mailbox>,

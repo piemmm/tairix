@@ -415,9 +415,10 @@ tairix-arch-riscv64 = { path = "../arch/riscv64", version = "=0.0.0" }
 # (`src/{aarch64,x86_64}_preempt_wiring.rs`) carry the same host regression
 # test as riscv64's, so their arch crates are dev-dependencies too. Naming
 # them here rather than relying on the CI host's own triple keeps the tests
-# running whichever machine the host stage runs on.
+# running whichever machine the host stage runs on, with the features each
+# port's own dependency turns on.
 tairix-arch-aarch64 = { path = "../arch/aarch64", version = "=0.0.0" }
-tairix-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 # The x86_64 interrupt-remapping plan is proven against the facility over the
 # reference model unit, which the API crate exposes only to host tests.
 tairix-kernel-iommu-api = { path = "../iommu/api", version = "=0.0.0", features = ["host-tests"] }

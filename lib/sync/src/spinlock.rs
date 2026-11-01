@@ -74,27 +74,16 @@ unsafe impl<T: ?Sized + Send> Send for SpinLock<T> {}
 unsafe impl<T: ?Sized + Send> Sync for SpinLock<T> {}
 
 impl<T> SpinLock<T> {
-    /// Create a new spinlock wrapping `value`.
-    #[cfg(not(loom))]
-    #[must_use]
-    pub const fn new(value: T) -> Self {
-        Self {
-            locked: AtomicBool::new(false),
-            data: SyncUnsafeCell::new(value),
-            #[cfg(feature = "lock-diagnostics")]
-            owner: core::sync::atomic::AtomicU32::new(0),
-        }
-    }
-
-    /// Create a new spinlock wrapping `value` (non-`const` under `loom`).
-    #[cfg(loom)]
-    #[must_use]
-    pub fn new(value: T) -> Self {
-        Self {
-            locked: AtomicBool::new(false),
-            data: SyncUnsafeCell::new(value),
-            #[cfg(feature = "lock-diagnostics")]
-            owner: core::sync::atomic::AtomicU32::new(0),
+    crate::const_fn! {
+        /// Create a new spinlock wrapping `value`.
+        #[must_use]
+        pub fn new(value: T) -> Self {
+            Self {
+                locked: AtomicBool::new(false),
+                data: SyncUnsafeCell::new(value),
+                #[cfg(feature = "lock-diagnostics")]
+                owner: core::sync::atomic::AtomicU32::new(0),
+            }
         }
     }
 
@@ -297,23 +286,14 @@ unsafe impl<T: Send, I: InterruptControl> Send for IrqSafeSpinLock<T, I> {}
 unsafe impl<T: Send, I: InterruptControl> Sync for IrqSafeSpinLock<T, I> {}
 
 impl<T, I: InterruptControl> IrqSafeSpinLock<T, I> {
-    /// Create a new IRQ-safe spinlock wrapping `value`.
-    #[cfg(not(loom))]
-    #[must_use]
-    pub const fn new(value: T) -> Self {
-        Self {
-            inner: SpinLock::new(value),
-            _irq: PhantomData,
-        }
-    }
-
-    /// Create a new IRQ-safe spinlock wrapping `value` (non-`const` under `loom`).
-    #[cfg(loom)]
-    #[must_use]
-    pub fn new(value: T) -> Self {
-        Self {
-            inner: SpinLock::new(value),
-            _irq: PhantomData,
+    crate::const_fn! {
+        /// Create a new IRQ-safe spinlock wrapping `value`.
+        #[must_use]
+        pub fn new(value: T) -> Self {
+            Self {
+                inner: SpinLock::new(value),
+                _irq: PhantomData,
+            }
         }
     }
 

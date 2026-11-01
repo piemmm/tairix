@@ -17,6 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tairix_fuzzseed::SOAK_UNTIL_ENV;
 
+use crate::commands::libtest::Account;
 use crate::commands::parallel::Job;
 use crate::Context;
 
@@ -171,7 +172,14 @@ pub(crate) fn job(
         budget.export(&mut cmd, harness.budget_env);
     }
     cmd.envs(env.iter().map(|(key, value)| (key, value)));
-    Job::new(label, cmd).with_budget(child_deadline(budget, ctx.children.ordinary_budget()))
+    let account = if harness.filter.is_empty() {
+        Account::Everything
+    } else {
+        Account::Selected
+    };
+    Job::new(label, cmd)
+        .with_budget(child_deadline(budget, ctx.children.ordinary_budget()))
+        .accounted(account)
 }
 
 /// Refuse a window over more than one target: one invocation starts its
@@ -326,6 +334,7 @@ mod tests {
         NIGHTLY, QUICK,
     };
     use crate::children::Children;
+    use crate::commands::libtest::Account;
     use crate::commands::parallel;
     use crate::{Context, DEFAULT_COMMAND_TIMEOUT};
     use std::collections::BTreeSet;
@@ -463,15 +472,57 @@ mod tests {
         );
     }
 
+    /// A soak is held to every test of its harness, or every one its filter
+    /// selects.
+    #[test]
+    fn a_soak_is_held_to_the_tests_its_harness_runs() {
+        let ctx = Context {
+            workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            cargo: OsString::from("true"),
+            children: Arc::new(Children::new(None)),
+        };
+        for (filter, account) in [
+            (&[][..], Account::Everything),
+            (&["--exact", "one"][..], Account::Selected),
+        ] {
+            let harness = Harness {
+                package: "soaked",
+                test: "soaked",
+                filter,
+                budget_env: "TAIRIX_SOAK_TEST_BUDGET",
+            };
+            let soaked = job(&ctx, "soaked".to_string(), &harness, None, &[]);
+            assert_eq!(soaked.account(), Some(account), "{filter:?}");
+        }
+    }
+
     /// The operator's floor reaches a soaking child: a soak's allowance past
     /// its budget is the raised ordinary step, so a slow host's floor is not
     /// lost on the soaks it most applies to.
     #[test]
     fn a_soaking_child_takes_the_operators_floor_as_its_allowance() {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let floor = Duration::from_hours(2);
+        // A soak is held to the tests it runs, so the stand-in for cargo
+        // reports one passing, as libtest would. It sits beside the test
+        // binary, where running a file is certain to be allowed.
+        let beside = std::env::current_exe().expect("the test binary");
+        let scratch = tairix_fuzzseed::scratch::Scratch::under(
+            beside.parent().expect("its directory"),
+            "tairix-soak",
+        );
+        let cargo = scratch.path().join("cargo");
+        std::fs::write(
+            &cargo,
+            "#!/bin/sh\necho 'running 1 test'\necho 'test result: ok. 1 passed; 0 failed; \
+             0 ignored; 0 measured; 0 filtered out; finished in 0.00s'\n",
+        )
+        .expect("the stand-in");
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).expect("runnable");
         let ctx = Context {
             workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-            cargo: OsString::from("true"),
+            cargo: cargo.into_os_string(),
             children: Arc::new(Children::new(Some(floor))),
         };
         let harness = Harness {

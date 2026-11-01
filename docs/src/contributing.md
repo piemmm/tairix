@@ -27,7 +27,7 @@ rules, it points to them.
 
 ## How long `cargo xtask ci` takes, and how to run it under a tool cap
 
-Budget **about 52 minutes** on a warm `target/` and a two-dozen-core host —
+Budget **about 53 minutes** on a warm `target/` and a two-dozen-core host —
 the sum of the stage costs below — and substantially longer on a cold one,
 where `-Z build-std` recompiles `core`/`alloc` per target and every image
 profile links from scratch.
@@ -43,17 +43,17 @@ says why on the line before its closing `FAILED in`. A measured warm run:
 | Stage | Cost | Shape |
 | --- | --- | --- |
 | `fmt --check` | 4 s | sequential, streams live |
-| static gates (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `help-lint`, `devids`, `unicode`, `spirv`, `c-header`, `font-atlas`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
+| static gates (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `ignore-check`, `help-lint`, `devids`, `unicode`, `spirv`, `c-header`, `font-atlas`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
 | `deny` | 1 s | sequential; reads `Cargo.lock`, compiles nothing |
 | `proptest --once` | 3 s | one iteration, logged seed |
 | `crypto-constant-time` | 5 s | `lib/crypto` re-run under release |
 | `fuzz --once` | 10 s | one iteration per harness, logged seed |
-| `loom` (the interleaving oracle over the protocols `commands/loom.rs` enrols) | 10 s | one process per crate, concurrent |
+| `loom` (the interleaving oracle over the protocols `commands/loom.rs` enrols) | 48 s | one process per crate, concurrent |
 | `docs-check` (rustdoc + mdBook + link check) | 68 s | sequential |
 | `image` gate | 193 s over 319 spawns | sequential |
 | `clippy` host + 2 feature-lane + 17 target passes | 330 s | sequential |
-| `test --qemu` (host matrix + 226 guests + 3 fixture cross-compiles) | 681 s | guests concurrent, `nproc/3` weighted budget |
-| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, `kernel/core`, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 1836 s | one process per crate, concurrent; `lib/collections`'s, `kernel/core`'s, `lib/spirv`'s and `lib/gpu`'s libraries, `kernel/mem`, `lib/abi`, `lib/rt`, the aarch64 and x86_64 ports, the DMA translation API and its RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores, at most 64 tests a shard |
+| `test --qemu --wasm` (host matrix + doctests + 226 guests + 6 wasm32 verticals + 3 fixture cross-compiles) | 711 s | guests concurrent, `nproc/3` weighted budget |
+| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, `kernel/core`, the MLFQ run queue, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 1836 s | one process per crate, concurrent; `lib/collections`'s, `kernel/core`'s, `lib/spirv`'s and `lib/gpu`'s libraries, `kernel/mem`, `lib/abi`, `lib/rt`, the aarch64 and x86_64 ports, the DMA translation API and its RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores, at most 64 tests a shard |
 
 Miri runs one interpreted thread at a time and reports a single CPU to the
 program, so libtest takes a crate's tests one after another whatever the host
@@ -66,6 +66,12 @@ per core, or more where that would put over 64 tests in one, so the makespan is
 the heaviest shard rather than the sum. The partition comes from the binary
 rather than a hand-kept list, so a test added later cannot fall outside every
 shard and go uninterpreted.
+
+A shard's libtest summary counts every test dealt to the other shards as
+filtered out, so its exit status says nothing about what it ran. The runner
+reads each binary's summary instead and holds the job to its account
+(`commands/libtest.rs`): a shard to passing exactly the tests it was dealt,
+and every other test job to running every test it was given, none ignored.
 
 Dealt one per core alone, a shard's share grew with the suite and with every
 core the host lacked while its budget stayed fixed: `kernel/core`'s library,
@@ -219,6 +225,7 @@ concurrently as the one `static gates` stage:
 | `driver-exits`| Rejects an exit code or `exit` module declared by a crate built on the driver runtime: every driver ends through `tairix_drvrt::exit` |
 | `help-lint` | Lints every command app's discovered `Help/` tree: the canonical `en-US/` documents, locale completeness, structure, option drift and the content policy |
 | `spec-review` | Rejects an unreviewed AI-drafted-artefact marker that reached the tree |
+| `ignore-check` | Rejects an ignored test in any spelling — `#[ignore]`, a `cfg_attr` that ignores, a doc example fenced `ignore` — since libtest reports one as skipped under a green gate |
 | `charter-cite`| Rejects a comment or package description citing a charter section instead of the reason ([§2.11][cite]) |
 | `source-text` | Rejects a control byte other than tab and newline in source and documents, outside the planning and charter files |
 | `supply-chain`| Source-hash allow-list + RUSTSEC advisory SLA ([§19.3][sc]) |
@@ -238,10 +245,10 @@ concurrently as the one `static gates` stage:
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `image`       | Builds every delivered image profile end-to-end (`debug` and `installer` for each image platform), so an image-breaking change cannot land green |
 | `clippy`      | `-D warnings` for the host **and once per Tier-1 target** (see below) |
-| `test --qemu` | `cargo test --workspace --all-targets`, then the packages the debug image's kernel diagnostics turn a feature on in, with those features (read from the manifests), then the QEMU matrix, run once ([§7][test]); each host pass starts in a randomised order, seed logged (see below); the scene tier is left to `ci-long` (see below) |
+| `test --qemu --wasm` | `cargo test --workspace --all-targets`, then the workspace's doctests, then the packages the debug image's kernel diagnostics turn a feature on in, with those features (read from the manifests), then the QEMU matrix and the wasm32 verticals, run once ([§7][test]); each host pass starts in a randomised order, seed logged (see below), and is held to having run every test, none ignored (`commands/libtest.rs`); the device-tree tests read the pinned Raspberry Pi firmware, which the stage verifies against `tools/mkimage/firmware.lock` once, fetching what the cache lacks unless `TAIRIX_PI_FIRMWARE` names a directory, and names to every host pass; the scene tier is left to `ci-long` (see below) |
 | `miri` | Interprets every crate `commands/miri.rs`'s `TARGETS` enrols under the undefined-behaviour oracle |
 
-The tree scans (`cfg-check`, `board-check`, `charter-cite`, `source-text`, `spec-review`)
+The tree scans (`cfg-check`, `board-check`, `charter-cite`, `source-text`, `spec-review`, `ignore-check`)
 walk what a change can carry: `target/`, `.git` and every untracked path git
 ignores (fetched tooling, the generated book, built images) are passed over,
 and a tracked file is scanned even where an ignore pattern names it.

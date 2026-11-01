@@ -1389,6 +1389,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-inline",
+ "tairix-sync",
  "tairix-util",
  "zeroize",
 ]
@@ -3721,6 +3722,7 @@ dependencies = [
  "tairix-drv-fs-arxfs",
  "tairix-drv-fs-fat32",
  "tairix-fdt",
+ "tairix-fuzzseed",
  "tairix-log",
  "tairix-netconfig",
  "tairix-partition",
@@ -3900,6 +3902,7 @@ dependencies = [
  "tairix-cpuops",
  "tairix-fuzzseed",
  "tairix-hash",
+ "tairix-sync",
 ]
 
 [[package]]

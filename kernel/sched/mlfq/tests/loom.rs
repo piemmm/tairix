@@ -1,22 +1,5 @@
-//! Loom model-checking harness for the run-queue's lock-free fast path.
-//!
-//! Run with:
-//!
-//! ```text
-//! RUSTFLAGS="--cfg loom" cargo test --test loom \
-//!     -p tairix-kernel-sched-mlfq --release
-//! ```
-//!
-//! When the `loom` cfg is *not* enabled, the file compiles to an empty
-//! test binary so the default `cargo test` workflow stays fast.
-//!
-//! **Nothing runs these models today, and the command above does not build.**
-//! `cargo xtask loom` enrols `tairix-sync` only, and under `--cfg loom` the
-//! crate graph fails to compile: loom's atomics have no `const` constructor,
-//! so every `const fn`-built static below this crate is rejected in a static
-//! initialiser (`kernel/arch/api`'s `ACTIVE_FRAMES` is the first). See
-//! `plans/OPEN-DEFECTS.md` D131 — until that is resolved these models are
-//! unverified, so do not read their presence as coverage.
+//! Loom models of the run queue's lock-free fast path, run by
+//! `cargo xtask loom`.
 //!
 //! Each model checks that a task is handed to exactly one party, never lost
 //! and never duplicated: two consumers racing for the last entry, and two

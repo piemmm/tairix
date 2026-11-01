@@ -1834,8 +1834,8 @@ mod tests {
 
     /// Two sharers coming back at once each store their own arm before they
     /// read the other's, so at least one of them unmasks the line: the
-    /// store-buffering pairing in `unmask_if_armed`, run on real threads
-    /// because loom cannot build the kernel crate graph.
+    /// store-buffering pairing in `unmask_if_armed`, run on real threads:
+    /// these are `core` atomics, which no model interleaves.
     #[test]
     fn two_sharers_returning_at_once_never_both_leave_the_line_masked() {
         use std::sync::Arc;

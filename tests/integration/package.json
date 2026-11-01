@@ -1,0 +1,8 @@
+{
+  "name": "tairix-wasm-harnesses",
+  "private": true,
+  "description": "The headless browser the wasm32 verticals' harnesses drive, pinned with every package beneath it in package-lock.json.",
+  "dependencies": {
+    "puppeteer": "25.0.4"
+  }
+}

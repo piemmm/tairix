@@ -259,15 +259,16 @@ bookkeeping, not the defect. The bucket half is covered by that function's own
   `Send`/`Sync` impls and the guard's `Deref`, and every edit here is safe
   code over `BTreeMap`/`BTreeSet` and atomics. `kernel/core` is enrolled
   (`OPEN-DEFECTS` D123), so the stage interprets the sleeplock's tests.
-- **loom cannot reach this crate, and the reason is worth recording rather
-  than waving at.** `--cfg loom` does not compile `kernel/core` at all: loom's
-  atomics and cell have no `const` constructor, and `WaitQueue::new` /
-  `SleepLock::new` are `const fn` precisely so the sixteen global queues and
-  the per-mount locks can be `static`s. Enrolling it means removing the `const`
-  construction of every one of those, which is its own staged piece of work,
-  not something to smuggle in here. The interleavings this plan turns on are
-  therefore driven deterministically by the tests above, at the exact windows,
-  rather than searched — and that gap is recorded as D131.
+- **loom cannot reach this crate yet.** `--cfg loom` does not compile
+  `kernel/core`: loom's atomics and cell have no `const` constructor, and
+  `WaitQueue::new` / `SleepLock::new` are `const fn`, so the twenty-three global
+  wait queues are plain `static`s. Nor would building it be enough: the sleeping
+  lock's `state` and `handoff` are `core` atomics behind no loom shim. Enrolling
+  the crate means routing those words through one and declaring the statics
+  through `tairix_sync::global!` and `const_fn!`, its own piece of work. The
+  interleavings this plan turns on are therefore driven deterministically by the
+  tests above, at the exact windows, rather than searched — and that gap is
+  recorded as D1643.
 
 ## Decisions, and what is deliberately not taken
 

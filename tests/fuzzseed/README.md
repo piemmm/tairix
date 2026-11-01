@@ -38,6 +38,10 @@ filesystem soak. It is the single place (`AGENTS.md` §2.2) that:
   (`scratch::Scratch`): made private to its user by a create that refuses
   anything already at its name, named apart from every other in the process
   however coarse the clock, and removed with what it holds once dropped;
+- owns the **one rule for where the pinned Raspberry Pi firmware is**
+  (`firmware::pi4_dtb`, `PI_FIRMWARE_ENV`): the directory the variable names,
+  which must then hold the tree, else the checkout's own cache, so the gate
+  that stages and names it can never pass a test that read nothing;
 - owns the **one document generator** for a closed settings registry's fuzz
   harness (`registry::registry_document`): whole lines drawn from the
   registry's table, one document in `POISONED_ONE_IN` carrying a value its

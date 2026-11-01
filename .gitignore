@@ -22,6 +22,7 @@
 !/.env.example
 /.junie/
 /node_modules/
+/tests/integration/node_modules/
 /.output.txt
 /package.json
 /package-lock.json

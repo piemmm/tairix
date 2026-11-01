@@ -248,18 +248,20 @@ impl<S: DescriptorSlot + ?Sized> Leaf<'_, S> {
     }
 }
 
-/// The frame source a walk of a CPU's **active** translation root
-/// recovers its tables through, published once by the boot wiring.
-///
-/// A fault-time walk — the software access-flag fix-up the aarch64 and
-/// riscv64 ports perform in exception context — holds no `AddressSpace`,
-/// so it cannot ask that space's own source for a table. The kernel's
-/// production source reaches every table frame in RAM through its direct
-/// map, the ports' static pools included, so one publication serves
-/// every root a CPU can be running on. Before it is published (on the
-/// host, and during boot before the frame allocator exists) such a walk
-/// has no way to reach a table and fails closed.
-static ACTIVE_FRAMES: Once<&'static dyn PageTableFrames> = Once::new();
+tairix_sync::global! {
+    /// The frame source a walk of a CPU's **active** translation root
+    /// recovers its tables through, published once by the boot wiring.
+    ///
+    /// A fault-time walk — the software access-flag fix-up the aarch64 and
+    /// riscv64 ports perform in exception context — holds no `AddressSpace`,
+    /// so it cannot ask that space's own source for a table. The kernel's
+    /// production source reaches every table frame in RAM through its direct
+    /// map, the ports' static pools included, so one publication serves
+    /// every root a CPU can be running on. Before it is published (on the
+    /// host, and during boot before the frame allocator exists) such a walk
+    /// has no way to reach a table and fails closed.
+    static ACTIVE_FRAMES: Once<&'static dyn PageTableFrames> = Once::new();
+}
 
 /// Publish the source free-standing walks of the active root draw their
 /// tables from. The first publication wins; a later one changes nothing.

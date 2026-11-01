@@ -1456,11 +1456,9 @@ The scheduler's behaviour is covered by:
   tests (fairness across ≥ 4 cores, work-stealing balance, IPI-based
   preemption, cancellation safety, error surface).
 * `kernel/sched/mlfq/tests/loom.rs` — Loom models of the run-queue (two
-  consumers racing for the last entry, two producers pushing at once).
-  Compiled into an empty binary when `--cfg loom` is not set; under it the
-  crate graph does not yet build (`plans/OPEN-DEFECTS.md` D131), so the
-  concurrent hand-off is covered by `runqueue.rs`'s multi-producer,
-  multi-consumer test, which miri interprets.
+  consumers racing for the last entry, two producers pushing at once), run
+  by `cargo xtask loom`. `runqueue.rs`'s multi-producer, multi-consumer test
+  covers the same hand-off on real threads, and miri interprets it.
 
 In addition, every module carries `#[cfg(test)] mod tests` with
 focused unit coverage. The tests use the in-memory [`TestArch`]

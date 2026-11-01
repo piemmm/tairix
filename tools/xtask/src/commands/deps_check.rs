@@ -432,6 +432,76 @@ pub(super) fn package_name(manifest: &str) -> Option<String> {
     None
 }
 
+/// One `[[bin]]`, `[[test]]`, `[[example]]` or `[[bench]]` table of a
+/// manifest, as far as the enrolment checks read it.
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct TargetTable {
+    /// `bin`, `test`, `example` or `bench`.
+    pub(super) kind: String,
+    pub(super) name: Option<String>,
+    pub(super) path: Option<String>,
+    /// The target's `required-features`, from a one-line array.
+    pub(super) required_features: Vec<String>,
+}
+
+/// Every target table `manifest` declares, in order.
+#[cfg(test)]
+pub(super) fn target_tables(manifest: &str) -> Vec<TargetTable> {
+    let mut tables: Vec<TargetTable> = Vec::new();
+    let mut open = false;
+    let mut features_open = false;
+    for line in manifest.lines() {
+        let trimmed = line.split('#').next().unwrap_or("").trim();
+        if features_open {
+            let (items, closed) = trimmed
+                .split_once(']')
+                .map_or((trimmed, false), |(items, _)| (items, true));
+            if let Some(table) = tables.last_mut() {
+                table
+                    .required_features
+                    .extend(items.split(',').filter_map(string_literal));
+            }
+            features_open = !closed;
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            let kind = trimmed
+                .strip_prefix("[[")
+                .and_then(|rest| rest.strip_suffix("]]"))
+                .filter(|kind| ["bin", "test", "example", "bench"].contains(kind));
+            open = kind.is_some();
+            if let Some(kind) = kind {
+                tables.push(TargetTable {
+                    kind: kind.to_string(),
+                    ..TargetTable::default()
+                });
+            }
+            continue;
+        }
+        let Some(table) = tables.last_mut().filter(|_| open) else {
+            continue;
+        };
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "name" => table.name = string_literal(value),
+            "path" => table.path = string_literal(value),
+            "required-features" => {
+                let list = value.trim().trim_start_matches('[');
+                let (items, closed) = list
+                    .split_once(']')
+                    .map_or((list, false), |(items, _)| (items, true));
+                table.required_features = items.split(',').filter_map(string_literal).collect();
+                features_open = !closed;
+            }
+            _ => {}
+        }
+    }
+    tables
+}
+
 /// Whether `manifest` declares `feature` in its `[features]` table.
 pub(super) fn declares_feature(manifest: &str, feature: &str) -> bool {
     let mut in_features = false;
@@ -521,11 +591,96 @@ pub(super) fn normalize_join(base: &str, path: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn target_tables_read_each_targets_name_path_and_features() {
+        let manifest = "[package]\nname = \"x\"\n\n[[bin]]\nname = \"run\" # the entry\n\
+path = \"src/main.rs\"\nrequired-features = [\"program\", \"rt\"]\n\n\
+[dependencies]\nname = \"not a target\"\n\n[[test]]\nname = \"loom\"\n\
+required-features = [\n    \"model\",\n    \"slow\",\n]\n";
+        let tables = target_tables(manifest);
+        assert_eq!(
+            tables,
+            [
+                TargetTable {
+                    kind: "bin".into(),
+                    name: Some("run".into()),
+                    path: Some("src/main.rs".into()),
+                    required_features: vec!["program".into(), "rt".into()],
+                },
+                TargetTable {
+                    kind: "test".into(),
+                    name: Some("loom".into()),
+                    required_features: vec!["model".into(), "slow".into()],
+                    ..TargetTable::default()
+                },
+            ]
+        );
+    }
+
     fn workspace_root() -> std::path::PathBuf {
         let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         p.pop();
         p.pop();
         p
+    }
+
+    /// The features each dependency in `manifest`'s tables that `wanted`
+    /// accepts turns on, by dependency name, from one-line entries.
+    fn dependency_features(
+        manifest: &str,
+        wanted: impl Fn(&str) -> bool,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+        let mut features = std::collections::BTreeMap::new();
+        let mut open = false;
+        for line in manifest.lines() {
+            let code = line.split('#').next().unwrap_or("").trim();
+            if code.starts_with('[') {
+                open = wanted(code);
+                continue;
+            }
+            let Some((name, value)) = code.split_once('=').filter(|_| open) else {
+                continue;
+            };
+            let listed = value
+                .split_once("features")
+                .and_then(|(_, rest)| rest.split_once('['))
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .map(|(list, _)| list.split(',').filter_map(string_literal).collect())
+                .unwrap_or_default();
+            features.insert(name.trim().to_string(), listed);
+        }
+        features
+    }
+
+    /// A dev-dependency standing in for a port's architecture-gated one, so a
+    /// host of another ISA builds the port's host tests, turns on every feature
+    /// that dependency does: without them a lane selecting the package fails
+    /// to compile there, though the host the gate usually runs on passes.
+    #[test]
+    fn a_dev_dependency_standing_in_for_a_port_s_turns_on_its_features() {
+        let root = workspace_root();
+        let mut short = Vec::new();
+        for dir in workspace_members(&root).expect("the workspace members") {
+            let Ok(manifest) = std::fs::read_to_string(root.join(&dir).join("Cargo.toml")) else {
+                continue;
+            };
+            let gated = dependency_features(&manifest, |table| {
+                table.starts_with("[target.'cfg(target_arch") && table.ends_with(".dependencies]")
+            });
+            let dev = dependency_features(&manifest, |table| table == "[dev-dependencies]");
+            for (name, needed) in &gated {
+                if let Some(present) = dev.get(name) {
+                    let missing: Vec<&String> = needed.difference(present).collect();
+                    if !missing.is_empty() {
+                        short.push(format!("{dir}: {name} lacks {missing:?}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            short.is_empty(),
+            "dev-dependencies short of their port's features: {short:?}"
+        );
     }
 
     #[test]

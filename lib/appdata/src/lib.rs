@@ -1,11 +1,19 @@
 //! The app-data client (`tairix-appdata`): how an application reaches its own
 //! settings, and the only way it can.
 //!
-//! ```ignore
-//! let mut settings = Settings::open(&mut RtHost, OWN_WORD);
+//! ```no_run
+//! # use tairix_appconf::ConfError;
+//! # use tairix_appdata::{AppDataHost, Settings};
+//! # enum Error { Conf(ConfError), Os(tairix_abi::Errno) }
+//! # impl From<ConfError> for Error { fn from(e: ConfError) -> Self { Self::Conf(e) } }
+//! # impl From<tairix_abi::Errno> for Error { fn from(e: tairix_abi::Errno) -> Self { Self::Os(e) } }
+//! # fn configure(host: &mut dyn AppDataHost, own_word: &str) -> Result<u32, Error> {
+//! let mut settings = Settings::open(host, own_word);
 //! let size = settings.u32("font.size")?.unwrap_or(14);
 //! settings.set_u32("font.size", 16)?;
 //! settings.commit()?;                       // one atomic publish
+//! # Ok(size)
+//! # }
 //! ```
 //!
 //! Nothing here takes a store path or a user, and nothing but

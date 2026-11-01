@@ -480,34 +480,40 @@ pub mod console_uart;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod console_layout;
 
-// The architecture ports. Each subtree gathers exactly one instruction
-// set's `KernelArch` wrapper, fail-closed dispatch callback, production
-// boot path, PID 1 (`init`) spawn seam, and runtime `spawn` producer (plus
-// the x86_64 IO-APIC controller, virtio bring-up, and `DriverHost`
-// composition), gated on the matching `kernel_isa` build-script name — the
-// single selection point lives in `build.rs`, never an
-// inline `target_arch` predicate. Code shared across the ports stays at the
-// crate root (`dispatch_core`, `mem_map`, `spawn_layout`,
-// the driver registry, …) rather than being duplicated into a port. Each port's bare-metal-only modules are further gated
-// on `freestanding` inside its root module.
-#[cfg(kernel_isa = "x86_64")]
+// The architecture ports, one subtree per instruction set, each gated on its
+// `kernel_isa` build-script name rather than an inline `target_arch`, and on
+// every host's test build, so one host runs all three ports' tests. Code the
+// ports share stays at the crate root; each gates its bare-metal-only modules
+// on `freestanding` inside its root.
+#[cfg(any(kernel_isa = "x86_64", test))]
 pub mod x86_64;
 
-#[cfg(kernel_isa = "aarch64")]
+#[cfg(any(kernel_isa = "aarch64", test))]
 pub mod aarch64;
 
-#[cfg(kernel_isa = "riscv64")]
+#[cfg(any(kernel_isa = "riscv64", test))]
 pub mod riscv64;
+
+// Narrowing a port back to its own ISA fails the host test build here, rather
+// than silently dropping two ports' tests from every host.
+#[cfg(test)]
+const _EVERY_PORT_IN_EVERY_HOST_TEST_BUILD: (
+    tairix_arch_x86_64::syscall_entry::SyscallDispatchFn,
+    tairix_arch_aarch64::syscall_entry::SyscallDispatchFn,
+    tairix_arch_riscv64::syscall_entry::SyscallDispatchFn,
+) = (
+    x86_64::dispatch::production_dispatch,
+    aarch64::dispatch::production_dispatch,
+    riscv64::dispatch::production_dispatch,
+);
 
 // The riscv64 PLIC `IrqController` bridge (`plans/NETWORK.md` N4e-riscv64): the
 // smallest local newtype implementing `kernel/irq`'s `IrqController` over the
 // arch port's `plic::PlicController` (orphan rules keep it out of the arch
 // port), mirroring how the x86_64 `IoApicController` lives in this crate. It is
-// generic over `PlicMmio`, so it is host-buildable: it lives at the crate root
-// — gated on the riscv64 image build *or* a host `cargo test` — rather than
-// inside the freestanding-only `riscv64` port module, so its mask-before-wake /
-// re-arm regression test runs under `cargo test` on the CI host. The
-// `virt`-board QEMU verticals re-export it from here (one definition).
+// generic over `PlicMmio`, so its mask-before-wake / re-arm regression test runs
+// in every host's test build. The `virt`-board QEMU verticals re-export it from
+// here (one definition).
 #[cfg(any(kernel_isa = "riscv64", test))]
 pub mod riscv64_plic_irq;
 
@@ -522,8 +528,7 @@ pub mod riscv64_aia_irq;
 pub mod riscv64_messages;
 
 // The aarch64 message-signalled line space and the LPI routes a GICv3 ITS
-// raises, at the crate root for the same reason: its route planning carries
-// host tests.
+// raises; its route planning carries host tests.
 #[cfg(any(kernel_isa = "aarch64", test))]
 pub mod aarch64_messages;
 
@@ -532,9 +537,8 @@ pub mod aarch64_messages;
 // install actually stored.
 pub mod preempt_callbacks;
 
-// Each port's trap-callback wiring, hoisted out of its freestanding-only
-// port module for the same reason as `riscv64_plic_irq`: it carries a host
-// regression test. What the test pins is that all three ports install the
+// Each port's trap-callback wiring, with its host regression test. What the
+// test pins is that all three ports install the
 // *shared* `tairix_kernel_core::traps` callbacks, because a missing install
 // is a silent lost wakeup and a port-local tick body is free to omit one of
 // the tick's duties — the wasm32 deadline sweep went missing exactly so.

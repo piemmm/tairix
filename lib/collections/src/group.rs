@@ -143,9 +143,11 @@ pub fn scan_portable(group: &Group, tag: u8) -> GroupMatch {
     }
 }
 
-/// The scan in force: resolved by [`resolve`], or on first use against the
-/// set this process was delivered.
-static RESOLVED: Resolved<GroupScanFn> = Resolved::new();
+tairix_sync::global! {
+    /// The scan in force: resolved by [`resolve`], or on first use against the
+    /// set this process was delivered.
+    static RESOLVED: Resolved<GroupScanFn> = Resolved::new();
+}
 
 /// The accelerated candidates available on this build, in descending declared
 /// priority. A target whose vector unit is off has none.

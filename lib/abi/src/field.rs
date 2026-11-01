@@ -801,7 +801,7 @@ fn decode_scalar_payload(
 /// blanket impl and no `Display`/`Debug` fallback that would let one slip
 /// through. The following does not compile, by design:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use tairix_abi::field::ToFieldValue;
 /// struct SecretKey([u8; 32]);
 /// fn record<V: ToFieldValue + ?Sized>(_value: &V) {}

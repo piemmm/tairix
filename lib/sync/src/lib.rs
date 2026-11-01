@@ -30,9 +30,10 @@
 //!
 //! # Design notes
 //!
-//! - Every primitive is usable from a `static` (`const fn new` is
-//!   provided on all stable builds; the `loom` model-checking build
-//!   relaxes this because `loom`'s atomic constructors are not `const`).
+//! - Every primitive has a `const fn new` and so can back a `static`, except
+//!   under the `loom` model checker, whose atomics have no `const`
+//!   constructor; a crate built for it declares such statics through
+//!   [`global!`].
 //! - The crate needs only `core`, never `alloc`. That is deliberate and
 //!   load-bearing: a `no_std` binary whose crate graph includes `alloc` must
 //!   supply a `#[global_allocator]`, so a single allocating primitive here
@@ -53,6 +54,10 @@
 #![cfg_attr(loom, allow(dead_code))]
 
 mod loom_compat;
+
+#[cfg(loom)]
+#[doc(hidden)]
+pub use loom::lazy_static as __lazy_static;
 
 pub mod claims;
 pub mod fnptr;
@@ -737,5 +742,28 @@ mod tests {
         let s = NopIrqState::default();
         let t = s;
         assert_eq!(s, t);
+    }
+
+    mod globals {
+        crate::global! {
+            static PRIVATE: crate::SpinLock<u8> = crate::SpinLock::new(1);
+        }
+        crate::global! {
+            pub static PUBLIC: crate::SpinLock<u8> = crate::SpinLock::new(2);
+        }
+        crate::global! {
+            pub(super) static SCOPED: crate::SpinLock<u8> = crate::SpinLock::new(3);
+        }
+
+        pub fn private() -> u8 {
+            *PRIVATE.lock()
+        }
+    }
+
+    #[test]
+    fn global_declares_a_static_at_every_visibility() {
+        assert_eq!(globals::private(), 1);
+        assert_eq!(*globals::PUBLIC.lock(), 2);
+        assert_eq!(*globals::SCOPED.lock(), 3);
     }
 }

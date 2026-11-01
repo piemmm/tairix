@@ -13,8 +13,10 @@
 //! another CPU and take effect at the next safe point. See
 //! `docs/src/architecture/scheduler.md` for the full invariants.
 
-use crate::loom_compat::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use crate::{CpuId, Priority, SchedClass, TaskAction, TaskContext, TaskId, TaskState};
+// `core`'s rather than the loom shim's: the doom mark is the park handshake's
+// word, whose functions take `core` atomics, and no model reaches the rest.
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use tairix_kernel_sched_api::park::{AtomicLifecycle, Lifecycle};
 use tairix_kernel_sched_api::ParkableTask;
 

@@ -30,6 +30,7 @@ use std::ffi::OsString;
 use std::process::Command;
 
 use crate::children::Children;
+use crate::commands::libtest::Account;
 use crate::commands::parallel::{self, Job};
 use crate::commands::seed;
 use crate::{output_or_reason, Context};
@@ -316,6 +317,9 @@ pub const TARGETS: &[Target] = &[
                 "tests::no_low_bit_repeats_on_a_power_of_two_period",
                 "sources::tests::crate_sources_reads_what_builds_and_not_the_tests",
                 "scratch::tests::a_path_already_there_is_refused_rather_than_used",
+                "firmware::tests::a_named_directory_is_read_and_nothing_else",
+                "firmware::tests::a_named_directory_without_the_tree_fails_rather_than_skips",
+                "firmware::tests::unnamed_the_cache_is_read_where_it_is_filled",
             ],
             reason: "the first two draw an entropy seed from the realtime clock, which the \
                      isolated stage refuses to read, and the seeding carries no `unsafe`; the \
@@ -323,7 +327,9 @@ pub const TARGETS: &[Target] = &[
                      interpreted of arithmetic that reaches no `unsafe` either; the fourth \
                      writes and walks a directory and the fifth reads the realtime clock and \
                      makes one, which the isolated stage refuses, and neither the walk nor the \
-                     scratch directory carries `unsafe`",
+                     scratch directory carries `unsafe`; three of the firmware locator's tests \
+                     read and write a scratch directory, refused alike, over a rule with no \
+                     `unsafe`",
         },
         spread: Spread::OneProcess,
     },
@@ -497,6 +503,14 @@ pub const TARGETS: &[Target] = &[
         description: "the same, plus the lock-diagnostics observer seam, whose function \
                       pointers and site records live only under that feature",
         features: &["lock-diagnostics"],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-kernel-sched-mlfq",
+        description: "the run queue's lock-free deque, which hands a task between CPUs as a raw \
+                      `Arc` pointer that exactly one party takes back",
+        features: &[],
         scope: Scope::AllTargets,
         spread: Spread::OneProcess,
     },
@@ -1177,10 +1191,13 @@ fn scope_label(target: &Target) -> String {
 fn whole_job(ctx: &Context, target: &Target, seed: u64) -> Job {
     let mut cmd = base_command(ctx, target, seed);
     let harness = harness_args(target, std::env::consts::ARCH);
-    if !harness.is_empty() {
+    let account = if harness.is_empty() {
+        Account::Everything
+    } else {
         cmd.arg("--").args(harness);
-    }
-    Job::new(format!("{} (seed {seed})", scope_label(target)), cmd)
+        Account::Selected
+    };
+    Job::new(format!("{} (seed {seed})", scope_label(target)), cmd).accounted(account)
 }
 
 /// One job per shard of `target`'s tests.
@@ -1203,19 +1220,26 @@ fn shard_jobs(ctx: &Context, target: &Target, seed: u64) -> Result<Vec<Job>, Str
     Ok(shards
         .into_iter()
         .enumerate()
-        .map(|(index, names)| {
-            let mut cmd = base_command(ctx, target, seed);
-            cmd.arg("--").arg("--exact").args(&names);
-            Job::new(
-                format!(
-                    "{} shard {}/{total} (seed {seed})",
-                    scope_label(target),
-                    index + 1
-                ),
-                cmd,
-            )
-        })
+        .map(|(index, names)| shard_job(ctx, target, seed, (index + 1, total), &names))
         .collect())
+}
+
+/// The job interpreting shard `nth` of `target`'s tests, `names`, held to
+/// passing exactly those: its summary counts every other shard's as filtered.
+fn shard_job(
+    ctx: &Context,
+    target: &Target,
+    seed: u64,
+    (nth, total): (usize, usize),
+    names: &[String],
+) -> Job {
+    let mut cmd = base_command(ctx, target, seed);
+    cmd.arg("--").arg("--exact").args(names);
+    Job::new(
+        format!("{} shard {nth}/{total} (seed {seed})", scope_label(target)),
+        cmd,
+    )
+    .accounted(Account::Exactly(names.len() as u64))
 }
 
 /// The command listing every test of `target`'s binary, so its scope's
@@ -1369,15 +1393,45 @@ fn capture(children: &Children, label: &str, mut cmd: Command) -> Result<String,
 mod tests {
     use super::{
         base_command, deal, harness_args, lists_first, parse, parse_listing, selected, shard_count,
-        skipped, skips, stale_pattern, unskipped, within, Scope, Spread, HOST_REFUSALS,
-        SHARD_TESTS, TARGETS,
+        shard_job, skipped, skips, stale_pattern, unskipped, whole_job, within, Scope, Spread,
+        HOST_REFUSALS, SHARD_TESTS, TARGETS,
     };
     use crate::children::Children;
+    use crate::commands::libtest::Account;
     use crate::rustflags::tests::flags_of;
     use crate::Context;
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    /// A whole run is held to every test, or every test its skips leave, and
+    /// a shard to exactly the tests it was dealt.
+    #[test]
+    fn every_miri_job_is_held_to_its_account() {
+        let ctx = Context {
+            workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            cargo: OsString::from("true"),
+            children: Arc::new(Children::new(None)),
+        };
+        for target in TARGETS {
+            let account = if harness_args(target, std::env::consts::ARCH).is_empty() {
+                Account::Everything
+            } else {
+                Account::Selected
+            };
+            assert_eq!(
+                whole_job(&ctx, target, 1).account(),
+                Some(account),
+                "{}",
+                target.package
+            );
+            let names = ["a::one".to_string(), "a::two".to_string()];
+            assert_eq!(
+                shard_job(&ctx, target, 1, (1, 4), &names).account(),
+                Some(Account::Exactly(2))
+            );
+        }
+    }
 
     /// Every interpreted build takes `sha2`'s portable backend after the
     /// caller's flags, as cargo reads them, whatever the caller set.

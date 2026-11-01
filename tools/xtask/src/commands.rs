@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use tairix_fuzzseed::firmware::{PI_FIRMWARE_CACHE, PI_FIRMWARE_ENV};
 use tairix_itest_harness::pie::PieArch;
 use tairix_procinfo::display::format_bytes;
 
@@ -32,10 +33,12 @@ mod fssoak;
 mod fuzz;
 mod help_lint;
 mod host_fonts;
+mod ignore_check;
 mod image_apps;
 mod image_drivers;
 mod json;
 mod keys;
+pub(crate) mod libtest;
 mod linkcheck;
 mod loom;
 mod miri;
@@ -96,6 +99,7 @@ pub enum Command {
     Loom,
     ModelCheck,
     SpecReview,
+    IgnoreCheck,
     SourceText,
     CharterCite,
     Bench,
@@ -141,6 +145,7 @@ impl Command {
         Command::Loom,
         Command::ModelCheck,
         Command::SpecReview,
+        Command::IgnoreCheck,
         Command::SourceText,
         Command::CharterCite,
         Command::Bench,
@@ -185,6 +190,7 @@ impl Command {
             "miri" => Command::Miri,
             "model-check" => Command::ModelCheck,
             "spec-review" => Command::SpecReview,
+            "ignore-check" => Command::IgnoreCheck,
             "source-text" => Command::SourceText,
             "charter-cite" => Command::CharterCite,
             "bench" => Command::Bench,
@@ -231,6 +237,7 @@ impl Command {
             Command::Miri => "miri",
             Command::ModelCheck => "model-check",
             Command::SpecReview => "spec-review",
+            Command::IgnoreCheck => "ignore-check",
             Command::SourceText => "source-text",
             Command::CharterCite => "charter-cite",
             Command::Bench => "bench",
@@ -312,6 +319,7 @@ impl Command {
                 "Exhaustively model-check the §19.7 Silver capability + IPC state machine."
             }
             Command::SpecReview => "Reject unreviewed AI draft markers in source (§19.7).",
+            Command::IgnoreCheck => "Reject an ignored test: the gate runs every test it builds.",
             Command::SourceText => "Reject control bytes in source text.",
             Command::CharterCite => {
                 "Reject a comment or description citing a charter section, not the reason (§2.11)."
@@ -365,6 +373,7 @@ impl Command {
             Command::Miri => miri::run(ctx, args),
             Command::ModelCheck => run_model_check(args),
             Command::SpecReview => run_spec_review(ctx),
+            Command::IgnoreCheck => run_ignore_check(ctx),
             Command::SourceText => run_source_text(ctx),
             Command::CharterCite => run_charter_cite(ctx),
             Command::Bench => run_bench(args),
@@ -607,7 +616,7 @@ struct TestOptions {
     budget: RunBudget,
     /// Run the bare-metal QEMU integration matrix (`--qemu`).
     run_qemu: bool,
-    /// Run the wasm32 browser-headless vertical (`--wasm`).
+    /// Run the wasm32 verticals (`--wasm`).
     run_wasm: bool,
     /// Run the scene tier as well (`--scenes`): the long host tests of whole
     /// ray-traced scenes and realms, compiled only under
@@ -812,15 +821,26 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // tests of whole ray-traced scenes cost more with every detail they gain.
     let opts = parse_test_options(args)?;
 
+    // A `--only` run is a debugging pass over the named guests alone; the
+    // whole-workspace host stage would drown the signal, so it is skipped (and
+    // a `--only` run is never a substitute for the full matrix). The firmware
+    // its tests read is staged first, so a run that cannot stage it fails
+    // before building anything.
+    let firmware = opts
+        .only
+        .is_none()
+        .then(|| test_firmware(ctx))
+        .transpose()?;
+
     // Build the opt-in matrices once, before any repeated passes, so a soak
     // re-runs the binaries rather than rebuilding them each pass. The host
     // `cargo test` invocation builds incrementally on its own.
     if opts.run_qemu {
         qemu_tests::build_all(ctx, opts.only.as_deref())?;
     }
-    // `--wasm` boots the wasm32 vertical in a headless browser. It is
-    // opt-in (like `--qemu`) because it needs node + puppeteer + Chrome;
-    // see `commands/wasm_tests.rs`.
+    // `--wasm` runs the wasm32 verticals, two of them in a headless browser;
+    // `ci` passes it, and the harnesses need node and the puppeteer
+    // `tests/integration/package-lock.json` pins (see `commands/wasm_tests.rs`).
     if opts.run_wasm {
         wasm_tests::prepare(ctx)?;
     }
@@ -832,34 +852,11 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // (rather than inside each stage) means a duration budget covers the
     // matrix as a unit instead of being spent in full on each stage.
     opts.budget.for_each(|pass| {
-        // A `--only` run is a debugging pass over the named guests alone;
-        // the whole-workspace host stage would drown the signal, so it is
-        // skipped (and a `--only` run is never a substitute for the full
-        // matrix).
-        if opts.only.is_none() {
-            let mut cmd = host_test_command(ctx);
-            cmd.args(&opts.forward);
-            let order = opts.order.seed(pass);
-            if let Some(order) = order {
-                cmd.args(host_order_args(&opts.forward, order));
-            }
-            let label = match (opts.budget.is_repeated(), order) {
-                (true, Some(order)) => format!("test (pass {pass}, order seed {order})"),
-                (true, None) => format!("test (pass {pass})"),
-                (false, Some(order)) => format!("test (order seed {order})"),
-                (false, None) => "test".to_string(),
-            };
-            ctx.run(&label, cmd)?;
-            for lane in opts.host_lanes() {
-                let mut cmd = lane.cargo(ctx, "test")?;
-                cmd.args(&opts.forward);
-                if let Some(order) = order {
-                    cmd.args(host_order_args(&opts.forward, order));
-                }
-                ctx.run_with_timeout(&format!("{label} ({})", lane.label()), cmd, lane.budget())?;
+        if let Some(firmware) = &firmware {
+            for step in host_pass(ctx, &opts, pass, firmware)? {
+                ctx.run_accounted(&step.label, step.command, step.budget, step.account)?;
             }
         }
-
         if opts.run_qemu {
             qemu_tests::run_once(ctx, opts.only.as_deref())?;
         }
@@ -868,6 +865,127 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         }
         Ok(())
     })
+}
+
+/// One host step of a test pass: a libtest command and what it must run.
+struct HostStep {
+    label: String,
+    command: std::process::Command,
+    budget: Duration,
+    account: libtest::Account,
+}
+
+/// The host steps of `pass`: the workspace's tests, its doctests unless the
+/// forwarded arguments select targets, then each host lane's, the device-tree
+/// tests among them reading `firmware`, and each held to every test it is
+/// given or, under forwarded arguments, to ignoring none of those they leave.
+fn host_pass(
+    ctx: &Context,
+    opts: &TestOptions,
+    pass: u64,
+    firmware: &Path,
+) -> Result<Vec<HostStep>, String> {
+    let order = opts.order.seed(pass);
+    let label = match (opts.budget.is_repeated(), order) {
+        (true, Some(order)) => format!("test (pass {pass}, order seed {order})"),
+        (true, None) => format!("test (pass {pass})"),
+        (false, Some(order)) => format!("test (order seed {order})"),
+        (false, None) => "test".to_string(),
+    };
+    let account = if opts.forward.is_empty() {
+        libtest::Account::Everything
+    } else {
+        libtest::Account::Forwarded
+    };
+    let mut steps = vec![HostStep {
+        label: label.clone(),
+        command: host_command(ctx, HostRun::Workspace, &opts.forward, order, firmware),
+        budget: crate::DEFAULT_COMMAND_TIMEOUT,
+        account,
+    }];
+    if !selects_targets(&opts.forward) {
+        steps.push(HostStep {
+            label: format!("{label} (doctests)"),
+            command: host_command(ctx, HostRun::Doctests, &opts.forward, order, firmware),
+            budget: crate::DEFAULT_COMMAND_TIMEOUT,
+            account,
+        });
+    }
+    for lane in opts.host_lanes() {
+        let selection = lane.selection(ctx)?;
+        steps.push(HostStep {
+            label: format!("{label} ({})", lane.label()),
+            command: host_command(
+                ctx,
+                HostRun::Lane(&selection),
+                &opts.forward,
+                order,
+                firmware,
+            ),
+            budget: lane.budget(),
+            account,
+        });
+    }
+    Ok(steps)
+}
+
+/// What one host test step runs.
+#[derive(Clone, Copy)]
+enum HostRun<'a> {
+    /// Every host-testable crate's tests.
+    Workspace,
+    /// The workspace's doctests.
+    Doctests,
+    /// A host lane, by its selection.
+    Lane(&'a [OsString]),
+}
+
+/// The command a host test step runs, in `ci`'s pass and `ci-long`'s hunt
+/// alike: `forward` passed on, the order `order` seeds, and `firmware` named
+/// to the device-tree tests.
+fn host_command(
+    ctx: &Context,
+    run: HostRun<'_>,
+    forward: &[OsString],
+    order: Option<u64>,
+    firmware: &Path,
+) -> std::process::Command {
+    let mut command = match run {
+        HostRun::Workspace => host_test_command(ctx),
+        HostRun::Doctests => host_doctest_command(ctx),
+        HostRun::Lane(selection) => HostLane::command(ctx, "test", selection),
+    };
+    command.env(PI_FIRMWARE_ENV, firmware);
+    command.args(forward);
+    if let Some(order) = order {
+        command.args(host_order_args(forward, order));
+    }
+    command
+}
+
+/// Whether `forward` selects cargo targets, which leaves the doctests out
+/// of the selection, as cargo refuses a selector beside `--doc`.
+fn selects_targets(forward: &[OsString]) -> bool {
+    const SELECTORS: [&str; 10] = [
+        "--lib",
+        "--bins",
+        "--bin",
+        "--tests",
+        "--test",
+        "--examples",
+        "--example",
+        "--benches",
+        "--bench",
+        "--all-targets",
+    ];
+    forward
+        .iter()
+        .take_while(|arg| *arg != "--")
+        .filter_map(|arg| arg.to_str())
+        .any(|arg| {
+            let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
+            SELECTORS.contains(&flag)
+        })
 }
 
 /// A host configuration the workspace pass builds none of: packages whose
@@ -1330,6 +1448,11 @@ fn run_spec_review(ctx: &Context) -> Result<(), String> {
     spec_review::run(&ctx.workspace_root, &ctx.children)
 }
 
+fn run_ignore_check(ctx: &Context) -> Result<(), String> {
+    noteln!("xtask: [ignore-check] {}", ctx.workspace_root.display());
+    ignore_check::run(&ctx.workspace_root, &ctx.children)
+}
+
 fn run_source_text(ctx: &Context) -> Result<(), String> {
     noteln!("xtask: [source-text] {}", ctx.workspace_root.display());
     source_text::run(&ctx.workspace_root, &ctx.children)
@@ -1396,8 +1519,10 @@ enum CiStage {
     Clippy,
     /// The whole test matrix once, the host passes in a freshly seeded order so
     /// an order-dependent suite fails. The QEMU tests need QEMU for every
-    /// Tier-1 target (`docs/src/platform/x86_64.md`); the repetition lives in
-    /// the soaks.
+    /// Tier-1 target (`docs/src/platform/x86_64.md`), the wasm32 ones Node.js
+    /// and the browser `tests/integration/package-lock.json` pins, and the
+    /// device-tree tests the pinned Pi firmware, staged as the image stage
+    /// stages it; the repetition lives in the soaks.
     Test,
     /// The undefined-behaviour oracle over the crates with a hand-written
     /// `unsafe` core. With the matrix it is the dearest stage, so it closes
@@ -1437,7 +1562,7 @@ impl CiStage {
             Self::DocsCheck => "docs-check",
             Self::Image => "image",
             Self::Clippy => "clippy",
-            Self::Test => "test --qemu",
+            Self::Test => "test --qemu --wasm",
             Self::Miri => "miri",
         }
     }
@@ -1469,9 +1594,9 @@ impl CiStage {
     }
 }
 
-/// The `test` arguments `ci` passes: the QEMU matrix, in a fresh order, and
-/// no scene tier.
-const CI_TEST_ARGS: [&str; 2] = ["--qemu", "--shuffle"];
+/// The `test` arguments `ci` passes: the QEMU and wasm32 matrices, in a fresh
+/// order, and no scene tier.
+const CI_TEST_ARGS: [&str; 3] = ["--qemu", "--wasm", "--shuffle"];
 
 fn run_ci(ctx: &Context) -> Result<(), String> {
     // Every compiling stage signs or derives an anchor from the key set, so a
@@ -1503,6 +1628,8 @@ const STATIC_GATES: &[(&str, StaticGate)] = &[
     ("help-lint", help_lint::run),
     // No unreviewed AI-drafted artefact marker reached the tree.
     ("spec-review", run_spec_review),
+    // No test the gate builds is ignored, so every one of them runs.
+    ("ignore-check", run_ignore_check),
     // No comment cites a charter section number in place of the reason.
     ("charter-cite", run_charter_cite),
     // No control byte in source text, which tools then misread as binary.
@@ -1585,11 +1712,14 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         match step {
             LongStep::Once(ci_stage) => stage(ci_stage.label(), || ci_stage.run(ctx))?,
             LongStep::FlakeHunt => stage("flake hunt", || {
-                // Every QEMU enrolment is built once, so the repeated runs
-                // re-execute the binaries rather than rebuilding them.
+                // Every QEMU enrolment and wasm32 vertical is built, and the
+                // firmware the host tests read staged, once, so the repeated
+                // runs re-execute rather than rebuild.
+                let firmware = test_firmware(ctx)?;
                 qemu_tests::build_all(ctx, None)?;
+                wasm_tests::prepare(ctx)?;
                 ci_long::flake_hunt(
-                    ci_long::all_units(ctx, ci_long::REPS)?,
+                    ci_long::all_units(ctx, ci_long::REPS, &firmware)?,
                     ci_long::REPS,
                     |jobs, budget| parallel::run(&ctx.children, jobs, budget),
                 )
@@ -1624,23 +1754,30 @@ fn run_image_gate(ctx: &Context) -> Result<(), String> {
 /// the `constant_time` module's full-traversal assertions, rather than at
 /// the debug optimisation level the main test phase uses.
 fn run_crypto_constant_time(ctx: &Context) -> Result<(), String> {
-    ctx.run(
-        "crypto-constant-time (release)",
-        crypto_constant_time_command(ctx),
-    )
+    parallel::run(&ctx.children, vec![crypto_constant_time_job(ctx)], 1)
 }
 
-/// The `crypto-constant-time` command, which `ci-long`'s hunt repeats.
-fn crypto_constant_time_command(ctx: &Context) -> std::process::Command {
+/// The release-profile crypto tests, held to running every one: the job
+/// `ci-long`'s hunt repeats as well.
+fn crypto_constant_time_job(ctx: &Context) -> parallel::Job {
     let mut cmd = ctx.cargo();
     cmd.args(["test", "--release", "--locked", "-p", "tairix-crypto"]);
-    cmd
+    parallel::Job::new("crypto-constant-time (release)", cmd)
+        .accounted(libtest::Account::Everything)
 }
 
 /// The workspace host test pass, which `ci-long`'s hunt repeats.
 fn host_test_command(ctx: &Context) -> std::process::Command {
     let mut cmd = ctx.cargo();
     cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
+    cmd
+}
+
+/// The workspace's doctests, which `--all-targets` leaves out and cargo will
+/// not run beside it; `ci-long`'s hunt repeats them too.
+fn host_doctest_command(ctx: &Context) -> std::process::Command {
+    let mut cmd = ctx.cargo();
+    cmd.args(["test", "--workspace", "--doc", "--locked"]);
     cmd
 }
 
@@ -1653,11 +1790,95 @@ fn run_deny(ctx: &Context) -> Result<(), String> {
     ctx.run("deny", cmd)
 }
 
-/// Environment variable naming an operator-staged Pi firmware-blob
-/// directory, the hands-free alternative to `--firmware` (air-gapped and
-/// pre-staged builds). When neither is set, `image` fetches the pinned
-/// blobs itself.
-const PI_FIRMWARE_ENV: &str = "TAIRIX_PI_FIRMWARE";
+/// Which stage stages the pinned Pi firmware, for the messages it fails with.
+#[derive(Clone, Copy)]
+enum FirmwareFor {
+    Image,
+    Tests,
+}
+
+impl FirmwareFor {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Tests => "test",
+        }
+    }
+
+    /// How an operator stages the blobs for this stage instead.
+    fn remedy(self) -> String {
+        match self {
+            Self::Image => format!("pass --firmware <dir> (or set ${PI_FIRMWARE_ENV})"),
+            Self::Tests => format!("set ${PI_FIRMWARE_ENV} to their directory"),
+        }
+    }
+}
+
+/// The build cache the pinned Pi firmware is fetched into.
+fn firmware_cache(ctx: &Context) -> PathBuf {
+    ctx.target_dir().join(PI_FIRMWARE_CACHE)
+}
+
+/// The directory holding the pinned Pi firmware, verified against
+/// `tools/mkimage/firmware.lock`: the operator's (`--firmware`, or
+/// [`PI_FIRMWARE_ENV`], the hands-free form for air-gapped and pre-staged
+/// builds) as it stands, else the build cache, with whatever it lacks fetched
+/// first.
+fn staged_pi_firmware(
+    ctx: &Context,
+    operator: Option<PathBuf>,
+    stage: FirmwareFor,
+) -> Result<(PathBuf, Vec<tairix_mkimage::firmware::FirmwareFile>), String> {
+    let label = stage.label();
+    let manifest_path = ctx
+        .workspace_root
+        .join("tools")
+        .join("mkimage")
+        .join("firmware.lock");
+    let manifest_text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("{label}: cannot read {}: {e}", manifest_path.display()))?;
+    let manifest = tairix_mkimage::firmware::FirmwareManifest::parse(&manifest_text)
+        .map_err(|e| format!("{label}: {e}"))?;
+    let dir = if let Some(dir) = operator {
+        dir
+    } else {
+        let cache = firmware_cache(ctx);
+        fetch_missing_firmware(ctx, &manifest, &cache, stage)?;
+        cache
+    };
+    let firmware = manifest
+        .load_dir(&dir)
+        .map_err(|e| format!("{label}: {e}"))?;
+    Ok((dir, firmware))
+}
+
+/// The directory `$TAIRIX_PI_FIRMWARE` names, made absolute against the
+/// working directory, since each test runs in its own package's.
+fn operator_firmware() -> Result<Option<PathBuf>, String> {
+    std::env::var_os(PI_FIRMWARE_ENV)
+        .map(|dir| {
+            std::path::absolute(&dir).map_err(|e| {
+                format!(
+                    "test: ${PI_FIRMWARE_ENV} {}: {e}",
+                    Path::new(&dir).display()
+                )
+            })
+        })
+        .transpose()
+}
+
+/// Where the pinned firmware the host tests check discovery against is: the
+/// operator's directory, else the build cache. Naming it stages nothing, so a
+/// run's plan can be shown without fetching.
+fn test_firmware_dir(ctx: &Context) -> Result<PathBuf, String> {
+    Ok(operator_firmware()?.unwrap_or_else(|| firmware_cache(ctx)))
+}
+
+/// [`test_firmware_dir`], staged once for a run to name to each pass, so a
+/// test handed it cannot pass having read nothing.
+fn test_firmware(ctx: &Context) -> Result<PathBuf, String> {
+    staged_pi_firmware(ctx, operator_firmware()?, FirmwareFor::Tests).map(|(dir, _)| dir)
+}
 
 /// Parsed `image` arguments. The flags mirror `tools/mkimage`'s CLI so the
 /// two entry points stay interchangeable.
@@ -1755,13 +1976,15 @@ fn fetch_missing_firmware(
     ctx: &Context,
     manifest: &tairix_mkimage::firmware::FirmwareManifest,
     cache: &Path,
+    stage: FirmwareFor,
 ) -> Result<(), String> {
     let missing = manifest.missing_in(cache);
     if missing.is_empty() {
         return Ok(());
     }
+    let label = stage.label();
     std::fs::create_dir_all(cache)
-        .map_err(|e| format!("image: cannot create {}: {e}", cache.display()))?;
+        .map_err(|e| format!("{label}: cannot create {}: {e}", cache.display()))?;
     for entry in &missing {
         let url = format!("{}/{}", manifest.source(), entry.name);
         let dest = cache.join(&entry.name);
@@ -1769,7 +1992,7 @@ fn fetch_missing_firmware(
         // subdirectory that must exist before curl writes the `.part`.
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("image: cannot create {}: {e}", parent.display()))?;
+                .map_err(|e| format!("{label}: cannot create {}: {e}", parent.display()))?;
         }
         let part = cache.join(format!("{}.part", entry.name));
         let mut curl = std::process::Command::new("curl");
@@ -1778,17 +2001,20 @@ fn fetch_missing_firmware(
             .arg("--output")
             .arg(&part)
             .arg(&url);
-        ctx.run(&format!("image: fetching pinned firmware blob {url}"), curl)
-            .map_err(|why| {
-                let _ = std::fs::remove_file(&part);
-                format!(
-                    "{why}; to build without fetching, stage the blobs per \
-                     tools/mkimage/firmware.lock and pass --firmware <dir> (or set \
-                     ${PI_FIRMWARE_ENV})"
-                )
-            })?;
+        ctx.run(
+            &format!("{label}: fetching pinned firmware blob {url}"),
+            curl,
+        )
+        .map_err(|why| {
+            let _ = std::fs::remove_file(&part);
+            format!(
+                "{why}; to run without fetching, stage the blobs per \
+                     tools/mkimage/firmware.lock and {}",
+                stage.remedy()
+            )
+        })?;
         std::fs::rename(&part, cache.join(&entry.name))
-            .map_err(|e| format!("image: cannot stage {}: {e}", entry.name))?;
+            .map_err(|e| format!("{label}: cannot stage {}: {e}", entry.name))?;
     }
     let still_missing = manifest.missing_in(cache);
     if !still_missing.is_empty() {
@@ -1797,7 +2023,7 @@ fn fetch_missing_firmware(
         }
         let names: Vec<&str> = still_missing.iter().map(|e| e.name.as_str()).collect();
         return Err(format!(
-            "image: fetched firmware failed the pinned checksum gate \
+            "{label}: fetched firmware failed the pinned checksum gate \
              (tools/mkimage/firmware.lock): {}",
             names.join(", ")
         ));
@@ -2146,28 +2372,8 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
         LONG_BUILD_COMMAND_TIMEOUT,
     )?;
 
-    // 2. Resolve the pinned firmware inputs — an operator-staged directory
-    //    is verified as-is; otherwise missing blobs are fetched into the
-    //    build cache — then verify them and assemble the image.
-    let manifest_path = ctx
-        .workspace_root
-        .join("tools")
-        .join("mkimage")
-        .join("firmware.lock");
-    let manifest_text = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("image: cannot read {}: {e}", manifest_path.display()))?;
-    let manifest = tairix_mkimage::firmware::FirmwareManifest::parse(&manifest_text)
-        .map_err(|e| format!("image: {e}"))?;
-    let firmware_dir = if let Some(dir) = firmware_dir {
-        dir
-    } else {
-        let cache = ctx.target_dir().join("pi-firmware");
-        fetch_missing_firmware(ctx, &manifest, &cache)?;
-        cache
-    };
-    let firmware = manifest
-        .load_dir(&firmware_dir)
-        .map_err(|e| format!("image: {e}"))?;
+    // 2. Resolve the pinned firmware inputs, then assemble the image.
+    let (_, firmware) = staged_pi_firmware(ctx, firmware_dir, FirmwareFor::Image)?;
 
     let kernel_path = ctx
         .target_dir()
@@ -2469,11 +2675,12 @@ fn relative(base: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_subcommand_available, ci_long_plan, dir_size, host_clippy, host_order_args,
-        image_drivers, kernel_build_profile, kernel_diag_feature_args, parse_image_args,
-        parse_run_args, parse_test_options, run_session_spec, CiStage, Command, HostLane, LongStep,
-        PassOrder, Path, RunBudget, RunMachine, CI_STAGES, CI_TEST_ARGS, DEFAULT_RUN_CPUS,
-        DOCS_RUSTDOCFLAGS, PLATFORM_IMAGE_DRIVER_STORE, STATIC_GATES,
+        cargo_subcommand_available, ci_long_plan, dir_size, host_clippy, host_command,
+        host_order_args, host_pass, image_drivers, kernel_build_profile, kernel_diag_feature_args,
+        libtest, parse_image_args, parse_run_args, parse_test_options, run_session_spec, CiStage,
+        Command, HostLane, HostRun, HostStep, LongStep, PassOrder, Path, RunBudget, RunMachine,
+        CI_STAGES, CI_TEST_ARGS, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS, PI_FIRMWARE_ENV,
+        PLATFORM_IMAGE_DRIVER_STORE, STATIC_GATES,
     };
     use crate::commands::soak::{Budget, NIGHTLY};
     use crate::Context;
@@ -2606,6 +2813,98 @@ mod tests {
         );
         assert_eq!(plan.last(), Some(&LongStep::FlakeHunt));
         assert!(plan.contains(&LongStep::Once(CiStage::Loom)));
+    }
+
+    /// A host pass runs the workspace's tests, its doctests and every lane's,
+    /// each held to its account and the device-tree tests handed the firmware.
+    #[test]
+    fn a_host_pass_runs_every_host_test_each_held_to_its_account() {
+        let ctx = Context {
+            workspace_root: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .expect("the workspace root")
+                .to_path_buf(),
+            cargo: OsString::from("true"),
+            children: std::sync::Arc::new(crate::children::Children::new(None)),
+        };
+        let firmware = Path::new("/staged/pi-firmware");
+        let args = |step: &HostStep| -> Vec<String> {
+            step.command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        let names_firmware = |step: &HostStep| {
+            step.command
+                .get_envs()
+                .any(|(key, value)| key == PI_FIRMWARE_ENV && value == Some(firmware.as_os_str()))
+        };
+
+        let opts = parse_test_options(&[]).expect("no arguments");
+        let steps = host_pass(&ctx, &opts, 1, firmware).expect("the pass");
+        assert_eq!(steps.len(), 2 + opts.host_lanes().count());
+        assert!(args(&steps[0]).contains(&"--all-targets".to_string()));
+        assert!(names_firmware(&steps[0]));
+        assert!(
+            args(&steps[1]).contains(&"--doc".to_string()),
+            "the doctests"
+        );
+        for lane in &steps[2..] {
+            assert!(names_firmware(lane), "{}", lane.label);
+        }
+        assert!(steps
+            .iter()
+            .all(|step| step.account == libtest::Account::Everything));
+
+        let filtered = parse_test_options(&[OsString::from("a_filter")]).expect("a filter");
+        let steps = host_pass(&ctx, &filtered, 1, firmware).expect("the pass");
+        assert!(steps
+            .iter()
+            .all(|step| step.account == libtest::Account::Forwarded));
+        assert!(
+            args(&steps[1]).contains(&"a_filter".to_string()),
+            "the doctests filtered too"
+        );
+
+        let selected = parse_test_options(&[OsString::from("--lib")]).expect("a selector");
+        let steps = host_pass(&ctx, &selected, 1, firmware).expect("the pass");
+        assert!(steps
+            .iter()
+            .all(|step| !args(step).contains(&"--doc".to_string())));
+    }
+
+    /// Every host step is handed the firmware and runs the forwarded
+    /// arguments before the order's, whichever run it is.
+    #[test]
+    fn a_host_command_names_the_firmware_and_orders_after_the_caller() {
+        let ctx = Context {
+            workspace_root: Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf(),
+            cargo: OsString::from("true"),
+            children: std::sync::Arc::new(crate::children::Children::new(None)),
+        };
+        let firmware = Path::new("/staged/pi-firmware");
+        let selection = [OsString::from("-p"), OsString::from("lane")];
+        for run in [
+            HostRun::Workspace,
+            HostRun::Doctests,
+            HostRun::Lane(&selection),
+        ] {
+            let command = host_command(&ctx, run, &[OsString::from("a_filter")], Some(7), firmware);
+            assert!(command
+                .get_envs()
+                .any(|(key, value)| key == PI_FIRMWARE_ENV && value == Some(firmware.as_os_str())));
+            let args: Vec<_> = command.get_args().collect();
+            let filter = args
+                .iter()
+                .position(|arg| *arg == "a_filter")
+                .expect("forwarded");
+            let seed = args
+                .iter()
+                .position(|arg| *arg == "7")
+                .expect("the order seed");
+            assert!(filter < seed);
+        }
     }
 
     /// The crate docs list exactly the subcommands xtask has.
@@ -2962,6 +3261,7 @@ mod tests {
     fn ci_runs_every_host_lane_but_the_scene_tier() {
         let ci = parse_test_options(&argv(&CI_TEST_ARGS)).expect("ci's arguments parse");
         assert!(ci.run_qemu);
+        assert!(ci.run_wasm, "the gate runs the wasm32 verticals too");
         assert_eq!(ci.order, PassOrder::Shuffled(None));
         assert_eq!(ci.host_lanes().collect::<Vec<_>>(), [HostLane::Diagnostics]);
         let scenes = parse_test_options(&argv(&["--scenes"])).expect("parse");

@@ -1,13 +1,7 @@
-//! Build script: register the `loom` cfg flag so `rustc`'s
-//! `unexpected_cfgs` check is happy.
-//!
-//! `loom` is a *cfg flag*, not a Cargo feature, because enabling it
-//! pulls in the `loom` crate (which depends on `std`) and rewires every
-//! atomic in this crate to go through the model checker — a change
-//! that is not a stable, additive feature in the Cargo sense. It is
-//! enabled by passing `RUSTFLAGS="--cfg loom"`. Mirrors the build
-//! scripts in `kernel/sync`, `kernel/mem`, and `kernel/sched`. See
-//! and `tests/loom.rs`.
+//! Build script: register the `loom` cfg, which `cargo xtask loom` sets to
+//! build the port's models over loom's atomics (`src/loom_compat.rs`). A cfg
+//! rather than a feature, as it swaps the atomics of every crate in the build,
+//! which no additive feature may do.
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(loom)");

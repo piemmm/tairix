@@ -108,23 +108,14 @@ unsafe impl<T: Send> Send for OnceCell<T> {}
 unsafe impl<T: Send + Sync> Sync for OnceCell<T> {}
 
 impl<T> OnceCell<T> {
-    /// Construct an empty cell.
-    #[cfg(not(loom))]
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            state: AtomicUsize::new(EMPTY),
-            value: SyncUnsafeCell::new(MaybeUninit::uninit()),
-        }
-    }
-
-    /// Construct an empty cell (non-`const` under `loom`).
-    #[cfg(loom)]
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            state: AtomicUsize::new(EMPTY),
-            value: SyncUnsafeCell::new(MaybeUninit::uninit()),
+    crate::const_fn! {
+        /// Construct an empty cell.
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                state: AtomicUsize::new(EMPTY),
+                value: SyncUnsafeCell::new(MaybeUninit::uninit()),
+            }
         }
     }
 
@@ -304,18 +295,12 @@ impl<T: fmt::Debug> fmt::Debug for OnceCell<T> {
 pub struct Once<T>(OnceCell<T>);
 
 impl<T> Once<T> {
-    /// Construct a fresh `Once`.
-    #[cfg(not(loom))]
-    #[must_use]
-    pub const fn new() -> Self {
-        Self(OnceCell::new())
-    }
-
-    /// Construct a fresh `Once` (non-`const` under `loom`).
-    #[cfg(loom)]
-    #[must_use]
-    pub fn new() -> Self {
-        Self(OnceCell::new())
+    crate::const_fn! {
+        /// Construct a fresh `Once`.
+        #[must_use]
+        pub fn new() -> Self {
+            Self(OnceCell::new())
+        }
     }
 
     /// Returns the contained value if already initialised.

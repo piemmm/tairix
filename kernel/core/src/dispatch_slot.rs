@@ -44,7 +44,7 @@
 //! performs is happens-before every subsequent `get` on any CPU
 //! because [`OnceCell::set`] is a release store and
 //! [`OnceCell::get`] is an acquire load (documented in
-//! `kernel/sync::once`). Per-CPU syscalls observe `Some(hook)` from
+//! `tairix_sync::once`). Per-CPU syscalls observe `Some(hook)` from
 //! the moment `set` returns.
 
 use tairix_arch_api::backtrace::UserRegisterFrame;

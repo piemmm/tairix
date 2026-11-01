@@ -2,7 +2,7 @@
 //!
 //! The wasm32 counterpart of [`super::qemu_tests`]. Where the bare-metal
 //! verticals boot under QEMU, these run on `wasm32-unknown-unknown` —
-//! most in a real (headless) browser, because what they test *is* the
+//! two in a real (headless) browser, because what they test *is* the
 //! browser: this module builds each wasm32 vertical `cdylib`
 //! for `wasm32-unknown-unknown` and launches its harness against the
 //! compiled module. Each harness decides PASS/FAIL — from the kernel's
@@ -14,10 +14,10 @@
 //! vertical is one row there (one driver, not a
 //! per-vertical copy of the build/run glue).
 //!
-//! Kept opt-in behind `test --wasm` (mirroring `test --qemu`) because the
-//! browser verticals need `node`, `puppeteer`, and a Chrome binary; a
-//! host lacking them fails loudly rather than skipping (never silently
-//! skip a test).
+//! `ci` passes `test --wasm` and `ci-long`'s hunt repeats every vertical. The
+//! harnesses need `node`, and the browser ones the puppeteer
+//! `tests/integration/package-lock.json` pins, with the Chrome it installs;
+//! a host lacking either fails loudly before the matrix rather than skipping.
 
 use std::path::PathBuf;
 
@@ -26,10 +26,17 @@ use crate::Context;
 /// Rust target every wasm32 vertical is built for.
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
+/// Loads puppeteer and checks the browser the harnesses launch can be run:
+/// the one `PUPPETEER_EXECUTABLE_PATH` names, else the one puppeteer installed.
+const BROWSER_PROBE: &str = "import { accessSync, constants } from 'node:fs'; \
+     const { default: puppeteer } = await import('puppeteer'); \
+     accessSync(process.env.PUPPETEER_EXECUTABLE_PATH || await puppeteer.executablePath(), \
+     constants.X_OK);";
+
 /// One enrolled wasm32 vertical.
-struct Vertical {
+pub(crate) struct Vertical {
     /// Workspace package name.
-    package: &'static str,
+    pub(crate) package: &'static str,
     /// File stem cargo emits for the `cdylib` (the crate name, `-` → `_`).
     artifact: &'static str,
     /// Harness runner, workspace-relative.
@@ -40,7 +47,7 @@ struct Vertical {
 /// order. Each instantiates the compiled module and decides its own
 /// verdict — from console markers in a headless browser, or from the
 /// module's exports where no browser is needed.
-const VERTICALS: &[Vertical] = &[
+pub(crate) const VERTICALS: &[Vertical] = &[
     // Stage 3d + W8: boot, per-worker isolation, live scheduler ticks,
     // multi-worker SMP + cross-context IPI.
     Vertical {
@@ -123,9 +130,23 @@ pub fn prepare(ctx: &Context) -> Result<(), String> {
     super::probe_version(ctx, "node").map_err(|why| {
         format!(
             "{why}; the wasm32 harnesses need Node.js on PATH, and the browser \
-             ones additionally need puppeteer and a Chrome binary"
+             ones the puppeteer tests/integration/package-lock.json pins"
         )
     })?;
+    // Resolved as the harnesses resolve it, from beside them, down to the
+    // browser they launch, so a missing one fails here with its remedy rather
+    // than mid-matrix.
+    let mut puppeteer = std::process::Command::new("node");
+    puppeteer
+        .current_dir(ctx.workspace_root.join("tests").join("integration"))
+        .args(["--input-type=module", "-e", BROWSER_PROBE]);
+    ctx.run("test --wasm (puppeteer)", puppeteer)
+        .map_err(|why| {
+            format!(
+                "{why}; the browser harnesses need the puppeteer \
+             tests/integration/package-lock.json pins: run `npm ci --prefix tests/integration`"
+            )
+        })?;
 
     for vertical in VERTICALS {
         build(ctx, vertical)?;
@@ -158,17 +179,49 @@ fn build(ctx: &Context, vertical: &Vertical) -> Result<(), String> {
 }
 
 fn run_harness(ctx: &Context, vertical: &Vertical) -> Result<(), String> {
+    ctx.run(
+        &format!("test --wasm (harness {})", vertical.package),
+        harness_command(ctx, vertical),
+    )
+}
+
+/// The harness command that runs `vertical` against its built module.
+pub(crate) fn harness_command(ctx: &Context, vertical: &Vertical) -> std::process::Command {
     let wasm: PathBuf = ctx
         .target_dir()
         .join(WASM_TARGET)
         .join("debug")
         .join(vertical.artifact);
-    let harness = ctx.workspace_root.join(vertical.harness);
-
     let mut cmd = std::process::Command::new("node");
     cmd.current_dir(&ctx.workspace_root)
-        .arg(&harness)
+        .arg(ctx.workspace_root.join(vertical.harness))
         .arg("--wasm")
         .arg(&wasm);
-    ctx.run(&format!("test --wasm (harness {})", vertical.package), cmd)
+    cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VERTICALS;
+    use crate::commands::feature_lane::workspace_manifests;
+
+    /// Every wasm32 vertical crate is enrolled, so none is linted and run by
+    /// no stage.
+    #[test]
+    fn every_wasm32_vertical_in_the_workspace_is_enrolled() {
+        let root = crate::workspace_root_from_manifest_dir().expect("the workspace root");
+        let unenrolled: Vec<String> = workspace_manifests(&root)
+            .expect("the workspace manifests")
+            .into_iter()
+            .filter(|(_, (dir, _))| {
+                dir.starts_with("tests/integration/") && dir.ends_with("_wasm32")
+            })
+            .map(|(package, _)| package)
+            .filter(|package| !VERTICALS.iter().any(|vertical| vertical.package == package))
+            .collect();
+        assert!(
+            unenrolled.is_empty(),
+            "wasm32 verticals no stage runs: {unenrolled:?}"
+        );
+    }
 }

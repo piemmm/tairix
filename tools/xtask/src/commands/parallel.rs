@@ -48,7 +48,9 @@
 //! each job is announced as it is *admitted*, with the in-flight weight that
 //! leaves, so the log shows real concurrency rather than a wall of start
 //! lines. When at most one job can run at a time (budget `1`), a command job's
-//! stdio is live instead, as a plain sequential run's is.
+//! stdio is live instead, as a plain sequential run's is; an accounted one's
+//! standard output is relayed a line at a time, so its account is kept from
+//! the lines that frame each libtest run without holding the rest.
 //!
 //! On either path a job's check is a step of its own ahead of its work, and
 //! every step ends with its closing line, so one still outstanding is never
@@ -63,6 +65,7 @@ use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::libtest::{Account, Tally};
 use crate::children::Children;
 use crate::{elapsed_line, output_within, run_within, WaitFailure, DEFAULT_COMMAND_TIMEOUT};
 
@@ -96,6 +99,9 @@ pub struct Job {
     budget: Duration,
     /// Made as the job starts, before its work: a refusal is the job's failure.
     check: Option<Task>,
+    /// What a command job's tests must have run, settled against the libtest
+    /// summaries in its output once it exits.
+    account: Option<Account>,
     work: Work,
 }
 
@@ -109,6 +115,7 @@ impl Job {
             weight: 1,
             budget: DEFAULT_COMMAND_TIMEOUT,
             check: None,
+            account: None,
             work: Work::Command(command),
         }
     }
@@ -148,6 +155,22 @@ impl Job {
         self
     }
 
+    /// Hold this job's tests to `account`, settled against the libtest
+    /// summaries in its output once it exits, so a run that skipped a test it
+    /// was given fails however it exited. A closure reports its own outcome,
+    /// so an account binds only a command job, and a closure given one fails.
+    #[must_use]
+    pub fn accounted(mut self, account: Account) -> Self {
+        self.account = Some(account);
+        self
+    }
+
+    /// The account this job is held to, for the tests that pin each stage's.
+    #[cfg(test)]
+    pub(crate) fn account(&self) -> Option<Account> {
+        self.account
+    }
+
     /// Pair a label with a closure that performs the job and reports its own
     /// pass/fail, charging `weight` against the runner's budget while it runs
     /// (clamped to at least one).
@@ -161,6 +184,7 @@ impl Job {
             weight: weight.max(1),
             budget: DEFAULT_COMMAND_TIMEOUT,
             check: None,
+            account: None,
             work: Work::Closure(Box::new(work)),
         }
     }
@@ -206,14 +230,36 @@ struct Runtime<'a> {
     children: &'a Children,
     /// Holds each block of the log whole where jobs run side by side.
     lock: Mutex<()>,
+    /// Where an accounted job running alone relays its output.
+    relay: Relay,
+}
+
+/// Where an accounted job running alone relays its output.
+#[derive(Clone, Copy)]
+enum Relay {
+    /// To this process's own standard streams, each line whole as it arrives,
+    /// so a line from one stream never splits one from the other.
+    Live,
+    /// To the log, once the job ends: a recorded run keeps every line of its
+    /// jobs out of the recorder's own output.
+    #[cfg(test)]
+    Log,
+}
+
+/// Which of a relayed job's streams a relay carries.
+#[derive(Clone, Copy)]
+enum Stream {
+    Out,
+    Err,
 }
 
 impl<'a> Runtime<'a> {
-    fn new(log: &'a (dyn Fn(&str) + Sync), children: &'a Children) -> Self {
+    fn new(log: &'a (dyn Fn(&str) + Sync), children: &'a Children, relay: Relay) -> Self {
         Self {
             log,
             children,
             lock: Mutex::new(()),
+            relay,
         }
     }
 
@@ -233,7 +279,7 @@ pub fn run(children: &Children, jobs: Vec<Job>, budget: usize) -> Result<(), Str
     run_with(
         jobs,
         budget,
-        &Runtime::new(&|block| crate::note(block), children),
+        &Runtime::new(&|block| crate::note(block), children, Relay::Live),
     )
 }
 
@@ -241,7 +287,11 @@ pub fn run(children: &Children, jobs: Vec<Job>, budget: usize) -> Result<(), Str
 /// tests.
 #[cfg(test)]
 pub(crate) fn run_unlogged(jobs: Vec<Job>, budget: usize) -> Result<(), String> {
-    run_with(jobs, budget, &Runtime::new(&|_| {}, &Children::default()))
+    run_with(
+        jobs,
+        budget,
+        &Runtime::new(&|_| {}, &Children::default(), Relay::Log),
+    )
 }
 
 /// [`run`] against `children`, keeping its log for a test to read, and
@@ -258,7 +308,7 @@ pub(crate) fn run_recorded(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push_str(block);
     };
-    let outcome = run_with(jobs, budget, &Runtime::new(&keep, children));
+    let outcome = run_with(jobs, budget, &Runtime::new(&keep, children, Relay::Log));
     assert!(
         children.live_children().is_empty(),
         "every job's group released"
@@ -358,20 +408,31 @@ fn run_job(job: Job, shown: Shown, runtime: &Runtime<'_>) -> Result<(), String> 
         work,
         budget,
         check,
+        account,
         ..
     } = job;
     let checked = check
         .map(|check| run_check(&label, check, runtime))
         .transpose()?;
     match work {
+        Work::Closure(_) if account.is_some() => {
+            let why = format!("{label} holds an account, which binds only a command job");
+            runtime.say(&verdict(&label, Some(&why), Duration::ZERO));
+            Err(why)
+        }
         Work::Closure(work) => run_closure(&label, work, runtime),
         Work::Command(command) => {
             // Refused before it starts, the work's step ends at once.
             let budget = remaining(&label, runtime.children.raised(budget), checked)
                 .inspect_err(|why| runtime.say(&verdict(&label, Some(why), Duration::ZERO)))?;
-            match shown {
-                Shown::Live => run_live(&label, command, budget, runtime),
-                Shown::Captured => run_captured(&label, command, budget, runtime),
+            match (shown, account) {
+                (Shown::Live, None) => run_live(&label, command, budget, runtime),
+                (Shown::Live, Some(account)) => {
+                    run_relayed(&label, command, budget, account, runtime)
+                }
+                (Shown::Captured, account) => {
+                    run_captured(&label, command, budget, account, runtime)
+                }
             }
         }
     }
@@ -401,12 +462,121 @@ fn run_live(
     failure.map_or(Ok(()), Err)
 }
 
+/// Run an accounted command job alone, relaying its output as it arrives and
+/// keeping the lines libtest frames each binary's run with, to hold the job to
+/// `account` once it exits cleanly. Both streams pass through here, so this
+/// process writes each line whole and none lands inside another.
+fn run_relayed(
+    label: &str,
+    mut command: Command,
+    budget: Duration,
+    account: Account,
+    runtime: &Runtime<'_>,
+) -> Result<(), String> {
+    runtime.say(&format!(
+        "xtask: [{label}] {command:?} (timeout {budget:?})\n"
+    ));
+    let started = Instant::now();
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let relay = runtime.relay;
+    let outcome = run_within(
+        runtime.children,
+        label,
+        &mut command,
+        budget,
+        move |mut child| {
+            let errors = child
+                .stderr
+                .take()
+                .map(|stderr| thread::spawn(move || relay_lines(stderr, Stream::Err, relay)));
+            let relayed = child
+                .stdout
+                .take()
+                .map(|stdout| relay_lines(stdout, Stream::Out, relay));
+            let status = child.wait()?;
+            let mut relayed = relayed.transpose()?.unwrap_or_default();
+            if let Some(errors) = errors {
+                let errors = errors
+                    .join()
+                    .map_err(|_| std::io::Error::other("the stderr relay panicked"))??;
+                relayed.logged.push_str(&errors.logged);
+            }
+            Ok((status, relayed))
+        },
+        |(status, _)| *status,
+    );
+    let (relayed, failure) = match outcome {
+        Ok((_, relayed)) => {
+            let failure = Tally::of(&relayed.runs)
+                .and_then(|tally| account.settle(&tally))
+                .err()
+                .map(|why| format!("{label} {why}"));
+            (Some(relayed), failure)
+        }
+        Err(WaitFailure {
+            message, reaped, ..
+        }) => (reaped.map(|(_, relayed)| relayed), Some(message)),
+    };
+    if let Some(logged) = relayed.as_ref().map(|relayed| relayed.logged.as_str()) {
+        if !logged.is_empty() {
+            runtime.say(logged);
+        }
+    }
+    runtime.say(&verdict(label, failure.as_deref(), started.elapsed()));
+    failure.map_or(Ok(()), Err)
+}
+
+/// What a relayed job wrote: the lines that frame its libtest runs, and the
+/// whole of it where it is relayed to the log.
+#[derive(Default)]
+struct Relayed {
+    runs: String,
+    logged: String,
+}
+
+/// Relay `stream` a line at a time to where `relay` says, keeping the lines
+/// of standard output that frame a libtest run, so a job's account costs no
+/// copy of its output.
+fn relay_lines(
+    stream: impl std::io::Read,
+    which: Stream,
+    relay: Relay,
+) -> std::io::Result<Relayed> {
+    use std::io::{BufRead as _, Write as _};
+
+    let mut reader = std::io::BufReader::new(stream);
+    let mut relayed = Relayed::default();
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? > 0 {
+        let text = String::from_utf8_lossy(&line);
+        match (relay, which) {
+            (Relay::Live, Stream::Out) => std::io::stdout().lock().write_all(&line)?,
+            (Relay::Live, Stream::Err) => std::io::stderr().lock().write_all(&line)?,
+            #[cfg(test)]
+            (Relay::Log, _) => relayed.logged.push_str(&text),
+        }
+        if matches!(which, Stream::Out) && super::libtest::frames_a_run(&text) {
+            relayed.runs.push_str(text.trim_end_matches(['\r', '\n']));
+            relayed.runs.push('\n');
+        }
+        line.clear();
+    }
+    if !relayed.logged.is_empty() && !relayed.logged.ends_with('\n') {
+        relayed.logged.push('\n');
+    }
+    Ok(relayed)
+}
+
 /// Run a command job with its output captured, logged whole as it ends; a
-/// killed job's too, as it names the work the budget ran out on.
+/// killed job's too, as it names the work the budget ran out on. A job that
+/// exits cleanly is then held to its `account`, if it has one.
 fn run_captured(
     label: &str,
     mut command: Command,
     budget: Duration,
+    account: Option<Account>,
     runtime: &Runtime<'_>,
 ) -> Result<(), String> {
     runtime.say(&format!(
@@ -421,6 +591,16 @@ fn run_captured(
             message, reaped, ..
         }) => (reaped, Some(message)),
     };
+    let failure = failure.or_else(|| {
+        let account = account?;
+        let stdout = output
+            .as_ref()
+            .map(|output| String::from_utf8_lossy(&output.stdout));
+        Tally::of(stdout.as_deref().unwrap_or(""))
+            .and_then(|tally| account.settle(&tally))
+            .err()
+            .map(|why| format!("{label} {why}"))
+    });
     let mut block = format!("xtask: [{label}] ----- output -----\n");
     for stream in output
         .iter()
@@ -506,6 +686,7 @@ fn aggregate(failures: Vec<String>) -> Result<(), String> {
 mod tests {
     use super::{default_concurrency, host_parallelism, remaining, Job};
     use crate::children::Children;
+    use crate::commands::libtest::Account;
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -536,6 +717,85 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "exit 1"]);
         Job::new(label, cmd)
+    }
+
+    /// A job that exits cleanly having run two tests and printed their
+    /// summary as libtest would.
+    fn summarising_job(label: &str, summary: &str) -> Job {
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "printf 'running 2 tests\\n%s\\n' \"$1\"",
+            "sh",
+            summary,
+        ]);
+        Job::new(label, cmd)
+    }
+
+    /// A job whose tests fall short of its account fails though it exited
+    /// cleanly, alone or beside others, and its log says how it fell short.
+    #[test]
+    fn a_clean_exit_short_of_its_account_fails_the_job() {
+        const TWO: &str =
+            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.01s";
+        for budget in [1, 4] {
+            let (outcome, _) = recorded(
+                vec![summarising_job("whole", TWO).accounted(Account::Exactly(2))],
+                budget,
+            );
+            assert_eq!(outcome, Ok(()), "budget {budget}");
+            let (outcome, log) = recorded(
+                vec![summarising_job("short", TWO).accounted(Account::Exactly(3))],
+                budget,
+            );
+            assert!(outcome.is_err(), "budget {budget}");
+            assert!(
+                log.contains("short ran 2 of the 3 tests dealt to it"),
+                "budget {budget}: {log}"
+            );
+            let (outcome, _) =
+                recorded(vec![ok_job("silent").accounted(Account::Selected)], budget);
+            assert!(outcome.is_err(), "budget {budget}: no summary is no count");
+        }
+        // Captured, so the summary stays out of this binary's own output,
+        // which the gate reads its tests from.
+        let (outcome, _) = recorded(vec![summarising_job("unheld", TWO)], 4);
+        assert_eq!(
+            outcome,
+            Ok(()),
+            "a job with no account is judged by its exit"
+        );
+    }
+
+    /// A relayed job's standard error reaches the log with its output, never
+    /// the recording process's own stream.
+    #[test]
+    fn a_relayed_job_relays_both_its_streams() {
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "printf 'running 1 test\\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; \
+             0 filtered out; finished in 0.00s\\n'; printf 'a warning\\n' >&2",
+        ]);
+        let (outcome, log) = recorded(
+            vec![Job::new("both", cmd).accounted(Account::Everything)],
+            1,
+        );
+        assert_eq!(outcome, Ok(()), "{log}");
+        assert!(log.contains("a warning\n"), "{log}");
+    }
+
+    /// A closure reports its own verdict, so an account given to one cannot be
+    /// kept, and the job fails rather than run unheld.
+    #[test]
+    fn a_closure_given_an_account_fails() {
+        for budget in [1, 2] {
+            let job = Job::closure("judged", 1, || Ok(())).accounted(Account::Everything);
+            let (outcome, log) = recorded(vec![job], budget);
+            let err = outcome.expect_err("an account a closure cannot keep");
+            assert!(err.contains("binds only a command job"), "{err}");
+            assert!(log.contains("[judged] FAILED in"), "{log}");
+        }
     }
 
     /// A command job that would never finish on its own, budgeted so tightly

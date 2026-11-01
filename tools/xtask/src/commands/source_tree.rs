@@ -9,6 +9,45 @@ use std::time::Duration;
 use crate::children::Children;
 use crate::output_within;
 
+/// One line a tree scan refuses: its workspace-relative path, its 1-based
+/// number and its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub path: String,
+    pub line: usize,
+    pub text: String,
+}
+
+impl Finding {
+    /// Line `index` (0-based) of `rel`, which reads `line`.
+    pub(super) fn at(rel: &str, index: usize, line: &str) -> Self {
+        Self {
+            path: rel.to_string(),
+            line: index + 1,
+            text: line.trim().to_string(),
+        }
+    }
+}
+
+/// Order `findings` by path, then line, as every gate reports them.
+pub(super) fn sort(findings: &mut [Finding]) {
+    findings.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+}
+
+/// Pass where there is nothing to refuse, else fail with `header` and each
+/// finding on a line of its own.
+pub(super) fn refuse(header: &str, findings: &[Finding]) -> Result<(), String> {
+    use std::fmt::Write as _;
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let mut msg = format!("{header}\n");
+    for finding in findings {
+        let _ = writeln!(msg, "  {}:{}: {}", finding.path, finding.line, finding.text);
+    }
+    Err(msg)
+}
+
 /// Visit every regular file under `root` a change could carry, passing its
 /// path, its workspace-relative path and its file name: everything but the
 /// build output, the repository database, and the untracked paths git ignores

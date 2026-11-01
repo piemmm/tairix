@@ -640,7 +640,8 @@ mod tests {
     /// unmap reaches the CPU, or the CPU reads the generation the unmap
     /// advanced and discards its tag on the way in, so no stale entry is
     /// kept. The store-buffering pairing between `enter` and `shoot_remote`,
-    /// run on real threads because loom cannot build the kernel crate graph.
+    /// run on real threads: these are `core` atomics, which no model
+    /// interleaves.
     #[test]
     fn a_cpu_entering_a_space_an_unmap_races_is_reached_or_catches_up() {
         static REACHED: AtomicU64 = AtomicU64::new(0);

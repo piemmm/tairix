@@ -72,12 +72,14 @@ impl fmt::Debug for HashSeed {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AlreadyPublished(pub HashSeed);
 
-/// The one key for this boot (in the kernel) or this process (in userland).
-///
-/// Only [`OnceCell::set`], [`OnceCell::get`], and `is_initialised` are used —
-/// none of which spins — so a reader is safe from any context, unlike the
-/// cell's lazy-initialiser path.
-static PUBLISHED: OnceCell<HashSeed> = OnceCell::new();
+tairix_sync::global! {
+    /// The one key for this boot (in the kernel) or this process (in userland).
+    ///
+    /// Only [`OnceCell::set`], [`OnceCell::get`], and `is_initialised` are
+    /// used — none of which spins — so a reader is safe from any context,
+    /// unlike the cell's lazy-initialiser path.
+    static PUBLISHED: OnceCell<HashSeed> = OnceCell::new();
+}
 
 /// Publish the key for this boot or process. The first call wins.
 ///

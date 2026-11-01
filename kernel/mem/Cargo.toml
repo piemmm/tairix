@@ -88,9 +88,8 @@ tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # directly on byte buffers, no macro magic.
 zeroize = { version = "1.8.1", default-features = false }
 
-# `loom` is pulled in only when the consumer opts in with
-# `RUSTFLAGS="--cfg loom" cargo test ...`. Mirrors the convention
-# established in `kernel/sync/Cargo.toml`.
+# Loom, linked only into the models `cargo xtask loom` builds under
+# `--cfg loom`.
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 

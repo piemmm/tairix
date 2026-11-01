@@ -15,7 +15,7 @@ workspace = true
 # `lib/abi` for the frozen `IrqHandle` / `Errno` types; `lib/log` for
 # the audit sink the subsystem's diagnostic records route through;
 # `kernel/sec` for `TaskId` (the security-attribution identifier the
-# IRQ table binds against); `kernel/sync` for the writer-preference
+# IRQ table binds against); `lib/sync` for the writer-preference
 # `RwLock` mirroring the `CapTable` lock-ordering policy; `lib/collections`
 # and `lib/hash` for the fallible handle map a bind records itself in.
 #

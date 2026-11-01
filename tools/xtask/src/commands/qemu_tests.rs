@@ -19917,6 +19917,102 @@ fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String
     })
 }
 
+/// The verticals the workspace holds against the ones `TESTS` boots.
+#[cfg(test)]
+mod enrolment_tests {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    use super::TESTS;
+    use crate::commands::deps_check::target_tables;
+    use crate::commands::feature_lane::workspace_manifests;
+
+    fn workspace_root() -> PathBuf {
+        crate::workspace_root_from_manifest_dir().expect("the workspace root")
+    }
+
+    /// Each integration crate's leaf directory, package and binaries.
+    fn integration_crates(root: &Path) -> Vec<(String, String, Vec<String>)> {
+        workspace_manifests(root)
+            .expect("the workspace manifests")
+            .into_iter()
+            .filter_map(|(package, (dir, text))| {
+                let leaf = dir.strip_prefix("tests/integration/")?.to_string();
+                let mut bins: Vec<String> = target_tables(&text)
+                    .into_iter()
+                    .filter(|table| table.kind == "bin")
+                    .filter_map(|table| table.name)
+                    .collect();
+                if bins.is_empty() && root.join(&dir).join("src").join("main.rs").exists() {
+                    bins.push(package.clone());
+                }
+                Some((leaf, package, bins))
+            })
+            .collect()
+    }
+
+    /// Every binary of every vertical crate is enrolled, so none builds as a
+    /// host stub and boots in no stage. A binary crate under
+    /// `tests/integration` is a vertical unless it is a program a vertical
+    /// plants (`*_program`) or a wasm32 vertical (`*_wasm32`).
+    #[test]
+    fn every_vertical_binary_in_the_workspace_is_enrolled() {
+        let root = workspace_root();
+        let enrolled: BTreeSet<(&str, &str)> = TESTS
+            .iter()
+            .map(|test| (test.package, test.binary))
+            .collect();
+        let missing: Vec<String> = integration_crates(&root)
+            .into_iter()
+            .filter(|(leaf, _, _)| !leaf.ends_with("_program") && !leaf.ends_with("_wasm32"))
+            .flat_map(|(_, package, bins)| {
+                bins.into_iter()
+                    .filter(|bin| !enrolled.contains(&(package.as_str(), bin.as_str())))
+                    .map(|bin| format!("{package}/{bin}"))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(missing.is_empty(), "verticals no stage boots: {missing:?}");
+    }
+
+    /// Every program crate is planted by some vertical's build or the image
+    /// builder, so none is built for nothing.
+    #[test]
+    fn every_program_crate_is_planted() {
+        let root = workspace_root();
+        let crates = integration_crates(&root);
+        let mut planters: Vec<String> = crates
+            .iter()
+            .filter_map(|(leaf, _, _)| {
+                std::fs::read_to_string(root.join("tests/integration").join(leaf).join("build.rs"))
+                    .ok()
+            })
+            .collect();
+        planters.push(
+            std::fs::read_to_string(root.join("tools/xtask/src/commands/image_apps.rs"))
+                .expect("the image builder's plantings"),
+        );
+        let unplanted: Vec<&String> = crates
+            .iter()
+            .filter(|(leaf, _, _)| leaf.ends_with("_program"))
+            .filter(|(leaf, package, _)| {
+                let quoted = [
+                    format!("\"{package}\""),
+                    format!("tests/integration/{leaf}"),
+                ];
+                !planters
+                    .iter()
+                    .any(|text| quoted.iter().any(|q| text.contains(q.as_str())))
+            })
+            .map(|(leaf, _, _)| leaf)
+            .collect();
+        assert!(
+            unplanted.is_empty(),
+            "programs nothing plants: {unplanted:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tairix_qemu::screendump::Rgb;

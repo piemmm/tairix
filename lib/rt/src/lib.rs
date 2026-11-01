@@ -23,15 +23,16 @@
 //! # Using it
 //!
 //! A program is `#![no_std]`, `#![no_main]`, declares its `main`, and hands it
-//! to [`entry!`]:
+//! to [`entry!`], a freestanding shape the host cannot build as a doctest:
 //!
-//! ```ignore
+//! ```text
 //! #![no_std]
 //! #![no_main]
 //!
+//! use tairix_rt::io::{Stdout, Write};
+//!
 //! fn main() -> i32 {
-//!     tairix_rt::stream_write(b"hello\n");
-//!     0
+//!     i32::from(Stdout.write_all(b"hello\n").is_err())
 //! }
 //!
 //! tairix_rt::entry!(main);

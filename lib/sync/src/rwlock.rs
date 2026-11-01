@@ -166,23 +166,14 @@ unsafe impl<T: ?Sized + Send> Send for RwLock<T> {}
 unsafe impl<T: ?Sized + Send + Sync> Sync for RwLock<T> {}
 
 impl<T> RwLock<T> {
-    /// Create a new reader/writer lock wrapping `value`.
-    #[cfg(not(loom))]
-    #[must_use]
-    pub const fn new(value: T) -> Self {
-        Self {
-            state: AtomicUsize::new(0),
-            data: SyncUnsafeCell::new(value),
-        }
-    }
-
-    /// Create a new reader/writer lock wrapping `value` (non-`const` under `loom`).
-    #[cfg(loom)]
-    #[must_use]
-    pub fn new(value: T) -> Self {
-        Self {
-            state: AtomicUsize::new(0),
-            data: SyncUnsafeCell::new(value),
+    crate::const_fn! {
+        /// Create a new reader/writer lock wrapping `value`.
+        #[must_use]
+        pub fn new(value: T) -> Self {
+            Self {
+                state: AtomicUsize::new(0),
+                data: SyncUnsafeCell::new(value),
+            }
         }
     }
 

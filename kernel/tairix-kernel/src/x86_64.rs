@@ -4,10 +4,10 @@
 //! Every module here names the x86_64 architecture port, so the whole
 //! subtree is gated on the `kernel_isa = "x86_64"` build-script name (the
 //! single selection point lives in `build.rs`, never an
-//! inline `target_arch` predicate). The host-testable wrappers
-//! ([`arch_wrapper`], [`dispatch`], [`ioapic_controller`]) compile on the
-//! x86_64 CI host so their unit tests run under `cargo test`; the
-//! bare-metal-only boot path, PID 1 spawn seam,
+//! inline `target_arch` predicate), and on every host's test build, whatever
+//! the host's own ISA, so the host-testable wrappers' ([`arch_wrapper`],
+//! [`dispatch`], [`ioapic_controller`]) unit tests run wherever the suite
+//! does; the bare-metal-only boot path, PID 1 spawn seam,
 //! runtime spawn producer, panic bridge, and serial sink are further gated
 //! on `freestanding`.
 

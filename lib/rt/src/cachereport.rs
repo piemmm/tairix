@@ -54,7 +54,14 @@
 //! ever turning an indefinite park into a poll, and holding a
 //! [`ReportGuard`] so the rows are withdrawn on every way out:
 //!
-//! ```ignore
+//! ```no_run
+//! # use core::hash::{BuildHasher, Hash};
+//! # use tairix_reclaim::{CachedBytes, ReclaimCache};
+//! # fn publisher<K: Eq + Hash, V: CachedBytes, E: PartialEq + Clone, S: BuildHasher>(
+//! #     cache: &ReclaimCache<K, V, E, S>,
+//! #     own_timeout_ns: u64,
+//! #     wait: impl Fn(u64),
+//! # ) -> ! {
 //! let _rows = tairix_rt::cachereport::ReportGuard;
 //! tairix_rt::cachereport::register(cache.ledger().expect("classified"));
 //! loop {
@@ -63,6 +70,7 @@
 //!     // ... handle whatever the wait woke for ...
 //!     tairix_rt::cachereport::publish_if_due();
 //! }
+//! # }
 //! ```
 
 use alloc::vec::Vec;

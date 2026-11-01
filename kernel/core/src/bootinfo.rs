@@ -996,7 +996,7 @@ where
     /// kernel (typically as a `static` in the binary crate, anchored
     /// at compile time — no global *mutable* static; the
     /// [`DispatchCallbackSlot`]'s internal `OnceCell` is set-once,
-    /// see `kernel/sync::once`).
+    /// see `tairix_sync::once`).
     ///
     /// The arch-port's `set_dispatch_callback` is **still** invoked
     /// before `syscall` is enabled — this field is the *kernel-side*

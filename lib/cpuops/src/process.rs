@@ -16,7 +16,9 @@ use tairix_sync::OnceCell;
 
 use crate::CpuFeatureSet;
 
-static DELIVERED: OnceCell<CpuFeatureSet> = OnceCell::new();
+tairix_sync::global! {
+    static DELIVERED: OnceCell<CpuFeatureSet> = OnceCell::new();
+}
 
 /// Record the feature set this process was delivered.
 ///
@@ -39,11 +41,13 @@ pub struct Resolved<T: Copy> {
 }
 
 impl<T: Copy> Resolved<T> {
-    /// A family nothing has resolved yet.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            cell: OnceCell::new(),
+    tairix_sync::const_fn! {
+        /// A family nothing has resolved yet.
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                cell: OnceCell::new(),
+            }
         }
     }
 

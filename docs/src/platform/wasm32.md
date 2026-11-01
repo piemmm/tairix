@@ -288,12 +288,16 @@ builds and runs both; adding a wasm32 vertical is one row there
 
 ## Build and run
 
-The wasm32 verticals are opt-in behind `cargo xtask test --wasm`
-(mirroring `test --qemu`), because it needs Node.js, puppeteer, and a
-Chrome binary:
+The gate runs the wasm32 verticals (`cargo xtask ci` passes `test --wasm`,
+beside `--qemu`). They need Node.js, and the two browser ones the puppeteer
+`tests/integration/package-lock.json` pins, which installs its own pinned
+headless Chrome:
 
 ```
-# Run the host unit tests and the wasm32 browser vertical:
+# Install the pinned puppeteer and its Chrome, once:
+npm ci --prefix tests/integration
+
+# Run the host unit tests and the wasm32 verticals:
 cargo xtask test --wasm
 
 # wasm32 arch-crate host tests only (clock / worker map / cooperative
@@ -304,11 +308,11 @@ cargo test -p tairix-arch-wasm32
 cargo build -p tairix-test-kernel-arch-boot-wasm32 \
     --target wasm32-unknown-unknown
 
-# Run the harness standalone (Chrome path overridable):
+# Run the harness standalone:
 node tests/integration/kernel_arch_boot_wasm32/web/harness.mjs \
     --wasm target/wasm32-unknown-unknown/debug/tairix_test_kernel_arch_boot_wasm32.wasm \
-    --chrome /usr/bin/google-chrome --timeout-secs 30
+    --timeout-secs 30
 ```
 
-The harness honours `PUPPETEER_EXECUTABLE_PATH` (or `--chrome`) for the
-Chrome binary and defaults to `/usr/bin/google-chrome`.
+The harness launches the Chrome the pinned puppeteer installed; `--chrome`
+or `PUPPETEER_EXECUTABLE_PATH` names another binary.

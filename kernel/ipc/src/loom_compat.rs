@@ -1,9 +1,6 @@
-//! Loom-aware re-exports for the atomic primitives used in this crate.
-//!
-//! Mirrors the pattern established by `kernel/sync/src/loom_compat.rs`:
-//! the production build uses `core::sync::atomic`; under
-//! `--cfg loom` the same names resolve to `loom::sync::atomic` so the
-//! model checker can interleave them.
+//! The atomics the port's state machine uses: loom's under `--cfg loom`, so
+//! the models drive every interleaving of them. `lib/sync` keeps its own shim
+//! private to that crate, hence this one.
 
 #[cfg(loom)]
 pub(crate) use loom::sync::atomic::{AtomicU32, AtomicU64, Ordering};

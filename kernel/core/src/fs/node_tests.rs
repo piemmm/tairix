@@ -213,7 +213,7 @@ fn interleavings(a: &[Step], b: &[Step]) -> Vec<Vec<Step>> {
 /// Every interleaving of opens and closes keeps a slot for every pin and
 /// loses no release. Each step is one hold of the queue's lock, so these are
 /// all the orders the lock can serialise them in; loom cannot build this
-/// crate (D131).
+/// crate (D1643).
 #[test]
 fn every_interleaving_keeps_a_slot_for_every_pin() {
     let opener = [
@@ -269,7 +269,7 @@ fn every_interleaving_keeps_a_slot_for_every_pin() {
 /// the registration due, and a pass clears the mark before it takes the
 /// queue. Each round ends with both sides done, so a stranded release is seen
 /// in the round that stranded it rather than swept up by a later wake. loom
-/// cannot build this crate (D131), so the race runs on the host's own cores.
+/// cannot build this crate (D1643), so the race runs on the host's own cores.
 #[test]
 fn a_release_racing_a_flusher_pass_is_never_stranded() {
     // The interpreter preempts at random points in every round, so it needs

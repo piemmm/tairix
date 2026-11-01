@@ -295,6 +295,18 @@ The bounds are pinned by
   RUSTFLAGS="--cfg loom" cargo test -p tairix-sync --test loom --release
   ```
 
+- **Statics under the model checker.** Loom's atomics have no `const`
+  constructor and belong to one model execution, so a crate the loom stage
+  builds declares a static holding a primitive through
+  `tairix_sync::global!`, which each execution builds afresh under loom and
+  is the plain `static` everywhere else, and gives a type embedding a
+  primitive its `const` constructor through `tairix_sync::const_fn!`. The
+  plain form does not compile under `--cfg loom`, so the stage enforces this.
+  The model's static is not quite the plain one: its first use synchronises
+  with every later one, so a model touches the globals its threads use before
+  spawning them, and each execution drops it, so a value whose drop reaches
+  another global fails at the execution's end.
+
 - **The UB oracle.** `cargo xtask miri` interprets the crate — both the
   default build and the `lock-diagnostics` one — so the MCS queue's
   intrusive node chain and the set-once cell's `MaybeUninit` are checked

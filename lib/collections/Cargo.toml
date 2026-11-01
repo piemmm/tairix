@@ -24,6 +24,9 @@ tairix-hash = { path = "../hash", version = "=0.0.0" }
 # The inline half of `SmallVec`, and with it the shared `CapacityError`: the
 # fixed-capacity vector is defined once, in the crate that links no allocator.
 tairix-inline = { path = "../inline", version = "=0.0.0" }
+# The static the resolved implementation is published through, in the form
+# the model checker can build.
+tairix-sync = { path = "../sync", version = "=0.0.0" }
 # The one exact byte-lane match the portable group scan is built on.
 tairix-util = { path = "../util", version = "=0.0.0" }
 # The audited optimisation-resistant wipe `ByteQueue` releases storage through:

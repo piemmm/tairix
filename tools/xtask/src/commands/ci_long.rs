@@ -14,8 +14,8 @@
 //! Only the stages that *execute test cases* are flake-hunted
 //! ([`super::CiStage::flake_hunted`]): the host `cargo test` matrix, with the
 //! scene tier `ci` leaves out, the release-profile crypto constant-time
-//! tests, the QEMU integration tests, the fuzz harnesses, and the proptest
-//! models. Every other `ci` stage is a pass/fail check whose result cannot
+//! tests, the QEMU integration tests, the wasm32 verticals, the fuzz
+//! harnesses, and the proptest models. Every other `ci` stage is a pass/fail check whose result cannot
 //! change between runs, so repeating it 2·[`REPS`] times would burn a
 //! long-runner's time for no signal: it runs once, in `ci`'s order, ahead of
 //! the hunt.
@@ -31,7 +31,7 @@
 //!
 //! The concurrency **budget** differs by test kind, deliberately:
 //!
-//! * host / crypto / fuzz / proptest replicas are deadline-free host
+//! * host / crypto / wasm32 / fuzz / proptest replicas are deadline-free host
 //!   processes — a slow run merely finishes later, it does not fail — so all
 //!   [`REPS`] replicas run at once (budget = `reps`).
 //! * a host lane one run of which fills the machine, the scene tier, runs its
@@ -49,6 +49,9 @@
 //!   QEMU replicas still all get submitted; they simply overlap as far as the
 //!   headroom budget allows rather than all at once.
 
+use std::path::Path;
+
+use crate::commands::libtest::Account;
 use crate::commands::parallel::Job;
 use crate::commands::{fuzz, proptest, qemu_tests, seed};
 use crate::Context;
@@ -105,7 +108,7 @@ pub(crate) fn flake_hunt(
         noteln!("xtask: [ci-long] {} — {reps}x sequential", unit.label);
         for pass in 1..=reps {
             let job = (unit.factory)((pass - 1) as usize);
-            // Budget one: the single job streams its output live and runs
+            // Budget one: the single job's output is live and it runs
             // strictly alone, giving the isolated-run timing profile.
             run(vec![job], 1).map_err(|e| {
                 format!(
@@ -126,16 +129,23 @@ pub(crate) fn flake_hunt(
     Ok(())
 }
 
-/// The ordered set of tests the flake hunt drives: the host test matrix, the
-/// QEMU integration tests, the fuzz harnesses, and the proptest models. The
-/// QEMU binaries must already be built ([`super::qemu_tests::build_all`]).
+/// The ordered set of tests the flake hunt drives: the host test matrix, its
+/// device-tree tests reading the firmware in `firmware`, the QEMU integration
+/// tests, the wasm32 verticals, the fuzz harnesses, and the proptest models.
+/// The QEMU binaries and wasm32 modules must already be built
+/// ([`super::qemu_tests::build_all`], [`super::wasm_tests::prepare`]).
 ///
 /// # Errors
 ///
 /// A host lane `ci` runs whose packages cannot be read from the manifests.
-pub(crate) fn all_units(ctx: &Context, reps: u32) -> Result<Vec<FlakeUnit<'_>>, String> {
-    let mut units = host_units(ctx, reps)?;
+pub(crate) fn all_units<'a>(
+    ctx: &'a Context,
+    reps: u32,
+    firmware: &Path,
+) -> Result<Vec<FlakeUnit<'a>>, String> {
+    let mut units = host_units(ctx, reps, firmware)?;
     units.extend(qemu_units(ctx));
+    units.extend(wasm_units(ctx, reps));
     units.extend(fuzz_units(ctx, reps));
     units.extend(proptest_units(ctx, reps));
     Ok(units)
@@ -145,16 +155,21 @@ pub(crate) fn all_units(ctx: &Context, reps: u32) -> Result<Vec<FlakeUnit<'_>>, 
 /// scene tier `ci` leaves out among them — and the release-profile crypto
 /// constant-time tests. Deadline-free, so every replica runs at once, but for
 /// a lane that fills the machine.
-fn host_units(ctx: &Context, reps: u32) -> Result<Vec<FlakeUnit<'_>>, String> {
+fn host_units<'a>(
+    ctx: &'a Context,
+    reps: u32,
+    firmware: &Path,
+) -> Result<Vec<FlakeUnit<'a>>, String> {
     let budget = reps as usize;
+    let firmware = firmware.to_path_buf();
+    // Each replica starts in an order of its own, so the hunt covers test
+    // *ordering* as well as timing: a suite that only passes in the harness's
+    // alphabetical order is a flake like any other. The seed is in the
+    // replica's label, so a hit replays.
+    let named = firmware.clone();
     let mut units = vec![FlakeUnit::new("host cargo test", budget, move |replica| {
-        let mut cmd = super::host_test_command(ctx);
-        // Each replica starts in an order of its own, so the hunt covers
-        // test *ordering* as well as timing: a suite that only passes in
-        // the harness's alphabetical order is a flake like any other. The
-        // seed is in the replica's label, so a hit replays.
         let order = seed::job_seed(None, replica);
-        cmd.args(super::host_order_args(&[], order));
+        let cmd = super::host_command(ctx, super::HostRun::Workspace, &[], Some(order), &named);
         // This one job compiles *and* runs every host-testable crate in
         // the workspace, so from a cold `target/` it legitimately runs far
         // longer than an ordinary step. It gets the long budget so a slow
@@ -162,27 +177,34 @@ fn host_units(ctx: &Context, reps: u32) -> Result<Vec<FlakeUnit<'_>>, String> {
         // is still stopped rather than left for an operator to notice.
         Job::new(format!("host cargo test (order seed {order})"), cmd)
             .with_budget(crate::LONG_BUILD_COMMAND_TIMEOUT)
+            .accounted(Account::Everything)
     })];
+    let named = firmware.clone();
+    units.push(FlakeUnit::new("host doctests", budget, move |replica| {
+        let order = seed::job_seed(None, replica);
+        let cmd = super::host_command(ctx, super::HostRun::Doctests, &[], Some(order), &named);
+        Job::new(format!("host doctests (order seed {order})"), cmd)
+            .with_budget(crate::LONG_BUILD_COMMAND_TIMEOUT)
+            .accounted(Account::Everything)
+    }));
     for lane in super::HostLane::ALL {
         let selection = lane.selection(ctx)?;
         let label = format!("host cargo test ({})", lane.label());
         let concurrency = if lane.fills_the_machine() { 1 } else { budget };
+        let named = firmware.clone();
         units.push(FlakeUnit::new(label.clone(), concurrency, move |replica| {
-            let mut cmd = super::HostLane::command(ctx, "test", &selection);
             let order = seed::job_seed(None, replica);
-            cmd.args(super::host_order_args(&[], order));
-            Job::new(format!("{label} (order seed {order})"), cmd).with_budget(lane.budget())
+            let run = super::HostRun::Lane(&selection);
+            let cmd = super::host_command(ctx, run, &[], Some(order), &named);
+            Job::new(format!("{label} (order seed {order})"), cmd)
+                .with_budget(lane.budget())
+                .accounted(Account::Everything)
         }));
     }
     units.push(FlakeUnit::new(
         "crypto constant-time (release)",
         budget,
-        move |_| {
-            Job::new(
-                "crypto constant-time (release)",
-                super::crypto_constant_time_command(ctx),
-            )
-        },
+        move |_| super::crypto_constant_time_job(ctx),
     ));
     Ok(units)
 }
@@ -192,6 +214,23 @@ fn host_units(ctx: &Context, reps: u32) -> Result<Vec<FlakeUnit<'_>>, String> {
 /// replicas the whole budget (running alone), against the one-third-of-logical
 /// -CPUs headroom budget, so no guest is starved of TCG time (see the module
 /// docs).
+/// One unit per wasm32 vertical: its harness against the module
+/// [`super::wasm_tests::prepare`] built.
+fn wasm_units(ctx: &Context, reps: u32) -> Vec<FlakeUnit<'_>> {
+    super::wasm_tests::VERTICALS
+        .iter()
+        .map(|vertical| {
+            let label = format!("wasm32 {}", vertical.package);
+            FlakeUnit::new(label.clone(), reps as usize, move |replica| {
+                Job::new(
+                    format!("{label} (replica {replica})"),
+                    super::wasm_tests::harness_command(ctx, vertical),
+                )
+            })
+        })
+        .collect()
+}
+
 fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
     let budget = qemu_tests::qemu_host_budget();
     qemu_tests::enrolments()
@@ -270,7 +309,7 @@ pub(crate) fn print_plan(ctx: &Context) -> Result<(), String> {
         })
         .collect();
     outln!("ci-long plan: once, in ci's order: {}", once.join(", "))?;
-    let units = all_units(ctx, REPS)?;
+    let units = all_units(ctx, REPS, &super::test_firmware_dir(ctx)?)?;
     outln!(
         "then {} test(s), each run {REPS}x sequential then {REPS}x concurrent:",
         units.len()
@@ -289,6 +328,7 @@ pub(crate) fn print_plan(ctx: &Context) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{all_units, flake_hunt, FlakeUnit, REPS};
+    use crate::commands::libtest::Account;
     use crate::commands::parallel::{run_unlogged, Job};
     use crate::Context;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -357,15 +397,41 @@ mod tests {
         assert_eq!(ran.load(Ordering::SeqCst), 2);
     }
 
+    /// Every libtest replica is held to its account; a wasm32 harness, which
+    /// libtest does not run, decides its own verdict, as a QEMU guest does,
+    /// whose job is not built here because that resolves its whole store.
+    #[test]
+    fn every_libtest_replica_is_held_to_its_account() {
+        let ctx = Context::discover(None).expect("workspace context");
+        let units =
+            all_units(&ctx, 2, std::path::Path::new("/staged/pi-firmware")).expect("the units");
+        for unit in units.iter().filter(|unit| !unit.label.starts_with("qemu ")) {
+            let account = (unit.factory)(0).account();
+            if unit.label.starts_with("wasm32 ") {
+                assert_eq!(account, None, "{}", unit.label);
+            } else if unit.label.starts_with("fuzz ") || unit.label.starts_with("proptest ") {
+                assert!(account.is_some(), "{}", unit.label);
+            } else {
+                assert_eq!(account, Some(Account::Everything), "{}", unit.label);
+            }
+        }
+    }
+
     /// Every test source is hunted: each host lane, the scene tier `ci` leaves
     /// out among them, its replicas one at a time because one run fills the
     /// machine.
     #[test]
     fn all_units_covers_every_test_source() {
         let ctx = Context::discover(None).expect("workspace context");
-        let units = all_units(&ctx, 2).expect("the units");
+        let units =
+            all_units(&ctx, 2, std::path::Path::new("/staged/pi-firmware")).expect("the units");
         let labels: Vec<&str> = units.iter().map(|u| u.label.as_str()).collect();
         assert!(labels.contains(&"host cargo test"));
+        assert!(labels.contains(&"host doctests"));
+        assert_eq!(
+            labels.iter().filter(|l| l.starts_with("wasm32 ")).count(),
+            crate::commands::wasm_tests::VERTICALS.len()
+        );
         assert!(labels.contains(&"host cargo test (debug-image kernel diagnostics)"));
         let budget = |label: &str| {
             units

@@ -4,10 +4,10 @@
 //! Every module here names the riscv64 architecture port, so the whole
 //! subtree is gated on the `kernel_isa = "riscv64"` build-script name (the
 //! single selection point lives in `build.rs`, never an
-//! inline `target_arch` predicate). The host-testable [`dispatch`] wrapper
-//! compiles on a riscv64 host so its unit tests run under `cargo test`; the
-//! bare-metal-only boot path, PID 1 spawn seam, and runtime spawn producer
-//! are further gated on `freestanding`.
+//! inline `target_arch` predicate), and on every host's test build, whatever
+//! the host's own ISA, so the host-testable [`dispatch`] wrapper's unit tests
+//! run wherever the suite does; the bare-metal-only boot path, PID 1 spawn
+//! seam, and runtime spawn producer are further gated on `freestanding`.
 
 pub mod dispatch;
 

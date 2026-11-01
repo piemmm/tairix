@@ -15,7 +15,7 @@
 //! * `&'a Scheduler<A>` — for `yield_now` and `exit` (and, in the
 //!   future, anything else that needs a `TaskId → Task` lookup).
 //! * `&'a RwLock<CapTable>` — for `cap_query` (read) and `cap_revoke`
-//!   (write). Wrapping `CapTable` in `kernel/sync::RwLock` is the
+//!   (write). Wrapping `CapTable` in `tairix_sync::RwLock` is the
 //!   minimum interior mutability the dispatcher requires; the choice
 //!   mirrors `Scheduler::tasks`'s reader-preferring lock and lets
 //!   `kernel_main`'s `KernelState` compose the two registries under a

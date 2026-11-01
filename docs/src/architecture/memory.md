@@ -2920,8 +2920,7 @@ and reading back a whole page through the live direct map — on the metal.
   untampered round-trips, and books that balance to zero after every
   cycle.
 - **Loom tests** — `kernel/mem/tests/loom.rs` models concurrent
-  allocation. It is built only under `RUSTFLAGS="--cfg loom"`, and no stage
-  runs it until `plans/OPEN-DEFECTS.md` D131 is resolved.
+  allocation over every interleaving (`cargo xtask loom`).
 
 [`BootMemoryMap`]: ../../tairix_kernel_mem/struct.BootMemoryMap.html
 [`AddressSpace<P: PageTable>`]: ../../tairix_kernel_mem/struct.AddressSpace.html

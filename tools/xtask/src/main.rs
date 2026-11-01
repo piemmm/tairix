@@ -26,7 +26,9 @@
 //!   build, so the next compile is still incremental
 //! - `keys`         — create the build's secret signing key set (`keys init`),
 //!   kept outside the tree
-//! - `test`         — `cargo test --workspace --all-targets`; `--count N`
+//! - `test`         — `cargo test --workspace --all-targets`, then the
+//!   doctests, each binary held to running every test it was given, the
+//!   device-tree tests reading the pinned Pi firmware staged first; `--count N`
 //!   (alias `--iterations N`) repeats the whole matrix N times to surface
 //!   flaky tests, defaulting to one run; `--soak` instead repeats it for a
 //!   wall-clock budget — 24 h, `--secs N`, or until the `--until T` close of a
@@ -122,6 +124,8 @@
 //!   equivalent), failing closed on any invariant counterexample
 //! - `spec-review`  — reject an unreviewed AI-drafted-artefact marker that
 //!   reached the tree
+//! - `ignore-check` — reject an ignored test in any spelling, since libtest
+//!   reports one as skipped under a green gate
 //! - `bench`        — host microbenchmarks for the per-pixel desktop paths:
 //!   `Surface::blit`, rounded-rect fill, `box_blur`/`frost_region`/
 //!   `frost_halved_from`,
@@ -138,8 +142,8 @@
 //!   `deny`; `proptest --once`; `crypto-constant-time`, the crypto tests under
 //!   release optimisation; `fuzz --once`; `loom`, the interleaving oracle;
 //!   `docs-check`; `image`, every delivered image profile; `clippy`;
-//!   `test --qemu`, each test once in a shuffled order; and `miri`, the
-//!   undefined-behaviour oracle
+//!   `test --qemu --wasm`, each test once in a shuffled order; and `miri`,
+//!   the undefined-behaviour oracle
 //! - `ci-long`      — the same checks as `ci`, but for a dedicated long-lived
 //!   runner: every test-executing stage (the host test matrix, the scene tier
 //!   `ci` leaves out, the release crypto constant-time tests, the QEMU
@@ -398,7 +402,10 @@ impl Context {
     /// `test --wasm`) can find the binary it just asked cargo to produce.
     #[must_use]
     pub fn target_dir(&self) -> PathBuf {
-        resolve_target_dir(&self.workspace_root, env::var_os("CARGO_TARGET_DIR"))
+        tairix_fuzzseed::firmware::target_dir(
+            &self.workspace_root,
+            env::var_os("CARGO_TARGET_DIR").as_deref(),
+        )
     }
 
     /// Runs `cmd` inheriting stdio, under [`DEFAULT_COMMAND_TIMEOUT`].
@@ -413,6 +420,25 @@ impl Context {
     /// [`run_with_timeout`]: Context::run_with_timeout
     pub fn run(&self, label: &str, cmd: Command) -> Result<(), String> {
         self.run_with_timeout(label, cmd, DEFAULT_COMMAND_TIMEOUT)
+    }
+
+    /// [`run_with_timeout`](Self::run_with_timeout), holding the command's
+    /// tests to `account`, settled from the lines that frame each libtest run
+    /// as its output is relayed.
+    pub fn run_accounted(
+        &self,
+        label: &str,
+        cmd: Command,
+        budget: Duration,
+        account: commands::libtest::Account,
+    ) -> Result<(), String> {
+        commands::parallel::run(
+            &self.children,
+            vec![commands::parallel::Job::new(label, cmd)
+                .with_budget(budget)
+                .accounted(account)],
+            1,
+        )
     }
 
     /// Runs `cmd` inheriting stdio, killing it with everything it forked if
@@ -727,22 +753,6 @@ fn is_workspace_root(dir: &Path) -> bool {
     text.contains("[workspace]")
 }
 
-/// Resolve cargo's target directory from the workspace root and the value of
-/// `$CARGO_TARGET_DIR` (passed in so this stays a pure, testable function).
-///
-/// Mirrors cargo's own precedence for this workspace: an absolute
-/// `CARGO_TARGET_DIR` is used verbatim; a relative one is resolved against the
-/// workspace root (where every `cargo xtask` subprocess sets its current
-/// directory); when it is unset, the default is `workspace_root/target`. The
-/// workspace pins no `build.target-dir` in `.cargo/config.toml`, so the
-/// environment variable is the only override in play.
-fn resolve_target_dir(workspace_root: &Path, cargo_target_dir: Option<OsString>) -> PathBuf {
-    match cargo_target_dir {
-        Some(dir) if !dir.is_empty() => workspace_root.join(dir),
-        _ => workspace_root.join("target"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,40 +778,6 @@ mod tests {
                 include_str!("../../../Cargo.toml"),
                 "\n[workspace.lints.clippy]\n"
             ),
-        );
-    }
-
-    #[test]
-    fn target_dir_defaults_to_workspace_target_when_unset() {
-        let root = Path::new("/ws");
-        assert_eq!(resolve_target_dir(root, None), root.join("target"));
-    }
-
-    #[test]
-    fn target_dir_defaults_when_env_is_empty() {
-        let root = Path::new("/ws");
-        assert_eq!(
-            resolve_target_dir(root, Some(OsString::from(""))),
-            root.join("target")
-        );
-    }
-
-    #[test]
-    fn target_dir_honours_absolute_override() {
-        let root = Path::new("/ws");
-        let abs = OsString::from("/var/lib/actions-runner/tairix-cache/target");
-        assert_eq!(
-            resolve_target_dir(root, Some(abs)),
-            Path::new("/var/lib/actions-runner/tairix-cache/target")
-        );
-    }
-
-    #[test]
-    fn target_dir_resolves_relative_override_against_workspace_root() {
-        let root = Path::new("/ws");
-        assert_eq!(
-            resolve_target_dir(root, Some(OsString::from("build/out"))),
-            root.join("build/out")
         );
     }
 
