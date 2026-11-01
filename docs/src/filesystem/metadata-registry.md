@@ -31,7 +31,10 @@ are privileged (a VFS capability gate). See arxfs-spec §21.1.
 A filetyped object encodes its type and a timestamp *inside* the load/exec
 words (`load >> 20 == 0xFFF`). The registry stores the decoded `acorn.filetype`
 **and** preserves the raw load/exec, so a copy back to ADFS reproduces the
-native fields byte-for-byte.
+native fields byte-for-byte. The desktop types a file by its `acorn.filetype`
+wherever its name says nothing (`lib/browse`'s `media_for_document`), so a
+RISC OS file copied to a volume that keeps attributes keeps its type and its
+icon. The value is a `tairix_abi::fs::Filetype`, the type a drag carries too.
 
 ## Amiga (AmigaDOS / FFS)
 

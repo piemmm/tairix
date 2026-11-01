@@ -1729,3 +1729,40 @@ fn a_held_bundle_draws_its_glyph_until_released_then_decodes_once() {
     assert!(desk.deliver(&job, Some(Artwork::new(square(8)))).kept());
     assert!(matches!(c.artwork(&mut desk, request, 8), Some(p) if !p.is_mask()));
 }
+
+/// A RISC OS application is asked for by its own sprite, read from its own
+/// files and so drawn as the tier beneath while it is produced; where the
+/// sprite will not serve, by its picture of what it holds, then as the folder
+/// it is.
+#[test]
+fn a_risc_os_application_asks_for_its_sprite_then_its_folder_picture_then_the_folder() {
+    let c = cache();
+    let mut deferring = Deferring::new();
+    let dir = "/Storage/disc/!Edit";
+    let own = ArtworkKey::RiscOsApplication {
+        dir: dir.to_string(),
+        stamp: None,
+    };
+    assert!(own.is_thumbnail_class());
+    assert_eq!(own.read_path(), Some(dir));
+    assert!(own.is_named_under("/Storage/disc"));
+    assert!(!own.is_named_under("/Storage/other"));
+
+    let request = IconRequest::riscos_application(IconKind::Folder, dir, None);
+    c.still_shown(&mut deferring, request, 8);
+    let named: Vec<ArtworkKey> = deferring.shown.iter().map(|(key, _)| key.clone()).collect();
+    assert_eq!(named, [own.clone(), ArtworkKey::Raster(IconKind::Folder)]);
+
+    let sample = crate::FolderSample::new([crate::SampleCard::Kind(IconKind::Text)]);
+    deferring.shown.clear();
+    c.still_shown(&mut deferring, request.or_folder(&sample), 8);
+    let named: Vec<ArtworkKey> = deferring.shown.iter().map(|(key, _)| key.clone()).collect();
+    assert_eq!(named, [own, ArtworkKey::Folder(sample)]);
+
+    let empty = crate::FolderSample::new([]);
+    assert_eq!(
+        request.or_folder(&empty),
+        request,
+        "an empty folder adds no tier"
+    );
+}

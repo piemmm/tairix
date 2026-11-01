@@ -43,7 +43,10 @@ can never diverge in navigation semantics, listing policy, or look.
   and acyclic, and association matching walks it, so naming a format precisely
   never narrows what can open it. The whole registry is a **display and offer
   hint only**: it decides a glyph and which applications are *offered*, never
-  an operation; authority stays in the VFS and the launcher.
+  an operation; authority stays in the VFS and the launcher. A file its name
+  does not type is the type its volume records as its RISC OS filetype
+  (`media_for_filetype`, `media_for_document(name, recorded)`), read by the
+  listing's `EntryReader` (`plans/ICONS.md` I18).
   `icon_for_entry(entry, parent)` is the one classification both views draw
   through: the registry's glyph, except that a plain directory *known* to hold
   something takes `IconKind::FolderFilled`, and `entry_icon_request` asks for

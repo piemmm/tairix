@@ -2,7 +2,7 @@
 
 use tairix_syntax::Format;
 
-use super::{format_for_name, indentation, line_ending, looks_binary, Indent, LineEnding};
+use super::{format_for_document, indentation, line_ending, looks_binary, Indent, LineEnding};
 use crate::document::Document;
 
 fn doc(text: &[u8]) -> Document {
@@ -46,21 +46,39 @@ fn only_the_head_is_judged() {
 #[test]
 fn a_store_is_known_by_its_name_before_its_extension() {
     assert_eq!(
-        format_for_name("/System/Settings/network.conf"),
+        format_for_document("/System/Settings/network.conf", None),
         Some(Format::NetworkConfig)
     );
-    assert_eq!(format_for_name("other.conf"), Some(Format::PlainText));
-    assert_eq!(format_for_name("Cargo.toml"), Some(Format::Toml));
-    assert_eq!(format_for_name("page.HTML"), Some(Format::Html));
-    assert_eq!(format_for_name("logo.svg"), Some(Format::Xml));
-    assert_eq!(format_for_name("tool.py"), Some(Format::Python));
-    assert_eq!(format_for_name("app.mjs"), Some(Format::JavaScript));
-    assert_eq!(format_for_name("photo.png"), None);
     assert_eq!(
-        format_for_name("Makefile"),
+        format_for_document("other.conf", None),
+        Some(Format::PlainText)
+    );
+    assert_eq!(format_for_document("Cargo.toml", None), Some(Format::Toml));
+    assert_eq!(format_for_document("page.HTML", None), Some(Format::Html));
+    assert_eq!(format_for_document("logo.svg", None), Some(Format::Xml));
+    assert_eq!(format_for_document("tool.py", None), Some(Format::Python));
+    assert_eq!(
+        format_for_document("app.mjs", None),
+        Some(Format::JavaScript)
+    );
+    assert_eq!(format_for_document("photo.png", None), None);
+    assert_eq!(
+        format_for_document("Makefile", None),
         None,
         "a name that says nothing leaves the head to decide"
     );
+    let filetype = |raw| tairix_abi::fs::Filetype::new(raw);
+    assert_eq!(
+        format_for_document("Index", filetype(0xFAF)),
+        Some(Format::Html),
+        "a filetype types what the name does not"
+    );
+    assert_eq!(
+        format_for_document("tool.py", filetype(0xFFF)),
+        Some(Format::Python),
+        "the name decides first"
+    );
+    assert_eq!(format_for_document("Data", filetype(0xFFD)), None);
 }
 
 #[test]

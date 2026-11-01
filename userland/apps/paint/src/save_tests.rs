@@ -54,7 +54,7 @@ fn snapshot_of(document: &Document) -> crate::document::Snapshot {
 
 #[test]
 fn a_name_asks_for_the_format_of_its_extension_or_file_type() {
-    let named = |name| format_named(name);
+    let named = |name| format_named(name, None);
     assert_eq!(named("a.png"), Ok(Some(SaveFormat::Png)));
     assert_eq!(named("a.JPEG"), Ok(Some(SaveFormat::Jpeg)));
     assert_eq!(named("a.jpg"), Ok(Some(SaveFormat::Jpeg)));
@@ -92,21 +92,32 @@ fn a_document_of_several_entries_is_written_only_as_a_tiff_or_a_sprite_area() {
     )
     .expect("entries");
     assert_eq!(
-        format_for("both.png", two.entries(), two.origin()),
+        format_for("both.png", None, two.entries(), two.origin()),
         Err(SaveRefusal::SeveralPictures(2))
     );
     assert_eq!(
-        format_for("both.spr", two.entries(), two.origin()),
+        format_for("both.spr", None, two.entries(), two.origin()),
         Ok(SaveFormat::Sprites)
     );
     assert_eq!(
-        format_for("both.tif", two.entries(), two.origin()),
+        format_for("both.tif", None, two.entries(), two.origin()),
         Ok(SaveFormat::Tiff)
     );
     assert_eq!(
-        format_for("both", two.entries(), two.origin()),
+        format_for("both", None, two.entries(), two.origin()),
         Err(SaveRefusal::SpritesUnnamed),
         "a sprite file nothing could open again"
+    );
+    let sprites = tairix_abi::fs::Filetype::new(0xFF9);
+    assert_eq!(
+        format_for("both", sprites, two.entries(), two.origin()),
+        Ok(SaveFormat::Sprites),
+        "a file its volume records as sprites opens again as them"
+    );
+    assert_eq!(
+        format_for("both.png", sprites, two.entries(), two.origin()),
+        Err(SaveRefusal::SeveralPictures(2)),
+        "the name asks first"
     );
     let kept = Document::of(
         vec![Entry::Kept(Kept {
@@ -120,11 +131,11 @@ fn a_document_of_several_entries_is_written_only_as_a_tiff_or_a_sprite_area() {
     )
     .expect("entries");
     assert_eq!(
-        format_for("odd.png", kept.entries(), kept.origin()),
+        format_for("odd.png", None, kept.entries(), kept.origin()),
         Err(SaveRefusal::KeptSprite)
     );
     assert_eq!(
-        format_for("odd.tif", kept.entries(), kept.origin()),
+        format_for("odd.tif", None, kept.entries(), kept.origin()),
         Err(SaveRefusal::KeptSprite),
         "a page holds pixels"
     );
@@ -136,7 +147,7 @@ fn a_document_of_several_entries_is_written_only_as_a_tiff_or_a_sprite_area() {
     )
     .expect("entries");
     assert_eq!(
-        format_for("photo", jpeg.entries(), jpeg.origin()),
+        format_for("photo", None, jpeg.entries(), jpeg.origin()),
         Ok(SaveFormat::Jpeg)
     );
 }
@@ -511,14 +522,14 @@ fn kept(length: usize) -> Entry {
 fn a_damaged_kept_sprite_is_refused_before_the_file_is_touched() {
     let off_word = read(vec![kept(46)], ViewFormat::Sprite, Unkept::default());
     assert_eq!(
-        format_for("odd.spr", off_word.entries(), off_word.origin()),
+        format_for("odd.spr", None, off_word.entries(), off_word.origin()),
         Err(SaveRefusal::KeptSpriteOffWord(
             SpriteName::new("odd").expect("a name")
         ))
     );
     let whole = read(vec![kept(48)], ViewFormat::Sprite, Unkept::default());
     assert_eq!(
-        format_for("odd.spr", whole.entries(), whole.origin()),
+        format_for("odd.spr", None, whole.entries(), whole.origin()),
         Ok(SaveFormat::Sprites)
     );
 }
@@ -527,22 +538,37 @@ fn a_damaged_kept_sprite_is_refused_before_the_file_is_touched() {
 fn a_file_is_written_back_only_as_what_it_was_read_as() {
     let picture = || vec![Entry::Picture(Picture::plain(stripes(false)))];
     let png = read(picture(), ViewFormat::Png, Unkept::default());
-    assert_eq!(write_back("a.png", &png), Ok(()));
-    assert_eq!(write_back("a", &png), Ok(()), "an unnamed PNG is still one");
-    assert_eq!(write_back("a.jpg", &png), Err(NotWrittenBack::Misnamed));
+    assert_eq!(write_back("a.png", None, &png), Ok(()));
     assert_eq!(
-        write_back("deep.png", &read(picture(), ViewFormat::Png, NARROWED)),
+        write_back("a", None, &png),
+        Ok(()),
+        "an unnamed PNG is still one"
+    );
+    assert_eq!(
+        write_back("a.jpg", None, &png),
+        Err(NotWrittenBack::Misnamed)
+    );
+    assert_eq!(
+        write_back(
+            "deep.png",
+            None,
+            &read(picture(), ViewFormat::Png, NARROWED)
+        ),
         Err(NotWrittenBack::Reduced)
     );
     for format in [ViewFormat::Png, ViewFormat::Jpeg] {
         assert_eq!(
-            write_back("held.png", &read(picture(), format, BESIDE)),
+            write_back("held.png", None, &read(picture(), format, BESIDE)),
             Err(NotWrittenBack::Extras),
             "{format:?}"
         );
     }
     assert_eq!(
-        write_back("inks.tif", &read(picture(), ViewFormat::Tiff, RESTATED)),
+        write_back(
+            "inks.tif",
+            None,
+            &read(picture(), ViewFormat::Tiff, RESTATED)
+        ),
         Err(NotWrittenBack::Converted)
     );
     for (name, format) in [
@@ -551,7 +577,7 @@ fn a_file_is_written_back_only_as_what_it_was_read_as() {
         ("doc.tif", ViewFormat::Tiff),
     ] {
         assert_eq!(
-            write_back(name, &read(picture(), format, Unkept::default())),
+            write_back(name, None, &read(picture(), format, Unkept::default())),
             Ok(()),
             "{name}"
         );
@@ -559,17 +585,28 @@ fn a_file_is_written_back_only_as_what_it_was_read_as() {
     assert_eq!(
         write_back(
             "art.webp",
+            None,
             &read(picture(), ViewFormat::Webp, Unkept::default())
         ),
         Err(NotWrittenBack::Format)
     );
     let new = Document::new(Picture::plain(stripes(false)));
-    assert_eq!(write_back("a.png", &new), Err(NotWrittenBack::Format));
+    assert_eq!(write_back("a.png", None, &new), Err(NotWrittenBack::Format));
     let area = read(vec![kept(46)], ViewFormat::Sprite, Unkept::default());
     assert!(matches!(
-        write_back("odd.spr", &area),
+        write_back("odd.spr", None, &area),
         Err(NotWrittenBack::Refused(SaveRefusal::KeptSpriteOffWord(_)))
     ));
+    let typed = read(picture(), ViewFormat::Sprite, Unkept::default());
+    assert_eq!(
+        write_back("Sprites", tairix_abi::fs::Filetype::new(0xFF9), &typed),
+        Ok(()),
+        "a sprite area its volume records as one is written back"
+    );
+    assert_eq!(
+        write_back("Sprites", None, &typed),
+        Err(NotWrittenBack::Refused(SaveRefusal::SpritesUnnamed))
+    );
 }
 
 #[test]
@@ -614,13 +651,13 @@ fn a_documents_save_endings_are_those_of_the_format_chosen() {
     for format in SaveFormat::ALL {
         for ending in listed(&one, format) {
             assert_eq!(
-                format_named(&alloc::format!("a{ending}")),
+                format_named(&alloc::format!("a{ending}"), None),
                 Ok(Some(format)),
                 "{ending}"
             );
         }
         assert_eq!(
-            format_named(&alloc::format!("a.{}", format.extension())),
+            format_named(&alloc::format!("a.{}", format.extension()), None),
             Ok(Some(format))
         );
     }
@@ -763,7 +800,10 @@ fn a_picture_of_layers_is_written_as_they_show_in_a_format_of_one() {
 
 #[test]
 fn openraster_holds_one_picture_in_colour() {
-    assert_eq!(format_named("layers.ora"), Ok(Some(SaveFormat::OpenRaster)));
+    assert_eq!(
+        format_named("layers.ora", None),
+        Ok(Some(SaveFormat::OpenRaster))
+    );
     assert_eq!(SaveFormat::OpenRaster.extension(), "ora");
     assert!(
         SaveFormat::OpenRaster.admits(None)
@@ -779,7 +819,7 @@ fn openraster_holds_one_picture_in_colour() {
         Entry::Picture(Picture::plain(stripes(false))),
     ];
     assert_eq!(
-        format_for("pair.ora", &several, Origin::New(SaveFormat::Png)),
+        format_for("pair.ora", None, &several, Origin::New(SaveFormat::Png)),
         Err(SaveRefusal::SeveralPictures(2))
     );
     let read = read(
@@ -788,7 +828,7 @@ fn openraster_holds_one_picture_in_colour() {
         Unkept::default(),
     );
     assert_eq!(
-        write_back("back.ora", &read),
+        write_back("back.ora", None, &read),
         Ok(()),
         "written back as it was read"
     );

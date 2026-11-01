@@ -157,6 +157,11 @@ over a resolution-independent design grid, so the same glyph is
   the white print a photo is set on, and the fixed-ink paper card the folder
   composite (`IconRequest::folder`) is built from
   (`plans/FILES-INTERACTION.md` FI11, FI18).
+- `riscos` — a RISC OS application pictured by its own sprite: the bounded,
+  never-run scan of its `!Boot` for the sprite files `IconSprites` loads
+  (`boot_sprite_files`), the two sprite names it is sought by
+  (`SpriteNames`), and the picture drawn through
+  `ArtworkRasteriser::application_sprite` (`plans/ICONS.md` I17).
 - `store` — `ThumbnailStore`, thumbnails kept across runs in one blob of an
   application's own bulk store, keyed by (volume, inode, content generation,
   reading) so only an exact version is ever served, in a blob laid out for one

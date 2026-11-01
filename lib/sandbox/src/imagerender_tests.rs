@@ -11,6 +11,7 @@
 //! specifications rather than duplicating a hand-rolled parser.
 
 use alloc::format;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -2549,12 +2550,18 @@ fn every_operation_this_worker_serves_has_its_own_opcode() {
         super::OP_VIEW_BAND,
         super::OP_VIEW_RELEASE,
         super::OP_THUMBNAIL,
+        super::OP_APPLICATION_SPRITE,
+        super::OP_BOOT_SPRITES,
     ];
     for (at, op) in ops.iter().enumerate() {
         assert!(!ops[at + 1..].contains(op), "opcode {op} served twice");
         assert!(
             !crate::imageedit::is_edit_op(*op),
             "opcode {op} is also the editor's"
+        );
+        assert!(
+            !crate::imageinspect::is_inspect_op(*op),
+            "opcode {op} is also the inspector's"
         );
     }
 }
@@ -2747,29 +2754,32 @@ fn a_thumbnail_placed_outside_its_square_or_nowhere_is_refused() {
     );
 }
 
+/// A document held in memory, read as a picture file is.
+struct Held(Vec<u8>);
+
+impl tairix_icon::ArtworkDocument for Held {
+    fn stamp(&self) -> tairix_icon::DocumentStamp {
+        tairix_icon::DocumentStamp {
+            size: self.0.len() as u64,
+            modified: tairix_abi::time::Time64::UNIX_EPOCH,
+            id: tairix_abi::FileId::NONE,
+            content_gen: 0,
+        }
+    }
+
+    fn read_at(&mut self, offset: u64, into: &mut [u8]) -> Option<usize> {
+        let held = self.0.get(usize::try_from(offset).ok()?..)?;
+        let len = held.len().min(into.len());
+        into[..len].copy_from_slice(&held[..len]);
+        Some(len)
+    }
+}
+
 /// The whole of what a program pays for a thumbnail: the file streamed from
 /// its handle, the picture drawn, through the one entry point every program
 /// uses.
 #[test]
 fn a_thumbnail_streams_its_document_and_draws_it() {
-    struct Held(Vec<u8>);
-    impl tairix_icon::ArtworkDocument for Held {
-        fn stamp(&self) -> tairix_icon::DocumentStamp {
-            tairix_icon::DocumentStamp {
-                size: self.0.len() as u64,
-                modified: tairix_abi::time::Time64::UNIX_EPOCH,
-                id: tairix_abi::FileId::NONE,
-                content_gen: 0,
-            }
-        }
-
-        fn read_at(&mut self, offset: u64, into: &mut [u8]) -> Option<usize> {
-            let held = self.0.get(usize::try_from(offset).ok()?..)?;
-            let len = held.len().min(into.len());
-            into[..len].copy_from_slice(&held[..len]);
-            Some(len)
-        }
-    }
     let mut sandbox = sandbox();
     let colour = [9, 8, 7, 255];
     let mut document = Held(png_with(4, 4, |_, _| colour));
@@ -2782,4 +2792,333 @@ fn a_thumbnail_streams_its_document_and_draws_it() {
     .expect("drawn")
     .pixels;
     assert_eq!(rgba_at(&pixels, 2, 1, 1), colour);
+}
+
+/// A truecolour sprite called `name`, its pixels of eigen factors `eig`, each
+/// one `pixel(x, y)`.
+fn sprite(
+    name: &[u8],
+    eig: (u8, u8),
+    (width, height): (u32, u32),
+    pixel: impl Fn(u32, u32) -> [u8; 4],
+) -> (
+    tairix_image::SpriteName,
+    tairix_image::SpriteMode,
+    tairix_image::Picture,
+) {
+    let rgba = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .flat_map(|(x, y)| pixel(x, y))
+        .collect();
+    (
+        tairix_image::SpriteName::from_bytes(name).expect("a sprite name"),
+        tairix_image::SpriteMode::truecolour(eig, true),
+        tairix_image::Picture::rgba(width, height, rgba).expect("a picture"),
+    )
+}
+
+/// A sprite area holding `sprites`, in order.
+fn sprite_area(
+    sprites: &[(
+        tairix_image::SpriteName,
+        tairix_image::SpriteMode,
+        tairix_image::Picture,
+    )],
+) -> Vec<u8> {
+    let inputs: Vec<_> = sprites
+        .iter()
+        .map(|(name, mode, picture)| tairix_image::SpriteInput::Picture {
+            name: *name,
+            mode: *mode,
+            palette: &tairix_image::SpritePalette::Implied,
+            masked: true,
+            source: picture,
+        })
+        .collect();
+    tairix_image::encode_sprite_area(&inputs).expect("an area")
+}
+
+/// Draw the application `name`'s sprite of `area` in a `side` square.
+fn application_drawn(
+    area: &[u8],
+    name: &str,
+    side: u32,
+) -> Result<tairix_icon::Fitted, super::ThumbnailFailure> {
+    let names = tairix_icon::SpriteNames::of(name).expect("sprite names");
+    super::application_sprite(&mut sandbox(), side, &names, &mut Held(area.to_vec()))
+}
+
+const RED: [u8; 4] = [200, 0, 0, 255];
+const BLUE: [u8; 4] = [0, 0, 200, 255];
+
+/// An application is drawn by the sprite of its name, matched without regard
+/// to case: the small one in a tile nearer its size than the large one's, the
+/// large one otherwise.
+#[test]
+fn an_application_is_drawn_by_the_sprite_of_its_name_its_tile_suits() {
+    let area = sprite_area(&[
+        sprite(b"!other", (1, 1), (4, 4), |_, _| [0, 200, 0, 255]),
+        sprite(b"!EDIT", (1, 1), (4, 4), |_, _| RED),
+        sprite(b"sm!edit", (1, 1), (2, 2), |_, _| BLUE),
+    ]);
+    for (side, colour) in [(2, BLUE), (3, RED), (4, RED), (8, RED)] {
+        let fitted = application_drawn(&area, "!Edit", side).expect("drawn");
+        assert_eq!(fitted.bounds, tairix_geometry::Rect::new(0, 0, side, side));
+        assert_eq!(
+            rgba_at(&fitted.pixels, side, side / 2, side / 2),
+            colour,
+            "{side}"
+        );
+    }
+    let small_only = sprite_area(&[sprite(b"sm!edit", (1, 1), (2, 2), |_, _| BLUE)]);
+    let fitted = application_drawn(&small_only, "!Edit", 8).expect("the small one serves");
+    assert_eq!(rgba_at(&fitted.pixels, 8, 4, 4), BLUE);
+}
+
+/// A sprite's transparent margin is trimmed and the drawing grown by whole
+/// pixels, so each of its pixels is a sharp block of the tile.
+#[test]
+fn an_application_sprite_is_trimmed_and_its_pixels_kept_sharp() {
+    let quarter = |x: u32, y: u32| match (x, y) {
+        (1, 1) => RED,
+        (2, 1) => BLUE,
+        (1, 2) => [0, 200, 0, 255],
+        (2, 2) => [250, 250, 250, 255],
+        _ => [0, 0, 0, 0],
+    };
+    let area = sprite_area(&[sprite(b"!paint", (1, 1), (4, 4), quarter)]);
+    let fitted = application_drawn(&area, "!Paint", 8).expect("drawn");
+    assert_eq!(fitted.bounds, tairix_geometry::Rect::new(0, 0, 8, 8));
+    for y in 0..8 {
+        for x in 0..8 {
+            let expected = quarter(1 + x / 4, 1 + y / 4);
+            assert_eq!(rgba_at(&fitted.pixels, 8, x, y), expected, "({x}, {y})");
+        }
+    }
+}
+
+/// Each pixel is drawn the shape its eigen factors say: a sprite of pixels
+/// twice as tall as wide fills a square with half as many rows.
+#[test]
+fn an_application_sprite_takes_its_pixels_shape() {
+    let halves = |x: u32, _| if x == 0 { RED } else { BLUE };
+    let tall = sprite_area(&[sprite(b"!draw", (1, 2), (2, 1), halves)]);
+    let fitted = application_drawn(&tall, "!Draw", 4).expect("drawn");
+    assert_eq!(fitted.bounds, tairix_geometry::Rect::new(0, 0, 4, 4));
+    assert_eq!(rgba_at(&fitted.pixels, 4, 1, 3), RED);
+    assert_eq!(rgba_at(&fitted.pixels, 4, 2, 0), BLUE);
+    let square = sprite_area(&[sprite(b"!draw", (1, 1), (2, 1), halves)]);
+    let fitted = application_drawn(&square, "!Draw", 4).expect("drawn");
+    assert_eq!(fitted.bounds, tairix_geometry::Rect::new(0, 1, 4, 2));
+}
+
+/// An area with no sprite of the application's name, a sprite that draws
+/// nothing, and one too large to be an icon are each refused, so the
+/// application is drawn by what comes after its sprite.
+#[test]
+fn an_application_without_a_sprite_it_can_be_drawn_by_is_refused() {
+    let refused = |area: &[u8]| match application_drawn(area, "!Edit", 8) {
+        Err(super::ThumbnailFailure::Render(IconRasterFailure::Refused(refusal))) => refusal,
+        other => panic!("not refused: {other:?}"),
+    };
+    let other = sprite_area(&[sprite(b"!other", (1, 1), (2, 2), |_, _| RED)]);
+    assert_eq!(refused(&other), IconRefusal::UnsupportedFormat);
+    let empty = sprite_area(&[sprite(b"!edit", (1, 1), (2, 2), |_, _| [9, 9, 9, 0])]);
+    assert_eq!(refused(&empty), IconRefusal::MalformedImage);
+    let side = super::MAX_APPLICATION_SPRITE_SIDE + 1;
+    let huge = sprite_area(&[sprite(b"!edit", (1, 1), (side, 1), |_, _| RED)]);
+    assert_eq!(refused(&huge), IconRefusal::TooLarge);
+    assert_eq!(refused(b"not an area"), IconRefusal::MalformedImage);
+}
+
+/// The worker lets the area go once it is drawn from.
+#[test]
+fn an_application_sprite_takes_its_area_with_it() {
+    let area = sprite_area(&[sprite(b"!edit", (1, 1), (2, 2), |_, _| RED)]);
+    let mut sandbox = sandbox();
+    super::send_document(&mut sandbox, &area).expect("uploaded");
+    let request = |names: &[&[u8]]| {
+        let mut w = Writer::new();
+        w.u8(super::OP_APPLICATION_SPRITE);
+        w.u32(4);
+        for name in names {
+            w.bytes(name);
+        }
+        w.finish()
+    };
+    let drawn = request(&[b"!edit", b"sm!edit"]);
+    assert_eq!(
+        sandbox.request(&drawn).expect("answered").first(),
+        Some(&super::REPLY_FITTED)
+    );
+    assert_eq!(
+        sandbox.request(&drawn).expect("answered"),
+        super::encode_error(IconRefusal::MalformedRequest.to_wire())
+    );
+}
+
+#[test]
+fn the_worker_refuses_every_malformed_application_sprite_request() {
+    let area = sprite_area(&[sprite(b"!edit", (1, 1), (2, 2), |_, _| RED)]);
+    let request = |side: u32, names: &[&[u8]], trailing: bool| {
+        let mut w = Writer::new();
+        w.u8(super::OP_APPLICATION_SPRITE);
+        w.u32(side);
+        for name in names {
+            w.bytes(name);
+        }
+        if trailing {
+            w.u8(0);
+        }
+        w.finish()
+    };
+    let names: &[&[u8]] = &[b"!edit", b"sm!edit"];
+    let cases: [(u32, &[&[u8]], bool); 7] = [
+        (0, names, false),
+        (MAX_ICON_SIDE + 1, names, false),
+        (4, names, true),
+        (4, &names[..1], false),
+        (4, &[b"!edit", b""], false),
+        (4, &[b"!edit", b"sm edit"], false),
+        (4, &[b"!edit", b"sm!thirteench"], false),
+    ];
+    for (side, names, trailing) in cases {
+        let mut sandbox = sandbox();
+        super::send_document(&mut sandbox, &area).expect("uploaded");
+        assert_eq!(
+            sandbox
+                .request(&request(side, names, trailing))
+                .expect("answered"),
+            super::encode_error(IconRefusal::MalformedRequest.to_wire()),
+            "{side} {names:?} {trailing}"
+        );
+    }
+    let mut worker = ImageRenderService::default();
+    assert_eq!(
+        worker.handle(&request(4, names, false)),
+        super::encode_error(IconRefusal::MalformedRequest.to_wire()),
+        "no area uploaded"
+    );
+    assert_eq!(
+        worker.handle(&[super::OP_APPLICATION_SPRITE]),
+        super::encode_error(IconRefusal::MalformedRequest.to_wire())
+    );
+}
+
+/// A sprite area of control blocks alone, each named and claiming `rows` rows
+/// of one word: its sizes are all an attacker states, and none is ever
+/// decoded.
+fn claimed(names: &[&[u8]], rows: u32) -> Vec<u8> {
+    let count = u32::try_from(names.len()).expect("a few");
+    let mut area = Vec::new();
+    for word in [count, 16, 16 + 44 * count] {
+        area.extend_from_slice(&word.to_le_bytes());
+    }
+    for name in names {
+        let mut block = [0u8; 44];
+        block[..4].copy_from_slice(&44u32.to_le_bytes());
+        block[4..4 + name.len()].copy_from_slice(name);
+        block[20..24].copy_from_slice(&(rows - 1).to_le_bytes());
+        block[28..32].copy_from_slice(&31u32.to_le_bytes());
+        block[32..36].copy_from_slice(&44u32.to_le_bytes());
+        block[36..40].copy_from_slice(&44u32.to_le_bytes());
+        area.extend_from_slice(&block);
+    }
+    area
+}
+
+/// Sizes a control block claims are weighed only once they are within the
+/// bound: two sprites claiming four billion rows each are refused as too
+/// large, never compared in arithmetic they would overflow.
+#[test]
+fn sprites_claiming_sizes_past_the_bound_are_refused_before_they_are_weighed() {
+    let area = claimed(&[b"!edit", b"sm!edit"], u32::MAX);
+    assert_eq!(
+        application_drawn(&area, "!Edit", 8).map(|fitted| fitted.bounds),
+        Err(super::ThumbnailFailure::Render(IconRasterFailure::Refused(
+            IconRefusal::TooLarge
+        )))
+    );
+}
+
+/// A large sprite past the bound gives way to the small one rather than
+/// refusing the application.
+#[test]
+fn a_large_sprite_past_the_bound_gives_way_to_the_small_one() {
+    let wide = super::MAX_APPLICATION_SPRITE_SIDE + 1;
+    let area = sprite_area(&[
+        sprite(b"!edit", (1, 1), (wide, 1), |_, _| RED),
+        sprite(b"sm!edit", (1, 1), (2, 2), |_, _| BLUE),
+    ]);
+    let fitted = application_drawn(&area, "!Edit", 64).expect("the small one draws");
+    assert_eq!(rgba_at(&fitted.pixels, 64, 32, 32), BLUE);
+}
+
+/// A `!Boot` is read in the worker, which answers the files it loads.
+#[test]
+fn a_boot_file_is_read_in_the_worker_for_the_files_it_loads() {
+    let boot = b"Set Edit$Dir <Obey$Dir>\nIconSprites <Edit$Dir>.Themes.!Sprites\n";
+    assert_eq!(
+        super::boot_sprite_files(&mut sandbox(), boot),
+        Ok(vec![String::from("Themes/!Sprites")])
+    );
+    let past = vec![b' '; tairix_icon::riscos::MAX_BOOT_BYTES + 1];
+    assert_eq!(
+        super::boot_sprite_files(&mut sandbox(), &past),
+        Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest)),
+        "refused before it is sent"
+    );
+}
+
+/// What the worker answers for a `!Boot` is believed only as paths inside an
+/// application, and no more of them than a scan names.
+#[test]
+fn a_worker_naming_a_file_outside_the_application_is_not_believed() {
+    let answer = |paths: &[&str]| {
+        let mut w = Writer::new();
+        w.u8(super::REPLY_SPRITE_FILES);
+        w.u8(u8::try_from(paths.len()).expect("a few"));
+        for path in paths {
+            w.bytes(path.as_bytes());
+        }
+        w.finish()
+    };
+    let honest = answer(&["!Sprites", "Themes/Icons"]);
+    assert_eq!(
+        super::boot_sprite_files(&mut scripted(honest), b"x"),
+        Ok(vec![String::from("!Sprites"), String::from("Themes/Icons")])
+    );
+    let too_many: Vec<&str> = (0..=tairix_icon::riscos::MAX_SPRITE_FILES)
+        .map(|_| "a")
+        .collect();
+    for lie in [
+        answer(&["../Other/!Sprites"]),
+        answer(&["/abs"]),
+        answer(&["a/b/c/d/e"]),
+        answer(&too_many),
+    ] {
+        assert_eq!(
+            super::boot_sprite_files(&mut scripted(lie), b"x"),
+            Err(IconRasterFailure::ReplyMalformed)
+        );
+    }
+    let mut trailing = answer(&["!Sprites"]);
+    trailing.push(0);
+    assert_eq!(
+        super::boot_sprite_files(&mut scripted(trailing), b"x"),
+        Err(IconRasterFailure::ReplyMalformed)
+    );
+}
+
+#[test]
+fn the_worker_refuses_a_malformed_boot_request() {
+    let mut worker = ImageRenderService::default();
+    let refused = super::encode_error(IconRefusal::MalformedRequest.to_wire());
+    assert_eq!(worker.handle(&[super::OP_BOOT_SPRITES]), refused);
+    let mut w = Writer::new();
+    w.u8(super::OP_BOOT_SPRITES);
+    w.bytes(b"IconSprites <Obey$Dir>.!Sprites");
+    let mut trailing = w.finish();
+    trailing.push(0);
+    assert_eq!(worker.handle(&trailing), refused);
 }

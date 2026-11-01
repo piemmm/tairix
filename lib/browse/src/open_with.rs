@@ -39,6 +39,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::{mime_type_at, AppInfoHeader};
+use tairix_fsmeta::preset::acorn::Filetype;
 
 use crate::column::ScrollColumn;
 use crate::entry::EntryKind;
@@ -178,18 +179,24 @@ pub fn association_from_manifest(
 /// ancestor — and bundles claiming at the same level keep `bundles`'
 /// enumeration order, so no existing ordering is disturbed.
 ///
-/// A name the registry does not recognise is
+/// The file is typed as [`media_for_document`](crate::media_for_document)
+/// types it, from its name and `recorded`, the RISC OS filetype its listing
+/// found recorded for it. A file neither types is
 /// [`ApplicationOctetStream`](crate::media::MediaType::ApplicationOctetStream):
 /// bytes. The result is empty — an honest "no application" answer — for an
 /// empty name, which names no file, and when no installed bundle claims the
 /// file's type or any of its broader types; it never falls back to a guessed
 /// default.
 #[must_use]
-pub fn applications_for<'a>(name: &str, bundles: &'a [AppAssociation]) -> Vec<&'a AppAssociation> {
+pub fn applications_for<'a>(
+    name: &str,
+    recorded: Option<Filetype>,
+    bundles: &'a [AppAssociation],
+) -> Vec<&'a AppAssociation> {
     if name.is_empty() {
         return Vec::new();
     }
-    let media = media_for_named(name, EntryKind::File, crate::media::Site::Plain);
+    let media = media_for_named(name, EntryKind::File, recorded, crate::media::Site::Plain);
     let mut ranked: Vec<(usize, &AppAssociation)> = bundles
         .iter()
         .filter_map(|bundle| {

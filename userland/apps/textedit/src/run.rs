@@ -53,7 +53,7 @@ mod program {
     use tairix_textedit::answer::Unlisted;
     use tairix_textedit::code::{list_code, CodeListing};
     use tairix_textedit::data::{self, Structure};
-    use tairix_textedit::detect::format_for_name;
+    use tairix_textedit::detect::format_for_document;
     use tairix_textedit::document::{Document, OutOfMemory, Snapshot, STEP_BYTES};
     use tairix_textedit::editor::{Conversion, Converted, Editor, Mode};
     use tairix_textedit::find::{Search, Step};
@@ -74,12 +74,14 @@ mod program {
     const APP_NAME: &str = "TextEdit";
 
     /// A document being read into a window, a step at a time: the file, what
-    /// it is called, and how far the read has got — `None` until the file has
-    /// been measured.
+    /// it is called, how far the read has got — `None` until the file has
+    /// been measured — and the filetype its volume records, read with the
+    /// last of it.
     struct Load {
         handle: Arc<Handle>,
         name: String,
         reading: Option<Reading>,
+        recorded: Option<tairix_abi::fs::Filetype>,
     }
 
     impl Load {
@@ -103,7 +105,9 @@ mod program {
                 ReadStep::Refused(err) => return Some(Err(ReadFailure::Unreadable(err))),
                 ReadStep::NoMemory => return Some(Err(ReadFailure::NoMemory)),
             };
-            let format = format_for_name(&self.name).unwrap_or(Format::PlainText);
+            self.recorded = tairix_browse::recorded_filetype_of(&self.handle);
+            let format =
+                format_for_document(&self.name, self.recorded).unwrap_or(Format::PlainText);
             Some(
                 Document::from_chunks(chunks)
                     .map(|document| Editor::new(document, format))
@@ -565,6 +569,7 @@ mod program {
                 handle,
                 name: name.clone(),
                 reading: None,
+                recorded: None,
             };
             if !host.queue(index, Work::Load(load)) {
                 host.not_opened(index, &name, &ReadFailure::NoMemory);
@@ -671,6 +676,7 @@ mod program {
         View::new(
             Editor::new(Document::new(), Format::PlainText),
             name,
+            None,
             access,
             host.desktop.info().double_click(),
         )
@@ -679,10 +685,12 @@ mod program {
     /// The whole of `load`'s document landed in window `index` as `editor`.
     fn loaded(host: &mut Host<TextEdit>, index: usize, load: Load, editor: Editor) {
         let access = host.windows[index].view.access();
-        let unnamed = format_for_name(&load.name).is_none() && editor.mode() == Mode::Text;
+        let unnamed =
+            format_for_document(&load.name, load.recorded).is_none() && editor.mode() == Mode::Text;
         let view = View::new(
             editor,
             load.name,
+            load.recorded,
             access,
             host.desktop.info().double_click(),
         );

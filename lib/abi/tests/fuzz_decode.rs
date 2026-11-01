@@ -3488,6 +3488,12 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
             )
             .expect("two items"),
         },
+        WindowRequest::BeginDrag {
+            window_id: 3,
+            items: DragItems::new(DocumentName::new("Prog").expect("a valid name"), 1, true)
+                .expect("one openable file")
+                .with_filetype(tairix_abi::fs::Filetype::new(0xFFB)),
+        },
         WindowRequest::TakeDropTarget { window_id: 3 },
         WindowRequest::DragVerdict {
             window_id: 3,

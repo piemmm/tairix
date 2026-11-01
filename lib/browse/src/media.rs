@@ -52,6 +52,7 @@ use tairix_abi::driver_store::DRIVER_STORE_PATH;
 use tairix_abi::fs::{DirEntry, FileKind};
 use tairix_abi::home::USERS_DIR;
 use tairix_abi::{BundleEntry, ProgramKind, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR};
+use tairix_fsmeta::preset::acorn::{self, Filetype};
 use tairix_icon::{
     DocumentStamp, FolderSample, IconKind, IconRequest, Reading, SampleCard, Thumbnail,
 };
@@ -90,6 +91,17 @@ pub enum MediaType {
     /// A bundle's signed manifest, its `AppInfo`
     /// (`application/x-tairix-appinfo`).
     TairixAppInfo,
+    /// A RISC OS program loaded at the address it was built for, an Absolute
+    /// file (`application/x-riscos-absolute`).
+    RiscOsAbsolute,
+    /// A RISC OS utility, code that runs wherever it is loaded
+    /// (`application/x-riscos-utility`).
+    RiscOsUtility,
+    /// A RISC OS relocatable module (`application/x-riscos-module`).
+    RiscOsModule,
+    /// A tokenised BBC BASIC program, as RISC OS saves one
+    /// (`application/x-riscos-basic`).
+    RiscOsBasic,
     /// Plain text and the config formats with no type of their own
     /// (`text/plain`).
     TextPlain,
@@ -119,10 +131,35 @@ pub enum MediaType {
     TextC,
     /// Python source (`text/x-python`).
     TextPython,
+    /// Lua source (`text/x-lua`).
+    TextLua,
+    /// Perl source (`text/x-perl`).
+    TextPerl,
+    /// A makefile (`text/x-makefile`).
+    TextMakefile,
+    /// A TeX or LaTeX document (`text/x-tex`).
+    TextTex,
+    /// A BBC BASIC program kept as text (`text/x-riscos-basic`).
+    RiscOsBasicText,
+    /// A Rich Text Format document (`application/rtf`).
+    Rtf,
     /// A shell script (`application/x-shellscript`).
     ShellScript,
+    /// A RISC OS Obey file, a script of command lines
+    /// (`application/x-riscos-obey`).
+    RiscOsObey,
+    /// A RISC OS Command file, keystrokes `*Exec` feeds to the command line
+    /// (`application/x-riscos-command`).
+    RiscOsCommand,
     /// A PDF document (`application/pdf`).
     Pdf,
+    /// A PostScript document (`application/postscript`).
+    PostScript,
+    /// Printer Command Language print data (`application/vnd.hp-pcl`).
+    Pcl,
+    /// Data RISC OS prepared for a dot-matrix printer
+    /// (`application/x-riscos-printout`).
+    RiscOsPrintout,
     /// A PNG image (`image/png`).
     ImagePng,
     /// A JPEG image (`image/jpeg`).
@@ -143,6 +180,35 @@ pub enum MediaType {
     ImageTiff,
     /// An OpenRaster layered image (`image/openraster`).
     ImageOpenRaster,
+    /// A JPEG 2000 image (`image/jp2`).
+    ImageJpeg2000,
+    /// A Photoshop image (`image/vnd.adobe.photoshop`).
+    ImagePhotoshop,
+    /// A PCX image (`image/vnd.zbrush.pcx`).
+    ImagePcx,
+    /// A RISC OS Draw vector drawing (`image/x-riscos-draw`).
+    RiscOsDraw,
+    /// An `ArtWorks` vector drawing (`image/x-artworks`).
+    ArtWorks,
+    /// The window templates a RISC OS application builds its windows from
+    /// (`application/x-riscos-template`).
+    RiscOsTemplate,
+    /// The Toolbox definitions of a RISC OS application's windows and menus
+    /// (`application/x-riscos-resource`).
+    RiscOsResource,
+    /// A RISC OS font, outline or bitmap (`application/x-riscos-font`).
+    RiscOsFont,
+    /// A BBC Micro font, a series of character definitions
+    /// (`application/x-bbc-font`).
+    BbcFont,
+    /// A TrueType font (`font/ttf`).
+    FontTtf,
+    /// An OpenType font (`font/otf`).
+    FontOtf,
+    /// A WOFF web font (`font/woff`).
+    FontWoff,
+    /// A RISC OS desktop palette (`application/x-riscos-palette`).
+    RiscOsPalette,
     /// A ZIP archive (`application/zip`).
     ArchiveZip,
     /// A tar archive (`application/x-tar`).
@@ -159,6 +225,12 @@ pub enum MediaType {
     Archive7z,
     /// A RAR archive (`application/vnd.rar`).
     ArchiveRar,
+    /// A Java archive, a ZIP of classes (`application/java-archive`).
+    JavaArchive,
+    /// One file compressed by RISC OS Squash (`application/x-riscos-squash`).
+    RiscOsSquash,
+    /// An `ArcFS` archive (`application/x-arcfs`).
+    ArcFs,
     /// The image of a disk, holding one volume (`application/x-raw-disk-image`):
     /// a hard-disk partition's, and the broader type of the disc and floppy
     /// images.
@@ -185,6 +257,12 @@ pub enum MediaType {
     AudioAac,
     /// An MPEG-4 audio file (`audio/mp4`).
     AudioMp4,
+    /// An AIFF audio file (`audio/aiff`).
+    AudioAiff,
+    /// A Standard MIDI File (`audio/midi`).
+    AudioMidi,
+    /// A Sound Tracker music module (`audio/x-mod`).
+    AudioTracker,
     /// An MPEG-4 video (`video/mp4`).
     VideoMp4,
     /// A `WebM` video (`video/webm`).
@@ -195,6 +273,10 @@ pub enum MediaType {
     VideoQuicktime,
     /// An AVI video (`video/x-msvideo`).
     VideoAvi,
+    /// An MPEG-1 or MPEG-2 video (`video/mpeg`).
+    VideoMpeg,
+    /// An Acorn Replay movie (`video/x-armovie`).
+    VideoArMovie,
     /// Any content of no recognised type (`application/octet-stream`).
     ApplicationOctetStream,
 }
@@ -213,6 +295,10 @@ impl MediaType {
             Self::Elf => "ELF program",
             Self::TairixDriver => "Driver",
             Self::TairixAppInfo => "Application manifest",
+            Self::RiscOsAbsolute => "RISC OS program",
+            Self::RiscOsUtility => "RISC OS utility",
+            Self::RiscOsModule => "RISC OS module",
+            Self::RiscOsBasic => "BASIC program",
             Self::TextPlain => "Text",
             Self::TextMarkdown => "Markdown document",
             Self::TextCsv => "CSV table",
@@ -227,8 +313,19 @@ impl MediaType {
             Self::TextJava => "Java source",
             Self::TextC => "C source",
             Self::TextPython => "Python script",
+            Self::TextLua => "Lua script",
+            Self::TextPerl => "Perl script",
+            Self::TextMakefile => "Makefile",
+            Self::TextTex => "TeX document",
+            Self::RiscOsBasicText => "BASIC source",
+            Self::Rtf => "Rich Text document",
             Self::ShellScript => "Shell script",
+            Self::RiscOsObey => "Obey script",
+            Self::RiscOsCommand => "Command script",
             Self::Pdf => "PDF document",
+            Self::PostScript => "PostScript document",
+            Self::Pcl => "PCL print data",
+            Self::RiscOsPrintout => "Printout",
             Self::ImagePng => "PNG image",
             Self::ImageJpeg => "JPEG image",
             Self::ImageGif => "GIF image",
@@ -239,6 +336,19 @@ impl MediaType {
             Self::ImageWebp => "WebP image",
             Self::ImageTiff => "TIFF image",
             Self::ImageOpenRaster => "OpenRaster image",
+            Self::ImageJpeg2000 => "JPEG 2000 image",
+            Self::ImagePhotoshop => "Photoshop image",
+            Self::ImagePcx => "PCX image",
+            Self::RiscOsDraw => "Draw drawing",
+            Self::ArtWorks => "ArtWorks drawing",
+            Self::RiscOsTemplate => "Window templates",
+            Self::RiscOsResource => "Toolbox resources",
+            Self::RiscOsFont => "RISC OS font",
+            Self::BbcFont => "BBC font",
+            Self::FontTtf => "TrueType font",
+            Self::FontOtf => "OpenType font",
+            Self::FontWoff => "WOFF font",
+            Self::RiscOsPalette => "Palette",
             Self::ArchiveZip => "ZIP archive",
             Self::ArchiveTar => "Tar archive",
             Self::ArchiveGzip => "Gzip archive",
@@ -247,6 +357,9 @@ impl MediaType {
             Self::ArchiveZstd => "Zstandard archive",
             Self::Archive7z => "7z archive",
             Self::ArchiveRar => "RAR archive",
+            Self::JavaArchive => "Java archive",
+            Self::RiscOsSquash => "Squash file",
+            Self::ArcFs => "ArcFS archive",
             Self::RawDiskImage => "Disk image",
             Self::CdImage => "Disc image",
             Self::RawFloppyDiskImage => "Floppy disk image",
@@ -258,11 +371,16 @@ impl MediaType {
             Self::AudioAu => "AU audio",
             Self::AudioAac => "AAC audio",
             Self::AudioMp4 => "MPEG-4 audio",
+            Self::AudioAiff => "AIFF audio",
+            Self::AudioMidi => "MIDI music",
+            Self::AudioTracker => "Tracker module",
             Self::VideoMp4 => "MPEG-4 video",
             Self::VideoWebm => "WebM video",
             Self::VideoMatroska => "Matroska video",
             Self::VideoQuicktime => "QuickTime video",
             Self::VideoAvi => "AVI video",
+            Self::VideoMpeg => "MPEG video",
+            Self::VideoArMovie => "Replay movie",
             Self::ApplicationOctetStream => "Data",
         }
     }
@@ -280,6 +398,10 @@ impl MediaType {
             Self::Elf => "application/x-elf",
             Self::TairixDriver => "application/x-tairix-driver",
             Self::TairixAppInfo => "application/x-tairix-appinfo",
+            Self::RiscOsAbsolute => "application/x-riscos-absolute",
+            Self::RiscOsUtility => "application/x-riscos-utility",
+            Self::RiscOsModule => "application/x-riscos-module",
+            Self::RiscOsBasic => "application/x-riscos-basic",
             Self::TextPlain => "text/plain",
             Self::TextMarkdown => "text/markdown",
             Self::TextCsv => "text/csv",
@@ -294,8 +416,19 @@ impl MediaType {
             Self::TextJava => "text/x-java",
             Self::TextC => "text/x-c",
             Self::TextPython => "text/x-python",
+            Self::TextLua => "text/x-lua",
+            Self::TextPerl => "text/x-perl",
+            Self::TextMakefile => "text/x-makefile",
+            Self::TextTex => "text/x-tex",
+            Self::RiscOsBasicText => "text/x-riscos-basic",
+            Self::Rtf => "application/rtf",
             Self::ShellScript => "application/x-shellscript",
+            Self::RiscOsObey => "application/x-riscos-obey",
+            Self::RiscOsCommand => "application/x-riscos-command",
             Self::Pdf => "application/pdf",
+            Self::PostScript => "application/postscript",
+            Self::Pcl => "application/vnd.hp-pcl",
+            Self::RiscOsPrintout => "application/x-riscos-printout",
             Self::ImagePng => "image/png",
             Self::ImageJpeg => "image/jpeg",
             Self::ImageGif => "image/gif",
@@ -306,6 +439,19 @@ impl MediaType {
             Self::ImageWebp => "image/webp",
             Self::ImageTiff => "image/tiff",
             Self::ImageOpenRaster => "image/openraster",
+            Self::ImageJpeg2000 => "image/jp2",
+            Self::ImagePhotoshop => "image/vnd.adobe.photoshop",
+            Self::ImagePcx => "image/vnd.zbrush.pcx",
+            Self::RiscOsDraw => "image/x-riscos-draw",
+            Self::ArtWorks => "image/x-artworks",
+            Self::RiscOsTemplate => "application/x-riscos-template",
+            Self::RiscOsResource => "application/x-riscos-resource",
+            Self::RiscOsFont => "application/x-riscos-font",
+            Self::BbcFont => "application/x-bbc-font",
+            Self::FontTtf => "font/ttf",
+            Self::FontOtf => "font/otf",
+            Self::FontWoff => "font/woff",
+            Self::RiscOsPalette => "application/x-riscos-palette",
             Self::ArchiveZip => "application/zip",
             Self::ArchiveTar => "application/x-tar",
             Self::ArchiveGzip => "application/gzip",
@@ -314,6 +460,9 @@ impl MediaType {
             Self::ArchiveZstd => "application/zstd",
             Self::Archive7z => "application/x-7z-compressed",
             Self::ArchiveRar => "application/vnd.rar",
+            Self::JavaArchive => "application/java-archive",
+            Self::RiscOsSquash => "application/x-riscos-squash",
+            Self::ArcFs => "application/x-arcfs",
             Self::RawDiskImage => "application/x-raw-disk-image",
             Self::CdImage => "application/x-cd-image",
             Self::RawFloppyDiskImage => "application/x-raw-floppy-disk-image",
@@ -325,11 +474,16 @@ impl MediaType {
             Self::AudioAu => "audio/basic",
             Self::AudioAac => "audio/aac",
             Self::AudioMp4 => "audio/mp4",
+            Self::AudioAiff => "audio/aiff",
+            Self::AudioMidi => "audio/midi",
+            Self::AudioTracker => "audio/x-mod",
             Self::VideoMp4 => "video/mp4",
             Self::VideoWebm => "video/webm",
             Self::VideoMatroska => "video/x-matroska",
             Self::VideoQuicktime => "video/quicktime",
             Self::VideoAvi => "video/x-msvideo",
+            Self::VideoMpeg => "video/mpeg",
+            Self::VideoArMovie => "video/x-armovie",
             Self::ApplicationOctetStream => "application/octet-stream",
         }
     }
@@ -383,8 +537,18 @@ impl MediaType {
             | Self::TextJava
             | Self::TextC
             | Self::TextPython
-            | Self::ShellScript => Some(Self::TextPlain),
+            | Self::TextLua
+            | Self::TextPerl
+            | Self::TextMakefile
+            | Self::TextTex
+            | Self::RiscOsBasicText
+            | Self::Rtf
+            | Self::ShellScript
+            | Self::RiscOsObey
+            | Self::RiscOsCommand
+            | Self::PostScript => Some(Self::TextPlain),
             Self::ImageSvg => Some(Self::Xml),
+            Self::JavaArchive => Some(Self::ArchiveZip),
             Self::AudioOpus => Some(Self::AudioOgg),
             Self::CdImage | Self::RawFloppyDiskImage => Some(Self::RawDiskImage),
             Self::InodeDirectory
@@ -397,8 +561,14 @@ impl MediaType {
             | Self::Elf
             | Self::TairixDriver
             | Self::TairixAppInfo
+            | Self::RiscOsAbsolute
+            | Self::RiscOsUtility
+            | Self::RiscOsModule
+            | Self::RiscOsBasic
             | Self::TextPlain
             | Self::Pdf
+            | Self::Pcl
+            | Self::RiscOsPrintout
             | Self::ImagePng
             | Self::ImageJpeg
             | Self::ImageGif
@@ -408,6 +578,19 @@ impl MediaType {
             | Self::ImageWebp
             | Self::ImageTiff
             | Self::ImageOpenRaster
+            | Self::ImageJpeg2000
+            | Self::ImagePhotoshop
+            | Self::ImagePcx
+            | Self::RiscOsDraw
+            | Self::ArtWorks
+            | Self::RiscOsTemplate
+            | Self::RiscOsResource
+            | Self::RiscOsFont
+            | Self::BbcFont
+            | Self::FontTtf
+            | Self::FontOtf
+            | Self::FontWoff
+            | Self::RiscOsPalette
             | Self::ArchiveZip
             | Self::ArchiveTar
             | Self::ArchiveGzip
@@ -416,6 +599,8 @@ impl MediaType {
             | Self::ArchiveZstd
             | Self::Archive7z
             | Self::ArchiveRar
+            | Self::RiscOsSquash
+            | Self::ArcFs
             | Self::RawDiskImage
             | Self::AudioMpeg
             | Self::AudioFlac
@@ -424,11 +609,16 @@ impl MediaType {
             | Self::AudioAu
             | Self::AudioAac
             | Self::AudioMp4
+            | Self::AudioAiff
+            | Self::AudioMidi
+            | Self::AudioTracker
             | Self::VideoMp4
             | Self::VideoWebm
             | Self::VideoMatroska
             | Self::VideoQuicktime
-            | Self::VideoAvi => Some(Self::ApplicationOctetStream),
+            | Self::VideoAvi
+            | Self::VideoMpeg
+            | Self::VideoArMovie => Some(Self::ApplicationOctetStream),
         }
     }
 
@@ -477,6 +667,10 @@ impl MediaType {
             Self::Elf => IconKind::ElfExecutable,
             Self::TairixDriver => IconKind::Driver,
             Self::TairixAppInfo => IconKind::Manifest,
+            Self::RiscOsAbsolute => IconKind::RiscOsProgram,
+            Self::RiscOsUtility => IconKind::RiscOsUtility,
+            Self::RiscOsModule => IconKind::RiscOsModule,
+            Self::RiscOsBasic | Self::RiscOsBasicText => IconKind::BasicProgram,
             Self::TextPlain
             | Self::TextMarkdown
             | Self::TextCsv
@@ -487,12 +681,20 @@ impl MediaType {
             | Self::TextCss
             | Self::TextJavaScript
             | Self::TextC
-            | Self::TextPython => IconKind::Text,
+            | Self::TextPython
+            | Self::TextLua
+            | Self::TextPerl
+            | Self::TextMakefile
+            | Self::TextTex
+            | Self::Rtf => IconKind::Text,
             Self::TextHtml => IconKind::TextHtml,
             Self::TextRust => IconKind::TextRust,
             Self::TextJava => IconKind::TextJava,
             Self::ShellScript => IconKind::ShellScript,
+            Self::RiscOsObey | Self::RiscOsCommand => IconKind::RiscOsObey,
             Self::Pdf => IconKind::Pdf,
+            Self::PostScript => IconKind::PostScript,
+            Self::Pcl | Self::RiscOsPrintout => IconKind::PrintData,
             Self::ImagePng => IconKind::ImagePng,
             Self::ImageJpeg => IconKind::ImageJpeg,
             Self::ImageGif => IconKind::ImageGif,
@@ -502,7 +704,16 @@ impl MediaType {
             | Self::ImageIcon
             | Self::ImageWebp
             | Self::ImageTiff
-            | Self::ImageOpenRaster => IconKind::Image,
+            | Self::ImageOpenRaster
+            | Self::ImageJpeg2000
+            | Self::ImagePhotoshop
+            | Self::ImagePcx => IconKind::Image,
+            Self::RiscOsDraw | Self::ArtWorks => IconKind::Drawing,
+            Self::RiscOsTemplate | Self::RiscOsResource => IconKind::WindowTemplate,
+            Self::RiscOsFont | Self::BbcFont | Self::FontTtf | Self::FontOtf | Self::FontWoff => {
+                IconKind::Font
+            }
+            Self::RiscOsPalette => IconKind::Palette,
             Self::ArchiveZip
             | Self::ArchiveTar
             | Self::ArchiveGzip
@@ -510,7 +721,10 @@ impl MediaType {
             | Self::ArchiveBzip2
             | Self::ArchiveZstd
             | Self::Archive7z
-            | Self::ArchiveRar => IconKind::Archive,
+            | Self::ArchiveRar
+            | Self::JavaArchive
+            | Self::RiscOsSquash
+            | Self::ArcFs => IconKind::Archive,
             Self::RawDiskImage => IconKind::DiskHard,
             Self::CdImage => IconKind::DiskOptical,
             Self::RawFloppyDiskImage => IconKind::DiskFloppy,
@@ -521,12 +735,17 @@ impl MediaType {
             | Self::AudioWav
             | Self::AudioAu
             | Self::AudioAac
-            | Self::AudioMp4 => IconKind::Audio,
+            | Self::AudioMp4
+            | Self::AudioAiff
+            | Self::AudioMidi
+            | Self::AudioTracker => IconKind::Audio,
             Self::VideoMp4
             | Self::VideoWebm
             | Self::VideoMatroska
             | Self::VideoQuicktime
-            | Self::VideoAvi => IconKind::Video,
+            | Self::VideoAvi
+            | Self::VideoMpeg
+            | Self::VideoArMovie => IconKind::Video,
             Self::ApplicationOctetStream => IconKind::File,
         }
     }
@@ -605,6 +824,42 @@ impl MediaType {
             | Self::VideoMatroska
             | Self::VideoQuicktime
             | Self::VideoAvi
+            | Self::RiscOsAbsolute
+            | Self::RiscOsUtility
+            | Self::RiscOsModule
+            | Self::RiscOsBasic
+            | Self::TextLua
+            | Self::TextPerl
+            | Self::TextMakefile
+            | Self::TextTex
+            | Self::RiscOsBasicText
+            | Self::Rtf
+            | Self::RiscOsObey
+            | Self::RiscOsCommand
+            | Self::PostScript
+            | Self::Pcl
+            | Self::RiscOsPrintout
+            | Self::ImageJpeg2000
+            | Self::ImagePhotoshop
+            | Self::ImagePcx
+            | Self::RiscOsDraw
+            | Self::ArtWorks
+            | Self::RiscOsTemplate
+            | Self::RiscOsResource
+            | Self::RiscOsFont
+            | Self::BbcFont
+            | Self::FontTtf
+            | Self::FontOtf
+            | Self::FontWoff
+            | Self::RiscOsPalette
+            | Self::JavaArchive
+            | Self::RiscOsSquash
+            | Self::ArcFs
+            | Self::AudioAiff
+            | Self::AudioMidi
+            | Self::AudioTracker
+            | Self::VideoMpeg
+            | Self::VideoArMovie
             | Self::ApplicationOctetStream => None,
         }
     }
@@ -626,13 +881,16 @@ pub enum Family {
     Video,
     /// Archives and disk images: files that hold other files.
     Archive,
-    /// Programs: bundles and executables.
+    /// Programs: bundles and executables, and the resources they build
+    /// their windows from.
     Program,
+    /// Typefaces.
+    Font,
 }
 
 impl Family {
     /// Every family.
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Picture,
         Self::Text,
         Self::Document,
@@ -640,6 +898,7 @@ impl Family {
         Self::Video,
         Self::Archive,
         Self::Program,
+        Self::Font,
     ];
 
     /// How many families there are.
@@ -666,7 +925,13 @@ impl MediaType {
             | Self::ImageIcon
             | Self::ImageWebp
             | Self::ImageTiff
-            | Self::ImageOpenRaster => Some(Family::Picture),
+            | Self::ImageOpenRaster
+            | Self::ImageJpeg2000
+            | Self::ImagePhotoshop
+            | Self::ImagePcx
+            | Self::RiscOsDraw
+            | Self::ArtWorks
+            | Self::RiscOsPalette => Some(Family::Picture),
             Self::TextPlain
             | Self::TextMarkdown
             | Self::TextCsv
@@ -681,8 +946,17 @@ impl MediaType {
             | Self::TextJava
             | Self::TextC
             | Self::TextPython
-            | Self::ShellScript => Some(Family::Text),
-            Self::Pdf => Some(Family::Document),
+            | Self::TextLua
+            | Self::TextPerl
+            | Self::TextMakefile
+            | Self::TextTex
+            | Self::RiscOsBasicText
+            | Self::ShellScript
+            | Self::RiscOsObey
+            | Self::RiscOsCommand => Some(Family::Text),
+            Self::Pdf | Self::Rtf | Self::PostScript | Self::Pcl | Self::RiscOsPrintout => {
+                Some(Family::Document)
+            }
             Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -690,12 +964,17 @@ impl MediaType {
             | Self::AudioWav
             | Self::AudioAu
             | Self::AudioAac
-            | Self::AudioMp4 => Some(Family::Audio),
+            | Self::AudioMp4
+            | Self::AudioAiff
+            | Self::AudioMidi
+            | Self::AudioTracker => Some(Family::Audio),
             Self::VideoMp4
             | Self::VideoWebm
             | Self::VideoMatroska
             | Self::VideoQuicktime
-            | Self::VideoAvi => Some(Family::Video),
+            | Self::VideoAvi
+            | Self::VideoMpeg
+            | Self::VideoArMovie => Some(Family::Video),
             Self::ArchiveZip
             | Self::ArchiveTar
             | Self::ArchiveGzip
@@ -704,6 +983,9 @@ impl MediaType {
             | Self::ArchiveZstd
             | Self::Archive7z
             | Self::ArchiveRar
+            | Self::JavaArchive
+            | Self::RiscOsSquash
+            | Self::ArcFs
             | Self::RawDiskImage
             | Self::CdImage
             | Self::RawFloppyDiskImage => Some(Family::Archive),
@@ -714,7 +996,16 @@ impl MediaType {
             | Self::Wasm
             | Self::Elf
             | Self::TairixDriver
-            | Self::TairixAppInfo => Some(Family::Program),
+            | Self::TairixAppInfo
+            | Self::RiscOsAbsolute
+            | Self::RiscOsUtility
+            | Self::RiscOsModule
+            | Self::RiscOsBasic
+            | Self::RiscOsTemplate
+            | Self::RiscOsResource => Some(Family::Program),
+            Self::RiscOsFont | Self::BbcFont | Self::FontTtf | Self::FontOtf | Self::FontWoff => {
+                Some(Family::Font)
+            }
             Self::InodeDirectory | Self::ApplicationOctetStream => None,
         }
     }
@@ -729,13 +1020,15 @@ impl MediaType {
 ///
 /// A member is drawn as its own picture where its tile would be — a regular
 /// file the listing names with an identity, of a type that has a reading —
-/// and as its kind otherwise.
+/// and as its kind otherwise. Each member comes with the RISC OS filetype its
+/// volume records for it, where one was read, so it is typed as its own
+/// listing would type it.
 ///
 /// `entries` is walked twice, once to count and once to pick, so a sample
 /// allocates only the paths of the pictures it keeps.
 pub fn folder_sample<'n>(
     folder: &[String],
-    entries: impl Iterator<Item = DirEntry<'n>> + Clone,
+    entries: impl Iterator<Item = (DirEntry<'n>, Option<Filetype>)> + Clone,
 ) -> FolderSample {
     // A count and the first position it was seen at, so a larger count, then
     // an earlier first sighting, wins.
@@ -745,14 +1038,15 @@ pub fn folder_sample<'n>(
         first: u32,
     }
     let site = Site::of(folder);
-    let classify = |record: &DirEntry<'n>| {
+    let classify = |(record, recorded): &(DirEntry<'n>, Option<Filetype>)| {
         let name = core::str::from_utf8(record.name).ok()?;
-        let media = media_for_named(name, EntryKind::for_listing(record.kind, name, None), site);
+        let kind = EntryKind::for_listing(record.kind, name, None);
+        let media = media_for_named(name, kind, *recorded, site);
         Some((media.family()?, media, name))
     };
     let mut families = [Seen::default(); Family::COUNT];
-    for (at, record) in (0u32..).zip(entries.clone()) {
-        let Some((family, ..)) = classify(&record) else {
+    for (at, member) in (0u32..).zip(entries.clone()) {
+        let Some((family, ..)) = classify(&member) else {
             continue;
         };
         let seen = &mut families[family.index()];
@@ -789,10 +1083,11 @@ pub fn folder_sample<'n>(
     let mut cards: [Option<SampleCard>; FolderSample::MOST] = Default::default();
     let mut met = [0u32; Family::COUNT];
     let mut path = None::<String>;
-    for record in entries {
-        let Some((family, media, name)) = classify(&record) else {
+    for member in entries {
+        let Some((family, media, name)) = classify(&member) else {
             continue;
         };
+        let record = member.0;
         let nth = met[family.index()];
         met[family.index()] += 1;
         let Some(slot) = wanted.iter().position(|want| *want == Some((family, nth))) else {
@@ -840,6 +1135,10 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::Elf,
     MediaType::TairixDriver,
     MediaType::TairixAppInfo,
+    MediaType::RiscOsAbsolute,
+    MediaType::RiscOsUtility,
+    MediaType::RiscOsModule,
+    MediaType::RiscOsBasic,
     MediaType::TextPlain,
     MediaType::TextMarkdown,
     MediaType::TextCsv,
@@ -854,8 +1153,19 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::TextJava,
     MediaType::TextC,
     MediaType::TextPython,
+    MediaType::TextLua,
+    MediaType::TextPerl,
+    MediaType::TextMakefile,
+    MediaType::TextTex,
+    MediaType::RiscOsBasicText,
+    MediaType::Rtf,
     MediaType::ShellScript,
+    MediaType::RiscOsObey,
+    MediaType::RiscOsCommand,
     MediaType::Pdf,
+    MediaType::PostScript,
+    MediaType::Pcl,
+    MediaType::RiscOsPrintout,
     MediaType::ImagePng,
     MediaType::ImageJpeg,
     MediaType::ImageGif,
@@ -866,6 +1176,19 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::ImageWebp,
     MediaType::ImageTiff,
     MediaType::ImageOpenRaster,
+    MediaType::ImageJpeg2000,
+    MediaType::ImagePhotoshop,
+    MediaType::ImagePcx,
+    MediaType::RiscOsDraw,
+    MediaType::ArtWorks,
+    MediaType::RiscOsTemplate,
+    MediaType::RiscOsResource,
+    MediaType::RiscOsFont,
+    MediaType::BbcFont,
+    MediaType::FontTtf,
+    MediaType::FontOtf,
+    MediaType::FontWoff,
+    MediaType::RiscOsPalette,
     MediaType::ArchiveZip,
     MediaType::ArchiveTar,
     MediaType::ArchiveGzip,
@@ -874,6 +1197,9 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::ArchiveZstd,
     MediaType::Archive7z,
     MediaType::ArchiveRar,
+    MediaType::JavaArchive,
+    MediaType::RiscOsSquash,
+    MediaType::ArcFs,
     MediaType::RawDiskImage,
     MediaType::CdImage,
     MediaType::RawFloppyDiskImage,
@@ -885,11 +1211,16 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::AudioAu,
     MediaType::AudioAac,
     MediaType::AudioMp4,
+    MediaType::AudioAiff,
+    MediaType::AudioMidi,
+    MediaType::AudioTracker,
     MediaType::VideoMp4,
     MediaType::VideoWebm,
     MediaType::VideoMatroska,
     MediaType::VideoQuicktime,
     MediaType::VideoAvi,
+    MediaType::VideoMpeg,
+    MediaType::VideoArMovie,
     MediaType::ApplicationOctetStream,
 ];
 
@@ -927,8 +1258,15 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::TextJava, &["java"]),
     (MediaType::TextC, &["c", "h"]),
     (MediaType::TextPython, &["py"]),
+    (MediaType::TextLua, &["lua"]),
+    (MediaType::TextPerl, &["pl", "pm"]),
+    (MediaType::TextMakefile, &["mk", "mak"]),
+    (MediaType::TextTex, &["tex", "ltx"]),
+    (MediaType::Rtf, &["rtf"]),
     (MediaType::ShellScript, &["sh"]),
     (MediaType::Pdf, &["pdf"]),
+    (MediaType::PostScript, &["ps", "eps"]),
+    (MediaType::Pcl, &["pcl"]),
     (MediaType::ImagePng, &["png"]),
     (MediaType::ImageJpeg, &["jpg", "jpeg"]),
     (MediaType::ImageGif, &["gif"]),
@@ -939,6 +1277,12 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::ImageWebp, &["webp"]),
     (MediaType::ImageTiff, &["tiff", "tif"]),
     (MediaType::ImageOpenRaster, &["ora"]),
+    (MediaType::ImageJpeg2000, &["jp2", "j2k"]),
+    (MediaType::ImagePhotoshop, &["psd"]),
+    (MediaType::ImagePcx, &["pcx"]),
+    (MediaType::FontTtf, &["ttf"]),
+    (MediaType::FontOtf, &["otf"]),
+    (MediaType::FontWoff, &["woff"]),
     (MediaType::ArchiveZip, &["zip"]),
     (MediaType::ArchiveTar, &["tar"]),
     (MediaType::ArchiveGzip, &["gz", "tgz"]),
@@ -947,6 +1291,7 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::ArchiveZstd, &["zst"]),
     (MediaType::Archive7z, &["7z"]),
     (MediaType::ArchiveRar, &["rar"]),
+    (MediaType::JavaArchive, &["jar"]),
     (MediaType::RawDiskImage, &["hdf"]),
     (MediaType::CdImage, &["iso"]),
     (MediaType::RawFloppyDiskImage, &["adf", "adl", "adm", "ads"]),
@@ -958,27 +1303,151 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::AudioAu, &["au", "snd"]),
     (MediaType::AudioAac, &["aac"]),
     (MediaType::AudioMp4, &["m4a"]),
+    (MediaType::AudioAiff, &["aif", "aiff", "aifc"]),
+    (MediaType::AudioMidi, &["mid", "midi"]),
     (MediaType::VideoMp4, &["mp4", "m4v"]),
     (MediaType::VideoWebm, &["webm"]),
     (MediaType::VideoMatroska, &["mkv"]),
     (MediaType::VideoQuicktime, &["mov"]),
     (MediaType::VideoAvi, &["avi"]),
+    (MediaType::VideoMpeg, &["mpg", "mpeg"]),
 ];
 
-/// RISC OS file types a name may carry after a comma — how a RISC OS file
-/// keeps its type on a filesystem with no field for one (`Sprites,ff9`) —
-/// for the types this registry knows.
-const FILETYPE_TABLE: &[(MediaType, &str)] = &[
-    (MediaType::ImageSprite, "ff9"),
-    (MediaType::ImagePng, "b60"),
-    (MediaType::ImageJpeg, "c85"),
-    (MediaType::ImageGif, "695"),
-    (MediaType::ImageBmp, "69c"),
-    (MediaType::ImageTiff, "ff0"),
-    (MediaType::TextPlain, "fff"),
+/// RISC OS filetype → [`MediaType`] table: the one source for the type a
+/// filetype names, whether the volume records it ([`media_for_filetype`]) or a
+/// name carries it after a comma, as a RISC OS file keeps its type on a
+/// filesystem with no field for one (`Sprites,ff9`).
+///
+/// Each type lists the filetypes that hold it, the one RISC OS gives a new file
+/// of it first; a filetype holding no type the registry knows is not listed,
+/// so it reads as [`ApplicationOctetStream`](MediaType::ApplicationOctetStream).
+/// The numbers are RISC OS's own allocations.
+const FILETYPE_TABLE: &[(MediaType, &[&str])] = &[
+    (MediaType::Elf, &["e1f", "fe6"]),
+    (MediaType::RiscOsAbsolute, &["ff8", "aa6", "fd3"]),
+    (MediaType::RiscOsUtility, &["ffc"]),
+    (MediaType::RiscOsModule, &["ffa"]),
+    (MediaType::RiscOsBasic, &["ffb", "aa5", "f7a"]),
+    (MediaType::TextPlain, &["fff", "fdb"]),
+    (MediaType::TextCsv, &["dfe"]),
+    (MediaType::Json, &["f75"]),
+    (MediaType::Yaml, &["f74"]),
+    (MediaType::Xml, &["f80"]),
+    (MediaType::TextHtml, &["faf"]),
+    (MediaType::TextCss, &["f79"]),
+    (MediaType::TextJavaScript, &["f81"]),
+    (MediaType::TextLua, &["18c", "18d"]),
+    (MediaType::TextPerl, &["102", "a06"]),
+    (MediaType::TextMakefile, &["fe1"]),
+    (MediaType::TextTex, &["ce5", "aca"]),
+    (MediaType::RiscOsBasicText, &["fd1"]),
+    (MediaType::Rtf, &["c32"]),
+    (MediaType::RiscOsObey, &["feb", "fd7", "fea", "f7b"]),
+    (MediaType::RiscOsCommand, &["ffe", "fd6"]),
+    (MediaType::Pdf, &["adf"]),
+    (MediaType::PostScript, &["ff5"]),
+    (MediaType::Pcl, &["ff3"]),
+    (MediaType::RiscOsPrintout, &["ff4"]),
+    (MediaType::ImagePng, &["b60"]),
+    (MediaType::ImageJpeg, &["c85"]),
+    (MediaType::ImageGif, &["695"]),
+    (MediaType::ImageSvg, &["aad"]),
+    (MediaType::ImageSprite, &["ff9"]),
+    (MediaType::ImageBmp, &["69c"]),
+    (MediaType::ImageIcon, &["132"]),
+    (MediaType::ImageWebp, &["a66"]),
+    (MediaType::ImageTiff, &["ff0"]),
+    (MediaType::ImageJpeg2000, &["a65"]),
+    (MediaType::ImagePhotoshop, &["f98"]),
+    (MediaType::ImagePcx, &["697"]),
+    (MediaType::RiscOsDraw, &["aff"]),
+    (MediaType::ArtWorks, &["d94"]),
+    (MediaType::RiscOsTemplate, &["fec"]),
+    (MediaType::RiscOsResource, &["fae"]),
+    (MediaType::RiscOsFont, &["ff6", "adb"]),
+    (MediaType::BbcFont, &["ff7"]),
+    (MediaType::FontTtf, &["77f"]),
+    (MediaType::FontOtf, &["07f"]),
+    (MediaType::FontWoff, &["7ff"]),
+    (MediaType::RiscOsPalette, &["fed"]),
+    (MediaType::ArchiveZip, &["ddc", "a91"]),
+    (MediaType::ArchiveTar, &["c46"]),
+    (MediaType::ArchiveGzip, &["f89"]),
+    (MediaType::JavaArchive, &["ae4"]),
+    (MediaType::RiscOsSquash, &["fca"]),
+    (MediaType::ArcFs, &["3fb"]),
+    (MediaType::RawDiskImage, &["fcd", "fc8"]),
+    (MediaType::RawFloppyDiskImage, &["fce"]),
+    (MediaType::AudioMpeg, &["1ad"]),
+    (MediaType::AudioFlac, &["1cf"]),
+    (MediaType::AudioOgg, &["1a8"]),
+    (MediaType::AudioWav, &["fb1"]),
+    (MediaType::AudioAiff, &["fc2"]),
+    (MediaType::AudioMidi, &["fd4"]),
+    (MediaType::AudioTracker, &["cb6"]),
+    (MediaType::VideoMp4, &["a64"]),
+    (MediaType::VideoMatroska, &["a63"]),
+    (MediaType::VideoMpeg, &["bf8"]),
+    (MediaType::VideoArMovie, &["ae7"]),
+    (MediaType::ApplicationOctetStream, &["ffd"]),
 ];
 
-/// What ends a file name: the RISC OS file type after its last comma, when
+/// Every filetype's row in [`FILETYPE_TABLE`] plus one, or zero where it has
+/// none, so a lookup is one load however many types the table holds. Building
+/// it proves at compile time that each code is three lowercase hex digits, that
+/// no filetype names two types and that no type has two rows.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a hex digit is four bits, and the table holds fewer rows than a u8 counts"
+)]
+const FILETYPE_ROWS: [u8; 0x1000] = {
+    let mut rows = [0u8; 0x1000];
+    let mut row = 0;
+    while row < FILETYPE_TABLE.len() {
+        assert!(row < u8::MAX as usize);
+        let mut earlier = 0;
+        while earlier < row {
+            assert!(FILETYPE_TABLE[earlier].0 as usize != FILETYPE_TABLE[row].0 as usize);
+            earlier += 1;
+        }
+        let codes = FILETYPE_TABLE[row].1;
+        assert!(!codes.is_empty());
+        let mut at = 0;
+        while at < codes.len() {
+            let code = codes[at].as_bytes();
+            assert!(code.len() == 3);
+            let mut raw = 0usize;
+            let mut digit = 0;
+            while digit < 3 {
+                let byte = code[digit];
+                assert!(byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+                let nibble = if byte.is_ascii_digit() {
+                    byte - b'0'
+                } else {
+                    byte - b'a' + 10
+                };
+                raw = raw << 4 | nibble as usize;
+                digit += 1;
+            }
+            assert!(rows[raw] == 0);
+            rows[raw] = (row + 1) as u8;
+            at += 1;
+        }
+        row += 1;
+    }
+    rows
+};
+
+/// The type `filetype` names, if it is one the registry knows.
+#[must_use]
+pub fn media_for_filetype(filetype: Filetype) -> Option<MediaType> {
+    let row = usize::from(*FILETYPE_ROWS.get(usize::from(filetype.get()))?);
+    FILETYPE_TABLE
+        .get(row.checked_sub(1)?)
+        .map(|(media, _)| *media)
+}
+
+/// What ends a file name: the RISC OS filetype after its last comma, when
 /// that is three hex digits, and the extension after the last dot of what
 /// comes before it. Each needs a stem of its own, so a name whose only dot or
 /// comma starts it ends in neither.
@@ -986,8 +1455,8 @@ const FILETYPE_TABLE: &[(MediaType, &str)] = &[
 pub struct Ending<'a> {
     /// What the ending follows: the whole name when it ends in neither.
     pub stem: &'a str,
-    /// The file type's three hex digits.
-    pub filetype: Option<&'a str>,
+    /// The filetype the name carries.
+    pub filetype: Option<Filetype>,
     /// The extension, without its dot.
     pub extension: Option<&'a str>,
 }
@@ -996,15 +1465,13 @@ impl<'a> Ending<'a> {
     /// What ends `name`.
     #[must_use]
     pub fn of(name: &'a str) -> Self {
-        let (rest, filetype) = match name.rsplit_once(',') {
-            Some((stem, filetype))
-                if !stem.is_empty()
-                    && tairix_fsmeta::preset::acorn::filetype_from_value(filetype.as_bytes())
-                        .is_ok() =>
-            {
-                (stem, Some(filetype))
-            }
-            _ => (name, None),
+        let carried = name.rsplit_once(',').and_then(|(stem, code)| {
+            let filetype = acorn::filetype_from_value(code.as_bytes()).ok()?;
+            (!stem.is_empty()).then_some((stem, filetype))
+        });
+        let (rest, filetype) = match carried {
+            Some((stem, filetype)) => (stem, Some(filetype)),
+            None => (name, None),
         };
         let (stem, extension) = match rest.rsplit_once('.') {
             Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
@@ -1026,7 +1493,7 @@ impl<'a> Ending<'a> {
     }
 }
 
-/// The media type a file name implies, if any: its [`Ending`]'s file type
+/// The media type a file name implies, if any: its [`Ending`]'s filetype
 /// when that is one the registry knows, else its extension.
 ///
 /// The lookup is ASCII-case-insensitive and allocates no `String`: it splits
@@ -1036,13 +1503,8 @@ impl<'a> Ending<'a> {
 #[must_use]
 pub fn media_for_name(name: &str) -> Option<MediaType> {
     let ending = Ending::of(name);
-    let known = ending.filetype.and_then(|filetype| {
-        FILETYPE_TABLE
-            .iter()
-            .find(|(_, code)| code.eq_ignore_ascii_case(filetype))
-    });
-    if let Some((media, _)) = known {
-        return Some(*media);
+    if let Some(media) = ending.filetype.and_then(media_for_filetype) {
+        return Some(media);
     }
     let ext = ending.extension?;
     EXTENSION_TABLE
@@ -1074,8 +1536,8 @@ const _: () = {
 };
 
 /// The endings a name of `media` is known by — each extension after a `.`,
-/// then its RISC OS file type after a `,` — as [`media_for_name`] reads
-/// them back, most usual first.
+/// then the RISC OS filetype a new file of it is given after a `,` — as
+/// [`media_for_name`] reads them back, most usual first.
 pub fn name_endings(media: MediaType) -> impl Iterator<Item = (char, &'static str)> {
     let extensions = EXTENSION_TABLE
         .iter()
@@ -1084,7 +1546,8 @@ pub fn name_endings(media: MediaType) -> impl Iterator<Item = (char, &'static st
     let filetype = FILETYPE_TABLE
         .iter()
         .filter(move |(held, _)| *held == media)
-        .map(|(_, code)| (',', *code));
+        .filter_map(|(_, codes)| codes.first())
+        .map(|code| (',', *code));
     extensions.chain(filetype)
 }
 
@@ -1139,12 +1602,34 @@ impl BlankDocument {
 /// [`TairixService`](MediaType::TairixService) when `parent` is a store of
 /// programs the system starts and [`TairixApp`](MediaType::TairixApp)
 /// otherwise; a regular file is what the layout it stands in names it
-/// ([`Site`]), else takes its extension's type, or
-/// [`ApplicationOctetStream`](MediaType::ApplicationOctetStream) when the
-/// extension is unrecognised (or absent) — fail closed to the generic type.
+/// ([`Site`]), else what [`media_for_document`] reads from its name and the
+/// filetype its volume records, or
+/// [`ApplicationOctetStream`](MediaType::ApplicationOctetStream) when neither
+/// says — fail closed to the generic type.
 #[must_use]
 pub fn media_for_entry(entry: &Entry, parent: &[String]) -> MediaType {
-    media_for_named(entry.name(), entry.kind(), Site::of(parent))
+    media_for_named(
+        entry.name(),
+        entry.kind(),
+        entry.filetype(),
+        Site::of(parent),
+    )
+}
+
+/// What a file called `name` is, its volume recording `recorded` as its RISC
+/// OS filetype: what the name's ending says, else what the recorded filetype
+/// says, else `None` where neither names a type the registry knows.
+///
+/// The name decides first because it is TAIRiX's own way of typing a file and
+/// RISC OS gives every file a filetype, Data where it was told nothing: a
+/// `notes.txt` RISC OS stored as Data is still text. The recorded filetype is
+/// what types a file whose name says nothing, as a RISC OS file's never does.
+///
+/// The one rule a listing and a program opening a document both apply, so a
+/// file is the same type wherever it is met.
+#[must_use]
+pub fn media_for_document(name: &str, recorded: Option<Filetype>) -> Option<MediaType> {
+    media_for_name(name).or_else(|| recorded.and_then(media_for_filetype))
 }
 
 /// The media type of a node known only by its `name` and `kind` — what a
@@ -1155,13 +1640,19 @@ pub fn media_for_entry(entry: &Entry, parent: &[String]) -> MediaType {
 /// identically whether it is reached as a listed row or as the subject of its
 /// own window. `site` is where it was found, which only a caller that knows
 /// the parent can answer; a caller that does not passes [`Site::Plain`], and
-/// a bundle types as an application and a file by its name alone.
+/// a bundle types as an application and a file by its name and `recorded`, the
+/// RISC OS filetype its volume records for it, alone.
 ///
 /// A link classifies as what it *names*: a shortcut to a folder is typed and
 /// opened as a folder. A link that resolves to nothing has no content type at
 /// all, so it falls closed to the generic one.
 #[must_use]
-pub fn media_for_named(name: &str, kind: EntryKind, site: Site) -> MediaType {
+pub fn media_for_named(
+    name: &str,
+    kind: EntryKind,
+    recorded: Option<Filetype>,
+    site: Site,
+) -> MediaType {
     match kind.resolved() {
         Some(EntryKind::Directory) => MediaType::InodeDirectory,
         Some(EntryKind::Bundle) if site == Site::StartedStore => MediaType::TairixService,
@@ -1169,7 +1660,7 @@ pub fn media_for_named(name: &str, kind: EntryKind, site: Site) -> MediaType {
         Some(EntryKind::Bundle) => MediaType::TairixApp,
         Some(EntryKind::File) => site
             .file_named(name)
-            .or_else(|| media_for_name(name))
+            .or_else(|| media_for_document(name, recorded))
             .unwrap_or(MediaType::ApplicationOctetStream),
         // `resolved` never yields a link, and a dangling one yields nothing.
         Some(EntryKind::Link(_)) | None => MediaType::ApplicationOctetStream,
@@ -1194,7 +1685,7 @@ pub fn icon_for_entry(entry: &Entry, parent: &[String]) -> IconKind {
         let site = Site::of(parent);
         icon_of(
             entry,
-            media_for_named(entry.name(), entry.kind(), site),
+            media_for_named(entry.name(), entry.kind(), entry.filetype(), site),
             site,
         )
     })
@@ -1216,12 +1707,13 @@ fn icon_of(entry: &Entry, media: MediaType, site: Site) -> IconKind {
 /// is drawn with, and the request its picture is asked for by.
 ///
 /// The request names the entry's own picture where it has one and `pictures`
-/// asks for it: an application bundle's own icon, an occupied folder's
-/// picture of what it holds, a picture file's own content — a bundle and a
-/// picture file each at the version the listing saw. Each falls back to the
-/// icon's class picture where it will not serve. `scratch` is a buffer the caller reuses
-/// across the entries of one frame, so a grid spells its paths without
-/// allocating one per tile.
+/// asks for it: an application bundle's own icon, a RISC OS application's
+/// sprite, an occupied folder's picture of what it holds, a picture file's own
+/// content — a bundle, an application folder and a picture file each at the
+/// version the listing saw. Each falls back to the icon's class picture where it
+/// will not serve, a RISC OS application to the folder it is. `scratch` is a
+/// buffer the caller reuses across the entries of one frame, so a grid spells
+/// its paths without allocating one per tile.
 ///
 /// Every surface that draws an entry's picture — the file manager's tiles and
 /// rows, and the desktop — asks here, so an entry cannot be pictured one way
@@ -1238,13 +1730,33 @@ pub fn entry_icon<'a>(
         return (drive, IconRequest::kind(drive));
     }
     let site = Site::of(parent);
-    let media = media_for_named(entry.name(), entry.kind(), site);
+    let media = media_for_named(entry.name(), entry.kind(), entry.filetype(), site);
     let kind = icon_of(entry, media, site);
-    if let (true, true, Some(sample)) = (
+    let contents = match (
         pictures.folder_contents,
         entry.is_directory(),
         entry.occupancy().pictured(),
     ) {
+        (true, true, Some(sample)) => Some(sample),
+        _ => None,
+    };
+    if entry.is_riscos_application() {
+        scratch.clear();
+        scratch.push_str(dir);
+        crate::vfs::push_child(scratch, entry.name());
+        // A link's listed stamp is its own, not its target's.
+        let stamp =
+            (entry.kind() == EntryKind::Directory && !entry.id().is_none()).then(|| entry.stamp());
+        let request = IconRequest::riscos_application(kind, scratch, stamp);
+        return (
+            kind,
+            match contents {
+                Some(sample) => request.or_folder(sample),
+                None => request,
+            },
+        );
+    }
+    if let Some(sample) = contents {
         return (kind, IconRequest::folder(sample));
     }
     // A link's listed size and time are its own, not its target's, so they

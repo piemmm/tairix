@@ -58,8 +58,8 @@ use tairix_abi::window_ipc::{AppBar, AppBarClick, AppMenu};
 use tairix_abi::{AppIdentity as AttestedApp, AppInfoHeader, Errno, ProcId, PublisherId};
 use tairix_geometry::Scale;
 use tairix_icon::{
-    ArtworkCache, ArtworkDocument, ArtworkOutcome, ArtworkRasteriser, ArtworkReader,
-    ArtworkResolver, Fitted, IconKind, IconPicture, IconRequest, Reading, MAX_ARTWORK_BYTES,
+    ArtworkCache, ArtworkDocument, ArtworkOutcome, ArtworkReader, ArtworkResolver, IconKind,
+    IconPicture, IconRequest, MAX_ARTWORK_BYTES,
 };
 use tairix_proglib::{Catalog, EntryId, IconAsset};
 use tairix_raster::{Region, Surface};
@@ -841,33 +841,6 @@ where
         .collect()
 }
 
-/// The icon-decoding seam: turns untrusted icon bytes into `side`×`side`
-/// straight-alpha RGBA8 pixels, or `None` when the image is refused.
-///
-/// In production this is the parser-sandbox icon service — the session
-/// never decodes bundle artwork in its own address space; tests supply a
-/// fake. It is bridged to the shared [`ArtworkRasteriser`] by
-/// [`ArtworkSandbox`] so the one [`ArtworkCache`] verifies and retains every
-/// decode; the cache re-checks the returned pixel length before building a
-/// surface from it, so the seam is trusted only to the extent the cache
-/// verifies.
-pub trait IconRasteriser {
-    /// Rasterise `icon` to a `side`-pixel square, or refuse.
-    fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<Vec<u8>>;
-
-    /// Draw the picture `document` holds, read as `reading` says, fitted
-    /// inside a `side`-pixel square with where in it the picture lies, or
-    /// refuse. The default refuses.
-    fn thumbnail(
-        &mut self,
-        _side: u32,
-        _reading: Reading,
-        _document: &mut dyn ArtworkDocument,
-    ) -> Option<Fitted> {
-        None
-    }
-}
-
 /// Bridges the session's [`SessionFileReader`] to the shared
 /// [`ArtworkReader`] the one [`ArtworkCache`] reads asset bytes through.
 ///
@@ -887,28 +860,9 @@ impl<R: SessionFileReader> ArtworkReader for ArtworkFileReader<R> {
     fn open(&mut self, path: &str) -> Option<Box<dyn ArtworkDocument + '_>> {
         self.0.open_document(path)
     }
-}
 
-/// Bridges the session's [`IconRasteriser`] (the parser sandbox) to the
-/// shared [`ArtworkRasteriser`] the one [`ArtworkCache`] rasterises through.
-///
-/// The pixel signature is identical, so this only forwards — the untrusted
-/// decode still runs in the sandbox worker, never here. Owns its rasteriser
-/// so it can be boxed as the shell's artwork seam.
-pub struct ArtworkSandbox<D>(pub D);
-
-impl<D: IconRasteriser> ArtworkRasteriser for ArtworkSandbox<D> {
-    fn rasterise(&mut self, side: u32, bytes: &[u8]) -> Option<Vec<u8>> {
-        self.0.rasterise(side, bytes)
-    }
-
-    fn thumbnail(
-        &mut self,
-        side: u32,
-        reading: Reading,
-        document: &mut dyn ArtworkDocument,
-    ) -> Option<Fitted> {
-        self.0.thumbnail(side, reading, document)
+    fn open_inside(&mut self, dir: &str, inside: &str) -> Option<Box<dyn ArtworkDocument + '_>> {
+        self.0.open_document_inside(dir, inside)
     }
 }
 

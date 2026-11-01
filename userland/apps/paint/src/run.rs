@@ -30,6 +30,7 @@ mod program {
     use alloc::vec::Vec;
     use core::fmt;
 
+    use tairix_abi::fs::Filetype;
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{AppMenuSymbol, ClipboardKind};
     use tairix_abi::Errno;
@@ -138,14 +139,17 @@ mod program {
 
     /// The format to name in place of reading a document's signature: only
     /// a RISC OS sprite area, whose first word is a count, carries none.
-    fn named_format(name: &str) -> Option<ViewFormat> {
-        matches!(format_named(name), Ok(Some(SaveFormat::Sprites))).then_some(ViewFormat::Sprite)
+    fn named_format(name: &str, recorded: Option<Filetype>) -> Option<ViewFormat> {
+        matches!(format_named(name, recorded), Ok(Some(SaveFormat::Sprites)))
+            .then_some(ViewFormat::Sprite)
     }
 
-    /// A document being read into a window: the file, and what it is called.
+    /// A document being read into a window: the file, what it is called, and
+    /// the filetype its volume records, read by the worker that reads it.
     struct Load {
         handle: Arc<Handle>,
         name: String,
+        recorded: Option<Filetype>,
     }
 
     /// Hand `length` bytes to the worker, each run read by `read_at`.
@@ -208,7 +212,10 @@ mod program {
         let outcome = upload(sandbox, length, |offset, into| {
             tairix_rt::fs_read(fd, offset, into).map_err(Errno::from_syscall)
         })
-        .and_then(|()| decode(sandbox, named_format(&load.name), length, Entries::All));
+        .and_then(|()| {
+            let format = named_format(&load.name, load.recorded);
+            decode(sandbox, format, length, Entries::All)
+        });
         // The worker that read this document reads no other.
         sandbox.release();
         outcome
@@ -292,10 +299,13 @@ mod program {
     fn serve_decode(sandbox: &mut Decoder, job: &mut Option<DecodeJob>) -> Option<DecodeReply> {
         let DecodeJob { stamp, work } = job.take()?;
         let answer = match work {
-            DecodeWork::Load(load) => DecodeAnswer::Loaded {
-                document: load_document(sandbox, &load),
-                load,
-            },
+            DecodeWork::Load(mut load) => {
+                load.recorded = tairix_browse::recorded_filetype_of(&load.handle);
+                DecodeAnswer::Loaded {
+                    document: load_document(sandbox, &load),
+                    load,
+                }
+            }
             DecodeWork::Paste { bytes, kind } => {
                 DecodeAnswer::Pasted(decode_pasted(sandbox, &bytes, kind))
             }
@@ -332,7 +342,8 @@ mod program {
         snapshot: &Snapshot,
         name: &str,
     ) -> Result<Option<&'static str>, SaveFailure> {
-        let format = format_for(name, &snapshot.entries, snapshot.origin)
+        let recorded = tairix_browse::recorded_filetype_of(file);
+        let format = format_for(name, recorded, &snapshot.entries, snapshot.origin)
             .map_err(SaveFailure::Unwritable)?;
         // Found before the file is touched, so a refusal leaves it whole.
         let lost = lost_in(snapshot, format)
@@ -508,6 +519,7 @@ mod program {
             let mut view = View::new(
                 Document::new_as(Picture::plain(canvas), preferences.format),
                 String::from(UNTITLED),
+                None,
                 Access::Untitled,
             );
             view.begin(preferences);
@@ -522,6 +534,7 @@ mod program {
             let mut view = View::new(
                 Document::new(Picture::plain(canvas)),
                 String::from(name),
+                None,
                 access,
             );
             view.begin(host.app.preferences.live());
@@ -532,6 +545,7 @@ mod program {
             let load = Load {
                 handle,
                 name: name.clone(),
+                recorded: None,
             };
             match host.app.decoder.submit(Some(DecodeJob {
                 stamp: host.windows[index].stamp(),
@@ -861,13 +875,13 @@ mod program {
     /// `load`'s `document` landed in window `index`.
     fn loaded(host: &mut Host<Paint>, index: usize, load: Load, document: Document) {
         let writable = host.windows[index].view.access() == Access::Writable;
-        let refusal = write_back(&load.name, &document).err();
+        let refusal = write_back(&load.name, load.recorded, &document).err();
         let access = if writable && refusal.is_none() {
             Access::Writable
         } else {
             Access::ReadOnly
         };
-        let mut view = View::new(document, load.name, access);
+        let mut view = View::new(document, load.name, load.recorded, access);
         view.begin(host.app.preferences.live());
         if let Some(refusal) = refusal.filter(|_| writable) {
             view.say(alloc::format!("{refusal}: Save asks where to save it"));
@@ -887,6 +901,7 @@ mod program {
                         let mut view = View::new(
                             Document::new_as(Picture::plain(canvas), format),
                             String::from(UNTITLED),
+                            None,
                             Access::Untitled,
                         );
                         view.begin(host.app.preferences.live());

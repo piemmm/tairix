@@ -44,6 +44,7 @@ impl Harness {
         let view = View::new(
             Editor::new(document, format),
             String::from("notes.txt"),
+            None,
             Access::Writable,
             CLICK,
         );
@@ -802,6 +803,7 @@ fn a_read_only_document_says_so_in_its_title() {
     let view = View::new(
         Editor::new(Document::new(), Format::PlainText),
         String::from("hosts"),
+        None,
         Access::ReadOnly,
         CLICK,
     );
@@ -822,6 +824,7 @@ fn a_long_or_odd_name_still_makes_a_title_the_desktop_accepts() {
             let mut view = View::new(
                 Editor::new(Document::new(), Format::PlainText),
                 name.clone(),
+                None,
                 access,
                 CLICK,
             );

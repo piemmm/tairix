@@ -15,8 +15,9 @@
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
+use tairix_abi::fs::Filetype;
 use tairix_binfmt::Format;
-use tairix_browse::{media_for_name, MediaType};
+use tairix_browse::{media_for_document, MediaType};
 use tairix_sandbox::decode::{self, MAX_INPUT};
 use tairix_sandbox::imageinspect::InspectFailure;
 use tairix_sandbox::imagerender::{ViewFormat, MAX_DOCUMENT_BYTES};
@@ -103,12 +104,13 @@ pub struct DataDisplay {
 }
 
 impl DataDisplay {
-    /// The display for a document called `name` opening with `head`, shown
-    /// at once, or `None` when it is neither a picture nor a manifest.
+    /// The display for a document called `name`, whose volume records
+    /// `recorded` as its filetype, opening with `head`, shown at once, or
+    /// `None` when it is neither a picture nor a manifest.
     #[must_use]
-    pub fn of(head: &[u8], name: &str) -> Option<Self> {
-        let named =
-            (media_for_name(name) == Some(MediaType::ImageSprite)).then_some(ViewFormat::Sprite);
+    pub fn of(head: &[u8], name: &str, recorded: Option<Filetype>) -> Option<Self> {
+        let named = (media_for_document(name, recorded) == Some(MediaType::ImageSprite))
+            .then_some(ViewFormat::Sprite);
         let structure = if named.is_some() || tairix_image::sniff(head).is_some() {
             Structure::Picture(named)
         } else if matches!(

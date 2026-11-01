@@ -51,8 +51,8 @@ UTF-8 and control bytes round-trip exactly.
   machine's (`boot_facts`), which is what an `rxe` installed here is written
   in; choosing the set already listed lists nothing again.
 - **Data.** A picture — a format `tairix_image::sniff` recognises from its head
-  (a bounded compare), or a RISC OS sprite area by its name, since a sprite
-  area carries no signature — or a signed manifest — a program's or a
+  (a bounded compare), or a RISC OS sprite area by its name or recorded
+  filetype, since a sprite area carries no signature — or a signed manifest — a program's or a
   bundle's `AppInfo`, by its magic — opens here instead: a structure report, a
   heading over the bytes, then every byte as the hex view draws it. A
   picture's report is the one `tairix_image::inspect` reads of it (the heading

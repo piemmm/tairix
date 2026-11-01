@@ -8129,15 +8129,16 @@ fn acorn_preset_metadata_round_trips_through_the_store() {
     // A synthetic ADFS Text file (&FFF) with a load/exec-encoded timestamp:
     // the driver stores the decoded filetype plus the exact raw load/exec, so
     // a later export reproduces the native fields byte-for-byte.
-    let (load, exec) = preset::acorn::encode_typed(0xFFF, 0x12_3456_789A).expect("encode typed");
+    let text = preset::acorn::Filetype::new(0xFFF).expect("twelve bits");
+    let (load, exec) = preset::acorn::encode_typed(text, 0x12_3456_789A).expect("encode typed");
     let mut fs = fmt(4096, 512, 64);
     let root = fs.root();
     fs.create(root, b"doc", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = fs.lookup(root, b"doc").expect("lookup");
 
-    let filetype = preset::acorn::filetype_to_value(0xFFF).expect("filetype");
-    fs.set_attr(node, b"acorn.filetype", &filetype)
+    let filetype = preset::acorn::filetype_to_value(text);
+    fs.set_attr(node, preset::acorn::FILETYPE_KEY, &filetype)
         .expect("set filetype");
     fs.set_attr(node, b"acorn.loadaddr", &preset::acorn::addr_to_value(load))
         .expect("set load");
@@ -8145,11 +8146,8 @@ fn acorn_preset_metadata_round_trips_through_the_store() {
         .expect("set exec");
 
     // Read back and reconstruct the native fields exactly.
-    let ft = get_attr_vec(&mut fs, node, b"acorn.filetype").expect("filetype present");
-    assert_eq!(
-        preset::acorn::filetype_from_value(&ft).expect("decode"),
-        0xFFF
-    );
+    let ft = get_attr_vec(&mut fs, node, preset::acorn::FILETYPE_KEY).expect("filetype present");
+    assert_eq!(preset::acorn::filetype_from_value(&ft), Ok(text));
     let rload = preset::acorn::addr_from_value(
         &get_attr_vec(&mut fs, node, b"acorn.loadaddr").expect("load present"),
     )

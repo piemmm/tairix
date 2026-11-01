@@ -350,7 +350,10 @@ first word (the total size, which the file's own length already gives), so
 every offset a file states is four greater than the position it names; the
 sprites themselves form a chain of 44-byte control blocks rather than a table,
 which is why the walk keeps the last block it located and a sequential pass
-costs one step per page.
+costs one step per page. `find_named` finds a sprite by its name — matched
+without regard to case, the first of a name taking it — from the control
+blocks alone, and `decode_named` decodes that one sprite, so a caller after one
+named picture (a RISC OS application's icon) decodes nothing else.
 
 Complete means: old-style screen mode numbers, RISC OS 3.5 sprite mode words,
 and the RISC OS 5 extended mode word with its mode-flags channel order and

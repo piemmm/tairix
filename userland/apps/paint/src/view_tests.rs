@@ -50,7 +50,12 @@ struct Window {
 impl Window {
     fn new(document: Document) -> Self {
         let registry = ThemeRegistry::with_builtins();
-        let view = View::new(document, String::from("picture.png"), Access::Writable);
+        let view = View::new(
+            document,
+            String::from("picture.png"),
+            None,
+            Access::Writable,
+        );
         let layout = view.layout(
             WINDOW.0,
             WINDOW.1,

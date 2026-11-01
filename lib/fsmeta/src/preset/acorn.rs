@@ -30,13 +30,36 @@ const CENTIS_LIMIT: u64 = 1 << 40;
 /// High 12 bits of a load address that mark a filetyped object.
 const TYPED_MARKER: u32 = 0xFFF;
 
+pub use tairix_abi::fs::Filetype;
+
+/// The bytes RISC OS keeps out of a name: its path separator and the
+/// characters its filing systems give a meaning of their own — the root `$`,
+/// the user root `&`, the library `%`, the current `@` and previous `\`
+/// directories, the parent `^`, the filing-system and path-variable `:`, the
+/// wildcards `#` and `*`, and the quote and bar the command line reads.
+pub const RESERVED_NAME_BYTES: &[u8] = b"$&%@\\^:.#*\"|";
+
+/// The byte a name holds in place of `byte` once it has crossed between RISC
+/// OS and TAIRiX. RISC OS separates a path with `.` and writes a dot within a
+/// name as `/`, the reverse of TAIRiX, so the two trade places — `ReadMe/txt`
+/// there is `ReadMe.txt` here — and every other byte crosses as itself. The
+/// exchange is its own inverse, so it carries a name either way.
+#[must_use]
+pub const fn crossed_name_byte(byte: u8) -> u8 {
+    match byte {
+        b'.' => b'/',
+        b'/' => b'.',
+        other => other,
+    }
+}
+
 /// A decoded RISC OS load/exec pair.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum LoadExec {
     /// A filetyped object: a 12-bit filetype and a 40-bit centisecond stamp.
     Typed {
-        /// The 12-bit filetype (`0..=0xFFF`).
-        filetype: u16,
+        /// The filetype.
+        filetype: Filetype,
         /// The 40-bit centisecond timestamp since 1900.
         centiseconds: u64,
     },
@@ -53,7 +76,8 @@ pub enum LoadExec {
 #[must_use]
 pub fn decode_load_exec(load: u32, exec: u32) -> LoadExec {
     if load >> 20 == TYPED_MARKER {
-        let filetype = u16::try_from((load >> 8) & 0xFFF).unwrap_or(0);
+        let [low, high, ..] = (load >> 8).to_le_bytes();
+        let filetype = Filetype::from_low_bits(u16::from_le_bytes([low, high]));
         let centiseconds = (u64::from(load & 0xFF) << 32) | u64::from(exec);
         LoadExec::Typed {
             filetype,
@@ -64,48 +88,42 @@ pub fn decode_load_exec(load: u32, exec: u32) -> LoadExec {
     }
 }
 
-/// Encode a 12-bit filetype and a 40-bit centisecond stamp back into the raw
+/// Encode a filetype and a 40-bit centisecond stamp back into the raw
 /// load/exec words.
 ///
 /// # Errors
 ///
-/// [`MetadataError::NotRepresentable`] if `filetype` exceeds 12 bits or
-/// `centiseconds` exceeds 40 bits.
-pub fn encode_typed(filetype: u16, centiseconds: u64) -> Result<(u32, u32), MetadataError> {
-    if filetype > 0xFFF || centiseconds >= CENTIS_LIMIT {
+/// [`MetadataError::NotRepresentable`] if `centiseconds` exceeds 40 bits.
+pub fn encode_typed(filetype: Filetype, centiseconds: u64) -> Result<(u32, u32), MetadataError> {
+    if centiseconds >= CENTIS_LIMIT {
         return Err(MetadataError::NotRepresentable);
     }
     let high_byte = u32::try_from(centiseconds >> 32).unwrap_or(0) & 0xFF;
-    let load = (TYPED_MARKER << 20) | (u32::from(filetype) << 8) | high_byte;
+    let load = (TYPED_MARKER << 20) | (u32::from(filetype.get()) << 8) | high_byte;
     let exec = u32::try_from(centiseconds & 0xFFFF_FFFF).unwrap_or(0);
     Ok((load, exec))
 }
 
-/// Encode a 12-bit filetype as three lowercase hex digits (e.g. `&FFF` →
-/// `b"fff"`), the canonical `acorn.filetype` value.
-///
-/// # Errors
-///
-/// [`MetadataError::NotRepresentable`] if `filetype` exceeds 12 bits.
-pub fn filetype_to_value(filetype: u16) -> Result<[u8; 3], MetadataError> {
-    if filetype > 0xFFF {
-        return Err(MetadataError::NotRepresentable);
-    }
-    Ok([
-        hex_digit(u8::try_from((filetype >> 8) & 0xF).unwrap_or(0)),
-        hex_digit(u8::try_from((filetype >> 4) & 0xF).unwrap_or(0)),
-        hex_digit(u8::try_from(filetype & 0xF).unwrap_or(0)),
-    ])
+/// Encode a filetype as three lowercase hex digits (e.g. `&FFF` → `b"fff"`),
+/// the canonical `acorn.filetype` value.
+#[must_use]
+pub fn filetype_to_value(filetype: Filetype) -> [u8; 3] {
+    let raw = filetype.get();
+    [
+        hex_digit(u8::try_from((raw >> 8) & 0xF).unwrap_or(0)),
+        hex_digit(u8::try_from((raw >> 4) & 0xF).unwrap_or(0)),
+        hex_digit(u8::try_from(raw & 0xF).unwrap_or(0)),
+    ]
 }
 
 /// Parse an `acorn.filetype` value (three hex digits, upper or lower case)
-/// back into a 12-bit filetype.
+/// back into a filetype.
 ///
 /// # Errors
 ///
 /// [`MetadataError::NotRepresentable`] if the value is not exactly three hex
 /// digits.
-pub fn filetype_from_value(value: &[u8]) -> Result<u16, MetadataError> {
+pub fn filetype_from_value(value: &[u8]) -> Result<Filetype, MetadataError> {
     if value.len() != 3 {
         return Err(MetadataError::NotRepresentable);
     }
@@ -114,7 +132,7 @@ pub fn filetype_from_value(value: &[u8]) -> Result<u16, MetadataError> {
         let nibble = hex_value(byte).ok_or(MetadataError::NotRepresentable)?;
         out = (out << 4) | u16::from(nibble);
     }
-    Ok(out)
+    Filetype::new(out).ok_or(MetadataError::NotRepresentable)
 }
 
 /// Encode a 32-bit load or exec address as eight lowercase hex digits, the
@@ -384,13 +402,24 @@ pub fn attr_from_value(value: &[u8]) -> Result<u16, MetadataError> {
     Ok(attr)
 }
 
+/// The key of an object's raw load word.
+pub const LOADADDR_KEY: &[u8] = b"acorn.loadaddr";
+/// The key of an object's raw execution word.
+pub const EXECADDR_KEY: &[u8] = b"acorn.execaddr";
+/// The key of an object's canonical attribute bits.
+pub const ATTR_KEY: &[u8] = b"acorn.attr";
+/// The key of a typed object's filetype.
+pub const FILETYPE_KEY: &[u8] = b"acorn.filetype";
+/// The key of a typed object's centisecond datestamp.
+pub const DATESTAMP_KEY: &[u8] = b"acorn.datestamp";
+
 /// The `acorn` keys an object's fields are surfaced as, in listing order.
 pub const KEYS: [&[u8]; 5] = [
-    b"acorn.loadaddr",
-    b"acorn.execaddr",
-    b"acorn.attr",
-    b"acorn.filetype",
-    b"acorn.datestamp",
+    LOADADDR_KEY,
+    EXECADDR_KEY,
+    ATTR_KEY,
+    FILETYPE_KEY,
+    DATESTAMP_KEY,
 ];
 
 /// What RISC OS records of one object: its load and execution words and its
@@ -420,8 +449,8 @@ impl Object {
     #[must_use]
     pub fn carries(&self, key: &[u8]) -> bool {
         match key {
-            b"acorn.loadaddr" | b"acorn.execaddr" | b"acorn.attr" => true,
-            b"acorn.filetype" | b"acorn.datestamp" => self.typed(),
+            LOADADDR_KEY | EXECADDR_KEY | ATTR_KEY => true,
+            FILETYPE_KEY | DATESTAMP_KEY => self.typed(),
             _ => false,
         }
     }
@@ -448,16 +477,16 @@ impl Object {
     ) -> Result<Option<usize>, MetadataError> {
         let decoded = decode_load_exec(self.load, self.exec);
         let len = match (key, decoded) {
-            (b"acorn.loadaddr", _) => put(out, &addr_to_value(self.load)),
-            (b"acorn.execaddr", _) => put(out, &addr_to_value(self.exec)),
-            (b"acorn.attr", _) => {
+            (LOADADDR_KEY, _) => put(out, &addr_to_value(self.load)),
+            (EXECADDR_KEY, _) => put(out, &addr_to_value(self.exec)),
+            (ATTR_KEY, _) => {
                 let (encoded, len) = attr_to_value(self.attr)?;
                 put(out, &encoded[..len])
             }
-            (b"acorn.filetype", LoadExec::Typed { filetype, .. }) => {
-                put(out, &filetype_to_value(filetype)?)
+            (FILETYPE_KEY, LoadExec::Typed { filetype, .. }) => {
+                put(out, &filetype_to_value(filetype))
             }
-            (b"acorn.datestamp", LoadExec::Typed { centiseconds, .. }) => {
+            (DATESTAMP_KEY, LoadExec::Typed { centiseconds, .. }) => {
                 put(out, &datestamp_to_value(centiseconds)?)
             }
             _ => return Ok(None),

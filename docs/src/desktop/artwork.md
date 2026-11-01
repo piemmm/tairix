@@ -7,12 +7,13 @@ apps.
 
 It is **reference material, not a shipped or build-time asset**. Nothing under
 `artwork/` is read by the kernel, a driver, the compositor, or any build step;
-removing the directory cannot break a build or a boot. The canonical, scalable
-assets the OS actually renders are authored as SVG and live under
-`/System/Graphics`, decoded through the curated image-decoding library in a
-parser sandbox on the desktop's single rasterisation path (`AGENTS.md` §10,
-§16.2; see [SVG asset decoding](./svg-assets.md), [Desktop icons](./icons.md),
-and [Pointer cursors](./cursors.md)). Treat `artwork/` as the human-facing
+removing the directory cannot break a build or a boot. The assets the OS
+renders live under `/System/Graphics` — SVG chrome, and raster masters for the
+pictures, the file-type masters among them drawn by `cargo xtask icons` — and
+are decoded through the curated image-decoding library in a parser sandbox on
+the desktop's single rasterisation path (`AGENTS.md` §10, §16.2; see
+[SVG asset decoding](./svg-assets.md), [Desktop icons](./icons.md), and
+[Pointer cursors](./cursors.md)). Treat `artwork/` as the human-facing
 brief these production assets are derived from, kept in sync by hand when the
 look changes.
 

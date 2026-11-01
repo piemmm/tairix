@@ -441,9 +441,11 @@ fn invalid_names_are_rejected() {
     for (variant, bytes) in [VARIANTS[0], VARIANTS[4], VARIANTS[5]] {
         let mut fs = fresh(variant, bytes);
         let root = FilesystemRead::root(&fs);
+        // A slash would reach the disc as the dot RISC OS separates a path
+        // with.
         for bad in [
             &b"has space"[..],
-            b"dot.name",
+            b"slash/name",
             b"star*",
             b"hash#",
             b"quo\"te",
@@ -480,6 +482,101 @@ fn invalid_names_are_rejected() {
                 "{variant:?}: fixed directories cap names at ten bytes"
             );
         }
+    }
+}
+
+/// Whether the ASCII name `needle` occurs in the image `haystack`, read past
+/// the attribute bits an old directory keeps in the top of each name byte.
+fn holds(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle)
+            .all(|(&have, &want)| have & 0x7F == want)
+    })
+}
+
+/// A dot in a name is written as the slash RISC OS spells it with, and a
+/// name RISC OS wrote with a slash is listed and found with a dot, which a
+/// path can spell where a slash cannot.
+#[test]
+fn a_name_crosses_between_the_disc_and_the_vfs_with_dot_and_slash_exchanged() {
+    for (variant, bytes) in VARIANTS {
+        let mut fs = fresh(variant, bytes);
+        let root = FilesystemRead::root(&fs);
+        let file = make(&mut fs, root, b"Read.Me", b"text");
+        fs.create(root, b"c.d", NodeKind::Directory, &DIR_RECORD)
+            .expect("a directory with a dot");
+        let listed: Vec<Vec<u8>> = list(&mut fs, root).into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(
+            listed,
+            [b"c.d".to_vec(), b"Read.Me".to_vec()],
+            "{variant:?}"
+        );
+        assert!(
+            listed.iter().all(|name| tairix_abi::fs::is_component(name)),
+            "{variant:?}: every listed name is one a path can spell"
+        );
+        assert_eq!(fs.lookup(root, b"read.me"), Ok(file), "{variant:?}");
+        assert_eq!(
+            fs.lookup(root, b"Read/Me"),
+            Err(DriverError::NotFound),
+            "{variant:?}: the disc's own spelling is not the VFS's"
+        );
+        let disc = fs.into_device().data;
+        assert!(
+            holds(&disc, b"Read/Me"),
+            "{variant:?}: RISC OS's spelling on the disc"
+        );
+        assert!(!holds(&disc, b"Read.Me"), "{variant:?}");
+    }
+}
+
+/// A name on the disc no path can spell is left out of the listing, so one
+/// such entry cannot make its whole directory unlistable.
+#[test]
+fn a_name_no_path_can_spell_is_left_out_rather_than_refusing_the_listing() {
+    for name in [&b"/"[..], b"//", b"a.b", b"."] {
+        assert!(super::Crossed::listed(name).is_none(), "{name:?}");
+    }
+    for (name, spelled) in [
+        (&b"Read/Me"[..], &b"Read.Me"[..]),
+        (b"!Boot", b"!Boot"),
+        (b"///", b"..."),
+    ] {
+        let crossed = super::Crossed::listed(name).expect("spellable");
+        assert_eq!(crossed.as_bytes(), spelled);
+    }
+}
+
+/// Every operation that takes a name takes the VFS's spelling: a rename, a
+/// removal and a listing resumed after a dotted name.
+#[test]
+fn renames_removals_and_resumed_listings_take_the_vfs_spelling() {
+    for (variant, bytes) in [VARIANTS[4], VARIANTS[5], VARIANTS[9]] {
+        let mut fs = fresh(variant, bytes);
+        let root = FilesystemRead::root(&fs);
+        make(&mut fs, root, b"a.b", b"1");
+        make(&mut fs, root, b"z", b"2");
+        fs.rename(root, b"a.b", root, b"m.n").expect("rename");
+        let (first, name) = listed(&mut fs, root, 0, &[])
+            .expect("read_dir")
+            .into_iter()
+            .next()
+            .expect("an entry");
+        assert_eq!(name, b"m.n", "{variant:?}");
+        let rest: Vec<Vec<u8>> = listed(&mut fs, root, first.next_cursor, &name)
+            .expect("resumed")
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        assert_eq!(rest, [b"z".to_vec()], "{variant:?}");
+        fs.remove(root, b"m.n").expect("remove");
+        assert_eq!(
+            fs.lookup(root, b"m.n"),
+            Err(DriverError::NotFound),
+            "{variant:?}"
+        );
     }
 }
 

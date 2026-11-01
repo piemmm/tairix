@@ -8,6 +8,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_abi::fs::Filetype;
 use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::{
     AppMenu, AppMenuItemId, AppMenuSymbol as S, CursorShape, DialogModality,
@@ -538,10 +539,17 @@ impl DocumentView for View {
 }
 
 impl View {
-    /// A window editing `editor`'s document, called `name`, which it may
-    /// write as `access` says; presses pair under `double_click`.
+    /// A window editing `editor`'s document, called `name` and recorded by
+    /// its volume as of `recorded`, which it may write as `access` says;
+    /// presses pair under `double_click`.
     #[must_use]
-    pub fn new(editor: Editor, name: String, access: Access, double_click: Duration64) -> Self {
+    pub fn new(
+        editor: Editor,
+        name: String,
+        recorded: Option<Filetype>,
+        access: Access,
+        double_click: Duration64,
+    ) -> Self {
         let flat = || ScrollModel::new(ScrollRange::new(0, 0, 0), 1, 1);
         let display = {
             let document = editor.document();
@@ -550,7 +558,7 @@ impl View {
             document
                 .copy_range(0..document.len().min(HEAD_LEN), &mut head)
                 .ok()
-                .and_then(|()| Display::of(&head, &name))
+                .and_then(|()| Display::of(&head, &name, recorded))
         };
         Self {
             editor,

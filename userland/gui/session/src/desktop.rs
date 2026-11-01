@@ -1316,7 +1316,7 @@ impl<S: DirectorySource> Desktop<S> {
                 }))
             }
             EntryKind::File | EntryKind::Link(LinkTarget::File) => {
-                match applications_for(entry.name(), apps).first() {
+                match applications_for(entry.name(), entry.filetype(), apps).first() {
                     Some(app) => DesktopOutcome::acting(DesktopAction::Activate(launch_of(
                         app.bundle_path(),
                         app.name().to_string(),

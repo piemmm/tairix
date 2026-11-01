@@ -37,6 +37,9 @@ bounds), and `plans/GUI-CONTROLS-DESIGN.md`.
 | I14 | Every drive medium has its own picture | done |
 | I15 | Every menu row's function has a picture: the `AppMenuSymbol` → `IconKind` map, and the command glyphs drawn as symbols | done |
 | I16 | A program, a driver image and a manifest are pictured by what they are | done |
+| I17 | A RISC OS application is pictured by its own sprite | done |
+| I18 | A file typed by the filetype its volume records is pictured and opened as that type | done |
+| I19 | The file-type masters are drawn by code and held to their drawings | done |
 
 Each item's section below records what it guarantees or what remains.
 
@@ -178,8 +181,9 @@ untrimmed master: its drawn content must reach within a pixel of both edges on
 its longer axis and sit centred, to a pixel, on the shorter one.
 A **vector** master has no pixel side at all: the decoder requires its design
 box to be square and the desktop rasterises it at the side it is about to
-draw. Either form stays within `MAX_ARTWORK_BYTES` (256 KiB), and both are
-*authored artwork*: adding or replacing one is dropping the file on disk, never
+draw. Either form stays within `MAX_ARTWORK_BYTES` (256 KiB). A file-type
+master is drawn by `cargo xtask icons` (I19); every other one is *authored
+artwork*, and adding or replacing it is dropping the file on disk, never
 editing a list. The image build proves every one of them is artwork the desktop
 will really draw (below), so "the icon is broken" is a build failure rather
 than a silent glyph on someone's desktop.
@@ -648,7 +652,50 @@ the listing drew, so the two cannot disagree. Each kind is a raster master over
 the program family's built-in glyph — the driver over a chip, the manifest over
 the page — so the rule stays total.
 
-## 18. What this plan deliberately does not cover
+## 18. I17 — a RISC OS application is pictured by its own sprite
+
+A RISC OS application directory (`!Name`) asks for
+`IconRequest::riscos_application`, so on every file surface it is drawn as
+RISC OS's Filer draws it. Its `!Boot` is **read, never run**, and read in the
+parser sandbox: of its commands only `Set`, `SetMacro`, `Unset`, an `If`
+comparing two quoted strings and `IconSprites` are understood (`lib/icon`'s
+`riscos::boot_sprite_files`, `OP_BOOT_SPRITES`), the scan is bounded in bytes,
+lines, variables, macro depth, references expanded and files, and the caller
+believes a path it answers only inside the application
+(`is_application_path`), opening every file there through no link
+(`open_inside`). Each sprite file it names is tried,
+then `!Sprites`, each first as its `11` and `22` copies; the two sprites of the
+application's name (`SpriteNames`) are sought, found and drawn in the parser
+sandbox (`OP_APPLICATION_SPRITE`), the small one kept only where the slot is
+nearer its size. It reads files, so it is thumbnail-class; below it lie the
+folder's picture of what it holds, then the folder.
+
+## 19. I18 — a file is the type its volume records where its name says nothing
+
+A RISC OS file carries its type as `acorn.filetype` (`plans/ARXFS-METADATA.md`,
+`tairix_abi::fs::Filetype`), and a copy to a volume that keeps attributes keeps
+it. Every file surface — the file manager, the pinboard, the picker — reads it
+for a file its name does not type (`RtEntryReader`, one probe a directory of
+whether its volume keeps attributes), and `media_for_document(name, recorded)`
+is the one rule: the name first, then the recorded filetype through
+`FILETYPE_TABLE`. The same rule chooses what opens a file ("Open With…", a
+drop on an icon-bar slot — a drag carries the filetype), and view, TextEdit
+and Paint read the filetype through the document's descriptor
+(`recorded_filetype_of`), so a sprite area typed and not named opens and is
+written back. Programs that name no file — the shell, `ls`, the taskbar — type
+by name alone.
+
+## 20. I19 — the file-type masters are drawn by code
+
+The file-type masters are drawn by `cargo xtask icons`, and its bare form, a
+`ci` static gate, fails on a committed master that differs from its drawing
+(`docs/src/desktop/icons.md`). The family shares the sheet, the light, the
+emblem shadow and the bevel scale; a new file type's master is a drawing added
+to `MASTERS`, never a picture composed by hand, and every drawing is held to
+the build's own check of an icon master. The executable, bundle, disk, folder
+and launcher masters are authored artwork outside it.
+
+## 21. What this plan deliberately does not cover
 
 - **Cursors and window chrome stay vector.** They are tintable silhouettes
   resolved from the theme; a raster master would be the wrong source format

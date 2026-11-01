@@ -313,6 +313,20 @@ sandboxes a parse imports it:
   worker lets the file go once it is drawn, and the caller-side
   `render_thumbnail` validates the reply exactly as `rasterise_icon` does. A
   refusal draws the file's class picture.
+- **Application sprites** (also `imagerender`, the same worker): a RISC OS
+  application's `!Boot` is scanned here (`OP_BOOT_SPRITES`) for the sprite
+  files it loads, each path answered believed by the caller only as one inside
+  the application, and a sprite file is uploaded the same way and drawn as its
+  icon by `OP_APPLICATION_SPRITE`, which names the two sprites RISC OS's Filer
+  shows it by (`!name` and `sm!name`). The worker finds each in the area's
+  chain from its control block alone (`tairix_image::find_named`), sets aside
+  one past `MAX_APPLICATION_SPRITE_SIDE` on a side before any size is weighed,
+  keeps the small one only where the square is nearer its size, trims its transparent
+  margin, gives each pixel the shape its eigen factors state, grows it by
+  whole pixels before smoothing it down so the pixels stay crisp, and centres
+  it on transparent padding. The area is let go once drawn, and the caller
+  validates the reply as a thumbnail's. A refusal draws the application's
+  folder.
 - **Wallpaper placement** (also `imagerender`, the same worker): a
   desktop wallpaper — a shipped master or a file the user picked, never
   parsed outside the sandbox — is sniffed, decoded, and placed onto the
@@ -527,7 +541,7 @@ under plain `cargo test`.
   decoding up to the position, a changed stream or a second failure at one
   position given up, and every dishonest need, block, seek, open and refusal
   refused); and the `fuzz_sandbox` harness (hostile
-  input files through the decode, helpdoc, imagerender icon/wallpaper and
+  input files through the decode, helpdoc, imagerender icon/wallpaper/application-sprite and
   audiodecode request decoders — the last a differential against an
   in-process decode — and hostile worker replies into every client decoder) in
   `cargo xtask fuzz`. `fuzz_discoveryd` drives a supervised session

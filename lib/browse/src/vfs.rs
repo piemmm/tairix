@@ -26,6 +26,9 @@ use tairix_abi::fs::{DirEntries, DirEntry, FileKind, FS_PATH_MAX};
 use tairix_abi::window_ipc::WINDOW_TITLE_MAX;
 use tairix_abi::Errno;
 use tairix_font::ELLIPSIS;
+#[cfg(feature = "rt")]
+use tairix_fsmeta::preset::acorn;
+use tairix_fsmeta::preset::acorn::Filetype;
 use tairix_util::utf8::shown;
 use tairix_visible::shown_chars;
 
@@ -48,39 +51,56 @@ pub struct LinkInfo {
     pub kind: Option<FileKind>,
 }
 
-/// Describes a listed symbolic link — the one thing a directory stream cannot
-/// carry.
+/// Reads what a directory stream cannot carry about one child: what a listed
+/// symbolic link resolves to, and the RISC OS filetype the volume records for a
+/// file whose name says nothing of what it is.
 ///
 /// Kept a seam for the same reason the directory fetch is: the calls it makes
 /// are the caller's own capability-checked ones, and keeping them injected is
 /// what lets the whole classification run in `cargo test` with no kernel. It
-/// is consulted only for entries the stream already reported as links, so a
-/// directory of plain files costs nothing.
-pub trait LinkReader {
+/// is consulted only for the children that need it — a link, or a file no
+/// ending types — so a directory of named files and folders costs nothing.
+pub trait EntryReader {
     /// Describe the symbolic link at the absolute `path`, or [`None`] when
     /// even its stored target could not be read (a refusal, or a mounted
     /// format that stores no links).
-    fn describe(&mut self, path: &str) -> Option<LinkInfo>;
+    fn describe_link(&mut self, path: &str) -> Option<LinkInfo>;
+
+    /// The RISC OS filetype the volume records for the child `name` of the
+    /// directory spelled `directory` — through a final link when
+    /// `through_link` — or [`None`] where it records none or the caller may
+    /// not read the child's attributes.
+    ///
+    /// The default reads none, which is right for a walk that types nothing.
+    fn recorded_filetype(
+        &mut self,
+        directory: &str,
+        name: &str,
+        through_link: bool,
+    ) -> Option<Filetype> {
+        let _ = (directory, name, through_link);
+        None
+    }
 }
 
-/// A [`LinkReader`] that describes nothing, so every link classifies as
-/// dangling.
+/// An [`EntryReader`] that reads nothing, so every link classifies as dangling
+/// and every file is typed by its name alone.
 ///
 /// For a caller listing a tree that cannot hold links — a store the build
 /// itself authored — for a walk that needs only to tell a link from what is
 /// not one and shows none of them, and for tests that plant none. It is never
 /// the right choice for a listing a user sees: a link there would be shown as
 /// broken when it is not.
-pub struct NoLinks;
+pub struct ListingOnly;
 
-impl LinkReader for NoLinks {
-    fn describe(&mut self, _path: &str) -> Option<LinkInfo> {
+impl EntryReader for ListingOnly {
+    fn describe_link(&mut self, _path: &str) -> Option<LinkInfo> {
         None
     }
 }
 
-impl<F: FnMut(&str) -> Option<LinkInfo>> LinkReader for F {
-    fn describe(&mut self, path: &str) -> Option<LinkInfo> {
+impl<F: FnMut(&str) -> Option<LinkInfo>> EntryReader for F {
+    fn describe_link(&mut self, path: &str) -> Option<LinkInfo> {
         self(path)
     }
 }
@@ -371,11 +391,11 @@ pub fn absolute_path(components: &[String]) -> Result<String, Errno> {
 pub fn entries_from_dir_stream(
     directory: &str,
     stream: &[u8],
-    links: &mut dyn LinkReader,
+    reader: &mut dyn EntryReader,
 ) -> Result<Vec<Entry>, Errno> {
     let mut entries = Vec::new();
     for item in DirEntries::new(stream) {
-        entries.push(entry_from_record(directory, &item?, links)?);
+        entries.push(entry_from_record(directory, &item?, reader)?);
     }
     Ok(entries)
 }
@@ -389,14 +409,14 @@ pub fn entries_from_dir_stream(
 pub(crate) fn entry_from_record(
     directory: &str,
     entry: &DirEntry<'_>,
-    links: &mut dyn LinkReader,
+    reader: &mut dyn EntryReader,
 ) -> Result<Entry, Errno> {
     let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
     // Only a link costs a second call: the stream already carries every
     // other kind outright, and carries neither a link's target nor what
     // that target is.
     let described = match entry.kind {
-        FileKind::Symlink => links.describe(&tairix_path::join(directory, name)),
+        FileKind::Symlink => reader.describe_link(&tairix_path::join(directory, name)),
         FileKind::Directory | FileKind::Regular => None,
     };
     let resolution = described.as_ref().and_then(|link| {
@@ -409,12 +429,33 @@ pub(crate) fn entry_from_record(
     let mut built = Entry::new(name, kind, entry.size, entry.modified)
         .with_id(entry.id)
         .with_content_gen(entry.content_gen);
+    if kind.resolved() == Some(EntryKind::File) {
+        if let Some(filetype) = recorded_filetype(directory, name, kind.is_link(), reader) {
+            built = built.with_filetype(filetype);
+        }
+    }
     // A link whose target could not be reached still shows the spelling it
     // stores: that spelling is exactly what tells a user why it is broken.
     if let Some(link) = described {
         built = built.with_target(link.target);
     }
     Ok(built)
+}
+
+/// The filetype `reader` finds recorded for the file `name` in `directory`,
+/// asked only where the name says nothing of what the file is: the name
+/// decides first ([`crate::media_for_document`]), so a recorded type it would
+/// overrule is never read.
+fn recorded_filetype(
+    directory: &str,
+    name: &str,
+    through_link: bool,
+    reader: &mut dyn EntryReader,
+) -> Option<Filetype> {
+    if crate::media_for_name(name).is_some() {
+        return None;
+    }
+    reader.recorded_filetype(directory, name, through_link)
 }
 
 /// The production [`DirectorySource`]: validated path spelling composed
@@ -452,12 +493,14 @@ pub const PROBE_BUF_LEN: usize = 4096;
 /// Probe each folder in `batch` through `probe`, as a
 /// [`probing`](VfsDirectorySource::probing) source does, answering for every
 /// one — a refusal included, so the folder draws plain and is not asked again.
+/// The members' recorded filetypes are read through `reader`.
 ///
 /// The read a worker performs for a [`Probes`](crate::Probes) batch. One
 /// [`PROBE_BUF_LEN`] buffer serves the whole batch.
 pub fn probe_batch<P>(
     batch: Vec<Vec<String>>,
     mut probe: P,
+    reader: &mut dyn EntryReader,
 ) -> Vec<(Vec<String>, Result<Probe, Errno>)>
 where
     P: FnMut(&str, &mut [u8]) -> Result<usize, Errno>,
@@ -466,47 +509,71 @@ where
     batch
         .into_iter()
         .map(|folder| {
-            let answer = probe_folder(&folder, &mut probe, &mut buf);
+            let answer = probe_folder(&folder, &mut probe, &mut buf, reader);
             (folder, answer)
         })
         .collect()
 }
 
 /// What `probe` reads of the folder named by `components`, into `buf`.
-fn probe_folder<P>(components: &[String], probe: &mut P, buf: &mut [u8]) -> Result<Probe, Errno>
+fn probe_folder<P>(
+    components: &[String],
+    probe: &mut P,
+    buf: &mut [u8],
+    reader: &mut dyn EntryReader,
+) -> Result<Probe, Errno>
 where
     P: FnMut(&str, &mut [u8]) -> Result<usize, Errno>,
 {
     let path = absolute_path(components)?;
     let read = probe(&path, buf)?;
-    probed(components, buf.get(..read).ok_or(Errno::OutOfRange)?)
+    probed(
+        components,
+        &path,
+        buf.get(..read).ok_or(Errno::OutOfRange)?,
+        reader,
+    )
 }
 
-/// What one batch of the entries of the folder named by `components`,
-/// `stream`, says of it: that it is empty, or what it holds.
+/// What one batch of the entries of the folder named by `components` and
+/// spelled `path`, `stream`, says of it: that it is empty, or what it holds.
 ///
 /// A batch that does not decode refuses the probe, as it would refuse the
 /// listing.
-fn probed(components: &[String], stream: &[u8]) -> Result<Probe, Errno> {
+fn probed(
+    components: &[String],
+    path: &str,
+    stream: &[u8],
+    reader: &mut dyn EntryReader,
+) -> Result<Probe, Errno> {
+    let mut members = Vec::new();
     for record in DirEntries::new(stream) {
-        record?;
+        let record = record?;
+        // A link draws no card, so what it names is never read.
+        let recorded = match core::str::from_utf8(record.name) {
+            Ok(name) if record.kind == FileKind::Regular => {
+                recorded_filetype(path, name, false, reader)
+            }
+            _ => None,
+        };
+        members.push((record, recorded));
     }
-    if stream.is_empty() {
+    if members.is_empty() {
         return Ok(Probe::Empty);
     }
     Ok(Probe::Holds(crate::folder_sample(
         components,
-        DirEntries::new(stream).flatten(),
+        members.iter().copied(),
     )))
 }
 
 impl<F, L> VfsDirectorySource<F, L>
 where
     F: FnMut(&str) -> Result<Vec<u8>, Errno>,
-    L: LinkReader,
+    L: EntryReader,
 {
     /// Build the source over `fetch`, the capability-checked directory read,
-    /// and `links`, which describes the symbolic links the listing reports.
+    /// and `links`, which reads what the listing's records cannot carry.
     pub fn new(fetch: F, links: L) -> Self {
         Self {
             fetch,
@@ -519,7 +586,7 @@ where
 impl<F, L, P> VfsDirectorySource<F, L, P>
 where
     F: FnMut(&str) -> Result<Vec<u8>, Errno>,
-    L: LinkReader,
+    L: EntryReader,
     P: FnMut(&str, &mut [u8]) -> Result<usize, Errno>,
 {
     /// Build the source over `fetch` and an occupancy `probe`.
@@ -542,7 +609,7 @@ where
 impl<F, L, P> DirectorySource for VfsDirectorySource<F, L, P>
 where
     F: FnMut(&str) -> Result<Vec<u8>, Errno>,
-    L: LinkReader,
+    L: EntryReader,
     P: FnMut(&str, &mut [u8]) -> Result<usize, Errno>,
 {
     fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
@@ -555,12 +622,17 @@ where
     fn has_children(&mut self, components: &[String]) -> Result<Probe, Errno> {
         let probe = self.probe.as_mut().ok_or(Errno::NotImplemented)?;
         // This thread's own read, so the answer is always ready.
-        probe_folder(components, probe, &mut [0u8; PROBE_BUF_LEN])
+        probe_folder(
+            components,
+            probe,
+            &mut [0u8; PROBE_BUF_LEN],
+            &mut self.links,
+        )
     }
 }
 
-/// The production [`LinkReader`]: the kernel-authorised `fs_readlink` plus one
-/// resolving `fs_stat`.
+/// The production links-only [`EntryReader`]: the kernel-authorised
+/// `fs_readlink` plus one resolving `fs_stat`, and no filetype read.
 ///
 /// It adds no authority — both calls are the caller's own, authorised per
 /// inode under its attested identity — and it fails closed: a link whose
@@ -568,9 +640,9 @@ where
 /// cannot be *reached* is described with no kind, which classifies it as
 /// dangling rather than guessing.
 ///
-/// One implementation, shared by every surface that lists a directory the user
-/// can put a link in (the file manager, the desktop, the trusted picker, the
-/// wallpaper catalog), so the two calls are never re-derived.
+/// For a walk that finds things by name and types nothing — a program store,
+/// the wallpaper catalog. A listing a person browses reads through
+/// [`RtEntryReader`].
 #[cfg(feature = "rt")]
 pub struct RtLinkReader;
 
@@ -589,16 +661,128 @@ pub fn probe_directory(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
 }
 
 #[cfg(feature = "rt")]
-impl LinkReader for RtLinkReader {
-    fn describe(&mut self, path: &str) -> Option<LinkInfo> {
-        let target = tairix_rt::readlink(path).ok()?;
-        // A resolve-only open with the *following* posture: no read authority
-        // is requested, the handle closes on drop, and a target that cannot be
-        // reached simply yields no kind.
-        let kind = tairix_rt::File::open(path.as_bytes(), tairix_abi::fs::OpenFlags::empty())
-            .ok()
-            .and_then(|file| file.stat().ok())
-            .map(|stat| stat.kind);
-        Some(LinkInfo { target, kind })
+impl EntryReader for RtLinkReader {
+    fn describe_link(&mut self, path: &str) -> Option<LinkInfo> {
+        describe_link(path)
+    }
+}
+
+/// The link at `path`, as [`RtLinkReader`] and [`RtEntryReader`] both describe
+/// one.
+#[cfg(feature = "rt")]
+fn describe_link(path: &str) -> Option<LinkInfo> {
+    let target = tairix_rt::readlink(path).ok()?;
+    // A resolve-only open with the *following* posture: no read authority
+    // is requested, the handle closes on drop, and a target that cannot be
+    // reached simply yields no kind.
+    let kind = tairix_rt::File::open(path.as_bytes(), tairix_abi::fs::OpenFlags::empty())
+        .ok()
+        .and_then(|file| file.stat().ok())
+        .map(|stat| stat.kind);
+    Some(LinkInfo { target, kind })
+}
+
+/// The production [`EntryReader`] of a listing a person browses: links as
+/// [`RtLinkReader`] describes them, and the RISC OS filetype each file no
+/// ending types carries as its `acorn.filetype` attribute.
+///
+/// Each filetype is one attribute read through a resolve-only handle on the
+/// child, resolved from its directory's own handle — lent
+/// ([`within`](Self::within)) or opened once ([`by_path`](Self::by_path)) — so
+/// a child costs one component rather than the whole path. It is the caller's
+/// own read of the child's attributes, so a file whose attributes it may not
+/// read simply has none, and the volume is asked once whether it keeps
+/// attributes at all, so a listing of a volume that cannot costs one call.
+#[cfg(feature = "rt")]
+pub struct RtEntryReader<'d> {
+    lent: Option<&'d tairix_rt::Dir>,
+    /// The directory last asked about, the handle this reader opened on it
+    /// where none was lent, and whether its volume keeps attributes.
+    current: Option<(String, Option<tairix_rt::Dir>, bool)>,
+}
+
+#[cfg(feature = "rt")]
+impl<'d> RtEntryReader<'d> {
+    /// A reader resolving each child from the directory `dir` lists.
+    #[must_use]
+    pub const fn within(dir: &'d tairix_rt::Dir) -> Self {
+        Self {
+            lent: Some(dir),
+            current: None,
+        }
+    }
+
+    /// A reader for a listing whose directory is not held open: it opens the
+    /// directory once and resolves each child from it.
+    #[must_use]
+    pub const fn by_path() -> Self {
+        Self {
+            lent: None,
+            current: None,
+        }
+    }
+
+    /// The directory at `directory` to resolve its children from, where its
+    /// volume keeps attributes: asked once, a refusal of any other kind than
+    /// that being no proof it keeps none.
+    fn directory(&mut self, directory: &str) -> Option<&tairix_rt::Dir> {
+        if self
+            .current
+            .as_ref()
+            .is_none_or(|(asked, ..)| asked != directory)
+        {
+            let opened = match self.lent {
+                Some(_) => None,
+                None => tairix_rt::Dir::open(directory.as_bytes()).ok(),
+            };
+            let keeps = self.lent.or(opened.as_ref()).is_some_and(|dir| {
+                Errno::from_syscall(attr_read(dir.as_file(), &mut [0u8; acorn::ATTR_VALUE_MAX]))
+                    != Errno::NotSupported
+            });
+            self.current = Some((String::from(directory), opened, keeps));
+        }
+        let (_, opened, keeps) = self.current.as_ref()?;
+        if !*keeps {
+            return None;
+        }
+        self.lent.or(opened.as_ref())
+    }
+}
+
+/// `fs_attr_get` of the filetype through `handle` into `out`: the value's
+/// length, or the negated errno.
+#[cfg(feature = "rt")]
+fn attr_read(handle: &tairix_rt::File, out: &mut [u8]) -> i64 {
+    tairix_rt::fs_attr_get(handle.fd(), acorn::FILETYPE_KEY, out)
+}
+
+/// The RISC OS filetype the volume records for the open file `file`, read
+/// through the descriptor, so a program handed a document needs no path to
+/// it; `None` where it records none or the caller may not read it.
+#[cfg(feature = "rt")]
+#[must_use]
+pub fn recorded_filetype_of(file: &tairix_rt::File) -> Option<Filetype> {
+    let mut value = [0u8; acorn::ATTR_VALUE_MAX];
+    let len = usize::try_from(attr_read(file, &mut value)).ok()?;
+    acorn::filetype_from_value(value.get(..len)?).ok()
+}
+
+#[cfg(feature = "rt")]
+impl EntryReader for RtEntryReader<'_> {
+    fn describe_link(&mut self, path: &str) -> Option<LinkInfo> {
+        describe_link(path)
+    }
+
+    fn recorded_filetype(
+        &mut self,
+        directory: &str,
+        name: &str,
+        through_link: bool,
+    ) -> Option<Filetype> {
+        let child = self
+            .directory(directory)?
+            .resolve(name.as_bytes(), through_link)
+            .ok()?;
+        recorded_filetype_of(&child)
     }
 }

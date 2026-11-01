@@ -38,8 +38,8 @@ use tairix_greeter::{Ticket, Tickets, Verdict, Verifier, UNNAMED_ACCOUNT};
 use tairix_hash::BuildFastHash;
 use tairix_icon::{
     artwork_cache, icon_artwork_path, ArtworkCache, ArtworkDesk, ArtworkJob, ArtworkKey,
-    ArtworkResolver, IconArtworkSource, IconKind, IconSet, InlineArtwork, Landed, NoArtwork,
-    Resolved, MAX_ARTWORK_BYTES,
+    ArtworkRasteriser, ArtworkResolver, IconArtworkSource, IconKind, IconSet, InlineArtwork,
+    Landed, NoArtwork, Resolved, MAX_ARTWORK_BYTES,
 };
 use tairix_log::{Event, Sink};
 use tairix_proglib::{
@@ -68,13 +68,13 @@ use crate::{
     load_programs, maybe_send_seat_report, open_tray, picker_cells, resolve_launch,
     resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
     tool_move_abandoned_event, tool_move_event, AppBarService, AppGroup, ArtworkFileReader,
-    ArtworkSandbox, BundleIndex, DesktopSession, DesktopShell, DocumentAuthority, DocumentRelay,
-    FrameContent, FramePacer, FrameReportGate, Handover, IconRasteriser, InputSource, Launch,
-    LaunchHost, LaunchTable, LaunchTarget, LockOutcome, OwnerBundleGate, OwnerWindow,
-    PresentedOwners, ScreenFade, ScreenLock, SessionFileReader, SessionInputResponse,
-    SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost, Stopped, SwitchboardMailbox,
-    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
-    UnlockAnswer, UnlockAsk, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
+    BundleIndex, DesktopSession, DesktopShell, DocumentAuthority, DocumentRelay, FrameContent,
+    FramePacer, FrameReportGate, Handover, InputSource, Launch, LaunchHost, LaunchTable,
+    LaunchTarget, LockOutcome, OwnerBundleGate, OwnerWindow, PresentedOwners, ScreenFade,
+    ScreenLock, SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows,
+    ShellOutcome, ShellWindowHost, Stopped, SwitchboardMailbox, SwitchboardOutcome,
+    SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter, UnlockAnswer, UnlockAsk,
+    DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
     DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS, MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_svg::font::NoFonts;
@@ -308,7 +308,7 @@ fn with_artwork_over<T>(
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
     let mut reader = ArtworkFileReader(assets);
-    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut rasteriser = TaggedRasteriser::new();
     let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);
     resolve(&mut inline, &mut cache)
 }
@@ -5204,6 +5204,9 @@ fn a_folder_selection_keeps_the_requesters_files_in_listing_order_within_the_bou
         Entry::file("cover.png"),
         Entry::file("A.wav"),
         Entry::file("notes"),
+        Entry::file("Fanfare")
+            .with_filetype(tairix_abi::fs::Filetype::new(0xFB1).expect("12 bits")),
+        Entry::file("Speech").with_filetype(tairix_abi::fs::Filetype::new(0xFFF).expect("12 bits")),
         Entry::new(
             "link.flac",
             tairix_browse::EntryKind::for_listing(
@@ -5220,7 +5223,11 @@ fn a_folder_selection_keeps_the_requesters_files_in_listing_order_within_the_bou
     ];
     assert_eq!(folder_selection(&mut entries, &kinds), 0);
     let names: Vec<&str> = entries.iter().map(Entry::name).collect();
-    assert_eq!(names, ["A.wav", "b.flac"]);
+    assert_eq!(
+        names,
+        ["A.wav", "b.flac", "Fanfare"],
+        "a recorded WAVE kept"
+    );
     assert_eq!(folder_selection(&mut entries, &[]), 0);
     assert!(
         entries.is_empty(),
@@ -6893,7 +6900,7 @@ fn the_bar_settles_only_once_it_is_revealed_and_holding_its_resolved_pictures() 
     );
 
     // The decode lands, exactly as the serve loop's worker delivers it.
-    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut rasteriser = TaggedRasteriser::new();
     while let Some(job) = {
         let taken = desk.borrow_mut().next_job();
         taken
@@ -12014,7 +12021,7 @@ impl CountingRasteriser {
     }
 }
 
-impl IconRasteriser for CountingRasteriser {
+impl ArtworkRasteriser for CountingRasteriser {
     fn rasterise(&mut self, side: u32, _icon: &[u8]) -> Option<Vec<u8>> {
         self.calls += 1;
         if self.refuse {
@@ -12031,7 +12038,7 @@ impl IconRasteriser for CountingRasteriser {
 #[test]
 fn class_artwork_larger_than_a_document_reaches_the_decoder_whole() {
     struct Lengths(Vec<usize>);
-    impl IconRasteriser for Lengths {
+    impl ArtworkRasteriser for Lengths {
         fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<Vec<u8>> {
             self.0.push(icon.len());
             let area = (side as usize).checked_mul(side as usize)?.checked_mul(4)?;
@@ -12047,7 +12054,7 @@ fn class_artwork_larger_than_a_document_reaches_the_decoder_whole() {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
     let mut reader = ArtworkFileReader(assets);
-    let mut rasteriser = ArtworkSandbox(Lengths(Vec::new()));
+    let mut rasteriser = Lengths(Vec::new());
     let drawn = cache
         .artwork(
             &mut InlineArtwork::new(&mut reader, &mut rasteriser),
@@ -12057,7 +12064,7 @@ fn class_artwork_larger_than_a_document_reaches_the_decoder_whole() {
         .and_then(tairix_icon::IconPicture::artwork)
         .is_some();
     assert!(drawn, "the shipped artwork, not the built-in glyph");
-    assert_eq!(rasteriser.0 .0, [size]);
+    assert_eq!(rasteriser.0, [size]);
 }
 
 /// The path of a bundle asset the fake reader will serve. The bytes never
@@ -12092,7 +12099,7 @@ fn pin_artwork_is_decoded_once_per_path_and_side() {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
     let mut reader = artwork_assets(&["/System/Applications/One.app"]);
-    let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
+    let mut rasteriser = CountingRasteriser::working();
     let path = artwork_source("/System/Applications/One.app");
 
     assert!(cache
@@ -12109,7 +12116,7 @@ fn pin_artwork_is_decoded_once_per_path_and_side() {
             16
         )
         .is_some());
-    assert_eq!(rasteriser.0.calls, 1, "the second lookup is a cache hit");
+    assert_eq!(rasteriser.calls, 1, "the second lookup is a cache hit");
 
     // A different side is a different entry: the artwork is rasterised
     // again at the new geometry rather than scaled from the old one.
@@ -12120,7 +12127,7 @@ fn pin_artwork_is_decoded_once_per_path_and_side() {
             32
         )
         .is_some());
-    assert_eq!(rasteriser.0.calls, 2);
+    assert_eq!(rasteriser.calls, 2);
 }
 
 #[test]
@@ -12128,7 +12135,7 @@ fn a_refused_pin_icon_is_refused_once_not_on_every_refresh() {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
     let mut reader = artwork_assets(&["/System/Applications/Bad.app"]);
-    let mut rasteriser = ArtworkSandbox(CountingRasteriser::refusing());
+    let mut rasteriser = CountingRasteriser::refusing();
     let path = artwork_source("/System/Applications/Bad.app");
 
     assert!(cache
@@ -12145,7 +12152,7 @@ fn a_refused_pin_icon_is_refused_once_not_on_every_refresh() {
             16
         )
         .is_none());
-    assert_eq!(rasteriser.0.calls, 1, "the refusal is remembered");
+    assert_eq!(rasteriser.calls, 1, "the refusal is remembered");
 }
 
 #[test]
@@ -12166,7 +12173,7 @@ fn pin_artwork_never_outgrows_the_budget_its_output_allows() {
         .collect();
     let refs: Vec<&str> = bundles.iter().map(String::as_str).collect();
     let mut reader = artwork_assets(&refs);
-    let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
+    let mut rasteriser = CountingRasteriser::working();
 
     for bundle in &bundles {
         let path = artwork_source(bundle);
@@ -12202,7 +12209,7 @@ fn pin_artwork_survives_tightening_pressure_and_is_wiped_on_teardown() {
     PRESSURED.report(PressureBand::Normal);
     let mut cache = test_artwork_cache(&PRESSURED, TEST_FRAME_BYTES);
     let mut reader = artwork_assets(&["/System/Applications/One.app"]);
-    let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
+    let mut rasteriser = CountingRasteriser::working();
     let path = artwork_source("/System/Applications/One.app");
     let mut drawn = |cache: &mut ArtworkCache| {
         cache
@@ -12271,7 +12278,7 @@ impl TaggedRasteriser {
     }
 }
 
-impl IconRasteriser for TaggedRasteriser {
+impl ArtworkRasteriser for TaggedRasteriser {
     fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<Vec<u8>> {
         self.calls += 1;
         let tag = *icon.first()?;
@@ -12372,7 +12379,7 @@ fn a_bundle_icon_is_read_and_decoded_once_and_reused_by_the_shared_cache() {
             )
             .with(&artwork_source(bundle), &[BUNDLE_TINT]),
     ));
-    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut rasteriser = TaggedRasteriser::new();
     let manifests = MemoryAssets::default().with(
         &format!("{bundle}/AppInfo"),
         &manifest_fixture("os.tairix.one", "One", Some("icon.svg")),
@@ -12392,7 +12399,7 @@ fn a_bundle_icon_is_read_and_decoded_once_and_reused_by_the_shared_cache() {
     let again = resolve();
 
     assert_eq!(reader.0.reads, 2, "the manifest and the asset, each once");
-    assert_eq!(rasteriser.0.calls, 1, "and one decode");
+    assert_eq!(rasteriser.calls, 1, "and one decode");
     let tint = |slots: &[tairix_taskbar::AppSlot]| {
         slots
             .first()
@@ -12420,7 +12427,7 @@ fn a_library_row_draws_its_own_applications_icon() {
         "/System/Applications/one.app/Resources/icon.svg",
         &[BUNDLE_TINT],
     )));
-    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut rasteriser = TaggedRasteriser::new();
 
     resolve_library_icons(
         session.taskbar_mut(),
@@ -12477,7 +12484,7 @@ fn the_launcher_has_its_icons_before_it_is_first_drawn() {
     // — the serve loop's own round, since a tier that refuses is what makes the
     // next one wanted. It runs dry, which is what makes the wait finite.
     let mut reader = ArtworkFileReader(assets);
-    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut rasteriser = TaggedRasteriser::new();
     let mut decoded = 0;
     let mut rounds = 0;
     while desk.borrow().has_work() {
@@ -12538,7 +12545,7 @@ fn resolving_the_popups_rows_owes_the_rows_whose_picture_changed() {
         "/System/Applications/one.app/Resources/icon.svg",
         &[BUNDLE_TINT],
     )));
-    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut rasteriser = TaggedRasteriser::new();
     let layout = session.taskbar().library_layout(Scale::ONE);
     let shown = shown_programs(&session);
     assert_eq!(shown.len(), 1, "one entry, one tile");
@@ -12597,7 +12604,7 @@ fn a_library_row_whose_asset_will_not_serve_falls_back_and_never_blanks() {
             )
             .with("/System/Applications/junk.app/Resources/icon.svg", &[]),
     ));
-    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut rasteriser = TaggedRasteriser::new();
 
     resolve_library_icons(
         session.taskbar_mut(),
@@ -12626,7 +12633,7 @@ fn a_library_row_with_no_declared_icon_falls_back_to_the_shipped_artwork() {
         .expect("fits");
     let (mut session, _comp) = open_library_over(cat);
     let mut reader = ArtworkFileReader(shipped_app_bundle_master(MemoryAssets::default()));
-    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut rasteriser = TaggedRasteriser::new();
 
     resolve_library_icons(
         session.taskbar_mut(),
@@ -12667,7 +12674,7 @@ fn the_library_resolves_artwork_only_for_the_rows_it_shows() {
     }
     let (mut session, _comp) = open_library_over(cat);
     let mut reader = ArtworkFileReader(CountingAssets::new(shipped_app_bundle_master(assets)));
-    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut rasteriser = TaggedRasteriser::new();
 
     let shown = shown_programs(&session);
     let listed: Vec<ItemAt> = session
@@ -12695,7 +12702,7 @@ fn the_library_resolves_artwork_only_for_the_rows_it_shows() {
     );
 
     assert_eq!(
-        rasteriser.0.calls,
+        rasteriser.calls,
         shown.len(),
         "one decode per shown program, none for the rest"
     );
@@ -12728,7 +12735,7 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
         .expect("fits");
     let (mut session, mut comp) = open_library_over(cat);
     let mut reader = ArtworkFileReader(MemoryAssets::default());
-    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut rasteriser = TaggedRasteriser::new();
 
     // The application strip: a slot whose bundle declares an icon nothing
     // will serve still exists, so the strip keeps it.
@@ -16503,7 +16510,7 @@ impl<T: SessionFileReader> SessionFileReader for Shared<T> {
     }
 }
 
-impl<T: IconRasteriser> IconRasteriser for Shared<T> {
+impl<T: ArtworkRasteriser> ArtworkRasteriser for Shared<T> {
     fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<Vec<u8>> {
         self.0.borrow_mut().rasterise(side, icon)
     }
@@ -16567,7 +16574,7 @@ fn identity_desktop(
     let mut shell = shell();
     shell.set_artwork_resolver(alloc::boxed::Box::new(InlineArtwork::new(
         ArtworkFileReader(Shared(Rc::clone(&reader))),
-        ArtworkSandbox(Shared(Rc::clone(&rasteriser))),
+        Shared(Rc::clone(&rasteriser)),
     )));
     (shell, compositor(), reader, rasteriser)
 }
@@ -16866,7 +16873,7 @@ fn a_second_window_of_the_same_application_reuses_the_resolved_icon() {
 /// Answers every decode as still in flight until `landed` is set, exactly as
 /// the desk does while its worker is still reading and rasterising.
 struct Gated {
-    inner: InlineArtwork<ArtworkFileReader<MemoryAssets>, ArtworkSandbox<TaggedRasteriser>>,
+    inner: InlineArtwork<ArtworkFileReader<MemoryAssets>, TaggedRasteriser>,
     landed: Rc<Cell<bool>>,
 }
 
@@ -16874,10 +16881,7 @@ impl Gated {
     /// A resolver over `assets` whose decodes land once `landed` is set.
     fn over(assets: MemoryAssets, landed: &Rc<Cell<bool>>) -> Self {
         Self {
-            inner: InlineArtwork::new(
-                ArtworkFileReader(assets),
-                ArtworkSandbox(TaggedRasteriser::new()),
-            ),
+            inner: InlineArtwork::new(ArtworkFileReader(assets), TaggedRasteriser::new()),
             landed: Rc::clone(landed),
         }
     }
@@ -16980,7 +16984,7 @@ fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
     );
 
     let mut reader = ArtworkFileReader(assets);
-    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut rasteriser = TaggedRasteriser::new();
     let mut rounds = 0;
     while desk.borrow().has_work() {
         while let Some(job) = {

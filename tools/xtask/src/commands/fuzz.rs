@@ -457,6 +457,12 @@ pub const TARGETS: &[Target] = &[
         description: "XML element scan (SVG documents, OpenRaster layer stacks)",
     },
     Target {
+        package: "tairix-icon",
+        test: "fuzz_riscos",
+        description:
+            "RISC OS application !Boot scan and sprite names (untrusted Obey text from a browsed volume)",
+    },
+    Target {
         package: "tairix-image",
         test: "fuzz_image",
         description:

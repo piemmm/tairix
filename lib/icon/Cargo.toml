@@ -65,6 +65,13 @@ tairix-font = { path = "../font", version = "=0.0.0" }
 # plain file name, checked by the one path parser the tree already has rather
 # than a second spelling of the same rule.
 tairix-path = { path = "../path", version = "=0.0.0" }
+# RISC OS's naming: the characters it keeps out of a name, and the dot and
+# slash a name crosses with exchanged, so an application's sprite file is found
+# as the volume spells it.
+tairix-fsmeta = { path = "../fsmeta", version = "=0.0.0" }
+# The sprite name an application's icons are sought by, so the name asked for
+# is the one the sandboxed decoder matches. Nothing here parses a sprite.
+tairix-image = { path = "../image", version = "=0.0.0" }
 
 # An account disc's own tests draw its monogram, so they inject the shared
 # solid test transport (never a running `fontd`).

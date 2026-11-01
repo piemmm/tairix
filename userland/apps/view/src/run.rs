@@ -69,7 +69,7 @@ mod program {
     use tairix_input::InputEvent;
     use tairix_raster::Surface;
 
-    use tairix_browse::media::{media_for_name, MediaType};
+    use tairix_browse::{media_for_document, MediaType};
     use tairix_sandbox::imagerender::{
         close_view, open_view, render_page, select_page, upload_document, ImageRenderService,
         UploadFailure, ViewDocument, ViewFailure, ViewFormat, ViewPage, ViewRefusal,
@@ -125,9 +125,6 @@ mod program {
         /// The document's own file name, empty when the hand-off did not
         /// carry one.
         name: String,
-        /// The format to name in place of reading the document's signature,
-        /// for the one format that carries none.
-        format: Option<ViewFormat>,
     }
 
     /// One job the worker carries out, and the window it belongs to.
@@ -273,14 +270,14 @@ mod program {
         // is nothing to act on.
         let _ = close_view(sandbox);
         let length = upload(sandbox, &source.handle)?;
+        let format = format_for(
+            &source.name,
+            tairix_browse::recorded_filetype_of(&source.handle),
+        );
         // The viewer holds a font client, so a drawing carrying `<text>`
         // is supplied its glyphs across the sandbox rather than refused.
-        let declared = open_view(
-            sandbox,
-            source.format,
-            &mut tairix_font::ServiceFonts::new(),
-        )
-        .map_err(Refusal::Failed)?;
+        let declared = open_view(sandbox, format, &mut tairix_font::ServiceFonts::new())
+            .map_err(Refusal::Failed)?;
         Ok((declared, source.name.clone(), length))
     }
 
@@ -372,7 +369,6 @@ mod program {
             .unwrap_or_default();
         Source {
             handle: tairix_rt::File::adopt(STDIN),
-            format: format_for(&name),
             name,
         }
     }
@@ -383,16 +379,13 @@ mod program {
     ///
     /// `name` is what to call it, and is empty where the hand-off could not
     /// name it. The viewer then states what it knows and invents nothing, and
-    /// a RISC OS sprite area (which no signature can identify) cannot be
-    /// reached by an unnamed hand-off at all. A delegation that cannot be
-    /// taken over hands the name back, to say which document it was.
+    /// a RISC OS sprite area (which no signature can identify) is reached by an
+    /// unnamed hand-off only where its volume records its filetype. A
+    /// delegation that cannot be taken over hands the name back, to say which
+    /// document it was.
     fn delegated(handle: u64, name: String) -> Result<Source, String> {
         match tairix_rt::File::from_delegation(handle) {
-            Ok(handle) => Ok(Source {
-                handle,
-                format: format_for(&name),
-                name,
-            }),
+            Ok(handle) => Ok(Source { handle, name }),
             Err(_) => Err(name),
         }
     }
@@ -412,16 +405,19 @@ mod program {
         String::from(path.rsplit('/').next().unwrap_or(path))
     }
 
-    /// The format to read a document as in place of its own signature, or
-    /// `None` to let the decoder sniff it.
+    /// The format to read a document called `name`, whose volume records
+    /// `recorded` as its filetype, as in place of its own signature, or `None`
+    /// to let the decoder sniff it.
     ///
     /// Only the one format that carries no signature is named: a RISC OS
     /// sprite area's first word is its sprite count, so nothing in the file
-    /// can identify it and the name is the only door. Every other format is
-    /// recognised from its bytes, which is stronger than trusting a file
-    /// name — a document named `.png` that is a JPEG opens as the JPEG it is.
-    fn format_for(name: &str) -> Option<ViewFormat> {
-        (media_for_name(name) == Some(MediaType::ImageSprite)).then_some(ViewFormat::Sprite)
+    /// can identify it and its name or filetype is the only door. Every other
+    /// format is recognised from its bytes, which is stronger than trusting a
+    /// file name — a document named `.png` that is a JPEG opens as the JPEG it
+    /// is.
+    fn format_for(name: &str, recorded: Option<tairix_abi::fs::Filetype>) -> Option<ViewFormat> {
+        (media_for_document(name, recorded) == Some(MediaType::ImageSprite))
+            .then_some(ViewFormat::Sprite)
     }
 
     // ---- the app-declared menu -----------------------------------------

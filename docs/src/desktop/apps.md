@@ -455,10 +455,10 @@ Bundle-ness is decided from the **target's** leaf name, not the link's: a
 desktop shortcut is named for the application (`Editor`) while its target is
 the bundle (`/System/Applications/Editor.app`), so classifying on the link's own name would
 show a shortcut to an application as a plain folder. A `fs_readdir` stream
-reports only *that* a child is a link, so the resolution comes from an
-injected `LinkReader` (`readlink` plus one resolving `fs_stat`, paid only for
-the link entries; the shipped `RtLinkReader` is the one implementation every
-surface shares). A link the reader cannot describe classifies as
+reports only *that* a child is a link, so the resolution comes from the
+injected `EntryReader` (`readlink` plus one resolving `fs_stat`, paid only for
+the link entries; the shipped `RtLinkReader` and `RtEntryReader` describe links
+by the one implementation every surface shares). A link the reader cannot describe classifies as
 `LinkTarget::Dangling` — the honest answer, never a silent downgrade to a
 plain file. Activation descends or opens *through* the link, but launches a
 bundle by its **resolved** path, because the spawn gate parses an entry point
@@ -492,7 +492,16 @@ AW1). It composes three pieces, each host-proven:
 - `entries_from_dir_stream` — the packed `fs_readdir` stream mapped onto
   `Entry` values through the shared `tairix_abi::fs::DirEntries` walker (the
   same walker `ls` lists through); one malformed record or non-UTF-8 name
-  refuses the whole listing, never a partial one.
+  refuses the whole listing, never a partial one. What a listing needs beyond
+  the stream it reads through one `EntryReader`: a link's target and, for a
+  file its name does not type, its recorded filetype. The production
+  `RtEntryReader` asks the listed directory's volume once whether it keeps
+  attributes at all, then reads each such file's `acorn.filetype` through a
+  resolve-only handle under the app's own identity, so a file whose
+  attributes it may not read simply has none; `recorded_filetype_of` is the
+  same read through a descriptor, for a program handed a document. A store
+  walk reads links alone (`RtLinkReader`), and the Trash's emptying neither
+  (`ListingOnly`).
 
 The directory fetch itself is injected (`fetch(path) -> stream`): the
 shipping program passes `tairix_rt::read_dir_all` — the kernel-authorised
@@ -1024,6 +1033,15 @@ drift apart (`AGENTS.md` §2.2):
   name alone. `media_for_entry(entry, parent)` is that same rule for a listed
   entry, whose parent directory is its site. The Info window takes the
   picture the listing drew, so the two cannot disagree.
+- A RISC OS file is typed by the filetype its volume records where its name
+  says nothing (`acorn.filetype`, read into `Entry::filetype`).
+  `media_for_filetype` maps the twelve bits through `FILETYPE_TABLE` — one row
+  per type with the filetypes it is known by, indexed for a single lookup —
+  and `media_for_document(name, recorded)` is the one rule every surface
+  applies: the name first, since RISC OS gives every file a filetype (Data
+  where it was told nothing), then the recorded filetype. `media_for_named`
+  takes the recorded filetype too, so a tile, its Info window, the folder
+  sample and "Open With…" agree.
 - `MediaType::icon` is the glyph the type draws. That mapping is deliberately
   many-to-one and is the *only* part of the registry allowed to be: several
   distinct types share `IconKind::Text`. Two types are never merged because
@@ -1048,8 +1066,9 @@ app-side spawn exactly as the `Activation` decision was:
   from a name (all a VFS listing gives) to the MIME vocabulary a bundle's
   signed `AppInfo` declares its associations in. An unknown or absent extension
   yields `None`, never a guess.
-- `applications_for(name, bundles)` returns the `AppAssociation`s whose
-  declared MIME set handles the file's type **or any broader type it is a
+- `applications_for(name, recorded, bundles)` returns the `AppAssociation`s
+  whose declared MIME set handles the file's type — by its name, else the
+  filetype its volume records — **or any broader type it is a
   subclass of** (`MediaType::parent`), so an editor declaring `text/plain` is
   offered for a `.rs` file. Candidates are ordered by how specifically they
   claim the file — an application declaring `text/x-rust` comes before one
@@ -1460,6 +1479,12 @@ over-long asset each reproducing the glyph frame exactly with the decoder never
 reached, a wrong-length reply refused without touching the frame, one decode
 across a hundred tiles, a scroll decoding only the newly visible kind, and
 `teardown` dropping the charged bytes to zero.
+
+A RISC OS application directory (`!Name`) is drawn by its own sprite
+(`IconRequest::riscos_application`), found as RISC OS's Filer finds it — by its
+`!Boot`'s `IconSprites`, read in the sandbox and never run, else its
+`!Sprites` — and decoded in the sandbox; until it lands, or where there is
+none, the folder is drawn as any other.
 
 ### The places / devices sidebar
 
@@ -3222,6 +3247,6 @@ as transparent rather than as the colour behind it.
 `WindowEvent::FilePicked` carries the authority; the viewer then pulls the
 chosen file's leaf name once with `TakePickedName`, so the title and the
 information panel name a picked document, and a RISC OS sprite area — which
-carries no signature and is reached only by its name — opens from the picker
-as it does from the file manager. A name the session no longer holds leaves
+carries no signature and is reached only by its name or the filetype its
+volume records — opens from the picker as it does from the file manager. A name the session no longer holds leaves
 the document unnamed rather than refusing it.

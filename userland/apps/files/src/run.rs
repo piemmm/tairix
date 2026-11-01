@@ -186,6 +186,7 @@ mod program {
     use tairix_discovery::catalogue::Catalogue;
     use tairix_discovery::walk::OpenSession;
     use tairix_discovery::{DiscoveryError, RtTransport, Session};
+    use tairix_fsmeta::preset::acorn::Filetype;
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_icon::{
         artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
@@ -4038,9 +4039,10 @@ mod program {
         /// Bounded by the children in flight; an entry is removed when its
         /// child is reaped, so it never grows beyond that.
         in_flight: BTreeMap<u64, String>,
-        /// Documents opened before any bundle scan landed, waiting for one to
-        /// say which application opens each. At most [`DOCUMENT_OPENS_MAX`].
-        awaiting: Vec<String>,
+        /// Documents opened before any bundle scan landed, each with the
+        /// filetype its volume records for it, waiting for one to say which
+        /// application opens each. At most [`DOCUMENT_OPENS_MAX`].
+        awaiting: Vec<(String, Option<Filetype>)>,
         /// The reader a document is opened on.
         reads: alloc::sync::Arc<Reads>,
         /// The program-store scan every open resolves its application from.
@@ -4209,9 +4211,10 @@ mod program {
             &mut self,
             client: &mut WindowClient<app::RtWindowTransport>,
             file_path: &str,
+            recorded: Option<Filetype>,
         ) {
             if self.installed.borrow().is_some() {
-                self.resolve(client, file_path);
+                self.resolve(client, file_path, recorded);
                 return;
             }
             if self.awaiting.len() >= DOCUMENT_OPENS_MAX {
@@ -4221,7 +4224,7 @@ mod program {
                 );
                 return;
             }
-            self.awaiting.push(String::from(file_path));
+            self.awaiting.push((String::from(file_path), recorded));
             if let Some(found) = self.reads.want_bundles() {
                 *self.installed.borrow_mut() = Some(found);
                 self.scan_landed(client);
@@ -4230,18 +4233,25 @@ mod program {
 
         /// A bundle scan landed: open every document that was waiting for one.
         fn scan_landed(&mut self, client: &mut WindowClient<app::RtWindowTransport>) {
-            for file_path in core::mem::take(&mut self.awaiting) {
-                self.resolve(client, &file_path);
+            for (file_path, recorded) in core::mem::take(&mut self.awaiting) {
+                self.resolve(client, &file_path, recorded);
             }
         }
 
-        /// Open `file_path` in the first installed application that claims it.
-        fn resolve(&mut self, client: &mut WindowClient<app::RtWindowTransport>, file_path: &str) {
+        /// Open `file_path`, whose volume records `recorded` as its filetype, in
+        /// the first installed application that claims it.
+        fn resolve(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            file_path: &str,
+            recorded: Option<Filetype>,
+        ) {
             let name = path_leaf(file_path);
-            let chosen =
-                applications_for(name, self.installed.borrow().as_deref().unwrap_or_default())
-                    .first()
-                    .map(|assoc| (String::from(assoc.bundle_path()), assoc.writes_documents()));
+            let installed = self.installed.borrow();
+            let chosen = applications_for(name, recorded, installed.as_deref().unwrap_or_default())
+                .first()
+                .map(|assoc| (String::from(assoc.bundle_path()), assoc.writes_documents()));
+            drop(installed);
             match chosen {
                 Some((bundle_path, edits)) => {
                     self.launch_viewer(client, &bundle_path, edits, file_path, name);
@@ -4466,6 +4476,15 @@ mod program {
             tairix_icon::RtDocument::open(path)
                 .map(|document| Box::new(document) as Box<dyn tairix_icon::ArtworkDocument>)
         }
+
+        fn open_inside(
+            &mut self,
+            dir: &str,
+            inside: &str,
+        ) -> Option<Box<dyn tairix_icon::ArtworkDocument + '_>> {
+            tairix_icon::RtDocument::open_inside(dir, inside)
+                .map(|document| Box::new(document) as Box<dyn tairix_icon::ArtworkDocument>)
+        }
     }
 
     /// The grid's [`ArtworkRasteriser`]: the decode runs in a
@@ -4604,6 +4623,25 @@ mod program {
                 side,
             };
             tairix_icon::serve_thumbnail(&mut store, reading, document, decode)
+        }
+
+        fn application_sprite(
+            &mut self,
+            side: u32,
+            names: &tairix_icon::SpriteNames,
+            document: &mut dyn tairix_icon::ArtworkDocument,
+        ) -> Option<tairix_icon::Fitted> {
+            tairix_sandbox::imagerender::application_sprite(
+                &mut self.sandbox,
+                side,
+                names,
+                document,
+            )
+            .ok()
+        }
+
+        fn boot_sprite_files(&mut self, boot: &[u8]) -> Option<Vec<String>> {
+            tairix_sandbox::imagerender::boot_sprite_files(&mut self.sandbox, boot).ok()
         }
     }
 
@@ -5090,8 +5128,11 @@ mod program {
                     .wake()
                 }
                 Read::Probe(batch) => {
-                    let answers =
-                        tairix_browse::vfs::probe_batch(batch, tairix_browse::vfs::probe_directory);
+                    let answers = tairix_browse::vfs::probe_batch(
+                        batch,
+                        tairix_browse::vfs::probe_directory,
+                        &mut tairix_browse::RtEntryReader::by_path(),
+                    );
                     self.work.lock().probes.deliver(answers)
                 }
                 Read::Properties(window, job) => {
@@ -6129,7 +6170,11 @@ mod program {
     fn read_directory(components: &[String]) -> Result<Vec<Entry>, Errno> {
         let path = tairix_browse::vfs::absolute_path(components)?;
         let stream = list_directory(&path)?;
-        tairix_browse::vfs::entries_from_dir_stream(&path, &stream, &mut RtLinkReader)
+        tairix_browse::vfs::entries_from_dir_stream(
+            &path,
+            &stream,
+            &mut tairix_browse::RtEntryReader::by_path(),
+        )
     }
 
     /// Describe the node `job` names: one `fs_stat` under the user's own
@@ -7036,8 +7081,11 @@ mod program {
     struct PendingChooser {
         /// The absolute path of the selected file.
         path: String,
-        /// Its leaf name, which the candidate match is keyed off.
+        /// Its leaf name, which the candidate match is keyed off first.
         name: String,
+        /// The filetype its volume records, the match's key where the name
+        /// says nothing.
+        recorded: Option<Filetype>,
     }
 
     /// The transient overlay state layered over the browser view, threaded
@@ -7177,12 +7225,14 @@ mod program {
         /// The selection as a drag, and what the desktop is told of it; `None`
         /// with nothing selected.
         fn of<S: DirectorySource>(browser: &Browser<S>) -> Option<(Self, DragItems)> {
-            let first = browser.selection().iter().next()?;
-            let name = DocumentName::new(browser.entries().get(first)?.name()).ok()?;
+            let first = browser.entries().get(browser.selection().iter().next()?)?;
+            let name = DocumentName::new(first.name()).ok()?;
             let sources = browser.listed_selection();
             let file = open_with_target(browser);
             let count = u32::try_from(sources.len()).ok()?;
-            let items = DragItems::new(name, count, file.is_some()).ok()?;
+            let items = DragItems::new(name, count, file.is_some())
+                .ok()?
+                .with_filetype(first.filetype());
             Some((Self { sources, file }, items))
         }
     }
@@ -8411,10 +8461,10 @@ mod program {
                 acts.launcher.borrow_mut().launch(acts.menu.client, &path);
                 false
             }
-            Ok(Activation::OpenFile { path }) => {
+            Ok(Activation::OpenFile { path, recorded }) => {
                 acts.launcher
                     .borrow_mut()
-                    .open_file(acts.menu.client, &path);
+                    .open_file(acts.menu.client, &path, recorded);
                 false
             }
             Ok(Activation::MountImage { path }) => {
@@ -9121,7 +9171,7 @@ mod program {
         tairix_browse::vfs::entries_from_dir_stream(
             &spelled,
             &stream,
-            &mut tairix_browse::vfs::NoLinks,
+            &mut tairix_browse::vfs::ListingOnly,
         )
     }
 
@@ -9726,7 +9776,13 @@ mod program {
         let held = installed.borrow();
         let ranked = target
             .as_ref()
-            .map(|file| applications_for(&file.name, held.as_deref().unwrap_or_default()))
+            .map(|file| {
+                applications_for(
+                    &file.name,
+                    file.recorded,
+                    held.as_deref().unwrap_or_default(),
+                )
+            })
             .unwrap_or_default();
         let quick = quick_applications(&ranked);
         let documents = blank_documents(held.as_deref().unwrap_or_default());
@@ -9813,10 +9869,15 @@ mod program {
             return None;
         }
         let name = entry.name().to_string();
+        let recorded = entry.filetype();
         let Some(Ok(path)) = browser.chosen_target_path() else {
             return None;
         };
-        Some(PendingChooser { path, name })
+        Some(PendingChooser {
+            path,
+            name,
+            recorded,
+        })
     }
 
     /// Act on the one outcome the desktop owes this window's open.
@@ -10263,7 +10324,11 @@ mod program {
         };
         adopt_bundles(acts.reads, acts.installed);
         let held = acts.installed.borrow();
-        let apps = applications_for(&target.name, held.as_deref().unwrap_or_default());
+        let apps = applications_for(
+            &target.name,
+            target.recorded,
+            held.as_deref().unwrap_or_default(),
+        );
         let chooser = OpenWithChooser::new(&apps, &target.path, &target.name);
         drop(held);
         let Some(chooser) = chooser else {

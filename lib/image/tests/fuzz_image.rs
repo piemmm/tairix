@@ -52,13 +52,13 @@ use tairix_fuzzseed::meter::{metered, refusing_above, Metered};
 use tairix_fuzzseed::Prng;
 use tairix_image::inspect::inspect;
 use tairix_image::{
-    decode, decode_as, decode_fitted, decode_fitted_as, decode_peak_bytes, decode_peak_bytes_as,
-    encode_bmp, encode_gif, encode_jpeg, encode_ora, encode_png, encode_sprite_area, encode_tiff,
-    open_native, probe_as, sniff, DecodeError, DecodeLimits, EncodeError, FitBox, GifOptions,
-    ImageFormat, IndexDepth, JpegOptions, NativeDocument, OraLayer, OraLayerSource, Picture,
-    PictureKind, PictureSource, RasterImage, Rgba8, Sequence, SequenceKind, SpriteAreaReader,
-    SpriteEntry, SpriteInput, SpriteMode, SpriteName, SpritePalette, TiffCompression, TiffOptions,
-    MOST_ORA_LAYERS,
+    decode, decode_as, decode_fitted, decode_fitted_as, decode_named, decode_peak_bytes,
+    decode_peak_bytes_as, encode_bmp, encode_gif, encode_jpeg, encode_ora, encode_png,
+    encode_sprite_area, encode_tiff, find_named, open_native, probe_as, sniff, DecodeError,
+    DecodeLimits, EncodeError, FitBox, GifOptions, ImageFormat, IndexDepth, JpegOptions,
+    NativeDocument, OraLayer, OraLayerSource, Picture, PictureKind, PictureSource, RasterImage,
+    Rgba8, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry, SpriteInput, SpriteMode,
+    SpriteName, SpritePalette, TiffCompression, TiffOptions, MOST_ORA_LAYERS,
 };
 use tairix_util::report::{MAX_LINE_BYTES, MAX_REPORT_LINES};
 
@@ -2230,8 +2230,33 @@ fn decode_never_panics_and_respects_limits(bytes: &[u8]) {
     if let Ok(sequence) = Sequence::open_as(ImageFormat::Sprite, bytes, &limits) {
         walk(sequence, &limits);
     }
+    named_sprites_within_bounds(bytes, &limits);
     native_doors_agree_and_write_back(bytes);
     reports_within_bounds(bytes);
+}
+
+/// A sprite found by name in `bytes` measures as it decodes, and decodes
+/// within `limits` or not at all.
+fn named_sprites_within_bounds(bytes: &[u8], limits: &DecodeLimits) {
+    for name in ["fixture", "FIXTURE", "!app", "sm!app"] {
+        let Some(name) = SpriteName::new(name) else {
+            continue;
+        };
+        let Ok(Some(found)) = find_named(bytes, &name) else {
+            continue;
+        };
+        if let Ok(image) = decode_named(bytes, &found, limits) {
+            assert_eq!(
+                (image.width(), image.height()),
+                (found.width(), found.height())
+            );
+            assert!(image.width() <= limits.max_width());
+            assert!(image.height() <= limits.max_height());
+            let (across, down) = found.pixel_aspect();
+            assert!(across.min(down) == 1 && across.max(down) <= 16);
+            assert!(across.is_power_of_two() && down.is_power_of_two());
+        }
+    }
 }
 
 /// Every format's structure report of `bytes` keeps to the report's bounds.

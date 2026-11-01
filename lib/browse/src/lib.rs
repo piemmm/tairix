@@ -180,8 +180,8 @@ pub use delete::{DeletePlan, DeleteTarget};
 pub use desk::{ListingDesk, ListingJob};
 pub use drive::{Drive, DriveChange, DrivePanels, DriveSample};
 pub use entry::{
-    bundle_stem, is_bundle_name, resolve_target, DriveMark, Entry, EntryKind, LinkResolution,
-    LinkTarget, Listed, Occupancy,
+    bundle_stem, is_bundle_name, is_riscos_application_name, resolve_target, DriveMark, Entry,
+    EntryKind, LinkResolution, LinkTarget, Listed, Occupancy,
 };
 pub use error::{BrowseError, Unnamable};
 pub use execute::{paste_strategy, PasteStrategy, VolumeId};
@@ -189,8 +189,8 @@ pub use format::{format_datetime, format_minute, format_size};
 pub use layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode};
 pub use marquee::Marquee;
 pub use media::{
-    entry_icon, folder_sample, icon_for_entry, media_for_entry, media_for_name, BlankDocument,
-    Ending, Family, MediaType, Site,
+    entry_icon, folder_sample, icon_for_entry, media_for_document, media_for_entry,
+    media_for_filetype, media_for_name, BlankDocument, Ending, Family, MediaType, Site,
 };
 pub use mode_edit::{validate_mode, InvalidMode};
 pub use network::{NetworkEndpoint, NetworkItem, Omission};
@@ -231,8 +231,8 @@ pub use trash::{
     TrashStrategy, MAX_TRASH_NAME_ATTEMPTS,
 };
 #[cfg(feature = "rt")]
-pub use vfs::RtLinkReader;
-pub use vfs::{LinkInfo, LinkReader, NoLinks, NoProbe, VfsDirectorySource};
+pub use vfs::{recorded_filetype_of, RtEntryReader, RtLinkReader};
+pub use vfs::{EntryReader, LinkInfo, ListingOnly, NoProbe, VfsDirectorySource};
 pub use watch::{
     merge_changes, EntryChange, Placement, Took, WatchUpdate, Watches, WATCH_BUFFER_LEN,
     WATCH_LATENCY_NS,

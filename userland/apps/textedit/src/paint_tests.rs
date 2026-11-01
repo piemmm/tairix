@@ -38,6 +38,7 @@ fn window_sized(text: &[u8], size: (u32, u32)) -> (View, Layout, ThemeRegistry) 
     let mut view = View::new(
         Editor::new(document, Format::PlainText),
         String::from("doc"),
+        None,
         Access::Writable,
         Duration64::from_millis(500),
     );

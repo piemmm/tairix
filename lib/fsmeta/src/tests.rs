@@ -329,20 +329,55 @@ fn metadata_errors_map_to_fail_closed_driver_errors() {
 
 // --- preset: acorn -------------------------------------------------------
 
+fn filetype(raw: u16) -> acorn::Filetype {
+    acorn::Filetype::new(raw).expect("twelve bits")
+}
+
 #[test]
 fn acorn_filetype_round_trips() {
-    assert_eq!(&acorn::filetype_to_value(0xFFF).expect("enc"), b"fff");
-    assert_eq!(&acorn::filetype_to_value(0x0FA).expect("enc"), b"0fa");
-    assert_eq!(acorn::filetype_from_value(b"fff").expect("dec"), 0xFFF);
-    assert_eq!(acorn::filetype_from_value(b"FFF").expect("dec"), 0xFFF);
-    assert_eq!(
-        acorn::filetype_to_value(0x1000),
-        Err(MetadataError::NotRepresentable)
-    );
+    assert_eq!(&acorn::filetype_to_value(filetype(0xFFF)), b"fff");
+    assert_eq!(&acorn::filetype_to_value(filetype(0x0FA)), b"0fa");
+    assert_eq!(acorn::filetype_from_value(b"fff"), Ok(filetype(0xFFF)));
+    assert_eq!(acorn::filetype_from_value(b"FFF"), Ok(filetype(0xFFF)));
     assert_eq!(
         acorn::filetype_from_value(b"ffff"),
         Err(MetadataError::NotRepresentable)
     );
+    assert_eq!(
+        acorn::filetype_from_value(b"ffg"),
+        Err(MetadataError::NotRepresentable)
+    );
+}
+
+#[test]
+fn a_filetype_is_twelve_bits() {
+    assert_eq!(
+        acorn::Filetype::new(0xFFF).map(acorn::Filetype::get),
+        Some(0xFFF)
+    );
+    assert_eq!(acorn::Filetype::new(0), Some(filetype(0)));
+    assert_eq!(acorn::Filetype::new(0x1000), None);
+    assert_eq!(acorn::Filetype::new(u16::MAX), None);
+    assert_eq!(acorn::Filetype::DATA.get(), 0xFFD);
+}
+
+#[test]
+fn a_name_crosses_between_risc_os_and_tairix_with_dot_and_slash_exchanged() {
+    let crossed: Vec<u8> = b"ReadMe/txt"
+        .iter()
+        .map(|&b| acorn::crossed_name_byte(b))
+        .collect();
+    assert_eq!(crossed, b"ReadMe.txt");
+    for byte in 0..=u8::MAX {
+        assert_eq!(
+            acorn::crossed_name_byte(acorn::crossed_name_byte(byte)),
+            byte,
+            "the exchange is its own inverse"
+        );
+        if byte != b'.' && byte != b'/' {
+            assert_eq!(acorn::crossed_name_byte(byte), byte);
+        }
+    }
 }
 
 #[test]
@@ -356,7 +391,7 @@ fn acorn_load_exec_decodes_typed_object() {
             filetype,
             centiseconds,
         } => {
-            assert_eq!(filetype, 0xFFF);
+            assert_eq!(filetype, self::filetype(0xFFF));
             assert_eq!(centiseconds, (0x12u64 << 32) | 0x3456_789A);
             let (rload, rexec) = acorn::encode_typed(filetype, centiseconds).expect("re-encode");
             assert_eq!((rload, rexec), (load, exec));
@@ -818,7 +853,7 @@ fn filecore_keeps_public_access_in_bits_four_and_five() {
 
 #[test]
 fn a_typed_object_carries_every_acorn_key_and_an_untyped_one_only_its_words() {
-    let (load, exec) = acorn::encode_typed(0xFFF, 0x12_3456_789A).expect("typed");
+    let (load, exec) = acorn::encode_typed(filetype(0xFFF), 0x12_3456_789A).expect("typed");
     let typed = acorn::Object {
         load,
         exec,
@@ -834,7 +869,7 @@ fn a_typed_object_carries_every_acorn_key_and_an_untyped_one_only_its_words() {
             .map(|len| out[..len].to_vec())
     };
     assert_eq!(
-        value(&typed, b"acorn.filetype").as_deref(),
+        value(&typed, acorn::FILETYPE_KEY).as_deref(),
         Some(&b"fff"[..])
     );
     assert_eq!(

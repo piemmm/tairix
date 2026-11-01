@@ -311,15 +311,14 @@ fn object_stamp(object: &Object) -> Time64 {
     }
 }
 
-/// The filetype a new object takes: Data, as RISC OS gives a file created
-/// without one. A new untyped object would be a load-and-run image at
-/// address zero.
-const FILETYPE_DATA: u16 = 0xFFD;
-
 /// `object` as a typed object of `filetype` stamped at `now`, to the
 /// centisecond — or stamped zero, read as none, while the time is unknown or
 /// beyond the 1900–2248 RISC OS's 40-bit stamp holds.
-fn typed_at(object: &Object, filetype: u16, now: Option<Time64>) -> Result<Object, DriverError> {
+fn typed_at(
+    object: &Object,
+    filetype: acorn::Filetype,
+    now: Option<Time64>,
+) -> Result<Object, DriverError> {
     let centiseconds = now
         .and_then(|time| {
             Time64::new(time.secs(), time.subsec_nanos() / 10_000_000 * 10_000_000).ok()
@@ -1260,9 +1259,48 @@ fn share_base_bytes(record: &tairix_fsprobe::adfs::DiscRecord, indaddr: u32) -> 
 /// Largest big directory the format permits (4096 KiB).
 const MAX_BIG_DIR: u32 = 4096 * 1024;
 
-/// Characters `FileCore` forbids in an object name (the path and
-/// wildcard vocabulary), on top of requiring printable ASCII.
-const FORBIDDEN_NAME_BYTES: &[u8] = b"$&%@\\^:.#*\"|";
+/// A name crossed between the disc's spelling and the VFS's, which differ only
+/// in having the dot and the slash exchanged ([`acorn::crossed_name_byte`]):
+/// every name is crossed once as it enters or leaves the driver, and nothing
+/// within it sees the VFS's spelling.
+struct Crossed {
+    bytes: [u8; dir::MAX_NAME_LEN],
+    len: usize,
+}
+
+impl Crossed {
+    /// `name` in the other spelling.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::LengthOutOfRange`] for a name no directory format holds.
+    fn of(name: &[u8]) -> Result<Self, DriverError> {
+        let mut bytes = [0u8; dir::MAX_NAME_LEN];
+        let slots = bytes
+            .get_mut(..name.len())
+            .ok_or(DriverError::LengthOutOfRange)?;
+        for (slot, &byte) in slots.iter_mut().zip(name) {
+            *slot = acorn::crossed_name_byte(byte);
+        }
+        Ok(Self {
+            bytes,
+            len: name.len(),
+        })
+    }
+
+    /// `name`, read from the disc, as the VFS lists it, or `None` where no
+    /// path can spell it: RISC OS's `/` and `//` become `.` and `..`, and a
+    /// `.` RISC OS keeps out of a name would become a separator.
+    fn listed(name: &[u8]) -> Option<Self> {
+        Self::of(name)
+            .ok()
+            .filter(|crossed| tairix_abi::fs::is_component(crossed.as_bytes()))
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
 
 impl<B: Block> Adfs<B> {
     /// Validate a name being written to a directory.
@@ -1277,7 +1315,7 @@ impl<B: Block> Adfs<B> {
         }
         if name
             .iter()
-            .any(|&b| !(0x21..=0x7E).contains(&b) || FORBIDDEN_NAME_BYTES.contains(&b))
+            .any(|&b| !(0x21..=0x7E).contains(&b) || acorn::RESERVED_NAME_BYTES.contains(&b))
         {
             return Err(DriverError::OutOfRange);
         }
@@ -1506,8 +1544,9 @@ impl<B: Block> FilesystemRead for Adfs<B> {
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
+        let name = Crossed::of(name)?;
         let dir_addr = self.entries_addr(dir)?;
-        let (index, object) = self.child(dir_addr, name)?;
+        let (index, object) = self.child(dir_addr, name.as_bytes())?;
         let node = self.reported(&object, dir_addr);
         self.keep_resolved(node, index, &object);
         Ok(node)
@@ -1545,19 +1584,24 @@ impl<B: Block> FilesystemRead for Adfs<B> {
         let Some(indaddr) = self.dir_addr(dir)? else {
             return Ok(());
         };
+        let after = Crossed::of(after)?;
         // One load serves the whole call, however many entries it lists.
         let handle = self.load_dir(indaddr)?;
-        let start = self.resume_index(&handle, indaddr, cursor, after)?;
+        let start = self.resume_index(&handle, indaddr, cursor, after.as_bytes())?;
         for index in start..Self::dir_len(&handle) {
             let Some(object) = self.dir_entry(&handle, indaddr, index)? else {
                 break;
+            };
+            // Left out rather than refusing the whole directory.
+            let Some(name) = Crossed::listed(object.name()) else {
+                continue;
             };
             let entry = DirEntry {
                 node: self.reported(&object, indaddr),
                 info: self.info_of(&object, indaddr, NodeInfo::SINGLE_NAME)?,
                 next_cursor: (u64::from(self.generation) << 32) | u64::from(index + 1),
             };
-            if visit(&entry, object.name()) == DirVisit::Stop {
+            if visit(&entry, name.as_bytes()) == DirVisit::Stop {
                 break;
             }
         }
@@ -1986,12 +2030,16 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         kind: NodeKind,
         _record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
+        let name = Crossed::of(name)?;
+        let name = name.as_bytes();
         let dir_addr = self.entries_addr(dir)?;
         self.validate_new_name(name)?;
         if self.dir_lookup(dir_addr, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
         }
-        let mut object = typed_at(&Object::named(name)?, FILETYPE_DATA, self.now())?;
+        // RISC OS types a file it is told nothing about as Data; an untyped
+        // object would be a load-and-run image at address zero.
+        let mut object = typed_at(&Object::named(name)?, acorn::Filetype::DATA, self.now())?;
         // ADFS keeps no owner, group or mode, so the record has nowhere to
         // go: the access bits are RISC OS's own, set as RISC OS sets them.
         match kind {
@@ -2113,8 +2161,9 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
+        let name = Crossed::of(name)?;
         let dir_addr = self.entries_addr(dir)?;
-        let (index, object) = self.child(dir_addr, name)?;
+        let (index, object) = self.child(dir_addr, name.as_bytes())?;
         if object.is_dir() && !self.dir_is_empty(object.indaddr)? {
             return Err(DriverError::DirectoryNotEmpty);
         }
@@ -2137,6 +2186,8 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         dst_dir: NodeId,
         dst_name: &[u8],
     ) -> Result<(), DriverError> {
+        let (src_name, dst_name) = (Crossed::of(src_name)?, Crossed::of(dst_name)?);
+        let (src_name, dst_name) = (src_name.as_bytes(), dst_name.as_bytes());
         let dst_addr = self.entries_addr(dst_dir)?;
         let src_addr = self.entries_addr(src_dir)?;
         let (src_index, object) = self.child(src_addr, src_name)?;
@@ -2345,15 +2396,15 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
         let decoded = acorn::decode_load_exec(object.load, object.exec);
         let mut updated = object;
         match key.as_bytes() {
-            b"acorn.loadaddr" => {
+            acorn::LOADADDR_KEY => {
                 updated.load =
                     acorn::addr_from_value(value).map_err(|_| DriverError::OutOfRange)?;
             }
-            b"acorn.execaddr" => {
+            acorn::EXECADDR_KEY => {
                 updated.exec =
                     acorn::addr_from_value(value).map_err(|_| DriverError::OutOfRange)?;
             }
-            b"acorn.attr" => {
+            acorn::ATTR_KEY => {
                 let attr = acorn::attr_from_value(value).map_err(|_| DriverError::OutOfRange)?;
                 // The directory bit is the object's kind, not a free
                 // attribute, and the volume's directory format bounds
@@ -2365,7 +2416,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
                 }
                 updated.attr = attr;
             }
-            b"acorn.filetype" => {
+            acorn::FILETYPE_KEY => {
                 let filetype =
                     acorn::filetype_from_value(value).map_err(|_| DriverError::OutOfRange)?;
                 let centiseconds = match decoded {
@@ -2377,7 +2428,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
                 updated.load = load;
                 updated.exec = exec;
             }
-            b"acorn.datestamp" => {
+            acorn::DATESTAMP_KEY => {
                 let centiseconds =
                     acorn::datestamp_from_value(value).map_err(|_| DriverError::OutOfRange)?;
                 let acorn::LoadExec::Typed { filetype, .. } = decoded else {
@@ -2432,7 +2483,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
         let decoded = acorn::decode_load_exec(object.load, object.exec);
         let mut updated = object;
         match key.as_bytes() {
-            b"acorn.filetype" => match decoded {
+            acorn::FILETYPE_KEY => match decoded {
                 acorn::LoadExec::Typed { .. } => {
                     // Untyping clears the whole encoding — the stamp
                     // lives inside it.
@@ -2441,7 +2492,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
                 }
                 acorn::LoadExec::Untyped { .. } => return Err(DriverError::NotFound),
             },
-            b"acorn.datestamp" => match decoded {
+            acorn::DATESTAMP_KEY => match decoded {
                 acorn::LoadExec::Typed { filetype, .. } => {
                     let (load, exec) =
                         acorn::encode_typed(filetype, 0).map_err(|_| DriverError::OutOfRange)?;
@@ -2452,7 +2503,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
             },
             // The addresses and attribute bits are structural fields of
             // every entry; they cannot be absent.
-            b"acorn.loadaddr" | b"acorn.execaddr" | b"acorn.attr" => {
+            acorn::LOADADDR_KEY | acorn::EXECADDR_KEY | acorn::ATTR_KEY => {
                 return Err(DriverError::Unsupported)
             }
             _ => return Err(DriverError::NotFound),

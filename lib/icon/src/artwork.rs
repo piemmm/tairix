@@ -69,6 +69,7 @@ use crate::folder::{
 };
 use crate::glyph::{builtin_icon_at, IconKind};
 use crate::picture::{Artwork, CastShadow, Fitted, IconPicture};
+use crate::riscos::SpriteNames;
 use crate::thumbnail::{render_thumbnail, ArtworkDocument, DocumentStamp, Reading, Thumbnail};
 
 /// Where the OS ships its desktop graphics assets.
@@ -168,6 +169,19 @@ pub trait ArtworkReader {
     fn open(&mut self, _path: &str) -> Option<alloc::boxed::Box<dyn ArtworkDocument + '_>> {
         None
     }
+
+    /// The file `inside` names within the directory `dir`, opened as
+    /// [`open`](Self::open) opens one but through no symbolic link at any
+    /// component of `inside`, so what is read cannot lie outside `dir`.
+    ///
+    /// The default opens nothing.
+    fn open_inside(
+        &mut self,
+        _dir: &str,
+        _inside: &str,
+    ) -> Option<alloc::boxed::Box<dyn ArtworkDocument + '_>> {
+        None
+    }
 }
 
 /// Turns encoded icon bytes into `side`×`side` straight-alpha RGBA8.
@@ -195,6 +209,32 @@ pub trait ArtworkRasteriser {
     ) -> Option<Fitted> {
         None
     }
+
+    /// Draw the sprite `names` chooses from the RISC OS sprite area `document`
+    /// holds, as RISC OS's Filer shows an application by it, fitted inside a
+    /// `side`-pixel square of straight-alpha RGBA8 and centred on it, with
+    /// where in the square it lies, or refuse with `None` — the area holding
+    /// neither name included.
+    ///
+    /// The default refuses, which is right for a rasteriser of icons alone.
+    fn application_sprite(
+        &mut self,
+        _side: u32,
+        _names: &SpriteNames,
+        _document: &mut dyn ArtworkDocument,
+    ) -> Option<Fitted> {
+        None
+    }
+
+    /// The sprite files `boot`, a RISC OS application's `!Boot`, loads, read
+    /// as [`crate::riscos::boot_sprite_files`] reads them but in the sandbox,
+    /// since the file is untrusted text; `None` where it cannot be read.
+    ///
+    /// The default reads nothing, so an application is sought in its own
+    /// `!Sprites` alone.
+    fn boot_sprite_files(&mut self, _boot: &[u8]) -> Option<Vec<alloc::string::String>> {
+        None
+    }
 }
 
 impl<T: ArtworkReader + ?Sized> ArtworkReader for &mut T {
@@ -204,6 +244,14 @@ impl<T: ArtworkReader + ?Sized> ArtworkReader for &mut T {
 
     fn open(&mut self, path: &str) -> Option<alloc::boxed::Box<dyn ArtworkDocument + '_>> {
         (**self).open(path)
+    }
+
+    fn open_inside(
+        &mut self,
+        dir: &str,
+        inside: &str,
+    ) -> Option<alloc::boxed::Box<dyn ArtworkDocument + '_>> {
+        (**self).open_inside(dir, inside)
     }
 }
 
@@ -219,6 +267,19 @@ impl<T: ArtworkRasteriser + ?Sized> ArtworkRasteriser for &mut T {
         document: &mut dyn ArtworkDocument,
     ) -> Option<Fitted> {
         (**self).thumbnail(side, reading, document)
+    }
+
+    fn application_sprite(
+        &mut self,
+        side: u32,
+        names: &SpriteNames,
+        document: &mut dyn ArtworkDocument,
+    ) -> Option<Fitted> {
+        (**self).application_sprite(side, names, document)
+    }
+
+    fn boot_sprite_files(&mut self, boot: &[u8]) -> Option<Vec<alloc::string::String>> {
+        (**self).boot_sprite_files(boot)
     }
 }
 
@@ -351,26 +412,42 @@ pub(crate) enum OwnIcon<'a> {
         /// How its format is read.
         reading: Reading,
     },
+    /// A RISC OS application directory, drawn by its own sprite.
+    RiscOsApplication {
+        /// The directory's absolute path.
+        dir: &'a str,
+        /// The version of the directory the listing named, where the request
+        /// came from one.
+        stamp: Option<DocumentStamp>,
+    },
 }
 
 /// What a draw site is asking for a picture of.
 ///
 /// Every request names the [`IconKind`] that always resolves — the shipped
 /// class artwork, and failing that the built-in glyph — and may additionally
-/// name the thing's own icon, which takes precedence when it resolves. The
-/// resulting order (own icon, then class artwork, then glyph) is the desktop's
-/// one icon-resolution rule, stated here so every surface obeys the same one.
+/// name the thing's own icon, which takes precedence when it resolves, and the
+/// folder it is, to draw where its own will not serve. The resulting order
+/// (own icon, then the folder, then class artwork, then glyph) is the
+/// desktop's one icon-resolution rule, stated here so every surface obeys the
+/// same one.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct IconRequest<'a> {
     kind: IconKind,
     own: Option<OwnIcon<'a>>,
+    /// The folder the thing is, drawn where its own icon will not serve.
+    folder: Option<&'a FolderSample>,
 }
 
 impl<'a> IconRequest<'a> {
     /// A picture for a `kind` alone: shipped class artwork, else the glyph.
     #[must_use]
     pub const fn kind(kind: IconKind) -> Self {
-        Self { kind, own: None }
+        Self {
+            kind,
+            own: None,
+            folder: None,
+        }
     }
 
     /// A picture for a thing whose own asset path is already known, falling
@@ -380,6 +457,7 @@ impl<'a> IconRequest<'a> {
         Self {
             kind,
             own: Some(OwnIcon::Asset(path)),
+            folder: None,
         }
     }
 
@@ -394,6 +472,7 @@ impl<'a> IconRequest<'a> {
         Self {
             kind,
             own: Some(OwnIcon::Bundle { dir, stamp: None }),
+            folder: None,
         }
     }
 
@@ -409,6 +488,7 @@ impl<'a> IconRequest<'a> {
                 dir,
                 stamp: Some(stamp),
             }),
+            folder: None,
         }
     }
 
@@ -427,6 +507,7 @@ impl<'a> IconRequest<'a> {
         Self {
             kind,
             own: Some(OwnIcon::Program { name, home }),
+            folder: None,
         }
     }
 
@@ -446,6 +527,7 @@ impl<'a> IconRequest<'a> {
                 stamp,
                 reading,
             }),
+            folder: None,
         }
     }
 
@@ -463,6 +545,37 @@ impl<'a> IconRequest<'a> {
             } else {
                 Some(OwnIcon::Folder(sample))
             },
+            folder: None,
+        }
+    }
+
+    /// A picture for the RISC OS application directory at `dir`, at the
+    /// version `stamp` its listing named it at where it came from one: the
+    /// sprite RISC OS's Filer shows it by — the one its `!Boot` loads with
+    /// `IconSprites`, else the one in its own `!Sprites` — falling back to
+    /// `kind` where it has none that will serve.
+    #[must_use]
+    pub const fn riscos_application(
+        kind: IconKind,
+        dir: &'a str,
+        stamp: Option<DocumentStamp>,
+    ) -> Self {
+        Self {
+            kind,
+            own: Some(OwnIcon::RiscOsApplication { dir, stamp }),
+            folder: None,
+        }
+    }
+
+    /// This request, falling back to a picture of a folder holding `sample`
+    /// where the thing's own icon will not serve, and to its kind after that:
+    /// what a RISC OS application with no sprite of its own is drawn as, the
+    /// folder it is.
+    #[must_use]
+    pub fn or_folder(self, sample: &'a FolderSample) -> Self {
+        Self {
+            folder: (!sample.is_empty()).then_some(sample),
+            ..self
         }
     }
 
@@ -475,14 +588,16 @@ impl<'a> IconRequest<'a> {
     /// The candidates this request resolves through, in the order they are
     /// tried. The one statement of the desktop's icon-resolution order.
     pub(crate) fn tiers(self) -> impl Iterator<Item = Tier<'a>> {
-        let kinds = match self.own {
+        let folder = self.folder.map(OwnIcon::Folder);
+        let kinds = [self.own, folder].into_iter().find_map(|own| match own {
             Some(OwnIcon::Folder(sample)) if sample.has_pictures() => {
                 Some(Tier::FolderKinds(sample))
             }
             _ => None,
-        };
+        });
         [
             self.own.map(Tier::Own),
+            folder.map(Tier::Own),
             kinds,
             Some(Tier::Raster(self.kind)),
             Some(Tier::Vector(self.kind)),
@@ -537,6 +652,9 @@ impl<'a> Tier<'a> {
                 stamp,
                 reading,
             },
+            Self::Own(OwnIcon::RiscOsApplication { dir, stamp }) => {
+                ArtView::RiscOsApplication { dir, stamp }
+            }
             Self::Raster(kind) => ArtView::Raster(kind),
             Self::Vector(kind) => ArtView::Vector(kind),
         }
@@ -765,17 +883,27 @@ pub enum ArtworkKey {
     Folder(FolderSample),
     /// A picture file drawn as its own content.
     Thumbnail(Thumbnail),
+    /// A RISC OS application directory, drawn by the sprite RISC OS's Filer
+    /// shows it by, at the version a listing named it at where it came from
+    /// one.
+    RiscOsApplication {
+        /// The directory's absolute path.
+        dir: String,
+        /// The version of the directory the listing named.
+        stamp: Option<DocumentStamp>,
+    },
 }
 
 impl ArtworkKey {
     /// Whether producing this reads a picture file's own content — a
-    /// thumbnail, or a folder whose cards show its members' pictures — which
-    /// is queued apart from icons, never decoded inline, and drawn as the
-    /// tier below while it is produced.
+    /// thumbnail, a folder whose cards show its members' pictures, or the
+    /// sprite files a RISC OS application is drawn from — which is queued
+    /// apart from icons, never decoded inline, and drawn as the tier below
+    /// while it is produced.
     #[must_use]
     pub fn is_thumbnail_class(&self) -> bool {
         match self {
-            Self::Thumbnail(_) => true,
+            Self::Thumbnail(_) | Self::RiscOsApplication { .. } => true,
             Self::Folder(sample) => sample.has_pictures(),
             _ => false,
         }
@@ -786,7 +914,9 @@ impl ArtworkKey {
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
         match self {
-            Self::Asset(path) | Self::Bundle { dir: path, .. } => path.capacity(),
+            Self::Asset(path)
+            | Self::Bundle { dir: path, .. }
+            | Self::RiscOsApplication { dir: path, .. } => path.capacity(),
             Self::Program { name, home } => {
                 name.capacity() + home.as_ref().map_or(0, String::capacity)
             }
@@ -797,22 +927,25 @@ impl ArtworkKey {
     }
 
     /// Whether this is read from a file at or under `tree`: an asset file, a
-    /// bundle's manifest and icon, a picture file's content. A kind's shipped
-    /// master, a folder's cards and a program found by name are not named by
-    /// a path a writer could be filling.
+    /// bundle's manifest and icon, a picture file's content, a RISC OS
+    /// application's boot file and sprites. A kind's shipped master, a folder's
+    /// cards and a program found by name are not named by a path a writer
+    /// could be filling.
     pub(crate) fn is_named_under(&self, tree: &str) -> bool {
         self.view().is_named_under(tree)
     }
 
     /// The file producing this reads first, by its absolute path: an asset
-    /// file, a bundle's directory, a picture file, a folder's front pictured
-    /// member. `None` for a kind's shipped artwork, a built-in picture, a
-    /// folder drawn as kinds, and a program found by name in the stores: none
-    /// is read from a place a listing named.
+    /// file, a bundle's or a RISC OS application's directory, a picture file,
+    /// a folder's front pictured member. `None` for a kind's shipped artwork, a
+    /// built-in picture, a folder drawn as kinds, and a program found by name
+    /// in the stores: none is read from a place a listing named.
     #[must_use]
     pub fn read_path(&self) -> Option<&str> {
         match self {
-            Self::Asset(path) | Self::Bundle { dir: path, .. } => Some(path),
+            Self::Asset(path)
+            | Self::Bundle { dir: path, .. }
+            | Self::RiscOsApplication { dir: path, .. } => Some(path),
             Self::Thumbnail(thumbnail) => Some(&thumbnail.path),
             Self::Folder(sample) => sample
                 .cards()
@@ -840,6 +973,9 @@ impl ArtworkKey {
                 stamp: thumbnail.stamp,
                 reading: thumbnail.reading,
             },
+            Self::RiscOsApplication { dir, stamp } => {
+                ArtView::RiscOsApplication { dir, stamp: *stamp }
+            }
         }
     }
 }
@@ -865,6 +1001,10 @@ enum ArtView<'a> {
         path: &'a str,
         stamp: DocumentStamp,
         reading: Reading,
+    },
+    RiscOsApplication {
+        dir: &'a str,
+        stamp: Option<DocumentStamp>,
     },
 }
 
@@ -899,12 +1039,16 @@ impl ArtView<'_> {
                 stamp,
                 reading,
             }),
+            Self::RiscOsApplication { dir, stamp } => ArtworkKey::RiscOsApplication {
+                dir: fallible::concatenated(&[dir])?,
+                stamp,
+            },
         })
     }
 
     fn is_thumbnail_class(self) -> bool {
         match self {
-            Self::Thumbnail { .. } => true,
+            Self::Thumbnail { .. } | Self::RiscOsApplication { .. } => true,
             Self::Folder(drawn) => drawn.has_pictures(),
             _ => false,
         }
@@ -912,8 +1056,10 @@ impl ArtView<'_> {
 
     /// [`ArtworkKey::is_named_under`], borrowed.
     fn is_named_under(self, tree: &str) -> bool {
-        let (Self::Asset(path) | Self::Bundle { dir: path, .. } | Self::Thumbnail { path, .. }) =
-            self
+        let (Self::Asset(path)
+        | Self::Bundle { dir: path, .. }
+        | Self::RiscOsApplication { dir: path, .. }
+        | Self::Thumbnail { path, .. }) = self
         else {
             return false;
         };
@@ -1539,6 +1685,9 @@ pub fn render_artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
             folder_picture(reader, rasteriser, sample, side).map(Artwork::new)
         }
         ArtworkKey::Thumbnail(thumbnail) => render_thumbnail(reader, rasteriser, thumbnail, side),
+        ArtworkKey::RiscOsApplication { dir, .. } => {
+            crate::riscos::application_picture(reader, rasteriser, dir, side)
+        }
     }
 }
 

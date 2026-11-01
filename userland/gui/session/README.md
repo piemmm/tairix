@@ -96,9 +96,9 @@ buttons (`AGENTS.md` §2.2).
 - `set_artwork_resolver(resolver)` installs the live one. On a running desktop
   that is the icon-decoder thread over `tairix_icon::ArtworkDesk`, so a read
   and a sandbox round trip never happen inside a paint; where the kernel grants
-  no thread it is `InlineArtwork` over the thin `ArtworkFileReader` /
-  `ArtworkSandbox` wrappers, which adapt the session's own `SessionFileReader`
-  and `IconRasteriser`, so there is one reading seam and one sandbox, not two.
+  no thread it is `InlineArtwork` over the thin `ArtworkFileReader` wrapper,
+  which adapts the session's own `SessionFileReader`, and the loop's own sandbox
+  worker, so there is one reading seam and one sandbox, not two.
 - A shell that is never given one keeps a resolver that finds and decodes
   nothing, so a bare shell is a working desktop drawn from built-in glyphs.
 - `artwork_parts()` lends the cache and the resolver in one borrow — how

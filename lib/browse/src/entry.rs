@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 use tairix_abi::fs::{FileId, FileKind};
 use tairix_abi::time::Time64;
 use tairix_abi::BUNDLE_SUFFIX;
+use tairix_fsmeta::preset::acorn::Filetype;
 use tairix_icon::{DocumentStamp, FolderSample, IconKind};
 
 use crate::places::VolumeFacts;
@@ -240,6 +241,13 @@ pub fn is_bundle_name(name: &str) -> bool {
     bundle_stem(name).is_some()
 }
 
+/// Whether `name` is a RISC OS application's: a `!` and at least one more
+/// character, as RISC OS's Filer takes a directory so named to be one.
+#[must_use]
+pub fn is_riscos_application_name(name: &str) -> bool {
+    name.len() > 1 && name.starts_with('!')
+}
+
 /// `name` without its bundle suffix, or `None` when it is no bundle name
 /// ([`is_bundle_name`]).
 #[must_use]
@@ -312,6 +320,9 @@ pub struct Entry {
     modified: Time64,
     id: FileId,
     content_gen: u64,
+    /// The RISC OS filetype the volume records for a file its name does not
+    /// type.
+    filetype: Option<Filetype>,
     occupancy: Occupancy,
     /// The occupancy shown is from before a change to this folder: it stays
     /// drawn, so the icon does not blink, until a fresh probe replaces it.
@@ -344,6 +355,7 @@ impl Entry {
             modified,
             id: FileId::NONE,
             content_gen: 0,
+            filetype: None,
             occupancy: Occupancy::Unprobed,
             stale: false,
             drive: None,
@@ -363,6 +375,13 @@ impl Entry {
     #[must_use]
     pub const fn with_content_gen(mut self, content_gen: u64) -> Self {
         self.content_gen = content_gen;
+        self
+    }
+
+    /// This entry, a file its volume records as RISC OS's `filetype`.
+    #[must_use]
+    pub const fn with_filetype(mut self, filetype: Filetype) -> Self {
+        self.filetype = Some(filetype);
         self
     }
 
@@ -444,6 +463,27 @@ impl Entry {
     #[must_use]
     pub const fn content_gen(&self) -> u64 {
         self.content_gen
+    }
+
+    /// The RISC OS filetype the volume records for the file, where the
+    /// listing read one: only for a file its name does not type.
+    #[must_use]
+    pub const fn filetype(&self) -> Option<Filetype> {
+        self.filetype
+    }
+
+    /// Whether this is a RISC OS application directory, or a link to one:
+    /// a folder RISC OS's Filer shows by the application's own sprite.
+    #[must_use]
+    pub fn is_riscos_application(&self) -> bool {
+        match self.kind {
+            EntryKind::Directory => is_riscos_application_name(&self.name),
+            EntryKind::Link(LinkTarget::Directory) => self
+                .target
+                .as_deref()
+                .is_some_and(|target| is_riscos_application_name(tairix_path::leaf_name(target))),
+            EntryKind::File | EntryKind::Bundle | EntryKind::Link(_) => false,
+        }
     }
 
     /// Which version of which file the listing named: what an open of it
@@ -531,6 +571,7 @@ impl Entry {
             && self.modified == other.modified
             && self.id == other.id
             && self.content_gen == other.content_gen
+            && self.filetype == other.filetype
     }
 
     /// Carry `previous`'s occupancy and drive picture over to this, its

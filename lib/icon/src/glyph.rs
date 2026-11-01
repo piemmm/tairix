@@ -610,6 +610,30 @@ pub enum IconKind {
     ElfExecutable,
     /// A WebAssembly module.
     WasmModule,
+    /// A RISC OS program, loaded at the address it was built for and run there
+    /// (an Absolute file).
+    RiscOsProgram,
+    /// A RISC OS utility: code that runs wherever it is loaded.
+    RiscOsUtility,
+    /// A RISC OS relocatable module, which extends the operating system.
+    RiscOsModule,
+    /// A RISC OS command script, run a line at a time by its command line (an
+    /// Obey or Command file); shares the text glyph.
+    RiscOsObey,
+    /// A BBC BASIC program.
+    BasicProgram,
+    /// A vector drawing.
+    Drawing,
+    /// The window definitions a RISC OS application builds its windows from.
+    WindowTemplate,
+    /// A font.
+    Font,
+    /// A PostScript document.
+    PostScript,
+    /// Data prepared for a printer to print.
+    PrintData,
+    /// A colour palette.
+    Palette,
 }
 
 impl IconKind {
@@ -885,6 +909,17 @@ impl IconKind {
             "executable-command" => Self::CommandProgram,
             "executable-elf" => Self::ElfExecutable,
             "executable-wasm" => Self::WasmModule,
+            "application-x-riscos-absolute" => Self::RiscOsProgram,
+            "application-x-riscos-utility" => Self::RiscOsUtility,
+            "application-x-riscos-module" => Self::RiscOsModule,
+            "application-x-riscos-obey" => Self::RiscOsObey,
+            "application-x-riscos-basic" => Self::BasicProgram,
+            "drawing" => Self::Drawing,
+            "application-x-riscos-template" => Self::WindowTemplate,
+            "font" => Self::Font,
+            "application-postscript" => Self::PostScript,
+            "print-data" => Self::PrintData,
+            "palette" => Self::Palette,
             _ => Self::Generic,
         }
     }
@@ -1166,6 +1201,17 @@ impl IconKind {
             Self::DiskOptical => 260,
             Self::BoardFan => 261,
             Self::DiskFloppy => 262,
+            Self::RiscOsProgram => 263,
+            Self::RiscOsUtility => 264,
+            Self::RiscOsModule => 265,
+            Self::BasicProgram => 266,
+            Self::Drawing => 267,
+            Self::WindowTemplate => 268,
+            Self::Font => 269,
+            Self::PostScript => 270,
+            Self::PrintData => 271,
+            Self::Palette => 272,
+            Self::RiscOsObey => 273,
         }
     }
 
@@ -1446,6 +1492,17 @@ impl IconKind {
             Self::CommandProgram => "executable-command",
             Self::ElfExecutable => "executable-elf",
             Self::WasmModule => "executable-wasm",
+            Self::RiscOsProgram => "application-x-riscos-absolute",
+            Self::RiscOsUtility => "application-x-riscos-utility",
+            Self::RiscOsModule => "application-x-riscos-module",
+            Self::RiscOsObey => "application-x-riscos-obey",
+            Self::BasicProgram => "application-x-riscos-basic",
+            Self::Drawing => "drawing",
+            Self::WindowTemplate => "application-x-riscos-template",
+            Self::Font => "font",
+            Self::PostScript => "application-postscript",
+            Self::PrintData => "print-data",
+            Self::Palette => "palette",
         }
     }
 }
@@ -1566,7 +1623,7 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         IconKind::FolderFilled => folder_filled(color),
         IconKind::FolderBack => folder_back(color),
         IconKind::FolderFront => folder_front(color),
-        IconKind::File | IconKind::Manifest => file(color),
+        IconKind::File | IconKind::Manifest | IconKind::WindowTemplate => file(color),
         // The app-bundle, text, and image families each share one built-in
         // glyph: the fine-grained kinds differ only in their shipped raster
         // artwork, so a system without it still shows the broad family glyph.
@@ -1576,13 +1633,20 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::TextRust
         | IconKind::TextJava
         | IconKind::ShellScript
-        | IconKind::Pdf => text(color),
+        | IconKind::RiscOsObey
+        | IconKind::Pdf
+        | IconKind::BasicProgram
+        | IconKind::Font
+        | IconKind::PostScript
+        | IconKind::PrintData => text(color),
         IconKind::Image
         | IconKind::ImagePng
         | IconKind::ImageJpeg
         | IconKind::ImageGif
         | IconKind::ImageSvg
-        | IconKind::ImageSprite => image(color),
+        | IconKind::ImageSprite
+        | IconKind::Drawing
+        | IconKind::Palette => image(color),
         IconKind::Archive => archive(color),
         IconKind::Audio => audio(color),
         IconKind::Video => video(color),
@@ -1598,8 +1662,10 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::ApplicationProgram
         | IconKind::CommandProgram
         | IconKind::ElfExecutable
-        | IconKind::WasmModule => executable(color),
-        IconKind::Driver => driver(color),
+        | IconKind::WasmModule
+        | IconKind::RiscOsProgram
+        | IconKind::RiscOsUtility => executable(color),
+        IconKind::Driver | IconKind::RiscOsModule => driver(color),
         IconKind::ViewToggle => view_toggle(color),
         IconKind::Sort => sort(color),
         IconKind::NewFolder => new_folder(color),

@@ -1305,7 +1305,7 @@ const EDGE_SLACK: usize = 1;
 ///
 /// Returns an actionable build-error message naming `label` and the geometry
 /// or decode problem.
-fn verify_raster_master(label: &str, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn verify_raster_master(label: &str, bytes: &[u8]) -> Result<(), String> {
     let image = decode_raster_master(label, bytes)?;
     let (width, height) = (image.width(), image.height());
     if width != height {

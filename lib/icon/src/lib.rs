@@ -60,6 +60,7 @@ pub mod folder;
 pub mod glyph;
 pub mod load;
 pub mod picture;
+pub mod riscos;
 pub mod store;
 pub mod svg;
 mod symbol;
@@ -84,6 +85,7 @@ pub use folder::{DrawnCard, FolderSample, SampleCard};
 pub use glyph::{builtin_icon, disk_icon, IconKind};
 pub use load::{IconAssetSource, IconSet, ICON_KINDS};
 pub use picture::{Artwork, CastShadow, Fitted, IconPicture};
+pub use riscos::SpriteNames;
 pub use store::{serve_thumbnail, StoreAccess, StoreFile, StoreKey, ThumbnailStore};
 pub use svg::decode as decode_svg;
 #[cfg(feature = "rt")]

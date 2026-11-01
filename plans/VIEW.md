@@ -228,7 +228,9 @@ count, and RISC OS types a file from its directory entry, not its content — so
 heuristic would be a false-positive machine, and one the crate would then act
 on; both planned consumers already know the type without it (the emulator
 loads `!Sprites22`/`!Sprites` by name and filetype, and `lib/browse::media`
-already maps `.spr` to `image/x-riscos-sprite`).
+maps `.spr`, `,ff9` and a recorded filetype of `&FF9` to
+`image/x-riscos-sprite`, the viewer reading the last through the document's
+descriptor with `tairix_browse::recorded_filetype_of`).
 
 So `ImageFormat::Sprite` exists — the crate must be able to *name* what it
 decoded — and `sniff` never answers it. The caller that knows the type reaches

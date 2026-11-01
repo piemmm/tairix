@@ -2,13 +2,14 @@
 //! implies, its line-ending convention, and the indentation it uses.
 //!
 //! Nothing here parses the document. The binary check counts byte classes the
-//! grid already decodes; the format comes from the name through the one
-//! extension registry. A format only the document's opening bytes reveal is
-//! asked of the sandbox.
+//! grid already decodes; the format comes from the name, else the filetype its
+//! volume records, through the one media registry. A format only the
+//! document's opening bytes reveal is asked of the sandbox.
 
 use core::ops::ControlFlow;
 
-use tairix_browse::{media_for_name, MediaType};
+use tairix_abi::fs::Filetype;
+use tairix_browse::{media_for_document, MediaType};
 use tairix_syntax::{store_for_name, Format};
 
 use crate::document::{Document, Source};
@@ -98,14 +99,16 @@ pub fn looks_binary(source: &impl Source) -> bool {
     nul || odd * 10 > units
 }
 
-/// The format a document named `name` is written in, when the name says.
+/// The format a document named `name`, whose volume records `recorded` as its
+/// filetype, is written in, when either says.
 ///
 /// A settings store is known by its fixed file name first, because two stores
-/// of different grammars share an extension; then the extension decides.
+/// of different grammars share an extension; then the extension decides, then
+/// the filetype.
 #[must_use]
-pub fn format_for_name(name: &str) -> Option<Format> {
+pub fn format_for_document(name: &str, recorded: Option<Filetype>) -> Option<Format> {
     let leaf = name.rsplit_once('/').map_or(name, |(_, leaf)| leaf);
-    store_for_name(leaf).or_else(|| media_for_name(leaf).and_then(format_for_media))
+    store_for_name(leaf).or_else(|| media_for_document(leaf, recorded).and_then(format_for_media))
 }
 
 /// The format a content type is written in, for the types that have one.

@@ -190,8 +190,9 @@ pub use picture::{
     PictureSource, Pixels, Rgba8,
 };
 pub use sprite::{
-    desktop_palette, opaque_sprite_writes_back, OpaqueSprite, Sprite, SpriteAreaReader,
-    SpriteEntry, SpriteLayout, SpriteMode, SpriteName, SpritePalette, SPRITE_HEADER_LEN,
+    decode_named, desktop_palette, find_named, opaque_sprite_writes_back, NamedSprite,
+    OpaqueSprite, Sprite, SpriteAreaReader, SpriteEntry, SpriteLayout, SpriteMode, SpriteName,
+    SpritePalette, SPRITE_HEADER_LEN,
 };
 pub use sprite_encode::SpriteInput;
 

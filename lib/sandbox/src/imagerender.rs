@@ -132,13 +132,14 @@
 //! decodes it.
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_geometry::Rect;
 use tairix_icon::{VectorIcon, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE};
 use tairix_image::{
-    DecodeError, DecodeLimits, FitBox, ImageFormat, RasterImage, Sequence, SequenceKind,
+    DecodeError, DecodeLimits, FitBox, ImageFormat, RasterImage, Sequence, SequenceKind, SpriteName,
 };
 use tairix_raster::{
     resample, resample_window, Region, ResampleError, Rgba8Image, Surface, MAX_DRAWING_EXTENT,
@@ -185,6 +186,21 @@ const OP_FONTS_SUPPLY: u8 = 12;
 /// Thumbnail opcode: the uploaded document drawn as its own content.
 const OP_THUMBNAIL: u8 = 19;
 
+/// Application-sprite opcode: the sprite of the uploaded sprite area a RISC OS
+/// application is shown by, drawn as its icon.
+const OP_APPLICATION_SPRITE: u8 = 21;
+
+/// Boot-scan opcode: the sprite files a RISC OS application's `!Boot` loads,
+/// read as untrusted text.
+const OP_BOOT_SPRITES: u8 = 22;
+
+/// Largest side, in pixels, of a sprite an application is shown by.
+///
+/// A fixed bound on untrusted input, not a capacity: an application's icon is
+/// a few dozen pixels across, so a larger sprite of its name is no icon and is
+/// refused before a pixel of it is decoded.
+pub const MAX_APPLICATION_SPRITE_SIDE: u32 = 512;
+
 /// Largest decode, in bytes, a thumbnail may cost at its peak.
 ///
 /// A fixed containment bound, not a capacity: a thumbnail is decoration made
@@ -208,6 +224,10 @@ const REPLY_FONTS_STORED: u8 = 3;
 /// Thumbnail success reply tag: the square's side, where the picture lies in
 /// it (left, top, width, height), then the square's pixels.
 const REPLY_FITTED: u8 = 19;
+
+/// Reply tag of a successful `OP_BOOT_SPRITES`: a count of paths, each
+/// length-prefixed.
+const REPLY_SPRITE_FILES: u8 = 22;
 
 /// Icon refusal wire codes.
 const REFUSAL_MALFORMED_REQUEST: u8 = 1;
@@ -349,6 +369,14 @@ impl Service for ImageRenderService {
                 Ok(reply) => reply,
                 Err(refusal) => encode_error(refusal.to_wire()),
             },
+            Some(OP_APPLICATION_SPRITE) => match self.handle_application_sprite(request) {
+                Ok(reply) => reply,
+                Err(refusal) => encode_error(refusal.to_wire()),
+            },
+            Some(OP_BOOT_SPRITES) => match handle_boot_sprites(request) {
+                Ok(reply) => reply,
+                Err(refusal) => encode_error(refusal.to_wire()),
+            },
             Some(
                 OP_WALLPAPER_PREPARE | OP_WALLPAPER_BAND | OP_WALLPAPER_RELEASE | OP_WALLPAPER_PLAN,
             ) => match self.dispatch_wallpaper(request) {
@@ -450,12 +478,7 @@ impl ImageRenderService {
             .or_else(|| tairix_image::sniff(&bytes))
             .ok_or(IconRefusal::UnsupportedFormat)?;
         let (limits, fit) = (view_limits(), FitBox::new(side, side));
-        let refused = |err: DecodeError| match DecodeVerdict::of(&err) {
-            DecodeVerdict::Unsupported => IconRefusal::UnsupportedFormat,
-            DecodeVerdict::Damaged => IconRefusal::MalformedImage,
-            DecodeVerdict::TooLarge => IconRefusal::TooLarge,
-            DecodeVerdict::OutOfMemory => IconRefusal::Unrenderable,
-        };
+        let refused = |err: DecodeError| icon_decode_refusal(&err);
         let peak =
             tairix_image::decode_peak_bytes_as(format, &bytes, &limits, fit).map_err(refused)?;
         if peak > MAX_THUMBNAIL_PEAK_BYTES {
@@ -465,15 +488,208 @@ impl ImageRenderService {
             tairix_image::decode_fitted_as(format, &bytes, &limits, fit).map_err(refused)?;
         drop(bytes);
         let (rgba, placed) = letterbox(image.width(), image.height(), image.pixels(), side)?;
-        let mut w = Writer::with_capacity(1 + 4 * 5 + rgba.len());
-        w.u8(REPLY_FITTED);
-        w.u32(side);
-        for at in [placed.left, placed.top, placed.width, placed.height] {
-            w.u32(at);
-        }
-        w.bytes(&rgba);
-        Ok(w.finish())
+        Ok(fitted_reply(side, &rgba, placed))
     }
+}
+
+impl ImageRenderService {
+    /// `OP_APPLICATION_SPRITE`: of the sprite area uploaded last, draw the
+    /// sprite of the two names that suits a `side` square as a RISC OS
+    /// application's icon ([`sprite_in_square`]), and let the area go.
+    fn handle_application_sprite(&mut self, request: &[u8]) -> Result<Vec<u8>, IconRefusal> {
+        let mut r = Reader::new(request);
+        let (Ok(OP_APPLICATION_SPRITE), Ok(side)) = (r.u8(), r.u32()) else {
+            return Err(IconRefusal::MalformedRequest);
+        };
+        let mut name = || {
+            r.bytes(SpriteName::MAX_LEN)
+                .ok()
+                .and_then(SpriteName::from_bytes)
+                .filter(|name| !name.as_bytes().is_empty())
+                .ok_or(IconRefusal::MalformedRequest)
+        };
+        let (large, small) = (name()?, name()?);
+        if side == 0 || side > MAX_ICON_SIDE || !r.is_exhausted() {
+            return Err(IconRefusal::MalformedRequest);
+        }
+        // Taken, so the area does not outlive the one picture it was sent for.
+        let bytes = self
+            .document
+            .take()
+            .filter(Document::is_complete)
+            .ok_or(IconRefusal::MalformedRequest)?
+            .into_bytes();
+        let found = |name: &SpriteName| {
+            tairix_image::find_named(&bytes, name).map_err(|err| icon_decode_refusal(&err))
+        };
+        let (large, small) = (found(&large)?, found(&small)?);
+        // Only a sprite within the bound is a candidate, so one past it gives
+        // way to the other and no size is compared that could overflow.
+        let fits = |sprite: &tairix_image::NamedSprite| {
+            sprite.width() <= MAX_APPLICATION_SPRITE_SIDE
+                && sprite.height() <= MAX_APPLICATION_SPRITE_SIDE
+        };
+        let chosen = match suited(side, large.filter(fits), small.filter(fits)) {
+            Some(chosen) => chosen,
+            None if large.is_some() || small.is_some() => return Err(IconRefusal::TooLarge),
+            None => return Err(IconRefusal::UnsupportedFormat),
+        };
+        let image = tairix_image::decode_named(&bytes, &chosen, &application_sprite_limits())
+            .map_err(|err| icon_decode_refusal(&err))?;
+        drop(bytes);
+        let (rgba, placed) = sprite_in_square(&image, chosen.pixel_aspect(), side)?;
+        Ok(fitted_reply(side, &rgba, placed))
+    }
+}
+
+/// The bounds an application's sprite is decoded within.
+const fn application_sprite_limits() -> DecodeLimits {
+    DecodeLimits::new(
+        MAX_APPLICATION_SPRITE_SIDE,
+        MAX_APPLICATION_SPRITE_SIDE,
+        MAX_APPLICATION_SPRITE_SIDE as u64 * MAX_APPLICATION_SPRITE_SIDE as u64,
+        0,
+    )
+}
+
+/// Encode a fitted picture: `rgba`, a `side` square, with where in it the
+/// picture was `placed`.
+fn fitted_reply(side: u32, rgba: &[u8], placed: Placed) -> Vec<u8> {
+    let mut w = Writer::with_capacity(1 + 4 * 5 + rgba.len());
+    w.u8(REPLY_FITTED);
+    w.u32(side);
+    for at in [placed.left, placed.top, placed.width, placed.height] {
+        w.u32(at);
+    }
+    w.bytes(rgba);
+    w.finish()
+}
+
+/// `OP_BOOT_SPRITES`: the sprite files the `!Boot` the request carries loads
+/// (`tairix_icon::riscos::boot_sprite_files`), each a path inside the
+/// application.
+fn handle_boot_sprites(request: &[u8]) -> Result<Vec<u8>, IconRefusal> {
+    let mut r = Reader::new(request);
+    let (Ok(OP_BOOT_SPRITES), Ok(boot)) = (r.u8(), r.bytes(tairix_icon::riscos::MAX_BOOT_BYTES))
+    else {
+        return Err(IconRefusal::MalformedRequest);
+    };
+    if !r.is_exhausted() {
+        return Err(IconRefusal::MalformedRequest);
+    }
+    let files = tairix_icon::riscos::boot_sprite_files(boot);
+    let mut w = Writer::new();
+    w.u8(REPLY_SPRITE_FILES);
+    w.u8(u8::try_from(files.len()).map_err(|_| IconRefusal::Unrenderable)?);
+    for file in &files {
+        w.bytes(file.as_bytes());
+    }
+    Ok(w.finish())
+}
+
+/// Of a sprite found by its large name and one by its small, the one that
+/// suits a `side` square: the small where it is the smaller and `side` is
+/// nearer its size than the large's by ratio, else the large, else whichever
+/// there is.
+fn suited(
+    side: u32,
+    large: Option<tairix_image::NamedSprite>,
+    small: Option<tairix_image::NamedSprite>,
+) -> Option<tairix_image::NamedSprite> {
+    match (large, small) {
+        (Some(large), Some(small)) => {
+            let (large_size, small_size) = (natural_size(&large), natural_size(&small));
+            let nearer_small =
+                u64::from(side) * u64::from(side) < large_size.saturating_mul(small_size);
+            Some(if small_size < large_size && nearer_small {
+                small
+            } else {
+                large
+            })
+        }
+        (one, None) | (None, one) => one,
+    }
+}
+
+/// How large `sprite` is drawn on a desktop, in its own finest pixels: its
+/// longer side once each pixel is given its shape.
+fn natural_size(sprite: &tairix_image::NamedSprite) -> u64 {
+    let (across, down) = sprite.pixel_aspect();
+    (u64::from(sprite.width()) * u64::from(across))
+        .max(u64::from(sprite.height()) * u64::from(down))
+}
+
+/// Draw the RISC OS sprite `image`, whose pixels have the shape `aspect`,
+/// inside a `side` square as an application's icon: the transparent margin
+/// around the drawing trimmed, each pixel given its shape, the drawing grown
+/// to the square by whole pixels before it is smoothed down to it, so its
+/// pixels stay crisp, and centred on transparent padding. Refused where the
+/// sprite draws nothing.
+fn sprite_in_square(
+    image: &RasterImage,
+    (across, down): (u32, u32),
+    side: u32,
+) -> Result<(Vec<u8>, Placed), IconRefusal> {
+    let drawn = drawn_bounds(image).ok_or(IconRefusal::MalformedImage)?;
+    let fit = fit_within(
+        drawn.width.saturating_mul(across),
+        drawn.height.saturating_mul(down),
+        side,
+    );
+    let (grow_x, grow_y) = (fit.0.div_ceil(drawn.width), fit.1.div_ceil(drawn.height));
+    let (grown_w, grown_h) = (drawn.width * grow_x, drawn.height * grow_y);
+    let row_bytes = pixel_buffer_len(grown_w, 1);
+    let band_bytes = pixel_buffer_len(grown_w, grow_y);
+    let mut grown = tairix_util::fallible::filled(pixel_buffer_len(grown_w, grown_h), 0u8)
+        .ok_or(IconRefusal::Unrenderable)?;
+    let first_byte = pixel_offset(drawn.left, 0, 1).ok_or(IconRefusal::Unrenderable)?;
+    let columns = first_byte..first_byte.saturating_add(pixel_buffer_len(drawn.width, 1));
+    let lines = image
+        .pixels()
+        .chunks_exact(pixel_buffer_len(image.width(), 1))
+        .skip(usize::try_from(drawn.top).map_err(|_| IconRefusal::Unrenderable)?);
+    for (band, line) in grown.chunks_exact_mut(band_bytes).zip(lines) {
+        let line = line.get(columns.clone()).ok_or(IconRefusal::Unrenderable)?;
+        let (first, rest) = band.split_at_mut(row_bytes);
+        let repeated = line
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|pixel| core::iter::repeat_n(pixel, grow_x as usize));
+        for (out, pixel) in first.as_chunks_mut::<4>().0.iter_mut().zip(repeated) {
+            *out = *pixel;
+        }
+        for copy in rest.chunks_exact_mut(row_bytes) {
+            copy.copy_from_slice(first);
+        }
+    }
+    place_in_square(grown_w, grown_h, &grown, side, fit)
+}
+
+/// The rectangle of `image` holding every pixel with any coverage, or `None`
+/// where none has any.
+fn drawn_bounds(image: &RasterImage) -> Option<Placed> {
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    let rows = image
+        .pixels()
+        .chunks_exact(pixel_buffer_len(image.width(), 1).max(1));
+    for (y, row) in (0u32..).zip(rows) {
+        let mut covered = (0u32..)
+            .zip(row.as_chunks::<4>().0)
+            .filter(|(_, p)| p[3] != 0);
+        let Some((first, _)) = covered.next() else {
+            continue;
+        };
+        let last = covered.last().map_or(first, |(x, _)| x);
+        let (left, top, right, _) = bounds.unwrap_or((first, y, last, y));
+        bounds = Some((left.min(first), top, right.max(last), y));
+    }
+    bounds.map(|(left, top, right, bottom)| Placed {
+        left,
+        top,
+        width: right - left + 1,
+        height: bottom - top + 1,
+    })
 }
 
 /// Encode a "this document needs glyphs I have not been given" reply.
@@ -815,6 +1031,112 @@ pub fn render_thumbnail<L: Launcher, S: tairix_log::Sink>(
             .map_err(IconRasterFailure::Sandbox)?;
         decode_fitted_reply(&reply, side)
     })
+}
+
+/// Stream the sprite area `document` to the worker and draw the sprite of
+/// `names` that suits a `side` square as a RISC OS application's icon: the
+/// whole of what an application's picture costs a program, so every program
+/// that draws one draws it the same way.
+///
+/// # Errors
+///
+/// [`ThumbnailFailure`]: the upload or the render failed, the area holding
+/// neither name included.
+pub fn application_sprite<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    side: u32,
+    names: &tairix_icon::SpriteNames,
+    document: &mut dyn tairix_icon::ArtworkDocument,
+) -> Result<tairix_icon::Fitted, ThumbnailFailure> {
+    if side == 0 || side > MAX_ICON_SIDE {
+        return Err(ThumbnailFailure::Render(IconRasterFailure::Refused(
+            IconRefusal::MalformedRequest,
+        )));
+    }
+    let length = usize::try_from(document.stamp().size).map_err(|_| {
+        ThumbnailFailure::Upload(UploadFailure::Document(DocumentFailure::Refused(
+            DocumentRefusal::TooLarge,
+        )))
+    })?;
+    upload_document(sandbox, length, |offset, into| {
+        document.read_at(offset, into).ok_or(())
+    })
+    .map_err(ThumbnailFailure::Upload)?;
+    let mut w = Writer::new();
+    w.u8(OP_APPLICATION_SPRITE);
+    w.u32(side);
+    w.bytes(names.large());
+    w.bytes(names.small());
+    let request = w.finish();
+    sandbox
+        .ask(|sandbox| {
+            let reply = sandbox
+                .request(&request)
+                .map_err(IconRasterFailure::Sandbox)?;
+            decode_fitted_reply(&reply, side)
+        })
+        .map_err(ThumbnailFailure::Render)
+}
+
+/// The sprite files `boot`, a RISC OS application's `!Boot`, loads, read in
+/// the worker: the file is untrusted text, so it is scanned nowhere else.
+/// Each path answered is believed only as a path inside the application
+/// (`tairix_icon::riscos::is_application_path`), no more of them than the
+/// scan ever names.
+///
+/// # Errors
+///
+/// [`IconRasterFailure`]: a boot file past the scan's bound is refused before
+/// anything is sent, and a reply naming a file outside the application, or
+/// more than the scan names, is not believed.
+pub fn boot_sprite_files<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    boot: &[u8],
+) -> Result<Vec<String>, IconRasterFailure> {
+    if boot.len() > tairix_icon::riscos::MAX_BOOT_BYTES {
+        return Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest));
+    }
+    let mut w = Writer::with_capacity(5 + boot.len());
+    w.u8(OP_BOOT_SPRITES);
+    w.bytes(boot);
+    let request = w.finish();
+    sandbox.ask(|sandbox| {
+        let reply = sandbox
+            .request(&request)
+            .map_err(IconRasterFailure::Sandbox)?;
+        decode_sprite_files_reply(&reply)
+    })
+}
+
+/// The paths an `OP_BOOT_SPRITES` reply names, each inside an application.
+fn decode_sprite_files_reply(reply: &[u8]) -> Result<Vec<String>, IconRasterFailure> {
+    let malformed = |_| IconRasterFailure::ReplyMalformed;
+    let mut r = Reader::new(reply);
+    match r.u8().map_err(malformed)? {
+        REPLY_SPRITE_FILES => {}
+        REPLY_ERROR => return Err(refusal_in(&mut r)),
+        _ => return Err(IconRasterFailure::ReplyMalformed),
+    }
+    let count = usize::from(r.u8().map_err(malformed)?);
+    if count > tairix_icon::riscos::MAX_SPRITE_FILES {
+        return Err(IconRasterFailure::ReplyMalformed);
+    }
+    let longest = tairix_icon::riscos::MAX_DEPTH * (tairix_abi::fs::FS_NAME_MAX + 1);
+    let mut files = Vec::new();
+    files
+        .try_reserve_exact(count)
+        .map_err(|_| IconRasterFailure::ReplyMalformed)?;
+    for _ in 0..count {
+        let path = core::str::from_utf8(r.bytes(longest).map_err(malformed)?)
+            .ok()
+            .filter(|path| tairix_icon::riscos::is_application_path(path))
+            .ok_or(IconRasterFailure::ReplyMalformed)?;
+        files.push(String::from(path));
+    }
+    if !r.is_exhausted() {
+        return Err(IconRasterFailure::ReplyMalformed);
+    }
+    Ok(files)
 }
 
 /// Why a picture file could not be drawn as its own content.
@@ -3523,6 +3845,16 @@ impl DecodeVerdict {
             | DecodeError::JpegProgressiveCoefficientStoreExceedsLimit => Self::TooLarge,
             _ => Self::Damaged,
         }
+    }
+}
+
+/// The icon refusal a decoder's error is.
+const fn icon_decode_refusal(err: &DecodeError) -> IconRefusal {
+    match DecodeVerdict::of(err) {
+        DecodeVerdict::Unsupported => IconRefusal::UnsupportedFormat,
+        DecodeVerdict::Damaged => IconRefusal::MalformedImage,
+        DecodeVerdict::TooLarge => IconRefusal::TooLarge,
+        DecodeVerdict::OutOfMemory => IconRefusal::Unrenderable,
     }
 }
 

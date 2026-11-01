@@ -61,6 +61,19 @@ pub trait SessionFileReader {
     fn open_document(&mut self, _path: &str) -> Option<Box<dyn ArtworkDocument + '_>> {
         None
     }
+
+    /// The file `inside` names within the directory `dir`, opened as
+    /// [`open_document`](Self::open_document) opens one but through no
+    /// symbolic link at any component of `inside`.
+    ///
+    /// The default opens nothing.
+    fn open_document_inside(
+        &mut self,
+        _dir: &str,
+        _inside: &str,
+    ) -> Option<Box<dyn ArtworkDocument + '_>> {
+        None
+    }
 }
 
 /// The cursor SVG bytes read from disk, one optional blob per [`CursorKind`],

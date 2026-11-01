@@ -2355,11 +2355,12 @@ a document its delegation cannot name. A pick concludes only through
 event, a conclusion is refused.
 
 The channel also carries **drag-and-drop** of a file onto an application's
-icon-bar slot. `WindowRequest::BeginDrag { window_id, name }` hands the
+icon-bar slot. `WindowRequest::BeginDrag { window_id, items }` hands the
 session the drag the user began on a file, and is honoured only while the
 press that began it is still held in that window — a drag is that press
-carried on, so it cannot begin anywhere else. Only the file's *name* crosses:
-the session matches it against each slot's declared types as the pointer
+carried on, so it cannot begin anywhere else. Only the file's *name*, the
+filetype its volume records and the count cross: the session matches them
+against each slot's declared types as the pointer
 passes, lighting a slot that takes it, and the dragging application keeps the
 file. The drag concludes with one `WindowEvent::DragEnded { dropped }`;
 dropped on a taker, `TakeDropTarget` yields that application's entry binary

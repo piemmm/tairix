@@ -189,6 +189,39 @@ total: a name that yields no character still marks the disc with
 (`AGENTS.md` §2.9), and only where a picture of that side cannot exist at all
 does a slot fall through to the `User` glyph.
 
+## The file-type masters
+
+The file-type masters in `lib/icon/assets/` are drawn by code rather than
+painted: `cargo xtask icons --write` draws them
+(`tools/xtask/src/commands/icons/`), the bare `cargo xtask icons` — one of
+`ci`'s static gates — redraws each in memory and fails on any committed master
+that differs from its drawing, and `--sheets` renders the set, at full size and
+at the sizes a slot draws it, into `images/icon-sheet.png`. A master is never
+edited as a picture; a change to one is a change to its drawing.
+
+Every master is drawn the same way, so the family reads as one:
+
+- **The sheet** (`icons/sheet.rs`): a page in a lit rim, its top right corner
+  folded down in the type's colour, and at its foot nothing, two lines of text,
+  or a plate naming the format (`PNG`, `HTML`, …) in the fold's colour.
+- **The emblem**: what the type is, drawn above the foot and clear of the
+  fold, raised by the one emblem shadow and lit from the upper left like every
+  other surface.
+- **A RISC OS program** (an Obey script, an Absolute, a Utility, a Module) is
+  a page of text with the Archimedes A in its background — a white-edged
+  yellow sail rising from the page's foot to a pole beneath the fold, a red
+  pennant at its peak — and its kind at the head: `*`, `APP`, `UTIL`, `MOD`.
+
+The drawing works at four times the master's size on a float canvas: every
+shape is filled at exact coverage by the one scan converter (`lib/raster`),
+lettering is set from the faces the tree ships (Inter, Noto Serif) through
+`lib/fontface`, a bevel is read off a blurred copy of its shape, worked only as
+far as the blur can reach, and the canvas is area-averaged down to the
+256-pixel master. Only IEEE arithmetic and `tairix_util::mathf` are used, so a
+master is the same bytes on every host. A new type is an `IconKind`, a drawing
+in `icons/masters.rs` and its row in `MASTERS`; the generator's tests hold
+every drawing to the build's own check of an icon master.
+
 ## In the taskbar
 
 The taskbar's notification area holds an ordered list of status icons, each

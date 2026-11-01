@@ -3,6 +3,8 @@
 //! A document opens as at most one — no container magic is also a picture's
 //! signature — and scrolls the same way whichever it is.
 
+use tairix_abi::fs::Filetype;
+
 use crate::code::CodeDisplay;
 use crate::data::DataDisplay;
 use crate::hex::HexLayout;
@@ -21,13 +23,13 @@ pub enum Display {
 }
 
 impl Display {
-    /// The display a document called `name` opening with `head` offers, if
-    /// any, shown at once.
+    /// The display a document called `name`, whose volume records `recorded`
+    /// as its filetype, opening with `head` offers, if any, shown at once.
     #[must_use]
-    pub fn of(head: &[u8], name: &str) -> Option<Self> {
+    pub fn of(head: &[u8], name: &str, recorded: Option<Filetype>) -> Option<Self> {
         CodeDisplay::of(head)
             .map(Self::Code)
-            .or_else(|| DataDisplay::of(head, name).map(Self::Data))
+            .or_else(|| DataDisplay::of(head, name, recorded).map(Self::Data))
     }
 
     /// Whether the window shows its document this way.

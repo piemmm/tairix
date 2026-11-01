@@ -9,7 +9,8 @@
 //! * **Hostile input files** — mutated container/help-document/icon/picture
 //!   templates and pure noise fed to
 //!   [`tairix_sandbox::decode::container_summary`] / [`file_report`] /
-//!   [`disassemble`] / [`render_help`] / [`rasterise_icon`] over the
+//!   [`disassemble`] / [`render_help`] / [`rasterise_icon`] /
+//!   [`application_sprite`] over the
 //!   in-process loopback worker — and mutated NTP server replies fed to
 //!   [`tairix_sandbox::timesync::evaluate_datagram`]: every outcome must be
 //!   a typed result, never a panic.
@@ -45,9 +46,9 @@ use tairix_sandbox::imageedit::{
 };
 use tairix_sandbox::imageinspect::{inspect_document, InspectService};
 use tairix_sandbox::imagerender::{
-    close_view, open_view, plan_wallpaper, rasterise_icon, render_page, render_thumbnail,
-    select_page, send_document, ImageRenderService, ViewFormat, WallpaperRenderFailure,
-    MAX_DESTINATION_WIDTH, MAX_ICON_SIDE,
+    application_sprite, boot_sprite_files, close_view, open_view, plan_wallpaper, rasterise_icon,
+    render_page, render_thumbnail, select_page, send_document, ImageRenderService, ViewFormat,
+    WallpaperRenderFailure, MAX_DESTINATION_WIDTH, MAX_ICON_SIDE,
 };
 use tairix_sandbox::loopback::{LoopbackLauncher, LoopbackSession};
 use tairix_sandbox::proto::Channel;
@@ -547,6 +548,109 @@ fn fuzz_thumbnail_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &
     }
 }
 
+/// A document held in memory, read as a sprite file is.
+struct Held<'a>(&'a [u8]);
+
+impl tairix_icon::ArtworkDocument for Held<'_> {
+    fn stamp(&self) -> tairix_icon::DocumentStamp {
+        tairix_icon::DocumentStamp {
+            size: self.0.len() as u64,
+            modified: tairix_abi::time::Time64::UNIX_EPOCH,
+            id: tairix_abi::FileId::NONE,
+            content_gen: 0,
+        }
+    }
+
+    fn read_at(&mut self, offset: u64, into: &mut [u8]) -> Option<usize> {
+        let held = self.0.get(usize::try_from(offset).ok()?..)?;
+        let len = held.len().min(into.len());
+        into[..len].copy_from_slice(&held[..len]);
+        Some(len)
+    }
+}
+
+/// The application names the application-sprite leg seeks: one the template
+/// holds both sprites of, one it holds a large sprite of, and one it lacks.
+const APPLICATION_NAMES: [&str; 3] = ["!App", "!Other", "!Missing"];
+
+/// A sprite area of an application's large and small sprites, of pixels of
+/// differing shapes, and a sprite of another name: the application-sprite
+/// leg's template.
+fn application_area() -> Vec<u8> {
+    let picture = |width: u32, height: u32| {
+        let rgba = (0..width * height * 4)
+            .map(|at| {
+                let low = at.to_le_bytes()[0];
+                if at % 4 == 3 {
+                    low.wrapping_mul(37)
+                } else {
+                    low
+                }
+            })
+            .collect();
+        Picture::rgba(width, height, rgba).unwrap_or_else(|_| unreachable!("a valid fixture"))
+    };
+    let (large, small, other) = (picture(4, 2), picture(2, 2), picture(3, 3));
+    let name = |text: &str| SpriteName::new(text).unwrap_or_else(|| unreachable!("a valid name"));
+    let sprite = |text, eig, source| SpriteInput::Picture {
+        name: name(text),
+        mode: SpriteMode::truecolour(eig, true),
+        palette: &SpritePalette::Implied,
+        masked: true,
+        source,
+    };
+    encode_sprite_area(&[
+        sprite("!other", (1, 1), &other),
+        sprite("!app", (1, 2), &large),
+        sprite("sm!app", (2, 1), &small),
+    ])
+    .unwrap_or_default()
+}
+
+/// The application sprite template mutated, a truncation of it, and noise,
+/// each drawn as an application's icon of a random name at a random side:
+/// every reply is either a refusal or exactly the square asked for.
+fn fuzz_application_sprite_iteration<L: Launcher>(
+    sandbox: &mut ParserSandbox<L, SilentSink>,
+    noise: &[u8],
+    rng: &mut Prng,
+) {
+    let mut area = application_area();
+    for _ in 0..rng.at_most(6) {
+        let pos = rng.below(area.len());
+        area[pos] ^= rng.next_u8();
+    }
+    let cut = rng.at_most(area.len());
+    for document in [area.as_slice(), &area[..cut], noise] {
+        let side = u32::try_from(rng.at_most(64)).unwrap_or(0) + 1;
+        let Some(names) = tairix_icon::SpriteNames::of(rng.pick(&APPLICATION_NAMES)) else {
+            continue;
+        };
+        if let Ok(fitted) = application_sprite(sandbox, side, &names, &mut Held(document)) {
+            assert_fitted(&fitted, side);
+        }
+    }
+    let mut boot = BOOT_TEMPLATE.as_bytes().to_vec();
+    for _ in 0..rng.at_most(6) {
+        let pos = rng.below(boot.len());
+        boot[pos] = rng.next_u8();
+    }
+    for text in [boot.as_slice(), noise] {
+        if let Ok(files) = boot_sprite_files(sandbox, text) {
+            assert!(files.len() <= tairix_icon::riscos::MAX_SPRITE_FILES);
+            assert!(files
+                .iter()
+                .all(|file| tairix_icon::riscos::is_application_path(file)));
+        }
+    }
+}
+
+/// An application's `!Boot`, the boot-scan leg's template.
+const BOOT_TEMPLATE: &str = "Set App$Dir <Obey$Dir>\n\
+     SetMacro App$Path <App$Dir>.,<App$Dir>.Themes.\n\
+     If \"<App$Dir>\"<>\"\" Then IconSprites App:!Sprites\n\
+     IconSprites <App$Dir>.Icons\n";
+
 /// A believed thumbnail is exactly the square asked for, with its picture
 /// placed inside it.
 fn assert_fitted(fitted: &tairix_icon::Fitted, side: u32) {
@@ -1033,6 +1137,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
             fuzz_wallpaper_iteration(&mut honest_icon, &noise, &mut rng);
         fuzz_view_iteration(&mut honest_icon, &noise, &mut rng);
         fuzz_thumbnail_iteration(&mut honest_icon, &noise, &mut rng);
+        fuzz_application_sprite_iteration(&mut honest_icon, &noise, &mut rng);
         fuzz_edit_iteration(&mut honest_icon, &noise, &mut rng);
         fuzz_inspect_iteration(&mut honest_inspect, &noise, &mut rng);
 
@@ -1066,6 +1171,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         if let Ok(fitted) = render_thumbnail(&mut hostile, side, None) {
             assert_fitted(&fitted, side);
         }
+        fuzz_application_sprite_iteration(&mut hostile, &noise, &mut rng);
         let _ = drawn(&mut hostile, wallpaper_w, wallpaper_h, fit, &png_template());
         hostile_document_iteration(&mut hostile);
         let _ = inspect_document(&mut hostile, None);

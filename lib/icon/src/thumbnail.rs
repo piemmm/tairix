@@ -135,7 +135,27 @@ impl RtDocument {
     #[must_use]
     pub fn open(path: &str) -> Option<Self> {
         let flags = tairix_abi::fs::OpenFlags::READ.union(tairix_abi::fs::OpenFlags::NO_FOLLOW);
-        let file = tairix_rt::File::open(path.as_bytes(), flags).ok()?;
+        Self::regular(tairix_rt::File::open(path.as_bytes(), flags).ok()?)
+    }
+
+    /// Open the file `inside` names within the directory `dir`, walking each
+    /// component of `inside` from `dir` without following a symbolic link,
+    /// so what is opened lies inside `dir`; `None` as [`open`](Self::open)
+    /// refuses, or where a component is a link.
+    #[must_use]
+    pub fn open_inside(dir: &str, inside: &str) -> Option<Self> {
+        let mut at = tairix_rt::Dir::open(dir.as_bytes()).ok()?;
+        let mut components = inside.split('/');
+        let leaf = components.next_back()?;
+        for component in components {
+            at = at.open_dir(component.as_bytes()).ok()?;
+        }
+        let flags = tairix_abi::fs::OpenFlags::READ.union(tairix_abi::fs::OpenFlags::NO_FOLLOW);
+        Self::regular(at.open_file(leaf.as_bytes(), flags).ok()?)
+    }
+
+    /// `file`, where it is a regular file.
+    fn regular(file: tairix_rt::File) -> Option<Self> {
         let stat = file.stat().ok()?;
         (stat.kind == tairix_abi::fs::FileKind::Regular).then_some(Self {
             file,

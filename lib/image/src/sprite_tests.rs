@@ -10,10 +10,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::{
-    decode, decode_as, decode_fitted_as, desktop_palette, open_native, probe_as, sniff,
-    DecodeError, DecodeLimits, FitBox, ImageFormat, IndexDepth, NativeDocument, Pixels,
-    RasterImage, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry, SpriteLayout, SpriteMode,
-    SpriteName, SpritePalette,
+    decode, decode_as, decode_fitted_as, decode_named, desktop_palette, find_named, open_native,
+    probe_as, sniff, DecodeError, DecodeLimits, FitBox, ImageFormat, IndexDepth, NativeDocument,
+    Pixels, RasterImage, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry, SpriteLayout,
+    SpriteMode, SpriteName, SpritePalette,
 };
 
 /// Limits generous enough for every fixture here.
@@ -91,6 +91,7 @@ pub(crate) struct Sprite {
     width_words: Option<u32>,
     last_bit: Option<u32>,
     length: Option<u32>,
+    name: [u8; 12],
 }
 
 impl Sprite {
@@ -108,7 +109,15 @@ impl Sprite {
             width_words: None,
             last_bit: None,
             length: None,
+            name: *b"fixture\0\0\0\0\0",
         }
+    }
+
+    /// This sprite called `name`, padded as a control block pads one.
+    pub(crate) fn named(mut self, name: &[u8]) -> Self {
+        self.name = [0; 12];
+        self.name[..name.len()].copy_from_slice(name);
+        self
     }
 
     fn left(mut self, left: u32) -> Self {
@@ -202,7 +211,7 @@ impl Sprite {
         let total = mask_at + self.mask.as_deref().map_or(0, len);
         let mut out = Vec::new();
         out.extend_from_slice(&self.length.unwrap_or(total).to_le_bytes());
-        out.extend_from_slice(b"fixture\0\0\0\0\0");
+        out.extend_from_slice(&self.name);
         let words = self
             .width_words
             .unwrap_or_else(|| row_words(self.bits, self.width, self.left));
@@ -1431,4 +1440,52 @@ fn a_fitted_decode_is_the_whole_decode_reduced() {
         decode_fitted_as(ImageFormat::Sprite, &bytes, &tight, FitBox::new(2, 2)),
         Err(DecodeError::WidthExceedsLimit)
     );
+}
+
+/// A sprite is found by its name as RISC OS finds one, without regard to case
+/// and the first of a name taking it, measured from its control block, and
+/// decoded alone.
+#[test]
+fn a_sprite_is_found_by_its_name_and_decoded_alone() {
+    let values: Vec<u32> = (0..4 * 2).collect();
+    let bytes = area(&[
+        Sprite::new(MODE_16, 4, 3, 3).named(b"!edit"),
+        Sprite::new(MODE_16, 4, 4, 2)
+            .named(b"sm!edit")
+            .pixels(&values),
+        Sprite::new(MODE_16, 4, 5, 5).named(b"SM!EDIT"),
+    ]);
+    let name = |text: &str| SpriteName::new(text).expect("a sprite name");
+    let large = find_named(&bytes, &name("!EDIT"))
+        .expect("the area reads")
+        .expect("found");
+    assert_eq!(
+        (large.width(), large.height(), large.pixel_aspect()),
+        (3, 3, (1, 2))
+    );
+    let small = find_named(&bytes, &name("sm!Edit"))
+        .expect("the area reads")
+        .expect("the first of its name");
+    assert_eq!((small.width(), small.height()), (4, 2));
+    assert_eq!(find_named(&bytes, &name("!other")), Ok(None));
+
+    let decoded = decode_named(&bytes, &small, &limits()).expect("decodes");
+    let whole = SpriteAreaReader::open(&bytes, &limits())
+        .expect("the area")
+        .sprite(1)
+        .expect("reads")
+        .expect("a sprite");
+    let SpriteEntry::Picture(native) = whole else {
+        panic!("a sprite this crate reads");
+    };
+    assert_eq!((decoded.width(), decoded.height()), (4, 2));
+    let expected = native.picture.to_rgba().expect("straight-alpha pixels");
+    assert_eq!(decoded.pixels(), expected.as_slice());
+
+    let tight = DecodeLimits::new(2, 2, 4, 0);
+    assert_eq!(
+        decode_named(&bytes, &small, &tight),
+        Err(DecodeError::WidthExceedsLimit)
+    );
+    assert!(find_named(&bytes[..20], &name("!edit")).is_err());
 }

@@ -42,6 +42,7 @@ use core::cmp::Ordering;
 use crate::bounded_text::{BoundedText, WideText};
 use crate::desktop::DesktopInfo;
 use crate::driver::display::{DamageList, DamageRect, DisplayFormat, MAX_DAMAGE_RECTS, NO_RECT};
+use crate::fs::Filetype;
 use crate::input::KeyInput;
 use crate::input::Modifiers;
 use crate::input::PointerButtonCode;
@@ -2739,8 +2740,9 @@ pub enum WindowRequest {
     /// Hand the session the drag the user began on `items` in window
     /// `window_id`, while the press that began it is still held there.
     ///
-    /// Only a name and a count cross: what the plate says, and what an
-    /// application slot's declared types are matched against. The dragging
+    /// Only a name, the filetype its volume records, and a count cross: what
+    /// the plate says, and what an application slot's declared types are
+    /// matched against. The dragging
     /// application keeps the items and performs every drop itself
     /// ([`WindowEvent::DragEnded`]), so no path of its own and no authority
     /// reaches the session. While the pointer is over one of the application's
@@ -3404,12 +3406,16 @@ const _: () = assert!(
 const DRAG_COUNT_OFFSET: usize = WINDOW_ID_WIRE_LEN;
 /// Byte offset of its flags.
 const DRAG_FLAGS_OFFSET: usize = DRAG_COUNT_OFFSET + 4;
+/// Byte offset of its first item's filetype, zero where it records none.
+const DRAG_FILETYPE_OFFSET: usize = DRAG_FLAGS_OFFSET + 1;
 /// Byte offset of its first item's name length.
-const DRAG_NAME_LEN_OFFSET: usize = DRAG_FLAGS_OFFSET + 1;
+const DRAG_NAME_LEN_OFFSET: usize = DRAG_FILETYPE_OFFSET + 2;
 /// Byte offset of that name.
 const DRAG_NAME_OFFSET: usize = DRAG_NAME_LEN_OFFSET + 1;
 /// Flag: the drag is one file an application may open.
 const DRAG_OPENABLE: u8 = 1;
+/// Flag: the first item's volume records a filetype for it.
+const DRAG_TYPED: u8 = 2;
 
 /// Encoded size of a [`WindowRequest::BeginDrag`] whose first item's name is
 /// `name` bytes.
@@ -4745,7 +4751,18 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
         } => {
             put_u64(out, 8, window_id);
             put_u32(out, DRAG_COUNT_OFFSET, items.count());
-            out[DRAG_FLAGS_OFFSET] = if items.openable() { DRAG_OPENABLE } else { 0 };
+            let openable = if items.openable() { DRAG_OPENABLE } else { 0 };
+            let typed = if items.filetype().is_some() {
+                DRAG_TYPED
+            } else {
+                0
+            };
+            out[DRAG_FLAGS_OFFSET] = openable | typed;
+            put_u16(
+                out,
+                DRAG_FILETYPE_OFFSET,
+                items.filetype().map_or(0, Filetype::get),
+            );
             let text = items.first().as_str().as_bytes();
             out[DRAG_NAME_LEN_OFFSET] = items.first().len_byte();
             out[DRAG_NAME_OFFSET..DRAG_NAME_OFFSET + text.len()].copy_from_slice(text);
@@ -4801,16 +4818,23 @@ fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> 
 }
 
 /// Decode the operands of a [`WindowRequest::BeginDrag`]: the count, the
-/// flags, and a name exactly as long as its length byte says.
+/// flags, the filetype exactly when they say there is one, and a name exactly
+/// as long as its length byte says.
 fn read_begin_drag(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     if bytes.len() < DRAG_NAME_OFFSET {
         return Err(Errno::BufferTooSmall);
     }
     let window_id = nonzero_id(read_u64(bytes, 8))?;
     let flags = bytes[DRAG_FLAGS_OFFSET];
-    if flags & !DRAG_OPENABLE != 0 {
+    if flags & !(DRAG_OPENABLE | DRAG_TYPED) != 0 {
         return Err(Errno::OutOfRange);
     }
+    let raw = read_u16(bytes, DRAG_FILETYPE_OFFSET);
+    let filetype = match (flags & DRAG_TYPED != 0, raw) {
+        (true, raw) => Some(Filetype::new(raw).ok_or(Errno::OutOfRange)?),
+        (false, 0) => None,
+        (false, _) => return Err(Errno::OutOfRange),
+    };
     let len = bytes[DRAG_NAME_LEN_OFFSET];
     exact_len(bytes, begin_drag_wire_len(usize::from(len)))?;
     let mut name = [0u8; crate::FS_NAME_MAX];
@@ -4818,13 +4842,14 @@ fn read_begin_drag(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     name.get_mut(..text.len())
         .ok_or(Errno::LengthOutOfRange)?
         .copy_from_slice(text);
+    let items = DragItems::new(
+        DocumentName::from_wire(len, &name)?,
+        read_u32(bytes, DRAG_COUNT_OFFSET),
+        flags & DRAG_OPENABLE != 0,
+    )?;
     Ok(WindowRequest::BeginDrag {
         window_id,
-        items: DragItems::new(
-            DocumentName::from_wire(len, &name)?,
-            read_u32(bytes, DRAG_COUNT_OFFSET),
-            flags & DRAG_OPENABLE != 0,
-        )?,
+        items: items.with_filetype(filetype),
     })
 }
 
@@ -5962,15 +5987,17 @@ pub const WINDOW_PANE_NAME_MAX: usize = 32;
 /// the life of the connection rather than taking one per call.
 pub const WINDOW_OPEN_TARGET_REPLY_MAX: usize = OPEN_TARGET_REPLY_TEXT_OFFSET + crate::FS_PATH_MAX;
 
-/// What a drag carries, as the session sees it: the first item's name, how
-/// many items there are, and whether the drag is one file an application may
-/// open.
+/// What a drag carries, as the session sees it: the first item's name and the
+/// filetype its volume records, how many items there are, and whether the drag
+/// is one file an application may open.
 ///
-/// The name is the plate's label and what an application slot's declared
-/// types are matched against; only an openable drag is offered to a slot.
+/// The name is the plate's label; it, and the filetype where the name says
+/// nothing, are what an application slot's declared types are matched
+/// against. Only an openable drag is offered to a slot.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DragItems {
     first: DocumentName,
+    filetype: Option<Filetype>,
     count: u32,
     openable: bool,
 }
@@ -5989,15 +6016,28 @@ impl DragItems {
         }
         Ok(Self {
             first,
+            filetype: None,
             count,
             openable,
         })
+    }
+
+    /// These items, the first recorded by its volume as of `filetype`.
+    #[must_use]
+    pub const fn with_filetype(self, filetype: Option<Filetype>) -> Self {
+        Self { filetype, ..self }
     }
 
     /// The first item's name.
     #[must_use]
     pub const fn first(&self) -> &DocumentName {
         &self.first
+    }
+
+    /// The filetype the first item's volume records for it.
+    #[must_use]
+    pub const fn filetype(&self) -> Option<Filetype> {
+        self.filetype
     }
 
     /// How many items are dragged.
@@ -8935,28 +8975,28 @@ mod tests {
         CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
         DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_COUNT_OFFSET, DRAG_EVENT_KIND_OFFSET,
         DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET, DRAG_EVENT_WINDOW_OFFSET,
-        DRAG_EVENT_X_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET, DROP_TARGET_REPLY_FLAGS_OFFSET,
-        HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN,
-        HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX,
-        HAND_OVER_WRITABLE, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET,
-        MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END,
-        MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_REPLY_LEN_OFFSET,
-        MENU_TEXT_REPLY_TEXT_OFFSET, NAME_LIST_COUNT_OFFSET, NAME_LIST_NAMES_OFFSET,
-        OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN,
-        OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
-        OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_LEN_OFFSET,
-        PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN, PINCH_MODIFIERS_OFFSET,
-        PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_RECT_LEN, PRESENT_WIRE_LEN,
-        PREVIEW_EVENT_OUTCOME_OFFSET, PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET,
-        PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
-        RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN,
-        REQUEST_HEADER_LEN, REVEAL_DOCUMENT_WIRE_LEN, SAVE_ENDINGS_MAX, SAVE_ENDING_MAX,
-        SCROLLED_MODIFIERS_OFFSET, SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET,
-        SET_CURSOR_OFFSET, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN,
-        SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
-        SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
-        SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
-        TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
+        DRAG_EVENT_X_OFFSET, DRAG_FILETYPE_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET, DRAG_TYPED,
+        DROP_TARGET_REPLY_FLAGS_OFFSET, HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET,
+        HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET,
+        HAND_OVER_RUN_PATH_MAX, HAND_OVER_WRITABLE, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH,
+        MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET,
+        MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET,
+        MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET, NAME_LIST_COUNT_OFFSET,
+        NAME_LIST_NAMES_OFFSET, OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET,
+        OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET,
+        OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET,
+        PICK_NAME_LEN_OFFSET, PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN,
+        PINCH_MODIFIERS_OFFSET, PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_RECT_LEN,
+        PRESENT_WIRE_LEN, PREVIEW_EVENT_OUTCOME_OFFSET, PREVIEW_EVENT_SIZE_OFFSET,
+        PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN,
+        QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET,
+        RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN, REVEAL_DOCUMENT_WIRE_LEN, SAVE_ENDINGS_MAX,
+        SAVE_ENDING_MAX, SCROLLED_MODIFIERS_OFFSET, SET_CLIPBOARD_KIND_OFFSET,
+        SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET,
+        SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN,
+        SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET,
+        SET_TOOLTIP_WIRE_LEN, SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT,
+        SIZING_MIN_WIDTH, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
         WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN,
         WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
         WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
@@ -9447,6 +9487,15 @@ mod tests {
                 window_id: 9,
                 items: DragItems::new(first, u32::MAX, false).expect("many items"),
             });
+            for raw in [0, 0xFFB, 0xFFF] {
+                let filetype = crate::fs::Filetype::new(raw).expect("twelve bits");
+                visit(WindowRequest::BeginDrag {
+                    window_id: 9,
+                    items: DragItems::new(first, 1, true)
+                        .expect("one openable file")
+                        .with_filetype(Some(filetype)),
+                });
+            }
         }
         visit(WindowRequest::TakePickedName { window_id: 9 });
         visit(WindowRequest::TakePickedFile { window_id: 9 });
@@ -11666,6 +11715,55 @@ mod tests {
             WindowRequest::from_bytes(&several[..len]),
             Err(Errno::OutOfRange)
         );
+    }
+
+    /// A drag carries the filetype its first item's volume records exactly
+    /// when its flag says so: a filetype past twelve bits, and one sent
+    /// without the flag, are refused rather than read either way.
+    #[test]
+    fn a_drag_carries_its_first_items_filetype_only_when_flagged() {
+        let name = DocumentName::new("Prog").expect("a valid name");
+        let basic = crate::fs::Filetype::new(0xFFB).expect("twelve bits");
+        let typed = WindowRequest::BeginDrag {
+            window_id: 9,
+            items: DragItems::new(name, 1, true)
+                .expect("one openable file")
+                .with_filetype(Some(basic)),
+        };
+        let len = typed.wire_len();
+        let bytes = typed.frame();
+        assert_eq!(WindowRequest::from_bytes(&bytes[..len]), Ok(typed));
+        let WindowRequest::BeginDrag { items, .. } = typed else {
+            unreachable!("built as a drag")
+        };
+        assert_eq!(items.filetype(), Some(basic));
+
+        let mut wide = bytes;
+        put_u16(&mut wide, DRAG_FILETYPE_OFFSET, 0x1000);
+        assert_eq!(
+            WindowRequest::from_bytes(&wide[..len]),
+            Err(Errno::OutOfRange)
+        );
+        let mut unflagged = bytes;
+        unflagged[DRAG_FLAGS_OFFSET] &= !DRAG_TYPED;
+        assert_eq!(
+            WindowRequest::from_bytes(&unflagged[..len]),
+            Err(Errno::OutOfRange)
+        );
+        let plain = WindowRequest::BeginDrag {
+            window_id: 9,
+            items: DragItems::new(name, 1, true).expect("one openable file"),
+        };
+        let plain_bytes = plain.frame();
+        assert_eq!(read_u16(&plain_bytes, DRAG_FILETYPE_OFFSET), 0);
+        let mut flagged = plain_bytes;
+        flagged[DRAG_FLAGS_OFFSET] |= DRAG_TYPED;
+        let WindowRequest::BeginDrag { items, .. } =
+            WindowRequest::from_bytes(&flagged[..plain.wire_len()]).expect("a typed drag")
+        else {
+            unreachable!("decoded as a drag")
+        };
+        assert_eq!(items.filetype().map(crate::fs::Filetype::get), Some(0));
     }
 
     #[test]

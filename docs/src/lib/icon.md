@@ -166,6 +166,30 @@ different ways:
   thumbnails the embedder calls `sweep_thumbnails`, which withdraws each one
   nothing asked for since the last sweep and wipes any drawn and never
   collected; `MAX_WANTED_THUMBNAILS` bounds what queues between sweeps.
+- `IconRequest::riscos_application(kind, dir, stamp)` — a RISC OS application
+  (`!Name`) drawn as RISC OS's Filer draws it, by the sprite of its own name.
+  `riscos::application_picture` has the application's `!Boot` read in the
+  parser sandbox (`ArtworkRasteriser::boot_sprite_files`), and never run: of
+  its commands only `Set`, `SetMacro`, `Unset`, an `If` comparing two quoted
+  strings and `IconSprites` are understood, `<Obey$Dir>` standing for the
+  application's directory and a path variable read as its `$Path` says
+  (`boot_sprite_files`), and the scan expands a bounded number of variable
+  references however its macros nest. Each sprite file it loads is tried in
+  turn, then `!Sprites`, each first as its `11` and `22` copies for finer
+  screens. A file is believed only as a path inside the application
+  (`is_application_path`: plain names at most `MAX_DEPTH` deep), at most
+  `MAX_SPRITE_FILES` of them, alike names but for case being one, and every
+  file is opened inside the application through no link
+  (`ArtworkReader::open_inside`); a `!Boot` past `MAX_BOOT_BYTES` or holding a
+  byte no command line can is not read, a sprite file past
+  `MAX_APPLICATION_SPRITES_BYTES` is passed over, and one picture streams no
+  more than `MAX_APPLICATION_PICTURE_BYTES` to the sandbox. The sprite
+  is sought by the two names the Filer uses (`SpriteNames`: the application's
+  name as RISC OS spells it and `sm` before it, cut to a sprite name's twelve
+  characters and matched without regard to case) and drawn in the sandbox
+  (`ArtworkRasteriser::application_sprite`). It reads files, so it is
+  thumbnail-class work the inline resolver declines; `or_folder(sample)` puts
+  the folder's picture of what it holds beneath it, then the plain folder.
 - `IconRequest::folder(sample)` — a folder drawn as a picture of what it
   holds: the `FolderBack` artwork, up to three cards from its `FolderSample`
   fanned out of the mouth — each turned a few degrees about its foot and drawn

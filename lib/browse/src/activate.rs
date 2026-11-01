@@ -22,6 +22,8 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 
+use tairix_fsmeta::preset::acorn::Filetype;
+
 use crate::network::NetworkEndpoint;
 
 /// What an activation should do when the entry turns out to be an application
@@ -72,6 +74,9 @@ pub enum Activation {
     OpenFile {
         /// The file's validated absolute path.
         path: String,
+        /// The RISC OS filetype its listing found recorded for it, which types
+        /// it where its name does not.
+        recorded: Option<Filetype>,
     },
     /// The item is a network endpoint that can be reached: the caller mounts
     /// it as it was displayed (`plans/ZEROCONF.md` §6.3). The engine names the

@@ -74,6 +74,9 @@ path = "src/run.rs"
 
 # Everything only the freestanding `Run` binary links.
 [target.'cfg(target_os = "none")'.dependencies]
+# The filetype a document's volume records, read through its descriptor by the
+# one reader every program shares.
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0", features = ["rt"] }
 # The app half of the window channel: the document host the editor runs in
 # and the clipboard client.
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }

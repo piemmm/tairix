@@ -131,7 +131,9 @@ Stability tier: **experimental**.
   store's own parser refuses an over-long one, and a validation answers at
   most `tairix_syntax::MAX_DIAGNOSTICS`. `TextEdit.app` is the consumer.
 - **`imagerender`** — the desktop's image decodes: an icon, sent whole in one
-  request; the wallpaper, sent with `send_document`; and a document session,
+  request; the wallpaper, sent with `send_document`; a thumbnail and a RISC OS
+  application's sprite (`application_sprite`), each streamed in and let go once
+  drawn; and a document session,
   whose file is streamed in through `upload_document` rather than held whole,
   read straight into one push frame of at most `MAX_DOCUMENT_CHUNK` bytes and
   no more than the document, and never copied.

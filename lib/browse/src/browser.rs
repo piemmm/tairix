@@ -1351,12 +1351,17 @@ impl<S: DirectorySource> Browser<S> {
             }),
             EntryKind::File | EntryKind::Link(LinkTarget::File) => {
                 let path = self.child_target_path(&name)?;
-                let media =
-                    crate::media::media_for_named(&name, kind, crate::media::Site::of(components));
+                let recorded = entry.filetype();
+                let media = crate::media::media_for_named(
+                    &name,
+                    kind,
+                    recorded,
+                    crate::media::Site::of(components),
+                );
                 Ok(if media.holds_a_volume() {
                     Activation::MountImage { path }
                 } else {
-                    Activation::OpenFile { path }
+                    Activation::OpenFile { path, recorded }
                 })
             }
             // A link that resolves to nothing has nothing to activate; the

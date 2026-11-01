@@ -26,6 +26,7 @@ fn window(canvas: Canvas) -> (View, Layout, ThemeRegistry) {
     let mut view = View::new(
         Document::new(Picture::plain(canvas)),
         String::from("p.png"),
+        None,
         Access::Writable,
     );
     let theme = registry.active();
@@ -518,6 +519,7 @@ fn layered_window(
     let mut view = View::new(
         Document::new(picture),
         String::from("p.ora"),
+        None,
         Access::Writable,
     );
     let theme = registry.active();

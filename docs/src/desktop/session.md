@@ -2544,7 +2544,8 @@ begins only from the window that holds the press — `DesktopShell::begin_drag`
 checks the router's own record of that press (`pressed_in`) — and takes the
 pointer from that window, which therefore never sees the release it lent.
 
-- **Only a name and a count are carried** (`DragItems`). Each motion asks the
+- **Only a name, its recorded filetype and a count are carried**
+  (`DragItems`). Each motion asks the
   session router which place the pointer is over (`drag_place`, which
   allocates nothing): an icon-bar slot, one of the dragging application's
   *own* windows (the window engine's attested ownership decides, so another
@@ -2554,8 +2555,8 @@ pointer from that window, which therefore never sees the release it lent.
   with the file, the folder a desktop drop lands in — is resolved
   (`drag_surface`) only as the pointer arrives somewhere new.
 - **A slot takes one openable file.** Its application takes the file when the
-  bundle the desktop launched it from declares a type the name resolves to, by
-  the one matching rule "Open With" uses; the slot is lit with its hover look
+  bundle the desktop launched it from declares a type the name, else the
+  recorded filetype, resolves to, by the one matching rule "Open With" uses; the slot is lit with its hover look
   while it would take the drop. A drag of several items, or of a folder, is
   never offered to a slot.
 - **The application decides every folder drop.** Over its own windows or the

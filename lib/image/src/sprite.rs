@@ -392,6 +392,13 @@ fn numbered_mode(mode: u32) -> Result<Mode, DecodeError> {
     })
 }
 
+/// The shape of a pixel of eigen factors `eig`, width to height, in lowest
+/// terms.
+fn pixel_shape((x, y): (u8, u8)) -> (u32, u32) {
+    let least = x.min(y);
+    (1 << (x - least), 1 << (y - least))
+}
+
 /// The eigen factor a resolution of `dpi` states: the finest whose OS-unit
 /// pitch it does not exceed.
 fn eig_of_dpi(dpi: u32) -> u8 {
@@ -693,9 +700,7 @@ impl SpriteMode {
     /// pixel twice as tall as it is wide.
     #[must_use]
     pub fn pixel_aspect(&self) -> (u32, u32) {
-        let (x, y) = self.mode.eig;
-        let least = x.min(y);
-        (1 << (x - least), 1 << (y - least))
+        pixel_shape(self.mode.eig)
     }
 
     /// Whether the mask is eight bits of alpha rather than binary.
@@ -1556,6 +1561,83 @@ pub(crate) fn fitted_peak_bytes(
 pub(crate) fn pages(bytes: &[u8], limits: &DecodeLimits) -> Result<Pages<Area>, DecodeError> {
     let (area, measured) = Area::open(bytes)?;
     Ok(Pages::new(area, limits, measured.width, measured.height))
+}
+
+/// A sprite of an area found by its name: where it lies, and its shape, read
+/// from its control block alone.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NamedSprite {
+    at: u32,
+    width: u32,
+    height: u32,
+    eig: (u8, u8),
+}
+
+impl NamedSprite {
+    /// Its width in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Its height in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Its pixels' shape, width to height, in lowest terms: `(1, 2)` for a
+    /// pixel twice as tall as it is wide.
+    #[must_use]
+    pub fn pixel_aspect(&self) -> (u32, u32) {
+        pixel_shape(self.eig)
+    }
+}
+
+/// The first sprite of the area `bytes` RISC OS would take for `name` —
+/// names match without regard to case — measured from its control block, or
+/// `None` where the area holds none of that name.
+///
+/// # Errors
+///
+/// A refusal of the area's header or chain, or of the named sprite's control
+/// block.
+pub fn find_named(bytes: &[u8], name: &SpriteName) -> Result<Option<NamedSprite>, DecodeError> {
+    let area = Area::chain(bytes)?;
+    let mut at = area.header.first;
+    for _ in 0..area.header.count {
+        let named = SpriteName::from_control_block(slice_at(
+            bytes,
+            at,
+            NAME_AT,
+            u32::try_from(SpriteName::MAX_LEN).unwrap_or(0),
+        )?);
+        if named.matches(name) {
+            let header = read_header(bytes, at)?;
+            return Ok(Some(NamedSprite {
+                at,
+                width: header.width,
+                height: header.height,
+                eig: header.mode.eig,
+            }));
+        }
+        at = next_sprite(bytes, &area.header, at)?;
+    }
+    Ok(None)
+}
+
+/// The sprite [`find_named`] found in `bytes`, decoded as straight-alpha RGBA8
+/// at its natural size.
+///
+/// # Errors
+///
+/// Whatever decoding it refuses, its size past `limits` included.
+pub fn decode_named(
+    bytes: &[u8],
+    sprite: &NamedSprite,
+    limits: &DecodeLimits,
+) -> Result<RasterImage, DecodeError> {
+    locate(bytes, sprite.at, limits)?.rgba()
 }
 
 /// A sprite area read one sprite at a time, each in the representation its

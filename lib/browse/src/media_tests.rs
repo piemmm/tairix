@@ -11,13 +11,16 @@ use alloc::vec::Vec;
 use tairix_abi::fs::FileId;
 use tairix_abi::time::Time64;
 use tairix_abi::{SYSTEM_COMPONENT_STORE, SYSTEM_SERVICE_STORE};
-use tairix_icon::{IconKind, IconRequest, Reading};
+use tairix_fsmeta::preset::acorn;
+use tairix_fsmeta::preset::acorn::Filetype;
+use tairix_icon::{FolderSample, IconKind, IconRequest, Reading, SampleCard};
 
 use super::{
-    ancestry, entry_icon, media_for_entry, media_for_name, name_endings, BlankDocument, Ending,
-    Family, MediaType, ALL, EXTENSION_TABLE,
+    ancestry, entry_icon, folder_sample, media_for_document, media_for_entry, media_for_filetype,
+    media_for_name, media_for_named, name_endings, BlankDocument, Ending, Family, MediaType, Site,
+    ALL, EXTENSION_TABLE, FILETYPE_TABLE,
 };
-use crate::entry::{Entry, EntryKind, LinkTarget};
+use crate::entry::{Entry, EntryKind, LinkTarget, Occupancy};
 use crate::presentation::Pictures;
 
 /// The root-first components of a directory path, as a listing carries them.
@@ -132,6 +135,32 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
     ("film.mkv", MediaType::VideoMatroska, IconKind::Video),
     ("film.mov", MediaType::VideoQuicktime, IconKind::Video),
     ("film.avi", MediaType::VideoAvi, IconKind::Video),
+    ("film.mpg", MediaType::VideoMpeg, IconKind::Video),
+    ("film.mpeg", MediaType::VideoMpeg, IconKind::Video),
+    ("plugin.lua", MediaType::TextLua, IconKind::Text),
+    ("tool.pl", MediaType::TextPerl, IconKind::Text),
+    ("Module.pm", MediaType::TextPerl, IconKind::Text),
+    ("rules.mk", MediaType::TextMakefile, IconKind::Text),
+    ("build.mak", MediaType::TextMakefile, IconKind::Text),
+    ("paper.tex", MediaType::TextTex, IconKind::Text),
+    ("paper.ltx", MediaType::TextTex, IconKind::Text),
+    ("letter.rtf", MediaType::Rtf, IconKind::Text),
+    ("page.ps", MediaType::PostScript, IconKind::PostScript),
+    ("figure.eps", MediaType::PostScript, IconKind::PostScript),
+    ("job.pcl", MediaType::Pcl, IconKind::PrintData),
+    ("scan.jp2", MediaType::ImageJpeg2000, IconKind::Image),
+    ("scan.j2k", MediaType::ImageJpeg2000, IconKind::Image),
+    ("art.psd", MediaType::ImagePhotoshop, IconKind::Image),
+    ("old.pcx", MediaType::ImagePcx, IconKind::Image),
+    ("Sans.ttf", MediaType::FontTtf, IconKind::Font),
+    ("Sans.otf", MediaType::FontOtf, IconKind::Font),
+    ("Sans.woff", MediaType::FontWoff, IconKind::Font),
+    ("app.jar", MediaType::JavaArchive, IconKind::Archive),
+    ("loop.aif", MediaType::AudioAiff, IconKind::Audio),
+    ("loop.aiff", MediaType::AudioAiff, IconKind::Audio),
+    ("loop.aifc", MediaType::AudioAiff, IconKind::Audio),
+    ("tune.mid", MediaType::AudioMidi, IconKind::Audio),
+    ("tune.midi", MediaType::AudioMidi, IconKind::Audio),
 ];
 
 #[test]
@@ -203,10 +232,10 @@ fn a_risc_os_file_type_after_a_comma_names_the_media() {
     assert_eq!(media_for_name("pages,ff0"), Some(MediaType::ImageTiff));
     assert_eq!(media_for_name("ReadMe,fff"), Some(MediaType::TextPlain));
     // A type the registry does not know leaves the extension to say.
-    assert_eq!(media_for_name("notes.txt,ffb"), Some(MediaType::TextPlain));
+    assert_eq!(media_for_name("notes.txt,123"), Some(MediaType::TextPlain));
     assert_eq!(media_for_name("Sprites,ff9.png"), Some(MediaType::ImagePng));
     assert_eq!(media_for_name("a,b,ff9"), Some(MediaType::ImageSprite));
-    assert_eq!(media_for_name("Obey,feb"), None);
+    assert_eq!(media_for_name("Track,123"), None);
     assert_eq!(media_for_name(",b60"), None, "a file type needs a stem");
 }
 
@@ -218,7 +247,7 @@ fn a_name_ends_only_in_a_file_type_or_an_extension_after_a_stem() {
     let both = Ending::of("notes.txt,ffb");
     assert_eq!(
         (both.stem, both.filetype, both.extension),
-        ("notes", Some("ffb"), Some("txt"))
+        ("notes", Filetype::new(0xFFB), Some("txt"))
     );
     for bare in [
         "Smith, J",
@@ -235,7 +264,7 @@ fn a_name_ends_only_in_a_file_type_or_an_extension_after_a_stem() {
     }
     assert_eq!(Ending::of("a.tar.gz").stem, "a.tar");
     assert_eq!(Ending::of("my.photos").extension, Some("photos"));
-    assert_eq!(Ending::of("Logo,B60").filetype, Some("B60"));
+    assert_eq!(Ending::of("Logo,B60").filetype, Filetype::new(0xB60));
 }
 
 /// Every ending a type is known by names that type back, extensions first.
@@ -492,12 +521,24 @@ const TEXTUAL: &[MediaType] = &[
     MediaType::TextJava,
     MediaType::TextC,
     MediaType::TextPython,
+    MediaType::TextLua,
+    MediaType::TextPerl,
+    MediaType::TextMakefile,
+    MediaType::TextTex,
+    MediaType::RiscOsBasicText,
+    MediaType::Rtf,
     MediaType::ShellScript,
+    MediaType::RiscOsObey,
+    MediaType::RiscOsCommand,
+    MediaType::PostScript,
     MediaType::ImageSvg,
 ];
 
 /// Each codec's file and the container it is carried in.
-const CONTAINED: &[(MediaType, MediaType)] = &[(MediaType::AudioOpus, MediaType::AudioOgg)];
+const CONTAINED: &[(MediaType, MediaType)] = &[
+    (MediaType::AudioOpus, MediaType::AudioOgg),
+    (MediaType::JavaArchive, MediaType::ArchiveZip),
+];
 
 /// Each medium's image and the disk image it is a kind of.
 const IMAGED: &[(MediaType, MediaType)] = &[
@@ -1078,4 +1119,212 @@ fn a_disk_image_of_any_kind_holds_a_volume_and_nothing_else_does() {
     }) {
         assert!(!media.holds_a_volume(), "{media:?}");
     }
+}
+
+fn filetype(raw: u16) -> Filetype {
+    Filetype::new(raw).expect("twelve bits")
+}
+
+/// RISC OS's filetypes type the files they name: as one of TAIRiX's own types
+/// where that is the content, as RISC OS's own where nothing else is.
+#[test]
+fn a_risc_os_filetype_names_the_type_it_holds() {
+    for (raw, media) in [
+        (0xFFF, MediaType::TextPlain),
+        (0xFDB, MediaType::TextPlain),
+        (0xFFB, MediaType::RiscOsBasic),
+        (0xFD1, MediaType::RiscOsBasicText),
+        (0xFEB, MediaType::RiscOsObey),
+        (0xFD7, MediaType::RiscOsObey),
+        (0xFEA, MediaType::RiscOsObey),
+        (0xFFE, MediaType::RiscOsCommand),
+        (0xFF8, MediaType::RiscOsAbsolute),
+        (0xFFC, MediaType::RiscOsUtility),
+        (0xFFA, MediaType::RiscOsModule),
+        (0xFF9, MediaType::ImageSprite),
+        (0xAFF, MediaType::RiscOsDraw),
+        (0xFEC, MediaType::RiscOsTemplate),
+        (0xFF6, MediaType::RiscOsFont),
+        (0xFF5, MediaType::PostScript),
+        (0xFF4, MediaType::RiscOsPrintout),
+        (0xFED, MediaType::RiscOsPalette),
+        (0xFAF, MediaType::TextHtml),
+        (0xC85, MediaType::ImageJpeg),
+        (0xB60, MediaType::ImagePng),
+        (0xADF, MediaType::Pdf),
+        (0xDDC, MediaType::ArchiveZip),
+        (0xA91, MediaType::ArchiveZip),
+        (0xFCA, MediaType::RiscOsSquash),
+        (0xFCE, MediaType::RawFloppyDiskImage),
+        (0xFCD, MediaType::RawDiskImage),
+        (0xE1F, MediaType::Elf),
+        (0x1AD, MediaType::AudioMpeg),
+        (0xFFD, MediaType::ApplicationOctetStream),
+    ] {
+        assert_eq!(media_for_filetype(filetype(raw)), Some(media), "&{raw:03X}");
+    }
+    for unknown in [0x000, 0x123, 0xFF2] {
+        assert_eq!(
+            media_for_filetype(filetype(unknown)),
+            None,
+            "&{unknown:03X}"
+        );
+    }
+    // Each RISC OS type is pictured as what it is.
+    assert_eq!(MediaType::RiscOsBasic.icon(), IconKind::BasicProgram);
+    assert_eq!(MediaType::RiscOsObey.icon(), IconKind::RiscOsObey);
+    assert_eq!(MediaType::RiscOsCommand.icon(), IconKind::RiscOsObey);
+    assert_eq!(MediaType::RiscOsAbsolute.icon(), IconKind::RiscOsProgram);
+    assert_eq!(MediaType::RiscOsModule.icon(), IconKind::RiscOsModule);
+    assert_eq!(MediaType::RiscOsDraw.icon(), IconKind::Drawing);
+    assert_eq!(MediaType::RiscOsTemplate.icon(), IconKind::WindowTemplate);
+    assert_eq!(MediaType::FontTtf.icon(), IconKind::Font);
+    assert_eq!(MediaType::RiscOsPrintout.icon(), IconKind::PrintData);
+    assert_eq!(MediaType::RiscOsPalette.icon(), IconKind::Palette);
+}
+
+/// Every filetype the table lists reads back as its row's type, from a name
+/// as from a volume, and the one a type is offered under after a comma is the
+/// one RISC OS gives a new file of it.
+#[test]
+fn every_listed_filetype_reads_back_and_a_new_files_comes_first() {
+    for (media, codes) in FILETYPE_TABLE {
+        for code in *codes {
+            let parsed = acorn::filetype_from_value(code.as_bytes()).expect("three hex digits");
+            assert_eq!(media_for_filetype(parsed), Some(*media), "{code}");
+            let named = alloc::format!("File,{code}");
+            assert_eq!(media_for_name(&named), Some(*media), "{named}");
+        }
+        let after_comma: Vec<&str> = name_endings(*media)
+            .filter(|(separator, _)| *separator == ',')
+            .map(|(_, code)| code)
+            .collect();
+        assert_eq!(after_comma, [codes[0]], "{media:?}");
+    }
+}
+
+/// A file is typed by its name first and by the filetype its volume records
+/// second, so RISC OS's Data never hides a name that says more; a layout's own
+/// names, and a folder, are typed before either.
+#[test]
+fn a_name_types_a_file_before_its_recorded_filetype() {
+    let text = Some(filetype(0xFFF));
+    assert_eq!(
+        media_for_document("ReadMe", text),
+        Some(MediaType::TextPlain)
+    );
+    assert_eq!(
+        media_for_document("notes.txt", Some(filetype(0xFFD))),
+        Some(MediaType::TextPlain)
+    );
+    assert_eq!(
+        media_for_document("index.html", Some(filetype(0xFFB))),
+        Some(MediaType::TextHtml)
+    );
+    assert_eq!(
+        media_for_document("Game.bas", Some(filetype(0xFFB))),
+        Some(MediaType::RiscOsBasic),
+        "an ending the registry does not know says nothing"
+    );
+    assert_eq!(media_for_document("Game", None), None);
+    assert_eq!(media_for_document("Game", Some(filetype(0x123))), None);
+    let bundle = components("/System/Applications/Edit.app");
+    assert_eq!(
+        media_for_named("Run", EntryKind::File, text, Site::of(&bundle)),
+        MediaType::TairixRxe
+    );
+    assert_eq!(
+        media_for_named("!Edit", EntryKind::Directory, text, Site::Plain),
+        MediaType::InodeDirectory
+    );
+    let program = Entry::new("!RunImage", EntryKind::File, 1, Time64::UNIX_EPOCH)
+        .with_filetype(filetype(0xFF8));
+    assert_eq!(media_for_entry(&program, &[]), MediaType::RiscOsAbsolute);
+    let image =
+        Entry::new("Floppy", EntryKind::File, 1, Time64::UNIX_EPOCH).with_filetype(filetype(0xFCE));
+    assert!(media_for_entry(&image, &[]).holds_a_volume());
+}
+
+/// A folder's picture of what it holds types each member as its own listing
+/// would, its recorded filetype included.
+#[test]
+fn a_folder_sample_types_its_members_by_their_recorded_filetypes() {
+    let record = |name: &'static str| tairix_abi::fs::DirEntry {
+        kind: tairix_abi::fs::FileKind::Regular,
+        size: 1,
+        allocated: 0,
+        modified: Time64::UNIX_EPOCH,
+        id: FileId::NONE,
+        nlink: 1,
+        content_gen: 0,
+        name: name.as_bytes(),
+    };
+    let members = [
+        (record("ReadMe"), Some(filetype(0xFFF))),
+        (record("Data"), None),
+        (record("Prog"), Some(filetype(0xFFB))),
+    ];
+    let sample = folder_sample(&components("/disc"), members.iter().copied());
+    let kinds: Vec<IconKind> = sample.cards().map(tairix_icon::DrawnCard::kind).collect();
+    assert_eq!(kinds, [IconKind::Text, IconKind::BasicProgram]);
+}
+
+/// A RISC OS application asks for the sprite RISC OS's Filer shows it by, at
+/// the version its listing named, falling back to the folder it is — to its
+/// picture of what it holds where it has one. A link to one keys no version,
+/// and a folder not named as one is a folder.
+#[test]
+fn a_risc_os_application_asks_for_its_own_sprite_then_the_folder_it_is() {
+    const DISC: &str = "/Storage/disc/Apps";
+    let mut scratch = String::new();
+    let written = Time64::from_secs(1_700_000_000);
+    let path = alloc::format!("{DISC}/!Edit");
+    let mut app = Entry::new("!Edit", EntryKind::Directory, 0, written).with_id(LISTED);
+    let (kind, request) = entry_icon(DISC, &components(DISC), &app, Pictures::ALL, &mut scratch);
+    assert_eq!(kind, IconKind::Folder);
+    assert_eq!(
+        request,
+        IconRequest::riscos_application(kind, &path, Some(app.stamp()))
+    );
+
+    let sample = FolderSample::new([SampleCard::Kind(IconKind::Text)]);
+    app.set_occupancy(Occupancy::NonEmpty(sample.clone()));
+    let (kind, request) = entry_icon(DISC, &components(DISC), &app, Pictures::ALL, &mut scratch);
+    assert_eq!(kind, IconKind::FolderFilled);
+    assert_eq!(
+        request,
+        IconRequest::riscos_application(kind, &path, Some(app.stamp())).or_folder(&sample)
+    );
+
+    let link = Entry::new(
+        "Editor",
+        EntryKind::Link(LinkTarget::Directory),
+        16,
+        written,
+    )
+    .with_id(LISTED)
+    .with_target("../Tools/!Edit");
+    let (kind, request) = entry_icon(DISC, &components(DISC), &link, Pictures::ALL, &mut scratch);
+    let linked = alloc::format!("{DISC}/Editor");
+    assert_eq!(
+        request,
+        IconRequest::riscos_application(kind, &linked, None)
+    );
+
+    for folder in [
+        Entry::new("Edit", EntryKind::Directory, 0, written),
+        Entry::new("!", EntryKind::Directory, 0, written),
+        Entry::new("Edit", EntryKind::Link(LinkTarget::Directory), 0, written).with_target("Edit"),
+    ] {
+        let (kind, request) = entry_icon(
+            DISC,
+            &components(DISC),
+            &folder,
+            Pictures::ALL,
+            &mut scratch,
+        );
+        assert_eq!(request, IconRequest::kind(kind), "{folder:?}");
+    }
+    let boot = Entry::new("!Boot", EntryKind::File, 0, written);
+    assert!(!boot.is_riscos_application(), "a file is no application");
 }

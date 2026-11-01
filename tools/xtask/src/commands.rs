@@ -33,6 +33,7 @@ mod fssoak;
 mod fuzz;
 mod help_lint;
 mod host_fonts;
+mod icons;
 mod ignore_check;
 mod image_apps;
 mod image_drivers;
@@ -79,6 +80,7 @@ pub enum Command {
     FontAtlas,
     SoundEncode,
     Artsheet,
+    Icons,
     Devids,
     Unicode,
     Spirv,
@@ -125,6 +127,7 @@ impl Command {
         Command::FontAtlas,
         Command::SoundEncode,
         Command::Artsheet,
+        Command::Icons,
         Command::Devids,
         Command::Unicode,
         Command::Spirv,
@@ -170,6 +173,7 @@ impl Command {
             "font-atlas" => Command::FontAtlas,
             "sound-encode" => Command::SoundEncode,
             "artsheet" => Command::Artsheet,
+            "icons" => Command::Icons,
             "devids" => Command::Devids,
             "unicode" => Command::Unicode,
             "spirv" => Command::Spirv,
@@ -217,6 +221,7 @@ impl Command {
             Command::FontAtlas => "font-atlas",
             Command::SoundEncode => "sound-encode",
             Command::Artsheet => "artsheet",
+            Command::Icons => "icons",
             Command::Devids => "devids",
             Command::Unicode => "unicode",
             Command::Spirv => "spirv",
@@ -273,6 +278,10 @@ impl Command {
             Command::Artsheet => {
                 "Measure WinterSun's figure art against its bounds (`--write` to regenerate \
                  the ledger, `--sheets` to render the contact sheets)."
+            }
+            Command::Icons => {
+                "Draw/verify the file-type icon masters (`--write` to regenerate, \
+                 `--sheets` to render the contact sheet)."
             }
             Command::Devids => {
                 "Verify the vetted PCI/USB ID-database tables (`--write` to regenerate, \
@@ -353,6 +362,7 @@ impl Command {
             Command::FontAtlas => run_font_atlas(ctx, args),
             Command::SoundEncode => sound_encode::run(ctx, args),
             Command::Artsheet => run_artsheet(ctx, args),
+            Command::Icons => icons::run(ctx, args),
             Command::Devids => devids::run(ctx, args),
             Command::Unicode => unicode::run(ctx, args),
             Command::Spirv => spirv::run(ctx, args),
@@ -1649,6 +1659,8 @@ const STATIC_GATES: &[(&str, StaticGate)] = &[
     // The shipped figure art against its bounds and the committed ledger
     // (plans/FIGURE.md FG5).
     ("artsheet", |c| run_artsheet(c, &[])),
+    // The file-type icon masters, each redrawn and compared byte for byte.
+    ("icons", |c| icons::run(c, &[])),
     // Exhaustively model-check the capability + IPC state machine.
     ("model-check", |_| run_model_check(&[])),
 ];

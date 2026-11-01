@@ -206,7 +206,7 @@ fn permute(entries: &mut [Entry], mut order: Vec<usize>) {
 /// The name of `entry`'s content type, which [`SortKey::Kind`] orders files
 /// by within their structural rank.
 fn type_name(entry: &Entry) -> &'static str {
-    media_for_named(entry.name(), entry.kind(), Site::Plain).name()
+    media_for_named(entry.name(), entry.kind(), entry.filetype(), Site::Plain).name()
 }
 
 /// The group an entry sorts into under `folders`: directories (`0`) ahead of

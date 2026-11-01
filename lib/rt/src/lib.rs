@@ -7619,6 +7619,22 @@ impl Dir {
         ))
     }
 
+    /// Open whatever `name` names from here with neither read nor write
+    /// access — a handle its stat, its attributes and its access are asked
+    /// through — through a final link only when `follow` asks it.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the `fs_open`.
+    pub fn resolve(&self, name: &[u8], follow: bool) -> Result<File, i64> {
+        let flags = if follow {
+            OpenFlags::empty()
+        } else {
+            OpenFlags::NO_FOLLOW
+        };
+        File::from_open_result(fs_open_at(self.fd(), name, flags, 0))
+    }
+
     /// Open the directory `name` names from here, through a final link as a
     /// path walk passes through one.
     ///

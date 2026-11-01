@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::time::Time64;
+use tairix_fsmeta::preset::acorn::Filetype;
 use tairix_icon::IconKind;
 
 use super::{entry_cmp, sort_entries, Folders, SortDirection, SortKey, SortMode};
@@ -169,4 +170,25 @@ fn a_kind_sort_lands_every_entry_where_its_comparison_puts_it() {
     expected.sort_by(|a, b| entry_cmp(a, b, mode));
     sort_entries(&mut entries, mode);
     assert_eq!(names(&entries), names(&expected));
+}
+
+/// A file its name does not type sorts by the type its recorded filetype
+/// names.
+#[test]
+fn a_recorded_filetype_sorts_a_file_by_the_type_it_names() {
+    let typed = |name: &str, raw: u16| {
+        Entry::file(name).with_filetype(Filetype::new(raw).expect("twelve bits"))
+    };
+    let mut entries = alloc::vec![typed("a", 0xFFF), typed("b", 0xFF9), Entry::file("c")];
+    let mode = SortMode {
+        key: SortKey::Kind,
+        direction: SortDirection::Ascending,
+        ..SortMode::default_order()
+    };
+    sort_entries(&mut entries, mode);
+    assert_eq!(
+        names(&entries),
+        ["c", "b", "a"],
+        "Data, then Sprite, then Text"
+    );
 }

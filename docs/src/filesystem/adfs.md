@@ -142,6 +142,17 @@ entry present throughout a listing is listed exactly once.
 
 ## Names
 
+RISC OS separates a path with `.` and writes the dot of a name from elsewhere
+as `/`, the reverse of TAIRiX, so every name crosses the driver with the two
+exchanged (`tairix_fsmeta::preset::acorn::crossed_name_byte`): a RISC OS
+`ReadMe/txt` is listed and found as `ReadMe.txt`, and `notes.txt` is written
+`notes/txt`. A name holding a slash is refused, since it would reach the disc as
+a separator, as are a space, any byte outside printable ASCII and RISC OS's own
+specials (`$ & % @ \ ^ : # * " |`). An entry on the disc no path can spell —
+RISC OS's `/` or `//`, which cross to `.` and `..`, or a name holding the `.`
+RISC OS keeps out — is left out of a listing rather than refusing the
+directory.
+
 Names match ignoring ASCII case, and the driver declares that rule to the VFS.
 A rename to a case variant of an entry's own name re-spells it where it stands
 — its place in the order is unchanged — and a rename replacing a sibling takes

@@ -1933,10 +1933,11 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
 
 use tairix_abi::fs::{DirEntry, FileKind, FS_PATH_MAX};
 use tairix_abi::time::Time64;
+use tairix_fsmeta::preset::acorn::Filetype;
 
 use crate::entry::{LinkResolution, LinkTarget};
 use crate::vfs::{
-    absolute_path, entries_from_dir_stream, LinkInfo, LinkReader, NoLinks, VfsDirectorySource,
+    absolute_path, entries_from_dir_stream, EntryReader, LinkInfo, ListingOnly, VfsDirectorySource,
 };
 
 /// Encode `(name, kind)` children as one packed `DirEntry` stream.
@@ -1961,7 +1962,7 @@ fn encoded_stream(children: &[(&[u8], FileKind)]) -> Vec<u8> {
     buf
 }
 
-/// A [`LinkReader`] over an in-memory table of `link path -> (target, kind)`,
+/// An [`EntryReader`] over an in-memory table of `link path -> (target, kind)`,
 /// where a `None` kind is a link whose target cannot be reached.
 #[derive(Clone, Default)]
 struct FixtureLinks {
@@ -1978,8 +1979,8 @@ impl FixtureLinks {
     }
 }
 
-impl LinkReader for FixtureLinks {
-    fn describe(&mut self, path: &str) -> Option<LinkInfo> {
+impl EntryReader for FixtureLinks {
+    fn describe_link(&mut self, path: &str) -> Option<LinkInfo> {
         self.links.get(path).map(|(target, kind)| LinkInfo {
             target: target.clone(),
             kind: *kind,
@@ -1990,10 +1991,10 @@ impl LinkReader for FixtureLinks {
 /// A source over an in-memory path → encoded-stream tree, with no links.
 fn tree_source(
     dirs: BTreeMap<String, Vec<u8>>,
-) -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>, Errno>, NoLinks> {
+) -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>, Errno>, ListingOnly> {
     VfsDirectorySource::new(
         move |path: &str| dirs.get(path).cloned().ok_or(Errno::NotFound),
-        NoLinks,
+        ListingOnly,
     )
 }
 
@@ -2060,13 +2061,131 @@ fn absolute_path_refuses_an_over_long_component() {
     assert_eq!(absolute_path(&[huge]), Err(Errno::OutOfRange));
 }
 
+/// An [`EntryReader`] holding the filetypes a volume records, by name,
+/// keeping each question it is asked.
+#[derive(Default)]
+struct RecordedTypes {
+    types: BTreeMap<&'static str, u16>,
+    links: FixtureLinks,
+    asked: Vec<(String, String, bool)>,
+}
+
+impl RecordedTypes {
+    fn holding(types: &[(&'static str, u16)]) -> Self {
+        Self {
+            types: types.iter().copied().collect(),
+            ..Self::default()
+        }
+    }
+}
+
+impl EntryReader for RecordedTypes {
+    fn describe_link(&mut self, path: &str) -> Option<LinkInfo> {
+        self.links.describe_link(path)
+    }
+
+    fn recorded_filetype(
+        &mut self,
+        directory: &str,
+        name: &str,
+        through_link: bool,
+    ) -> Option<Filetype> {
+        self.asked
+            .push((directory.to_string(), name.to_string(), through_link));
+        self.types.get(name).copied().and_then(Filetype::new)
+    }
+}
+
+/// A listing asks for the filetype a volume records only for a file its name
+/// does not type: never for one it does, or for a folder, and through the link
+/// for a link to a file.
+#[test]
+fn a_listing_reads_a_recorded_filetype_only_where_the_name_says_nothing() {
+    let stream = encoded_stream(&[
+        (b"!Edit", FileKind::Directory),
+        (b"ReadMe", FileKind::Regular),
+        (b"notes.txt", FileKind::Regular),
+        (b"Shortcut", FileKind::Symlink),
+        (b"Mystery", FileKind::Regular),
+    ]);
+    let mut reader =
+        RecordedTypes::holding(&[("ReadMe", 0xFFF), ("notes.txt", 0xFFB), ("Shortcut", 0xFF9)]);
+    reader.links = FixtureLinks::default().with("/disc/Shortcut", "Icons", Some(FileKind::Regular));
+    let entries = entries_from_dir_stream("/disc", &stream, &mut reader).expect("valid stream");
+    let typed: Vec<(&str, Option<u16>)> = entries
+        .iter()
+        .map(|entry| (entry.name(), entry.filetype().map(Filetype::get)))
+        .collect();
+    assert_eq!(
+        typed,
+        [
+            ("!Edit", None),
+            ("ReadMe", Some(0xFFF)),
+            ("notes.txt", None),
+            ("Shortcut", Some(0xFF9)),
+            ("Mystery", None),
+        ]
+    );
+    let asked: Vec<(&str, &str, bool)> = reader
+        .asked
+        .iter()
+        .map(|(dir, name, through)| (dir.as_str(), name.as_str(), *through))
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            ("/disc", "ReadMe", false),
+            ("/disc", "Shortcut", true),
+            ("/disc", "Mystery", false)
+        ]
+    );
+    assert_eq!(
+        crate::media_for_entry(&entries[1], &["disc".to_string()]),
+        MediaType::TextPlain
+    );
+    assert_eq!(
+        crate::media_for_entry(&entries[3], &["disc".to_string()]),
+        MediaType::ImageSprite
+    );
+}
+
+/// A folder's probe types the members of the batch it read by the filetypes
+/// their volume records, as a listing would.
+#[test]
+fn a_probe_types_its_members_by_their_recorded_filetypes() {
+    let batch = encoded_stream(&[
+        (b"ReadMe", FileKind::Regular),
+        (b"Prog", FileKind::Regular),
+        (b"Inner", FileKind::Directory),
+    ]);
+    let mut reader = RecordedTypes::holding(&[("ReadMe", 0xFFF), ("Prog", 0xFFB)]);
+    let answers = crate::vfs::probe_batch(
+        vec![vec!["disc".to_string(), "App".to_string()]],
+        |_: &str, buf: &mut [u8]| {
+            buf[..batch.len()].copy_from_slice(&batch);
+            Ok(batch.len())
+        },
+        &mut reader,
+    );
+    let Some((_, Ok(Probe::Holds(sample)))) = answers.first() else {
+        panic!("the folder holds something: {answers:?}");
+    };
+    let kinds: Vec<IconKind> = sample.cards().map(tairix_icon::DrawnCard::kind).collect();
+    assert_eq!(kinds, [IconKind::Text, IconKind::BasicProgram]);
+    assert_eq!(
+        reader.asked.len(),
+        2,
+        "a folder in the batch is not asked about"
+    );
+}
+
 #[test]
 fn entries_from_dir_stream_maps_names_and_kinds_in_order() {
     let stream = encoded_stream(&[
         (b"Logs", FileKind::Directory),
         (b"motd.txt", FileKind::Regular),
     ]);
-    let entries = entries_from_dir_stream("/", &stream, &mut NoLinks).expect("valid stream");
+    let entries = entries_from_dir_stream("/", &stream, &mut ListingOnly).expect("valid stream");
     assert_eq!(
         entries,
         vec![Entry::directory("Logs"), Entry::file("motd.txt")]
@@ -2095,7 +2214,8 @@ fn a_listed_entry_names_the_file_and_version_its_record_named() {
     }
     .encode_into(&mut buf)
     .expect("fits");
-    let entries = entries_from_dir_stream("/", &buf[..len], &mut NoLinks).expect("valid stream");
+    let entries =
+        entries_from_dir_stream("/", &buf[..len], &mut ListingOnly).expect("valid stream");
     let [entry] = entries.as_slice() else {
         panic!("one entry: {entries:?}");
     };
@@ -2116,7 +2236,7 @@ fn a_listed_entry_names_the_file_and_version_its_record_named() {
 fn entries_from_dir_stream_refuses_a_non_utf8_name_whole() {
     let stream = encoded_stream(&[(b"ok", FileKind::Regular), (b"\xff\xfe", FileKind::Regular)]);
     assert_eq!(
-        entries_from_dir_stream("/", &stream, &mut NoLinks),
+        entries_from_dir_stream("/", &stream, &mut ListingOnly),
         Err(Errno::OutOfRange)
     );
 }
@@ -2126,7 +2246,7 @@ fn entries_from_dir_stream_refuses_a_truncated_stream_whole() {
     let mut stream = encoded_stream(&[(b"ok", FileKind::Regular)]);
     stream.extend_from_slice(&[0u8; 3]);
     assert_eq!(
-        entries_from_dir_stream("/", &stream, &mut NoLinks),
+        entries_from_dir_stream("/", &stream, &mut ListingOnly),
         Err(Errno::BufferTooSmall)
     );
 }
@@ -2310,7 +2430,7 @@ fn entries_carry_size_and_modified_from_the_stream() {
         (b"data.bin", FileKind::Regular, 4096, modified),
         (b"Docs", FileKind::Directory, 0, Time64::from_secs(-100)),
     ]);
-    let entries = entries_from_dir_stream("/", &stream, &mut NoLinks).expect("valid");
+    let entries = entries_from_dir_stream("/", &stream, &mut ListingOnly).expect("valid");
     // The stream order is preserved here (the browser applies the sort).
     assert_eq!(entries[0].name(), "data.bin");
     assert_eq!(entries[0].size(), 4096);
@@ -2331,7 +2451,7 @@ fn a_bad_record_still_refuses_the_whole_listing() {
     bad[0] = 9;
     stream.extend_from_slice(&bad);
     assert_eq!(
-        entries_from_dir_stream("/", &stream, &mut NoLinks),
+        entries_from_dir_stream("/", &stream, &mut ListingOnly),
         Err(Errno::OutOfRange)
     );
 }
@@ -2359,7 +2479,7 @@ fn a_dot_app_directory_is_a_bundle_not_a_folder_to_descend() {
         // only a *directory* named <Name>.app is a bundle.
         (b"report.app", FileKind::Regular),
     ]);
-    let entries = entries_from_dir_stream("/", &stream, &mut NoLinks).expect("valid");
+    let entries = entries_from_dir_stream("/", &stream, &mut ListingOnly).expect("valid");
     assert_eq!(entries[0].kind(), EntryKind::Bundle);
     assert!(entries[0].is_bundle());
     assert!(!entries[0].is_directory(), "a bundle is not descended into");
@@ -4787,9 +4907,44 @@ mod owner_edit_model {
 
 use crate::activate::{Activation, BundleIntent};
 
+/// A file activated is handed on with the filetype its listing found
+/// recorded for it, and one recorded as a disc image is mounted.
+#[test]
+fn a_recorded_filetype_rides_with_the_file_it_types() {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[
+            (b"Floppy", FileKind::Regular),
+            (b"ReadMe", FileKind::Regular),
+        ]),
+    );
+    let source = VfsDirectorySource::new(
+        move |path: &str| dirs.get(path).cloned().ok_or(Errno::NotFound),
+        RecordedTypes::holding(&[("Floppy", 0xFCE), ("ReadMe", 0xFFF)]),
+    );
+    let mut browser = Browser::open_root(source).expect("root");
+    browser.select(0).expect("select Floppy");
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Browse),
+        Ok(Activation::MountImage {
+            path: "/Floppy".to_string()
+        })
+    );
+    browser.select(1).expect("select ReadMe");
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Browse),
+        Ok(Activation::OpenFile {
+            path: "/ReadMe".to_string(),
+            recorded: Filetype::new(0xFFF),
+        })
+    );
+}
+
 /// A tree source whose root holds a plain subdirectory, an application
 /// bundle, and a regular file — the three activation kinds side by side.
-fn activation_source() -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>, Errno>, NoLinks> {
+fn activation_source() -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>, Errno>, ListingOnly>
+{
     let mut dirs = BTreeMap::new();
     dirs.insert(
         "/".to_string(),
@@ -4880,7 +5035,8 @@ fn the_browse_intent_changes_nothing_for_a_directory_or_a_file() {
     assert_eq!(
         browser.activate_selected(BundleIntent::Browse),
         Ok(Activation::OpenFile {
-            path: "/notes.txt".to_string()
+            path: "/notes.txt".to_string(),
+            recorded: None,
         })
     );
     assert!(!browser.can_go_up());
@@ -4919,7 +5075,8 @@ fn a_disk_image_of_any_kind_is_activated_as_a_mount() {
     assert_eq!(
         activated("notes.txt"),
         Ok(Activation::OpenFile {
-            path: "/notes.txt".to_string()
+            path: "/notes.txt".to_string(),
+            recorded: None,
         })
     );
 }
@@ -4949,7 +5106,8 @@ fn activating_a_file_names_it_for_open_without_descending() {
     assert_eq!(
         browser.activate_selected(BundleIntent::Launch),
         Ok(Activation::OpenFile {
-            path: "/notes.txt".to_string()
+            path: "/notes.txt".to_string(),
+            recorded: None,
         })
     );
     assert!(!browser.can_go_up());
@@ -4974,7 +5132,8 @@ fn activate_index_spells_a_nested_target_path() {
     assert_eq!(
         browser.activate_index(0, BundleIntent::Launch),
         Ok(Activation::OpenFile {
-            path: "/System/motd.txt".to_string()
+            path: "/System/motd.txt".to_string(),
+            recorded: None,
         })
     );
 }
@@ -5045,9 +5204,32 @@ fn the_offered_type_is_the_registry_type() {
             "/System/Applications/claimant.app",
             vec![media.as_str().to_string()],
         );
-        let offered = applications_for(name, core::slice::from_ref(&claimant));
+        let offered = applications_for(name, None, core::slice::from_ref(&claimant));
         assert_eq!(offered.len(), 1, "{name}");
     }
+}
+
+/// A file its name does not type is offered to the applications claiming the
+/// type its volume records for it.
+#[test]
+fn a_recorded_filetype_types_the_file_an_application_is_offered() {
+    let text = AppAssociation::new(
+        "text",
+        "/System/Applications/text.app",
+        vec!["text/plain".to_string()],
+    );
+    let bundles = [text];
+    assert_eq!(
+        applications_for("ReadMe", Filetype::new(0xFFF), &bundles).len(),
+        1
+    );
+    assert_eq!(
+        applications_for("!Boot", Filetype::new(0xFEB), &bundles).len(),
+        1,
+        "an Obey file is text"
+    );
+    assert!(applications_for("ReadMe", None, &bundles).is_empty());
+    assert!(applications_for("Prog", Filetype::new(0xFFB), &bundles).is_empty());
 }
 
 #[test]
@@ -5067,12 +5249,12 @@ fn a_file_the_registry_cannot_type_is_bytes() {
     );
     let bundles = [text, bytes];
     for name in ["mystery.xyz", "Makefile", ".profile", "archive."] {
-        let offered = applications_for(name, &bundles);
+        let offered = applications_for(name, None, &bundles);
         assert_eq!(offered.len(), 1, "{name}");
         assert_eq!(offered[0].name(), "bytes", "{name}");
     }
     assert!(
-        applications_for("", &bundles).is_empty(),
+        applications_for("", None, &bundles).is_empty(),
         "an empty name names no file"
     );
 }
@@ -5090,12 +5272,12 @@ fn a_byte_editor_is_offered_every_file_behind_what_claims_it_exactly() {
         vec!["application/octet-stream".to_string()],
     );
     let bundles = [bytes, viewer];
-    let offered: Vec<&str> = applications_for("photo.png", &bundles)
+    let offered: Vec<&str> = applications_for("photo.png", None, &bundles)
         .iter()
         .map(|app| app.name())
         .collect();
     assert_eq!(offered, ["viewer", "bytes"], "the exact claim ranks first");
-    let program: Vec<&str> = applications_for("Run.rxe", &bundles)
+    let program: Vec<&str> = applications_for("Run.rxe", None, &bundles)
         .iter()
         .map(|app| app.name())
         .collect();
@@ -5144,7 +5326,7 @@ fn applications_for_offers_every_bundle_that_claims_the_type_in_order() {
     let bundles = open_with_store();
     // A text file is offered the text viewer and the studio, in enumeration
     // order — never the image-only bundle.
-    let names: Vec<&str> = applications_for("notes.txt", &bundles)
+    let names: Vec<&str> = applications_for("notes.txt", None, &bundles)
         .iter()
         .map(|b| b.name())
         .collect();
@@ -5154,7 +5336,7 @@ fn applications_for_offers_every_bundle_that_claims_the_type_in_order() {
 #[test]
 fn applications_for_offers_a_single_matching_bundle() {
     let bundles = open_with_store();
-    let matches = applications_for("scan.jpeg", &bundles);
+    let matches = applications_for("scan.jpeg", None, &bundles);
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].name(), "images");
     assert_eq!(matches[0].bundle_path(), "/System/Applications/images.app");
@@ -5165,7 +5347,7 @@ fn applications_for_is_empty_when_no_bundle_claims_a_known_type() {
     let bundles = open_with_store();
     // A recognised type (gzip archive) that no installed bundle handles is an
     // honest "no application" answer, not a fabricated default.
-    assert!(applications_for("backup.tgz", &bundles).is_empty());
+    assert!(applications_for("backup.tgz", None, &bundles).is_empty());
 }
 
 #[test]
@@ -5311,8 +5493,8 @@ fn applications_for_is_empty_for_an_unrecognised_type() {
     let bundles = open_with_store();
     // The file's type cannot be derived, so nothing is offered even though
     // bundles exist.
-    assert!(applications_for("mystery.xyz", &bundles).is_empty());
-    assert!(applications_for("Makefile", &bundles).is_empty());
+    assert!(applications_for("mystery.xyz", None, &bundles).is_empty());
+    assert!(applications_for("Makefile", None, &bundles).is_empty());
 }
 
 /// An application declaring only the broad `text/plain` type — a plain text
@@ -5343,7 +5525,7 @@ fn a_generic_text_application_opens_a_specific_text_file() {
         "Main.java",
         "logo.svg",
     ] {
-        let offered = applications_for(name, &bundles);
+        let offered = applications_for(name, None, &bundles);
         assert_eq!(offered.len(), 1, "{name}");
         assert_eq!(offered[0].name(), "editor", "{name}");
     }
@@ -5361,7 +5543,7 @@ fn a_generic_text_application_is_not_offered_for_binary_content() {
         "tool.rxe",
         "tile.spr",
     ] {
-        assert!(applications_for(name, &bundles).is_empty(), "{name}");
+        assert!(applications_for(name, None, &bundles).is_empty(), "{name}");
     }
 }
 
@@ -5377,13 +5559,13 @@ fn a_specific_declaration_outranks_a_generic_one() {
             vec!["text/x-rust".to_string()],
         ),
     ];
-    let offered: Vec<&str> = applications_for("main.rs", &bundles)
+    let offered: Vec<&str> = applications_for("main.rs", None, &bundles)
         .iter()
         .map(|b| b.name())
         .collect();
     assert_eq!(offered, ["rustide", "editor"]);
     // A file the specific application does not claim leaves the answer alone.
-    let offered: Vec<&str> = applications_for("notes.txt", &bundles)
+    let offered: Vec<&str> = applications_for("notes.txt", None, &bundles)
         .iter()
         .map(|b| b.name())
         .collect();
@@ -5407,7 +5589,7 @@ fn a_two_step_chain_ranks_each_ancestor_in_turn() {
             vec!["image/svg+xml".to_string()],
         ),
     ];
-    let offered: Vec<&str> = applications_for("logo.svg", &bundles)
+    let offered: Vec<&str> = applications_for("logo.svg", None, &bundles)
         .iter()
         .map(|b| b.name())
         .collect();
@@ -5424,7 +5606,7 @@ fn a_bundle_claiming_both_a_type_and_its_ancestor_is_offered_once() {
         ),
         plain_text_editor(),
     ];
-    let offered: Vec<&str> = applications_for("main.rs", &bundles)
+    let offered: Vec<&str> = applications_for("main.rs", None, &bundles)
         .iter()
         .map(|b| b.name())
         .collect();
@@ -5472,9 +5654,11 @@ fn an_association_reads_the_bundle_name_and_its_declared_types() {
     assert_eq!(assoc.bundle_path(), "/System/Applications/viewer.app");
     assert_eq!(assoc.mime_types(), ["text/plain", "text/markdown"]);
     // It composes with the matcher exactly as the mock store does.
-    assert!(applications_for("notes.txt", core::slice::from_ref(&assoc))
-        .iter()
-        .any(|b| b.name() == "viewer"));
+    assert!(
+        applications_for("notes.txt", None, core::slice::from_ref(&assoc))
+            .iter()
+            .any(|b| b.name() == "viewer")
+    );
 }
 
 #[test]
@@ -5505,7 +5689,7 @@ fn a_bundle_that_declares_no_types_is_never_an_open_with_candidate() {
     let bytes = build_appinfo("printf", None, &[]);
     let assoc = association("/System/Commands/printf.app", &bytes).expect("decodes");
     assert!(assoc.mime_types().is_empty());
-    assert!(applications_for("notes.txt", core::slice::from_ref(&assoc)).is_empty());
+    assert!(applications_for("notes.txt", None, core::slice::from_ref(&assoc)).is_empty());
 }
 
 #[test]
@@ -11682,7 +11866,7 @@ mod occupancy {
         for (records, want) in [(Vec::new(), Probe::Empty), (held, Probe::Holds(want))] {
             let mut source = VfsDirectorySource::probing(
                 |_: &str| Err::<Vec<u8>, _>(Errno::NotImplemented),
-                NoLinks,
+                ListingOnly,
                 move |_: &str, buf: &mut [u8]| {
                     buf[..records.len()].copy_from_slice(&records);
                     Ok(records.len())
@@ -11694,7 +11878,7 @@ mod occupancy {
         // Any other refusal is surfaced, never guessed at.
         let mut refusing = VfsDirectorySource::probing(
             |_: &str| Err::<Vec<u8>, _>(Errno::NotImplemented),
-            NoLinks,
+            ListingOnly,
             |_: &str, _: &mut [u8]| Err(Errno::PermissionDenied),
         );
         assert_eq!(
@@ -11740,7 +11924,10 @@ mod occupancy {
     }
 
     fn sample_of(members: &[tairix_abi::fs::DirEntry<'_>]) -> FolderSample {
-        folder_sample(&["d".to_string()], members.iter().copied())
+        folder_sample(
+            &["d".to_string()],
+            members.iter().map(|member| (*member, None)),
+        )
     }
 
     /// Variety first: one card for each of the most frequent families, ties
@@ -11833,7 +12020,7 @@ mod occupancy {
         // The trusted picker's source: it never reads a directory it is only
         // displaying, so the cue degrades to the plain folder.
         let mut picker =
-            VfsDirectorySource::new(|_: &str| Err::<Vec<u8>, _>(Errno::NotFound), NoLinks);
+            VfsDirectorySource::new(|_: &str| Err::<Vec<u8>, _>(Errno::NotFound), ListingOnly);
         assert_eq!(
             picker.has_children(&["d".to_string()]),
             Err(Errno::NotImplemented)
@@ -13014,7 +13201,7 @@ fn a_link_a_reader_cannot_describe_is_dangling_not_a_file() {
     // silently downgraded to a plain file.
     let (dirs, _) = link_tree();
     let stream = dirs.get("/").expect("root stream").clone();
-    let entries = entries_from_dir_stream("/", &stream, &mut NoLinks).expect("valid stream");
+    let entries = entries_from_dir_stream("/", &stream, &mut ListingOnly).expect("valid stream");
     for entry in entries.iter().take(4) {
         assert_eq!(entry.kind(), EntryKind::Link(LinkTarget::Dangling));
         assert_eq!(entry.target(), None);
@@ -13085,7 +13272,8 @@ fn activating_a_link_acts_on_what_it_names() {
     assert_eq!(
         browser.activate_selected(BundleIntent::Launch),
         Ok(Activation::OpenFile {
-            path: "/notes".to_string()
+            path: "/notes".to_string(),
+            recorded: None,
         })
     );
 

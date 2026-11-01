@@ -61,6 +61,9 @@
 //! - `artsheet`     — measures `WinterSun`'s figure art against its bounds and
 //!   the committed ledger (`--write` to regenerate the ledger, `--sheets` to
 //!   render the contact sheets)
+//! - `icons`        — draws the file-type icon masters in `lib/icon/assets/`
+//!   and verifies the committed ones are exactly their drawings (`--write` to
+//!   regenerate, `--sheets` to render the contact sheet)
 //! - `devids`       — verifies the compact PCI, USB and IEEE OUI tables (each
 //!   inside its consuming bundle's `Resources/`) against the vetted
 //!   snapshots in

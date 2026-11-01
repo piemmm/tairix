@@ -156,37 +156,36 @@ mod program {
         serve_pinboard, serve_switchboard_request, settled_size_event, size_state_name,
         tool_move_abandoned_event, tool_move_event, window_control_alternate_event,
         window_control_event, Acquisition, AidPolicy, Answer, AppBarBridge, AppBarService,
-        AppearanceWork, ArtworkFileReader, ArtworkSandbox, AskedSettings, AuthoriseAnswer,
-        AuthoriseConcluded, AuthoriseDesk, AuthoriseDone, AuthorisePrompt, AuthoriseRefusal,
-        AuthoriseRequest, BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure,
-        Desktop, DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
-        DocumentAuthority, DocumentRelay, DragEnd, DragPlace, DragSurface, DropRefusal, ElevateAsk,
-        Elevation, Elevator, FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher,
-        FrameStatsSink, GestureRefusal, HangTracker, HoldBack, IconRasteriser, IdleAction,
-        IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource, Launch, LaunchDocument,
-        LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed, Listing as Authorisers,
-        LoadedPinboard, LoadedPrograms, MachineWatch, OwedReport, OwnPick, OwnerBundleGate,
-        OwnerWindow, PickAccess, PickEnd, PickStep, PinboardApplied, PinboardCall, PinboardRefusal,
-        Prepared, PresentedOwners, PreviewBudget, PreviewDone, PreviewJob, PreviewRequest,
-        PreviewRun, PreviewTarget, PromptOutcome, Requester, ResizedRecord, ResolutionAsk,
-        ResolutionPrompt, Routed, SaverContext, SaverEnd, SaverLaunch, SaverLauncher, SaverSetup,
-        ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
-        SeatRouter, SeatWake, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
-        SizedRecord, SlideWant, SlotAnswer, SoundCall, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, Timed, Trial, TrialEnd, TrialOutcome, UnlockAnswer, UnlockAsk,
-        WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH,
-        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
-        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE,
-        DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
-        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE,
-        LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED,
-        LAYER_REFUSED_MESSAGE, LAYER_RETIRED, LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN,
-        LIBRARY_SHOWN_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS,
-        PICKER_SHOWN, PICKER_SHOWN_MESSAGE, SETTINGS_LABEL, SET_TIME_PURPOSE,
-        SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, TRIAL_CONCLUDED,
-        TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, USAGE, WINDOW_RETITLED,
-        WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, WINDOW_SIZED,
-        WINDOW_SIZED_MESSAGE,
+        AppearanceWork, ArtworkFileReader, AskedSettings, AuthoriseAnswer, AuthoriseConcluded,
+        AuthoriseDesk, AuthoriseDone, AuthorisePrompt, AuthoriseRefusal, AuthoriseRequest,
+        BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop, DesktopAction,
+        DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource, DocumentAuthority,
+        DocumentRelay, DragEnd, DragPlace, DragSurface, DropRefusal, ElevateAsk, Elevation,
+        Elevator, FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
+        GestureRefusal, HangTracker, HoldBack, IdleAction, IdleClock, IdlePolicy, InputPolicy,
+        KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
+        LayerDecision, LayerFeed, Listing as Authorisers, LoadedPinboard, LoadedPrograms,
+        MachineWatch, OwedReport, OwnPick, OwnerBundleGate, OwnerWindow, PickAccess, PickEnd,
+        PickStep, PinboardApplied, PinboardCall, PinboardRefusal, Prepared, PresentedOwners,
+        PreviewBudget, PreviewDone, PreviewJob, PreviewRequest, PreviewRun, PreviewTarget,
+        PromptOutcome, Requester, ResizedRecord, ResolutionAsk, ResolutionPrompt, Routed,
+        SaverContext, SaverEnd, SaverLaunch, SaverLauncher, SaverSetup, ScreenFade, ScreenLock,
+        Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake,
+        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SlideWant,
+        SlotAnswer, SoundCall, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Timed,
+        Trial, TrialEnd, TrialOutcome, UnlockAnswer, UnlockAsk, WallpaperDesk, WallpaperJob,
+        WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH, APP_BAR_SETTLED,
+        APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED,
+        CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED,
+        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
+        LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
+        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
+        MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
+        SETTINGS_LABEL, SET_TIME_PURPOSE, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
+        SWITCHBOARD_RUN_PATH, TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN,
+        TRIAL_SHOWN_MESSAGE, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
+        WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
     };
     use tairix_desktop_session::{machine_zone_place, moves_machine_zone, read_machine_zone};
     use tairix_desktop_session::{
@@ -199,7 +198,9 @@ mod program {
     };
     use tairix_greeter::AccountTile;
     use tairix_greeter::{Asking, Courier, Ticket, Tickets, Verdict};
-    use tairix_icon::{ArtworkDesk, ArtworkKey, ArtworkResolver, InlineArtwork, Resolved};
+    use tairix_icon::{
+        ArtworkDesk, ArtworkKey, ArtworkRasteriser, ArtworkResolver, InlineArtwork, Resolved,
+    };
     use tairix_keymap::modifiers_to_abi;
     use tairix_log::{
         log, Event as LogEvent, EventId, Field as LogField, FieldValue as LogFieldValue,
@@ -3094,9 +3095,9 @@ mod program {
         } else {
             shell.set_artwork_resolver(alloc::boxed::Box::new(InlineArtwork::new(
                 ArtworkFileReader(VfsFileReader),
-                ArtworkSandbox(SandboxRasteriser {
+                SandboxRasteriser {
                     sandbox: alloc::rc::Rc::clone(&sandbox),
-                }),
+                },
             )));
         }
 
@@ -6413,10 +6414,10 @@ mod program {
         /// thread rather than the session owns it.
         fn serve(&self) {
             let mut reader = ArtworkFileReader(VfsFileReader);
-            let mut rasteriser = ArtworkSandbox(OwnedSandbox(ParserSandbox::new(
+            let mut rasteriser = OwnedSandbox(ParserSandbox::new(
                 RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Artwork),
                 tairix_rt::LogSink,
-            )));
+            ));
             loop {
                 let job = {
                     let mut desk = self.desk.lock();
@@ -6666,6 +6667,7 @@ mod program {
                         let answers = tairix_browse::vfs::probe_batch(
                             batch,
                             tairix_browse::vfs::probe_directory,
+                            &mut tairix_browse::RtEntryReader::by_path(),
                         );
                         self.work.lock().probes.deliver(answers)
                     }
@@ -6901,7 +6903,7 @@ mod program {
         tairix_browse::vfs::entries_from_dir_stream(
             &path,
             &stream,
-            &mut tairix_browse::RtLinkReader,
+            &mut tairix_browse::RtEntryReader::by_path(),
         )
     }
 
@@ -8077,7 +8079,7 @@ mod program {
     type SharedSandbox =
         alloc::rc::Rc<core::cell::RefCell<ParserSandbox<RtLauncher, tairix_rt::LogSink>>>;
 
-    /// The production [`IconRasteriser`]: untrusted icon bytes go to the
+    /// The loop's own [`ArtworkRasteriser`]: untrusted icon bytes go to the
     /// parser-sandbox icon service — this binary re-entered as a
     /// capability-empty worker — and only a verified pixel block comes
     /// back. Any refusal (malformed image, crashed worker, unavailable
@@ -8086,7 +8088,7 @@ mod program {
         sandbox: SharedSandbox,
     }
 
-    impl IconRasteriser for SandboxRasteriser {
+    impl ArtworkRasteriser for SandboxRasteriser {
         fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<alloc::vec::Vec<u8>> {
             rasterise_icon(
                 &mut self.sandbox.borrow_mut(),
@@ -8106,7 +8108,7 @@ mod program {
     /// of these instead, exactly as the wallpaper worker builds its own.
     struct OwnedSandbox(ParserSandbox<RtLauncher, tairix_rt::LogSink>);
 
-    impl IconRasteriser for OwnedSandbox {
+    impl ArtworkRasteriser for OwnedSandbox {
         fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<alloc::vec::Vec<u8>> {
             rasterise_icon(
                 &mut self.0,
@@ -8124,6 +8126,19 @@ mod program {
             document: &mut dyn tairix_icon::ArtworkDocument,
         ) -> Option<tairix_icon::Fitted> {
             tairix_sandbox::imagerender::thumbnail(&mut self.0, side, reading, document).ok()
+        }
+
+        fn application_sprite(
+            &mut self,
+            side: u32,
+            names: &tairix_icon::SpriteNames,
+            document: &mut dyn tairix_icon::ArtworkDocument,
+        ) -> Option<tairix_icon::Fitted> {
+            tairix_sandbox::imagerender::application_sprite(&mut self.0, side, names, document).ok()
+        }
+
+        fn boot_sprite_files(&mut self, boot: &[u8]) -> Option<Vec<alloc::string::String>> {
+            tairix_sandbox::imagerender::boot_sprite_files(&mut self.0, boot).ok()
         }
     }
 
@@ -8500,8 +8515,12 @@ mod program {
             let association = self.programs.association(bundle)?;
             let name = items.first().as_str();
             let claimed = items.openable()
-                && !tairix_browse::applications_for(name, core::slice::from_ref(association))
-                    .is_empty();
+                && !tairix_browse::applications_for(
+                    name,
+                    items.filetype(),
+                    core::slice::from_ref(association),
+                )
+                .is_empty();
             if !claimed {
                 return Some(SlotAnswer::Refuses(alloc::boxed::Box::new(
                     DropRefusal::new(
@@ -11998,6 +12017,17 @@ mod program {
             path: &str,
         ) -> Option<alloc::boxed::Box<dyn tairix_icon::ArtworkDocument + '_>> {
             tairix_icon::RtDocument::open(path).map(|document| {
+                alloc::boxed::Box::new(document)
+                    as alloc::boxed::Box<dyn tairix_icon::ArtworkDocument>
+            })
+        }
+
+        fn open_document_inside(
+            &mut self,
+            dir: &str,
+            inside: &str,
+        ) -> Option<alloc::boxed::Box<dyn tairix_icon::ArtworkDocument + '_>> {
+            tairix_icon::RtDocument::open_inside(dir, inside).map(|document| {
                 alloc::boxed::Box::new(document)
                     as alloc::boxed::Box<dyn tairix_icon::ArtworkDocument>
             })

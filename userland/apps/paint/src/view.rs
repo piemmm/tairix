@@ -11,6 +11,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use tairix_abi::fs::Filetype;
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, DialogModality, SaveEndings};
 use tairix_browse::vfs::write_document_title;
 use tairix_colour::Rgba;
@@ -881,6 +882,9 @@ pub(crate) struct PaletteEdit {
 pub struct View {
     document: Document,
     name: String,
+    /// The filetype the volume records for the file the document came from,
+    /// for as long as that is the file it is saved to.
+    recorded: Option<Filetype>,
     access: Access,
     viewport: Viewport,
     tool: Tool,
@@ -1009,6 +1013,7 @@ impl SavedDocument for View {
 
     fn rename(&mut self, name: String) {
         self.name = name;
+        self.recorded = None;
         self.save_as = None;
     }
 
@@ -1261,10 +1266,15 @@ fn tool_pane(id: u32) -> Option<PaneKind> {
 }
 
 impl View {
-    /// A window on `document`, called `name`, which it may write as `access`
-    /// says.
+    /// A window on `document`, called `name` and recorded by its volume as of
+    /// `recorded`, which it may write as `access` says.
     #[must_use]
-    pub fn new(document: Document, name: String, access: Access) -> Self {
+    pub fn new(
+        document: Document,
+        name: String,
+        recorded: Option<Filetype>,
+        access: Access,
+    ) -> Self {
         let flat = || ScrollModel::new(ScrollRange::new(0, 0, 0), 1, 1);
         let kind = picture_kind(&document);
         let tool = Tool::Brush;
@@ -1274,6 +1284,7 @@ impl View {
         let mut view = Self {
             document,
             name,
+            recorded,
             access,
             viewport: Viewport::new(aspect),
             tool,
@@ -1379,13 +1390,20 @@ impl View {
         self.tool
     }
 
-    /// The format the document is written in under `name`.
+    /// The format the document is written in under `name`: its own file's
+    /// recorded filetype counts only for a save to that file.
     ///
     /// # Errors
     ///
     /// [`SaveRefusal`] where it cannot be written so; nothing is written.
     pub fn save_format(&self, name: &str) -> Result<SaveFormat, SaveRefusal> {
-        format_for(name, self.document.entries(), self.document.origin())
+        let recorded = self.recorded.filter(|_| name == self.name);
+        format_for(
+            name,
+            recorded,
+            self.document.entries(),
+            self.document.origin(),
+        )
     }
 
     /// The primary and secondary inks.

@@ -16,7 +16,7 @@ use crate::entry::{Entry, Occupancy};
 use crate::render::{listing_damage, shown_listing};
 use crate::source::{DirectorySource, Listing, Probe};
 use crate::tests::focused;
-use crate::vfs::NoLinks;
+use crate::vfs::ListingOnly;
 
 /// A directory whose listing a test rewrites, answered at once or, when
 /// `deferred`, only once a test lets it land.
@@ -98,7 +98,7 @@ fn a_batch_decodes_to_the_entries_a_listing_would_hold() {
             DirChange::Absent(b"gone"),
         ],
     );
-    let (update, more) = decode_batch("/Users/me", &bytes, &mut NoLinks).expect("decodes");
+    let (update, more) = decode_batch("/Users/me", &bytes, &mut ListingOnly).expect("decodes");
     assert!(more);
     let expected = Entry::new(
         "moo.txt",
@@ -119,11 +119,11 @@ fn a_batch_decodes_to_the_entries_a_listing_would_hold() {
         (DirWatchStatus::Changes, WatchUpdate::Quiet),
     ] {
         assert_eq!(
-            decode_batch("/", &batch(status, false, &[]), &mut NoLinks),
+            decode_batch("/", &batch(status, false, &[]), &mut ListingOnly),
             Ok((want, false))
         );
     }
-    assert!(decode_batch("/", &[0u8; 3], &mut NoLinks).is_err());
+    assert!(decode_batch("/", &[0u8; 3], &mut ListingOnly).is_err());
 }
 
 #[test]

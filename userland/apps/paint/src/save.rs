@@ -13,8 +13,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::fs::Filetype;
 use tairix_abi::window_ipc::SaveEndings;
-use tairix_browse::media::{media_for_name, name_endings, Ending, MediaType};
+use tairix_browse::media::{media_for_document, name_endings, Ending, MediaType};
 use tairix_image::{
     desktop_palette, encode_bmp, encode_gif, encode_jpeg, encode_ora, encode_png,
     encode_sprite_area, encode_tiff, opaque_sprite_writes_back, Density, DensityUnit, EncodeError,
@@ -242,8 +243,9 @@ pub enum SaveRefusal {
     /// A sprite kept as its bytes is not a whole number of words, so no
     /// sprite after it could be written where RISC OS reads it.
     KeptSpriteOffWord(SpriteName),
-    /// A sprite file named so that nothing could open it again: the name
-    /// carries neither `.spr` nor the `,ff9` file type.
+    /// A sprite file nothing could open again: neither its name, by `.spr` or
+    /// the `,ff9` file type, nor the filetype its volume records says it
+    /// holds sprites.
     SpritesUnnamed,
 }
 
@@ -274,16 +276,20 @@ impl core::fmt::Display for SaveRefusal {
     }
 }
 
-/// The format `name` asks for — its RISC OS file type or its extension, as
-/// the desktop's one media registry reads either — or `None` for a name
-/// that asks for neither.
+/// The format a file called `name`, whose volume records `recorded` as its
+/// filetype, asks for — its name's RISC OS file type or extension, else the
+/// recorded filetype, as the desktop's one media registry reads each — or
+/// `None` where neither asks for one.
 ///
 /// # Errors
 ///
-/// [`SaveRefusal::Unwritable`] for a name that asks for a format Paint does
+/// [`SaveRefusal::Unwritable`] for a file that asks for a format Paint does
 /// not write.
-pub fn format_named(name: &str) -> Result<Option<SaveFormat>, SaveRefusal> {
-    let Some(media) = media_for_name(name) else {
+pub fn format_named(
+    name: &str,
+    recorded: Option<Filetype>,
+) -> Result<Option<SaveFormat>, SaveRefusal> {
+    let Some(media) = media_for_document(name, recorded) else {
         return Ok(None);
     };
     let format = SaveFormat::ALL
@@ -296,18 +302,20 @@ pub fn format_named(name: &str) -> Result<Option<SaveFormat>, SaveRefusal> {
     Ok(format)
 }
 
-/// The format a document of `entries`, read from `origin`, is written in
-/// under `name`: what the name asks for, else what the document is.
+/// The format a document of `entries`, read from `origin`, is written in to
+/// a file called `name` whose volume records `recorded`: what the file asks
+/// for, else what the document is.
 ///
 /// # Errors
 ///
 /// [`SaveRefusal`] where the document cannot be written so.
 pub fn format_for(
     name: &str,
+    recorded: Option<Filetype>,
     entries: &[Entry],
     origin: Origin,
 ) -> Result<SaveFormat, SaveRefusal> {
-    writable_as(format_named(name)?, entries, origin)
+    writable_as(format_named(name, recorded)?, entries, origin)
 }
 
 /// The endings a document of `entries`, read from `origin`, may be saved
@@ -414,14 +422,19 @@ impl core::fmt::Display for NotWrittenBack {
     }
 }
 
-/// Whether the file `name`, read as `document`, may be written back over
-/// itself: only where a save under its own name writes exactly the format it
-/// was read as, and nothing it held was lost on the way in.
+/// Whether the file `name`, whose volume records `recorded`, read as
+/// `document`, may be written back over itself: only where a save to it
+/// writes exactly the format it was read as, and nothing it held was lost on
+/// the way in.
 ///
 /// # Errors
 ///
 /// [`NotWrittenBack`]: why not.
-pub fn write_back(name: &str, document: &Document) -> Result<(), NotWrittenBack> {
+pub fn write_back(
+    name: &str,
+    recorded: Option<Filetype>,
+    document: &Document,
+) -> Result<(), NotWrittenBack> {
     let Origin::Read(read_as) = document.origin() else {
         return Err(NotWrittenBack::Format);
     };
@@ -436,7 +449,7 @@ pub fn write_back(name: &str, document: &Document) -> Result<(), NotWrittenBack>
     if unkept.converted {
         return Err(NotWrittenBack::Converted);
     }
-    match format_for(name, document.entries(), document.origin()) {
+    match format_for(name, recorded, document.entries(), document.origin()) {
         Ok(written) if written == own => Ok(()),
         Ok(_) => Err(NotWrittenBack::Misnamed),
         Err(refusal) => Err(NotWrittenBack::Refused(refusal)),

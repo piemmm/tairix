@@ -43,7 +43,7 @@ says why on the line before its closing `FAILED in`. A measured warm run:
 | Stage | Cost | Shape |
 | --- | --- | --- |
 | `fmt --check` | 4 s | sequential, streams live |
-| static gates (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `ignore-check`, `help-lint`, `devids`, `unicode`, `spirv`, `c-header`, `font-atlas`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
+| static gates (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `ignore-check`, `help-lint`, `devids`, `unicode`, `spirv`, `c-header`, `font-atlas`, `icons`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
 | `deny` | 1 s | sequential; reads `Cargo.lock`, compiles nothing |
 | `proptest --once` | 3 s | one iteration, logged seed |
 | `crypto-constant-time` | 5 s | `lib/crypto` re-run under release |
@@ -236,6 +236,7 @@ concurrently as the one `static gates` stage:
 | `unicode` | Verifies the Unicode property tables against the pinned UCD snapshot, regenerated in-process |
 | `spirv` | Verifies the SPIR-V grammar tables against the pinned Khronos grammar, regenerated in-process |
 | `artsheet` | Measures the shipped figure art against its bounds and the committed ledger |
+| `icons` | Redraws the file-type icon masters in-process and compares each with its committed file |
 | `model-check` | Exhaustively model-checks the capability + IPC state machine, failing on any invariant counterexample |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
 | `proptest --once` | Runs one iteration of each stateful capability model, fresh logged seed |

@@ -300,7 +300,8 @@ drawn as its own picture.
 - `entry_icon` (`lib/browse`) asks a regular file whose `MediaType::thumbnail`
   names a reading for `IconRequest::thumbnail`: the request's own tier, ahead
   of the class picture. A sprite area, which carries no signature, is read as
-  one because its name says so (`Reading::Sprite`). A link is not
+  one because its name, or the filetype its volume records, says so
+  (`Reading::Sprite`). A link is not
   thumbnailed: its listed size and time are its own.
 - The key (`ArtworkKey::Thumbnail`) is the path, the file's identity, size and
   modification time as listed, and the reading, with the side as for any

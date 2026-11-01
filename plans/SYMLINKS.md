@@ -337,11 +337,12 @@ reads as an application — the shape S5 builds on. `is_directory_backed()` is
 `false` for every link however it resolves (a link is a leaf: removing one
 unlinks it, and recursing into one would walk a tree the name only points
 at), while `is_directory()`/`is_bundle()` follow the target, and
-`resolved()` is the content reading a sort, icon, or association takes. A
-`LinkReader` seam describes the links a listing reports (one production
-`RtLinkReader` under the crate's new `rt` feature, shared by the file
-manager, the desktop, the picker, and the wallpaper catalog); `NoLinks` is
-the honest "describes nothing" for a tree that cannot hold one. Activation
+`resolved()` is the content reading a sort, icon, or association takes. An
+`EntryReader` seam describes the links a listing reports (the production
+`RtLinkReader` and `RtEntryReader` under the crate's `rt` feature, shared by
+the file manager, the desktop, the picker, and the wallpaper catalog);
+`ListingOnly` is the honest "describes nothing" for a tree that cannot hold
+one. Activation
 descends or opens *through* the link and launches a bundle by its
 **resolved** path, because the app-load gate judges the path it is handed.
 

@@ -12,7 +12,7 @@ use tairix_abi::{DirChange, DirChangeBatch, DirWatchStatus};
 use crate::entry::Entry;
 use crate::sort::{entry_cmp, SortMode};
 #[cfg(any(feature = "rt", test))]
-use crate::vfs::{entry_from_record, LinkReader};
+use crate::vfs::{entry_from_record, EntryReader};
 
 /// The latency every desktop listing arms its watch with: a lone change
 /// shows at once, and a storm repaints at most five times a second.
@@ -77,7 +77,7 @@ impl WatchUpdate {
 /// answering the update it carries and whether more batches wait.
 ///
 /// A present record becomes the [`Entry`] a listing of the directory would
-/// hold, through the same per-record decode, links resolved by `links`.
+/// hold, through the same per-record decode and `reader`.
 ///
 /// # Errors
 ///
@@ -87,7 +87,7 @@ impl WatchUpdate {
 pub(crate) fn decode_batch(
     directory: &str,
     bytes: &[u8],
-    links: &mut dyn LinkReader,
+    reader: &mut dyn EntryReader,
 ) -> Result<(WatchUpdate, bool), Errno> {
     let batch = DirChangeBatch::decode(bytes)?;
     let update = match batch.status {
@@ -98,7 +98,7 @@ pub(crate) fn decode_batch(
             for change in batch.changes() {
                 changes.push(match change {
                     DirChange::Present(record) => {
-                        EntryChange::Upsert(entry_from_record(directory, &record, links)?)
+                        EntryChange::Upsert(entry_from_record(directory, &record, reader)?)
                     }
                     DirChange::Absent(name) => EntryChange::Remove(String::from(
                         core::str::from_utf8(name).map_err(|_| Errno::OutOfRange)?,
@@ -962,7 +962,11 @@ impl WatchedDirectory {
             .read_all()
             .map_err(Errno::from_syscall)
             .and_then(|stream| {
-                crate::vfs::entries_from_dir_stream(&path, &stream, &mut crate::RtLinkReader)
+                crate::vfs::entries_from_dir_stream(
+                    &path,
+                    &stream,
+                    &mut crate::RtEntryReader::within(&dir),
+                )
             });
         let watch = match (listed.as_ref().err(), armed) {
             (Some(&err), _) | (None, Err(err)) => Err(err),
@@ -986,7 +990,11 @@ impl WatchedDirectory {
             .read_all()
             .map_err(Errno::from_syscall)
             .and_then(|stream| {
-                crate::vfs::entries_from_dir_stream(&self.path, &stream, &mut crate::RtLinkReader)
+                crate::vfs::entries_from_dir_stream(
+                    &self.path,
+                    &stream,
+                    &mut crate::RtEntryReader::within(&self.dir),
+                )
             })
     }
 
@@ -1006,6 +1014,7 @@ impl WatchedDirectory {
             scratch
         };
         let mut update = WatchUpdate::Quiet;
+        let mut reader = crate::RtEntryReader::within(&self.dir);
         for _ in 0..DRAIN_BATCHES {
             let Some(bytes) = self
                 .dir
@@ -1016,8 +1025,7 @@ impl WatchedDirectory {
                 update.absorb(WatchUpdate::Rescan);
                 return update;
             };
-            let Ok((batch, more)) = decode_batch(&self.path, bytes, &mut crate::RtLinkReader)
-            else {
+            let Ok((batch, more)) = decode_batch(&self.path, bytes, &mut reader) else {
                 update.absorb(WatchUpdate::Rescan);
                 return update;
             };

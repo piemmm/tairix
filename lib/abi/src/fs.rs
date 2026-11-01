@@ -181,6 +181,42 @@ pub const FS_ATTR_KEY_MAX: usize = 255;
 /// than this is a named stream, not an attribute.
 pub const FS_ATTR_VALUE_MAX: usize = 3072;
 
+/// A RISC OS filetype: the twelve bits that say what an object holds, as
+/// `&FFF` says text. A volume records one as the object's `acorn.filetype`
+/// attribute, and `lib/fsmeta` spells it there.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct Filetype(u16);
+
+impl Filetype {
+    /// Data, the type RISC OS gives an object it is told nothing about.
+    pub const DATA: Self = Self(0xFFD);
+
+    /// The bits a filetype holds.
+    const BITS: u16 = 0xFFF;
+
+    /// `raw` as a filetype, or `None` past twelve bits.
+    #[must_use]
+    pub const fn new(raw: u16) -> Option<Self> {
+        if raw <= Self::BITS {
+            Some(Self(raw))
+        } else {
+            None
+        }
+    }
+
+    /// The filetype the low twelve bits of `raw` state.
+    #[must_use]
+    pub const fn from_low_bits(raw: u16) -> Self {
+        Self(raw & Self::BITS)
+    }
+
+    /// The twelve bits.
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
 /// What an inode is, as reported by [`FileStat`] and each [`DirEntry`].
 ///
 /// Deliberately closed, and an unknown discriminant on decode fails closed
@@ -1836,7 +1872,7 @@ mod tests {
     extern crate alloc;
     use super::{
         is_component, is_name, mode_after_owner_change, mode_string, Access, AtFlags, DirChange,
-        DirChangeBatch, DirEntries, DirEntry, DirWatchStatus, FileId, FileKind, FileStat,
+        DirChangeBatch, DirEntries, DirEntry, DirWatchStatus, FileId, FileKind, FileStat, Filetype,
         FinalLink, NodeExpect, NodeTimes, OpenFlags, PathAt, RealpathMode, RenameFlags,
         UnlinkFlags, FD_CWD, FS_MODE_MASK, FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, FS_UMASK_BITS,
         FS_UMASK_QUERY,
@@ -1844,6 +1880,18 @@ mod tests {
     use crate::time::Time64;
     use crate::Errno;
     use alloc::vec;
+
+    #[test]
+    fn a_filetype_is_twelve_bits() {
+        assert_eq!(Filetype::new(0xFFF).map(Filetype::get), Some(0xFFF));
+        assert_eq!(Filetype::new(0x1000), None);
+        assert_eq!(
+            Filetype::from_low_bits(0xAFFB),
+            Filetype::new(0xFFB).expect("12 bits")
+        );
+        assert_eq!(Filetype::from_low_bits(0x1000).get(), 0);
+        assert_eq!(Filetype::DATA.get(), 0xFFD);
+    }
 
     #[test]
     fn a_name_is_bounded_and_holds_no_separator_or_nul() {

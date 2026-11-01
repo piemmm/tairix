@@ -1512,15 +1512,15 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
 }
 
 /// Keep, of a chosen folder's `entries`, the regular files whose content type
-/// is one of `kinds`, in the order the picker lists them and at most the most
-/// one folder pick delegates, answering how many matching files the bound left
-/// out.
+/// — by name, else by the filetype their volume records — is one of `kinds`,
+/// in the order the picker lists them and at most the most one folder pick
+/// delegates, answering how many matching files the bound left out.
 ///
 /// A link is never kept: a pick hands over only what the folder itself holds.
 pub fn folder_selection(entries: &mut Vec<Entry>, kinds: &[String]) -> u32 {
     entries.retain(|entry| {
         entry.kind() == EntryKind::File
-            && tairix_browse::media::media_for_name(entry.name())
+            && tairix_browse::media_for_document(entry.name(), entry.filetype())
                 .is_some_and(|media| kinds.iter().any(|kind| kind == media.as_str()))
     });
     tairix_browse::sort_entries(entries, tairix_browse::SortMode::default_order());
