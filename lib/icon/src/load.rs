@@ -298,6 +298,23 @@ pub const ICON_KINDS: [IconKind; core::mem::variant_count::<IconKind>()] = [
     IconKind::PrintData,
     IconKind::Palette,
     IconKind::RiscOsObey,
+    IconKind::RiscOsData,
+    IconKind::RiscOsCommand,
+    IconKind::RiscOsDesktop,
+    IconKind::RiscOsSquash,
+    IconKind::ArchiveZip,
+    IconKind::ArchiveTar,
+    IconKind::ArchiveGzip,
+    IconKind::ArchiveBzip2,
+    IconKind::ArchiveXz,
+    IconKind::ArchiveZstd,
+    IconKind::Archive7z,
+    IconKind::ArchiveRar,
+    IconKind::JavaArchive,
+    IconKind::ArchiveSpark,
+    IconKind::ArchiveArcFs,
+    IconKind::TextCsv,
+    IconKind::TextMakefile,
 ];
 
 /// A source of on-disk SVG icon assets, one per [`IconKind`].

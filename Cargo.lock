@@ -49,6 +49,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -77,6 +83,16 @@ name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+
+[[package]]
+name = "blake2s_simd"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2380c0236432f7b22a70229df30f218f5293870c056beb76f5ca068e3273a366"
+dependencies = [
+ "arrayvec",
+ "constant_time_eq",
+]
 
 [[package]]
 name = "block-buffer"
@@ -191,6 +207,12 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "cpubits"
@@ -1516,6 +1538,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-crc16"
+version = "0.0.0"
+
+[[package]]
 name = "tairix-crc32"
 version = "0.0.0"
 
@@ -1544,6 +1570,7 @@ dependencies = [
  "aes",
  "aes-gcm",
  "bcrypt-pbkdf",
+ "blake2s_simd",
  "ccm",
  "chacha20",
  "chacha20poly1305",
@@ -2165,6 +2192,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-drv-fs-archive"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-bytedev",
+ "tairix-compress",
+ "tairix-crc16",
+ "tairix-crc32",
+ "tairix-crypto",
+ "tairix-fsmeta",
+ "tairix-fsprobe",
+ "tairix-fsserve",
+ "tairix-fuzzseed",
+ "tairix-reclaim",
+ "tairix-rt",
+ "tairix-test-archive-image",
+ "tairix-util",
+ "tairix-writeback",
+]
+
+[[package]]
 name = "tairix-drv-fs-arxfs"
 version = "0.0.0"
 dependencies = [
@@ -2195,6 +2244,7 @@ dependencies = [
  "tairix-buildcfg",
  "tairix-bytedev",
  "tairix-collections",
+ "tairix-crc16",
  "tairix-crc32c",
  "tairix-fsprobe",
  "tairix-fsserve",
@@ -2775,6 +2825,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-bytedev",
+ "tairix-crc32",
  "tairix-crypto",
  "tairix-fuzzseed",
  "tairix-path",
@@ -3192,6 +3243,7 @@ dependencies = [
  "tairix-drv-bus-virtio",
  "tairix-drv-fs-adfs",
  "tairix-drv-fs-affs",
+ "tairix-drv-fs-archive",
  "tairix-drv-fs-arxfs",
  "tairix-drv-fs-ext4",
  "tairix-drv-fs-fat32",
@@ -3227,6 +3279,7 @@ dependencies = [
  "tairix-log",
  "tairix-netconfig",
  "tairix-partition",
+ "tairix-path",
  "tairix-pci",
  "tairix-reclaim",
  "tairix-signkeys",
@@ -3926,6 +3979,7 @@ dependencies = [
  "tairix-image",
  "tairix-inline",
  "tairix-input",
+ "tairix-log",
  "tairix-procinfo",
  "tairix-raster",
  "tairix-reclaim",
@@ -4647,6 +4701,7 @@ name = "tairix-sound"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-crc16",
  "tairix-fuzzseed",
  "tairix-inline",
  "tairix-sound",
@@ -5091,6 +5146,19 @@ dependencies = [
  "tairix-kernel-ipc",
  "tairix-log",
  "tairix-util",
+]
+
+[[package]]
+name = "tairix-test-archive-image"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-compress",
+ "tairix-crc16",
+ "tairix-crc32",
+ "tairix-drv-fs-archive",
+ "tairix-fsserve",
+ "tairix-reclaim",
 ]
 
 [[package]]
@@ -9226,6 +9294,7 @@ dependencies = [
  "tairix-drv-dma-bcm2835",
  "tairix-drv-fs-adfs",
  "tairix-drv-fs-affs",
+ "tairix-drv-fs-archive",
  "tairix-drv-fs-arxfs",
  "tairix-drv-fs-ext4",
  "tairix-drv-fs-fat32",
@@ -9297,6 +9366,7 @@ dependencies = [
  "tairix-terminal",
  "tairix-test-amiga-image",
  "tairix-test-appbar-qemu-aarch64",
+ "tairix-test-archive-image",
  "tairix-test-arxfs-image",
  "tairix-test-audio-wire",
  "tairix-test-autoload-input-qemu-aarch64",

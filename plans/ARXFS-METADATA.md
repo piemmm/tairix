@@ -425,9 +425,9 @@ that are genuinely blocked on drivers and tools the tree does not have, are
 recorded in `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
 - **Archive preservation (§6.3).** `cp`, `mv`, `fstree` and the file
-  manager carry attributes and holes through `lib/fscopy`; the archive tools,
-  which do not exist yet, must carry the attribute set through the same engine
-  when they land.
+  manager carry attributes and holes through `lib/fscopy`; archives are
+  mounted as volumes whose drivers answer and keep the `acorn.*` attributes
+  (`plans/ARCHIVES.md`), so a copy into or out of one runs the same engine.
 - **An attribute CLI.** No command app reads or writes attributes today. The
   graphical callers are `fstree`'s `a` editor and the file manager's Properties
   window (`plans/NEW-FILEMANAGER.md` FM8b), both over the capability-checked

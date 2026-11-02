@@ -4611,18 +4611,17 @@ mod program {
         fn thumbnail(
             &mut self,
             side: u32,
-            reading: tairix_icon::Reading,
             document: &mut dyn tairix_icon::ArtworkDocument,
         ) -> Option<tairix_icon::Fitted> {
             let sandbox = &mut self.sandbox;
             let decode = |document: &mut dyn tairix_icon::ArtworkDocument| {
-                tairix_sandbox::imagerender::thumbnail(sandbox, side, reading, document).ok()
+                tairix_sandbox::imagerender::thumbnail(sandbox, side, document).ok()
             };
             let mut store = LentStore {
                 slot: &self.store,
                 side,
             };
-            tairix_icon::serve_thumbnail(&mut store, reading, document, decode)
+            tairix_icon::serve_thumbnail(&mut store, document, decode)
         }
 
         fn application_sprite(

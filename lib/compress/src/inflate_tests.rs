@@ -14,7 +14,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{
-    build_huffman, inflate_into, inflate_prefix, is_permitted_incomplete, Error, Inflater,
+    build_huffman, inflate_into, inflate_prefix, is_permitted_incomplete, Checkpoint, Error,
+    Inflater,
 };
 
 /// A minimal test-only bit writer, the encode-side mirror of [`super::BitReader`].
@@ -650,4 +651,123 @@ fn a_prefix_decodes_only_the_opening_bytes() {
         inflate_prefix(&stream[..20], &mut head),
         Err(Error::UnexpectedEof)
     );
+}
+
+/// A long stream deflated by the crate's own encoder: many blocks, with
+/// back-references reaching across block ends.
+fn long_stream() -> (Vec<u8>, Vec<u8>) {
+    let mut plain = Vec::new();
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    while plain.len() < 600_000 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        // Short runs of a small alphabet, repeating at distances a window
+        // reaches: compressible, and never one block's worth of anything.
+        let word = [b"alpha ", b"beta  ", b"gamma ", b"delta "][(state % 4) as usize];
+        plain.extend_from_slice(word);
+        plain.push(b'0' + (state >> 60) as u8 % 10);
+    }
+    let mut encoder = Box::new(crate::deflate::Deflate::new());
+    let mut stream = vec![0u8; encoder.bound(plain.len())];
+    let len = encoder
+        .deflate(&plain, &mut stream, crate::deflate::Flush::Finish)
+        .expect("deflates");
+    stream.truncate(len);
+    (plain, stream)
+}
+
+/// A decoder resumed from a checkpoint at a block's start decodes the rest of
+/// the stream exactly as the one it was taken from does.
+#[test]
+fn a_checkpoint_at_a_block_start_resumes_the_stream() {
+    let (plain, stream) = long_stream();
+    let mut decoder = Box::new(Inflater::new());
+    let mut checkpoint = Box::new(Checkpoint::default());
+    let mut out = vec![0u8; 4096];
+    let (mut consumed, mut produced) = (0, 0);
+    let mut taken = None;
+    let mut boundaries = 0;
+    while !decoder.is_finished() {
+        let progress = decoder
+            .inflate_by_block(&stream[consumed..], &mut out)
+            .expect("decodes");
+        assert_eq!(
+            out[..progress.produced],
+            plain[produced..produced + progress.produced]
+        );
+        consumed += progress.consumed;
+        produced += progress.produced;
+        if decoder.at_block_start() && !decoder.is_finished() {
+            boundaries += 1;
+            if boundaries == 3 && taken.is_none() {
+                assert!(decoder.checkpoint(&mut checkpoint));
+                taken = Some((consumed, produced));
+            }
+        }
+    }
+    assert_eq!(produced, plain.len());
+    assert!(boundaries > 3, "a stream of many blocks");
+    let (from, at) = taken.expect("a checkpoint was taken");
+    assert!(at > 0 && at < plain.len());
+
+    let mut resumed = Box::new(Inflater::new());
+    resumed.resume(&checkpoint);
+    let mut rest = Vec::new();
+    let mut consumed = from;
+    while !resumed.is_finished() {
+        let progress = resumed
+            .inflate(&stream[consumed..], &mut out)
+            .expect("resumes");
+        consumed += progress.consumed;
+        rest.extend_from_slice(&out[..progress.produced]);
+    }
+    assert_eq!(rest, plain[at..]);
+}
+
+/// A decoder that is mid-block records no checkpoint.
+#[test]
+fn a_checkpoint_is_taken_only_at_a_block_start() {
+    let (_, stream) = long_stream();
+    let mut decoder = Box::new(Inflater::new());
+    let mut out = [0u8; 16];
+    decoder.inflate(&stream, &mut out).expect("decodes");
+    assert!(!decoder.at_block_start());
+    assert!(!decoder.checkpoint(&mut Box::new(Checkpoint::default())));
+}
+
+/// A stream an encoder sync-flushed resumes after the flush from a checkpoint
+/// built of the plaintext before it.
+#[test]
+fn a_checkpoint_after_a_sync_flush_resumes_the_stream() {
+    let (plain, _) = long_stream();
+    let (first, second) = plain.split_at(250_000);
+    let mut encoder = Box::new(crate::deflate::Deflate::new());
+    let mut stream = vec![0u8; encoder.bound(plain.len())];
+    let flushed = encoder
+        .deflate(first, &mut stream, crate::deflate::Flush::Sync)
+        .expect("deflates");
+    let rest = encoder
+        .deflate(
+            second,
+            &mut stream[flushed..],
+            crate::deflate::Flush::Finish,
+        )
+        .expect("deflates");
+    stream.truncate(flushed + rest);
+    let mut checkpoint = Box::new(Checkpoint::default());
+    checkpoint.after_sync(first);
+    let mut resumed = Box::new(Inflater::new());
+    resumed.resume(&checkpoint);
+    let mut out = vec![0u8; 4096];
+    let mut got = Vec::new();
+    let mut consumed = flushed;
+    while !resumed.is_finished() {
+        let progress = resumed
+            .inflate(&stream[consumed..], &mut out)
+            .expect("resumes");
+        consumed += progress.consumed;
+        got.extend_from_slice(&out[..progress.produced]);
+    }
+    assert_eq!(got, second);
 }

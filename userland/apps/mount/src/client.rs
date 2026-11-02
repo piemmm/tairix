@@ -118,6 +118,7 @@ fn mount(
         target: target.as_deref(),
         expects: request.expects,
         adopt: false,
+        file_name: None,
     };
     let image = || request.image.clone();
     let volume = match mounter.attach(&request.image, &attach) {

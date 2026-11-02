@@ -15,6 +15,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::alloc::Layout;
 use core::fmt;
 
 use tairix_abi::Errno;
@@ -26,6 +27,29 @@ pub fn filled<T: Clone>(count: usize, value: T) -> Option<Vec<T>> {
     buffer.try_reserve_exact(count).ok()?;
     buffer.resize(count, value);
     Some(buffer)
+}
+
+/// `count` zero bytes, or `None` when the allocator refuses room for them.
+///
+/// Asked of the allocator as zeroed memory, so one handing out pages still as
+/// the kernel mapped them writes none of them: a large buffer its writer goes
+/// on to fill only in part costs the pages written, not its length.
+#[must_use]
+pub fn zeroed(count: usize) -> Option<Vec<u8>> {
+    if count == 0 {
+        return Some(Vec::new());
+    }
+    let layout = Layout::array::<u8>(count).ok()?;
+    // SAFETY: `layout` is not zero-sized.
+    let block = unsafe { alloc::alloc::alloc_zeroed(layout) };
+    if block.is_null() {
+        return None;
+    }
+    // SAFETY: the global allocator gave `block` for `layout`, `count` bytes at
+    // the alignment of `u8`, the allocation a boxed slice of `count` bytes
+    // holds and frees with; it zeroed all of them, and a zero is a `u8`.
+    let bytes = unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(block, count)) };
+    Some(bytes.into_vec())
 }
 
 /// `N` copies of `value` in a boxed array, or `None` when the allocator

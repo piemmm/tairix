@@ -138,6 +138,10 @@ eject it or their login session ends. It consumes and never contradicts
   out for a floppy a floppy.
 - The served-volume registry holds image volumes beside the device volumes,
   so `volume_read`/`write`/`ctl` reach either through one lookup.
+- An archive is an image attachment of another shape
+  (`kernel/tairix-kernel/src/image_archive.rs`): read by byte to its exact
+  length rather than by block, with work files and a commit that replaces
+  its file; its design is `plans/ARCHIVES.md` §2.
 
 ## 4. Lifetime
 

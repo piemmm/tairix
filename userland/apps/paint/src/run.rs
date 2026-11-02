@@ -44,9 +44,11 @@ mod program {
         artwork_cache, ArtworkCache, IconArtworkSource, InlineArtwork, NoArtworkSeam,
     };
     use tairix_image::{encode_png, EncodeError};
+    use tairix_paint::area::{render_area, AreaView, SpriteOpening};
     use tairix_paint::canvas::{Canvas, Kind, OutOfMemory, Sample};
     use tairix_paint::document::{Document, Entry, Picture, Snapshot};
-    use tairix_paint::layout::{Faces, Layout, WINDOW_SIZE};
+    use tairix_paint::engine::{Engine, EngineLayout};
+    use tairix_paint::layout::{Faces, WINDOW_SIZE};
     use tairix_paint::load::{Assembly, Refusal};
     use tairix_paint::preferences::Preferences;
     use tairix_paint::render::render_into;
@@ -72,7 +74,8 @@ mod program {
     use tairix_util::defer::JobQueue;
     use tairix_window::app;
     use tairix_window::docapp::{
-        self, AnswerWake, DocWindow, DocumentApp, Handle, Host, Stamp, APP_TOKEN,
+        self, AnswerWake, DocWindow, DocumentApp, DocumentView, Handle, Host, Outcome, Request,
+        Stamp, APP_TOKEN,
     };
     use tairix_window::document::{Access, ReadFailure, SaveJob, SavedDocument, UNTITLED};
     use tairix_window::{clipboard, Desktop};
@@ -387,7 +390,7 @@ mod program {
     }
 
     impl DocumentApp for Paint {
-        type View = View;
+        type View = Engine;
         type AppView = SettingsWindow;
         type Snapshot = Snapshot;
         type Extra = ();
@@ -510,25 +513,18 @@ mod program {
                 .retain_waiting(|job| job.as_ref().is_none_or(|job| job.stamp.window() != window));
         }
 
-        fn untitled(host: &Host<Self>) -> Result<View, String> {
+        fn untitled(host: &Host<Self>) -> Result<Engine, String> {
             let preferences = host.app.preferences.live();
             let canvas = preferences
                 .new
                 .canvas()
                 .map_err(|err| alloc::format!("{err}"))?;
-            let mut view = View::new(
-                Document::new_as(Picture::plain(canvas), preferences.format),
-                String::from(UNTITLED),
-                None,
-                Access::Untitled,
-            );
-            view.begin(preferences);
-            Ok(view)
+            Ok(new_picture_engine(host, canvas, preferences.format))
         }
 
         /// A single clear pixel stands in until the document lands, so
         /// nothing is shown that the file might be taken to hold.
-        fn placeholder(host: &Host<Self>, name: &str, access: Access) -> Result<View, String> {
+        fn placeholder(host: &Host<Self>, name: &str, access: Access) -> Result<Engine, String> {
             let canvas = Canvas::new(1, 1, Kind::Rgba, Sample::Rgba([0; 4]))
                 .map_err(|_| String::from("there is not enough memory"))?;
             let mut view = View::new(
@@ -538,7 +534,7 @@ mod program {
                 access,
             );
             view.begin(host.app.preferences.live());
-            Ok(view)
+            Ok(Engine::Picture(alloc::boxed::Box::new(view)))
         }
 
         fn load(host: &mut Host<Self>, index: usize, handle: Arc<Handle>, name: String) {
@@ -610,11 +606,16 @@ mod program {
                     submit_settings(host, job);
                 }
                 SettingsRequest::TakePanes => {
-                    let front = host
-                        .windows
-                        .iter()
-                        .position(DocWindow::focused)
-                        .or_else(|| host.windows.len().checked_sub(1));
+                    let pictures = || {
+                        host.windows
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, window)| window.view.picture().is_some())
+                    };
+                    let front = pictures()
+                        .find(|(_, window)| window.focused())
+                        .or_else(|| pictures().next_back())
+                        .map(|(at, _)| at);
                     let Some(front) = front else {
                         let window = &mut host.app_windows[index];
                         window.view.say(
@@ -629,7 +630,9 @@ mod program {
                     };
                     let was = host.app.preferences.live().clone();
                     let mut now = was.clone();
-                    now.panes.clone_from(host.windows[front].view.panes());
+                    if let Some(view) = host.windows[front].view.picture() {
+                        now.panes.clone_from(view.panes());
+                    }
                     host.app.preferences.edit(&was, &now);
                     apply_settings(host);
                     let job = host.app.preferences.settle();
@@ -642,12 +645,32 @@ mod program {
         fn turn(host: &mut Host<Self>, now_ns: u64) -> bool {
             let (theme, scale) = (host.themes.active(), host.desktop.scale());
             for window in &mut host.windows {
-                if window.view.deadline_ns().is_some_and(|due| due <= now_ns) {
-                    window
-                        .view
-                        .tick(now_ns, &window.layout, scale, theme, &mut window.damage);
+                let (Engine::Picture(view), EngineLayout::Picture(layout)) =
+                    (&mut window.view, &window.layout)
+                else {
+                    continue;
+                };
+                if view.deadline_ns().is_some_and(|due| due <= now_ns) {
+                    view.tick(now_ns, layout, scale, theme, &mut window.damage);
                     window.owe_reported();
                 }
+            }
+            // A sprite file window opens what it was made to, its sprite
+            // windows follow it, and it asks for the thumbnails it lacks,
+            // whatever moved it: an input, a save landing, a resize.
+            let mut at = 0;
+            while let Some(window) = host.windows.get_mut(at) {
+                let id = window.id();
+                if let Some(area) = window.view.area_mut() {
+                    let pending = area.take_pending();
+                    if !pending.is_empty() {
+                        open_sprites(host, at, &pending);
+                    }
+                    if let Some(file) = host.index_of(id) {
+                        sync_sprite_windows(host, file);
+                    }
+                }
+                at = host.index_of(id).map_or(at, |now| now + 1);
             }
             false
         }
@@ -658,10 +681,13 @@ mod program {
             host.windows
                 .iter_mut()
                 .filter_map(|window| {
-                    window
-                        .view
-                        .arm_deadline(now_ns, &window.layout, scale, theme);
-                    window.view.deadline_ns()
+                    let (Engine::Picture(view), EngineLayout::Picture(layout)) =
+                        (&mut window.view, &window.layout)
+                    else {
+                        return None;
+                    };
+                    view.arm_deadline(now_ns, layout, scale, theme);
+                    view.deadline_ns()
                 })
                 .min()
         }
@@ -676,6 +702,16 @@ mod program {
 
         fn request(host: &mut Host<Self>, index: usize, request: Own) {
             carry_out(host, index, request);
+        }
+
+        /// A sprite window's edit becomes its file's as it lands, and a sprite
+        /// file window's names, changes and deletions reach its sprite windows.
+        fn driven(host: &mut Host<Self>, index: usize) {
+            if let Some(file) = host.primary_of(index) {
+                hand_to_file(host, index, file);
+            } else if host.windows[index].view.area().is_some() {
+                sync_sprite_windows(host, index);
+            }
         }
 
         fn answered(host: &mut Host<Self>, index: usize, answer: Answer) {
@@ -714,16 +750,25 @@ mod program {
         fn render(
             &mut self,
             surface: &mut Surface,
-            view: &View,
-            layout: &Layout,
+            view: &Engine,
+            layout: &EngineLayout,
             (theme, scale, faces): (&Theme, Scale, Faces),
             _focused: bool,
         ) {
-            // Every picture drawn is built in, so the resolver refuses every
-            // asset tier and the cache answers from its glyphs.
-            let mut resolver = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
-            let mut source = IconArtworkSource::new(&mut self.artwork, &mut resolver);
-            render_into(surface, view, layout, theme, scale, faces, &mut source);
+            match (view, layout) {
+                (Engine::Picture(view), EngineLayout::Picture(layout)) => {
+                    // Every picture drawn is built in, so the resolver
+                    // refuses every asset tier and the cache answers from its
+                    // glyphs.
+                    let mut resolver = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
+                    let mut source = IconArtworkSource::new(&mut self.artwork, &mut resolver);
+                    render_into(surface, view, layout, theme, scale, faces, &mut source);
+                }
+                (Engine::Area(view), EngineLayout::Area(layout)) => {
+                    render_area(surface, view, layout, theme, faces, scale);
+                }
+                _ => {}
+            }
         }
 
         fn render_app(
@@ -792,10 +837,12 @@ mod program {
     fn apply_settings(host: &mut Host<Paint>) {
         let preferences = host.app.preferences.live();
         for window in &mut host.windows {
-            window
-                .view
-                .adopt(preferences, &window.layout, &mut window.damage);
-            window.owe_reported();
+            if let (Engine::Picture(view), EngineLayout::Picture(layout)) =
+                (&mut window.view, &window.layout)
+            {
+                view.adopt(preferences, layout, &mut window.damage);
+                window.owe_reported();
+            }
         }
         for window in &mut host.app_windows {
             window
@@ -864,10 +911,12 @@ mod program {
             } => host.not_opened(index, &load.name, &why),
             DecodeAnswer::Pasted(pasted) => {
                 let window = &mut host.windows[index];
-                let outcome = window
-                    .view
-                    .pasted(pasted, &window.layout, &mut window.damage);
-                host.apply(index, outcome);
+                if let (Engine::Picture(view), EngineLayout::Picture(layout)) =
+                    (&mut window.view, &window.layout)
+                {
+                    let outcome = view.pasted(pasted, layout, &mut window.damage);
+                    host.apply(index, outcome);
+                }
             }
         }
     }
@@ -881,12 +930,202 @@ mod program {
         } else {
             Access::ReadOnly
         };
-        let mut view = View::new(document, load.name, load.recorded, access);
-        view.begin(host.app.preferences.live());
-        if let Some(refusal) = refusal.filter(|_| writable) {
-            view.say(alloc::format!("{refusal}: Save asks where to save it"));
+        let said = refusal
+            .filter(|_| writable)
+            .map(|refusal| alloc::format!("{refusal}: Save asks where to save it"));
+        // A sprite file is shown as its sprites, each opened in a window of
+        // its own.
+        let mut engine = if document.is_sprite_area() {
+            let double_click = host.desktop.info().double_click();
+            Engine::Area(alloc::boxed::Box::new(AreaView::new(
+                document,
+                load.name,
+                load.recorded,
+                access,
+                double_click,
+            )))
+        } else {
+            let mut view = View::new(document, load.name, load.recorded, access);
+            view.begin(host.app.preferences.live());
+            Engine::Picture(alloc::boxed::Box::new(view))
+        };
+        if let Some(said) = said {
+            SavedDocument::say(&mut engine, said);
         }
-        host.show(index, view, Some(load.handle));
+        host.show(index, engine, Some(load.handle));
+        ask_thumbnails(host, index);
+    }
+
+    /// The engine a new picture of `canvas`, to be saved as `format`, is
+    /// shown in: a sprite file window holding it as its one sprite where
+    /// it is to be a sprite file.
+    fn new_picture_engine(host: &Host<Paint>, canvas: Canvas, format: SaveFormat) -> Engine {
+        let mut picture = Picture::plain(canvas);
+        if format == SaveFormat::Sprites {
+            if let Some(name) = tairix_image::SpriteName::new(tairix_paint::document::SPRITE_STEM) {
+                picture.sprite = Some(tairix_paint::document::SpriteInfo::for_canvas(
+                    name,
+                    picture.canvas(),
+                ));
+            }
+            let document = Document::new_as(picture, format);
+            return Engine::Area(alloc::boxed::Box::new(
+                AreaView::new(
+                    document,
+                    String::from(UNTITLED),
+                    None,
+                    Access::Untitled,
+                    host.desktop.info().double_click(),
+                )
+                .opening_its_sprites(),
+            ));
+        }
+        let mut view = View::new(
+            Document::new_as(picture, format),
+            String::from(UNTITLED),
+            None,
+            Access::Untitled,
+        );
+        view.begin(host.app.preferences.live());
+        Engine::Picture(alloc::boxed::Box::new(view))
+    }
+
+    /// Ask for the thumbnails a sprite file window at `index` still lacks.
+    fn ask_thumbnails(host: &mut Host<Paint>, index: usize) {
+        let wanted = host
+            .windows
+            .get_mut(index)
+            .and_then(|window| window.view.area_mut())
+            .and_then(AreaView::wanted);
+        if let Some(request) = wanted {
+            host.apply(index, Outcome::asking(request));
+        }
+    }
+
+    /// Hand sprite window `index`'s edit, where it made one, to its sprite
+    /// file window `file`.
+    fn hand_to_file(host: &mut Host<Paint>, index: usize, file: usize) {
+        let Some(view) = host.windows[index].view.picture_mut() else {
+            return;
+        };
+        let (Some(id), Some(picture)) = (view.member(), view.take_edit()) else {
+            return;
+        };
+        let window = &mut host.windows[file];
+        let (Engine::Area(area), EngineLayout::Area(layout)) = (&mut window.view, &window.layout)
+        else {
+            return;
+        };
+        let outcome = area.adopt_edited(id, picture, layout, &mut window.damage);
+        host.apply(file, outcome);
+    }
+
+    /// Bring sprite file window `file`'s sprite windows into line with it:
+    /// each retitled by its sprite's name and the file's state, and the
+    /// window of a sprite no longer in it closed.
+    fn sync_sprite_windows(host: &mut Host<Paint>, file: usize) {
+        if !host.windows[file]
+            .view
+            .area_mut()
+            .is_some_and(AreaView::members_moved)
+        {
+            ask_thumbnails(host, file);
+            return;
+        }
+        let Some(area) = host.windows[file].view.area() else {
+            return;
+        };
+        let modified = area.is_modified();
+        let file_name = String::from(area.name());
+        let members: Vec<(usize, Option<tairix_image::SpriteName>)> = host
+            .members(file)
+            .map(|member| {
+                let named = host.windows[member]
+                    .view
+                    .picture()
+                    .and_then(View::member)
+                    .and_then(|id| area.sprite_name(id));
+                (member, named)
+            })
+            .collect();
+        let mut closing = Vec::new();
+        for (member, named) in members {
+            let window = &mut host.windows[member];
+            match (named, window.view.picture_mut()) {
+                (Some(name), Some(view)) => {
+                    if view.set_member(name, &file_name, modified) {
+                        window
+                            .damage
+                            .add(<Engine as DocumentView>::message_area(&window.layout));
+                        window.owe_reported();
+                    }
+                }
+                _ => closing.push(window.id()),
+            }
+        }
+        for id in closing {
+            if let Some(member) = host.index_of(id) {
+                host.apply(member, Outcome::asking(Request::Close));
+            }
+        }
+        ask_thumbnails(host, file);
+    }
+
+    /// Open each of `ids`, sprites of sprite file window `file`, in a window
+    /// of its own, or bring forward the one it has.
+    fn open_sprites(host: &mut Host<Paint>, file: usize, ids: &[tairix_paint::document::EntryId]) {
+        let mut opening = SpriteOpening::of(ids.len());
+        for &id in ids {
+            if !opening.goes_on() {
+                break;
+            }
+            let open = host.members(file).find(|&member| {
+                host.windows[member].view.picture().and_then(View::member) == Some(id)
+            });
+            if let Some(member) = open {
+                host.raise_window(member);
+                opening.opened();
+                continue;
+            }
+            let Some(area) = host.windows[file].view.area() else {
+                return;
+            };
+            let Some(mut view) = sprite_view(area, id) else {
+                opening.short();
+                continue;
+            };
+            view.begin(host.app.preferences.live());
+            match host.open_member(file, Engine::Picture(alloc::boxed::Box::new(view))) {
+                Some(_) => opening.opened(),
+                None => opening.refused(),
+            }
+        }
+        if let Some(said) = opening.said() {
+            host.windows[file].state(said);
+        }
+    }
+
+    /// A sprite window over sprite `id` of `area`, or `None` for a sprite
+    /// that is not a picture here or memory refused.
+    fn sprite_view(area: &AreaView, id: tairix_paint::document::EntryId) -> Option<View> {
+        let document = area.document();
+        let index = document.index_of(id)?;
+        let Entry::Picture(picture) = &document.entries()[index] else {
+            return None;
+        };
+        let name = *document.entries()[index].name()?;
+        let single = Document::of(
+            alloc::vec![Entry::Picture(picture.try_clone().ok()?)],
+            document.origin(),
+            document.unkept(),
+            document.settings(),
+        )?;
+        Some(View::sprite_window(
+            single,
+            (String::from(area.name()), area.is_modified()),
+            (id, name),
+            area.access(),
+        ))
     }
 
     /// Carry out a request of window `index`'s that only the painter makes.
@@ -894,20 +1133,20 @@ mod program {
         let window = &mut host.windows[index];
         let id = window.id();
         match request {
+            Own::OpenSprites(ids) => open_sprites(host, index, &ids),
+            Own::ShowSpriteFile => {
+                if let Some(file) = host.primary_of(index) {
+                    host.raise_window(file);
+                }
+            }
             Own::NewWindow { picture, format } => {
                 let pristine = window.pristine();
                 match picture.canvas() {
                     Ok(canvas) => {
-                        let mut view = View::new(
-                            Document::new_as(Picture::plain(canvas), format),
-                            String::from(UNTITLED),
-                            None,
-                            Access::Untitled,
-                        );
-                        view.begin(host.app.preferences.live());
+                        let engine = new_picture_engine(host, canvas, format);
                         if pristine {
-                            host.show(index, view, None);
-                        } else if host.open_view(view).is_none() {
+                            host.show(index, engine, None);
+                        } else if host.open_view(engine).is_none() {
                             // The reason went to stderr; the window that
                             // asked says that it was refused.
                             host.windows[index].state("No new window could be opened");
@@ -957,6 +1196,12 @@ mod program {
     /// waiting on it.
     fn refuse_compute(host: &mut Host<Paint>, index: usize, job: u64) {
         let window = &mut host.windows[index];
+        // A sprite file window asks again once something changes, never at
+        // once: the queue just said it had no room.
+        if let Some(area) = window.view.area_mut() {
+            area.refused(job);
+            return;
+        }
         let outcome = window.view.computed(
             job,
             Computed::Tiles(Err(OutOfMemory)),

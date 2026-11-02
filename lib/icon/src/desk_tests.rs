@@ -822,7 +822,6 @@ fn thumbnail_at(path: &str) -> ArtworkKey {
             },
             content_gen: 1,
         },
-        reading: crate::Reading::Signature,
     })
 }
 

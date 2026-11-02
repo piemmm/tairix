@@ -6,7 +6,7 @@ use std::vec::Vec;
 
 use tairix_abi::driver::block::{Block, DiscardCapability};
 use tairix_abi::driver::BufferClass;
-use tairix_abi::volume::{VolumeCtl, VolumeCtlOp, VolumeInfo, VOLUME_IO_MAX};
+use tairix_abi::volume::{VolumeCtl, VolumeInfo, VOLUME_IO_MAX};
 use tairix_abi::{DriverError, Errno};
 
 use super::{GrantedVolume, VolumeAccess};
@@ -19,7 +19,7 @@ const BLOCK: u32 = 4096;
 enum Call {
     Read(u64, usize),
     Write(u64, usize),
-    Ctl(VolumeCtlOp, u64, u64),
+    Ctl(VolumeCtl),
 }
 
 /// A kernel serving one in-memory volume, recording every call.
@@ -46,6 +46,9 @@ impl FakeKernel {
                 },
                 disc_layout: None,
                 medium: None,
+                byte_len: blocks * u64::from(BLOCK),
+                work_files: 0,
+                archive_name: None,
             }),
             refuse: None,
         }
@@ -85,13 +88,20 @@ impl VolumeAccess for &FakeKernel {
     }
 
     fn ctl(&self, ctl: &VolumeCtl) -> Result<Option<VolumeInfo>, Errno> {
-        self.calls
-            .borrow_mut()
-            .push(Call::Ctl(ctl.op, ctl.lba, ctl.blocks));
-        match ctl.op {
-            VolumeCtlOp::Info => Ok(self.info),
+        self.calls.borrow_mut().push(Call::Ctl(*ctl));
+        match ctl {
+            VolumeCtl::Info => Ok(self.info),
             _ => self.refuse.map_or(Ok(None), Err),
         }
+    }
+
+    // A volume of whole blocks has no regions.
+    fn region_read(&self, _region: u8, _offset: u64, _buf: &mut [u8]) -> Result<usize, Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn region_write(&self, _region: u8, _offset: u64, _buf: &[u8]) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
     }
 }
 
@@ -103,7 +113,7 @@ fn the_volume_is_the_device_the_kernel_describes() {
     assert_eq!((geometry.block_size, geometry.block_count), (BLOCK, 64));
     assert!(volume.discard_capability().unwrap().supported);
     assert_eq!(volume.info().block_count, 64);
-    assert_eq!(*kernel.calls.borrow(), [Call::Ctl(VolumeCtlOp::Info, 0, 0)]);
+    assert_eq!(*kernel.calls.borrow(), [Call::Ctl(VolumeCtl::Info)]);
 }
 
 #[test]
@@ -148,8 +158,8 @@ fn flush_and_discard_are_the_volume_controls() {
     assert_eq!(
         kernel.calls.borrow()[1..],
         [
-            Call::Ctl(VolumeCtlOp::Flush, 0, 0),
-            Call::Ctl(VolumeCtlOp::Discard, 3, 4)
+            Call::Ctl(VolumeCtl::Flush),
+            Call::Ctl(VolumeCtl::Discard { lba: 3, blocks: 4 })
         ]
     );
 }

@@ -1,18 +1,23 @@
-//! `plans/DISK-IMAGES.md` DI7 vertical: boot the production aarch64
-//! `tairix-kernel` pipeline against a root disk whose read-only `/System`
-//! volume carries the signed AmigaDOS, ADFS and ISO 9660 drivers and the
-//! test-only `images` fixture, and whose root volume holds an Acorn ADFS
-//! floppy, an AmigaDOS floppy and the RISC OS disc in the user's home.
+//! `plans/DISK-IMAGES.md` DI7 and `plans/ARCHIVES.md` AR11 vertical: boot
+//! the production aarch64 `tairix-kernel` pipeline against a root disk whose
+//! read-only `/System` volume carries the signed AmigaDOS, ADFS, ISO 9660 and
+//! archive drivers and the test-only `images` fixture, and whose root volume
+//! holds an Acorn ADFS floppy, an AmigaDOS floppy, the RISC OS disc and an
+//! archive of each format in the user's home.
 //!
 //! ## What this vertical asserts
 //!
-//! The scripted root shell runs `images`, which copies each image into the
-//! home, mounts it with the real `mount` — the kernel recognising which is
-//! which from its contents, publishing its volume node under the kernel's
-//! image-volumes node, and `devmgr` loading the format's driver against it —
-//! reads what it holds, writes on the floppies and is refused on the disc and
-//! on an image the user may only read, ejects each with the real `unmount`,
-//! and mounts the floppies again to read back what it wrote.
+//! The scripted root shell runs `images`, which copies each image and
+//! archive into the home, mounts it with the real `mount` — the kernel
+//! recognising which is which from its contents, publishing its volume node
+//! under the kernel's image-volumes node, and `devmgr` loading the format's
+//! driver against it — reads what it holds, writes on the floppies and is
+//! refused on the disc and on an image the user may only read, ejects each
+//! with the real `unmount`, and mounts the floppies again to read back what
+//! it wrote. Each archive's `ReadMe` is read with its RISC OS filetype; a
+//! file is written and typed in every archive but the RAR, which refuses it,
+//! and each written archive, committed as it is ejected, is mounted again to
+//! read both files and their types back.
 //!
 //! A failing fixture states its reason and never exits, so the sink below
 //! never arms and the run times out with the reason in the transcript.

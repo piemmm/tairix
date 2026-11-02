@@ -49,6 +49,7 @@ use tairix_util::defer::JobQueue;
 use super::closing::{
     next_quit_step, reveal_refusal, save_changes_alert, CloseAnswer, QuitStanding, QuitStep,
 };
+use super::members::{members_of, route, Route};
 use super::title::{opening, Title};
 use super::{
     AppRequest, AppView, DocumentView, Outcome, Relayout, Request, ToolGone, ToolMove, ViewOutcome,
@@ -346,6 +347,11 @@ pub trait DocumentApp: Sized {
     /// document that asked had gone: by default it is let go.
     fn orphaned(_host: &mut Host<Self>, _window: u64, _answer: Self::Answer) {}
 
+    /// Window `index`'s engine was driven, and what it asked is about to be
+    /// carried out: what it changed is handed to the other windows of its
+    /// document here, so a save asked now freezes it.
+    fn driven(_host: &mut Host<Self>, _index: usize) {}
+
     /// The process is ending: see the application's own outstanding work out,
     /// as the host sees its saves out, so nothing asked for is dropped.
     fn leaving(_host: &mut Host<Self>) {}
@@ -423,6 +429,9 @@ pub struct DocWindow<A: DocumentApp> {
     /// secondary press on its close button asks, for as long as that close is
     /// under way.
     reveal_on_close: bool,
+    /// The window whose document it shows, for a member window
+    /// ([`Host::open_member`]): its file is that window's.
+    primary: Option<u64>,
 }
 
 /// Whether a window's document is still being read in; input waits until it
@@ -820,10 +829,17 @@ impl<A: DocumentApp> DocWindow<A> {
                 .any(|pane| pane.tool().is_some() && pane.chrome.focused)
     }
 
-    /// Whether a document opened now may take its place.
+    /// Whether a document opened now may take its place: never a member
+    /// window's, which shows its primary's.
     #[must_use]
     pub fn pristine(&self) -> bool {
-        !self.loading() && self.file.pristine(&self.view)
+        self.primary.is_none() && !self.loading() && self.file.pristine(&self.view)
+    }
+
+    /// Whether it is a member window ([`Host::open_member`]).
+    #[must_use]
+    pub const fn is_member(&self) -> bool {
+        self.primary.is_some()
     }
 
     /// Whether the document shown may be replaced in place: no save or file
@@ -854,7 +870,7 @@ impl<A: DocumentApp> DocWindow<A> {
     /// Where it stands in the quit under way; `leaving` when it is about to
     /// close.
     fn quit_standing(&self, leaving: bool) -> QuitStanding {
-        if leaving {
+        if leaving || self.primary.is_some() {
             QuitStanding::Clear
         } else if self.asking_to_close() || self.file.picking() {
             QuitStanding::Asking
@@ -1304,10 +1320,26 @@ impl<A: DocumentApp> Host<A> {
         }
         self.move_on(index);
         let (theme, scale) = (self.themes.active(), self.desktop.scale());
+        // A window opened for this document alone takes the size it asks.
+        let faces = A::faces(theme, Scale::ONE);
+        let fit = (self.windows[index].reading == Reading::Alone)
+            .then(|| view.open_size(theme, faces))
+            .flatten()
+            .map(|(width, height)| {
+                let (width, height) = self.desktop.window_size(width, height);
+                app::mode_for(width, height)
+            });
         let window = &mut self.windows[index];
         window.view = view;
         window.file.opened(handle);
         window.reading = Reading::Done;
+        if let Some(mode) = fit {
+            let _ =
+                window
+                    .chrome
+                    .pane
+                    .resize_with(&mut self.client, &mode, &mut window.chrome.surface);
+        }
         window.relayout(theme, scale, self.faces);
     }
 
@@ -1355,6 +1387,13 @@ impl<A: DocumentApp> Host<A> {
             Relayout::Reported => window.lay_out(theme, scale, self.faces),
             Relayout::Whole => window.relayout(theme, scale, self.faces),
         }
+        let id = window.id();
+        A::driven(self, index);
+        // What the application did may have closed windows, this one among
+        // them.
+        let Some(index) = self.index_of(id) else {
+            return;
+        };
         if let Some(request) = outcome.request {
             self.carry_out(index, request);
         }
@@ -1365,7 +1404,10 @@ impl<A: DocumentApp> Host<A> {
     fn open_window(&mut self, view: A::View, reading: Reading) -> Result<usize, String> {
         let theme = self.themes.active();
         let scale = self.desktop.scale();
-        let (width, height) = self.desktop.window_size(A::WINDOW_SIZE.0, A::WINDOW_SIZE.1);
+        let (width, height) = view
+            .open_size(theme, A::faces(theme, Scale::ONE))
+            .unwrap_or(A::WINDOW_SIZE);
+        let (width, height) = self.desktop.window_size(width, height);
         let mode = app::mode_for(width, height);
         let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
             return Err(String::from(NO_SURFACE));
@@ -1413,10 +1455,92 @@ impl<A: DocumentApp> Host<A> {
             closing: None,
             quit_asked: false,
             reveal_on_close: false,
+            primary: None,
         };
         window.view.settle(&window.layout, &mut window.damage);
         self.windows.push(window);
         Ok(self.windows.len() - 1)
+    }
+
+    /// Open a further window onto window `index`'s document, showing `view`,
+    /// answering its index: a member window, whose saves are its primary's —
+    /// `index`'s, or `index`'s own primary's — which is never asked whether to
+    /// save, and which closes with its primary. A refusal is put up as an
+    /// alert over the primary and answers `None`.
+    pub fn open_member(&mut self, index: usize, view: A::View) -> Option<usize> {
+        let window = &self.windows[index];
+        let primary = window.primary.unwrap_or_else(|| window.id());
+        match self.open_window(view, Reading::Done) {
+            Ok(member) => {
+                self.windows[member].primary = Some(primary);
+                Some(member)
+            }
+            Err(why) => {
+                self.alert(Some(index), NO_NEW_WINDOW, &why);
+                None
+            }
+        }
+    }
+
+    /// The index of the window whose document member window `index` shows,
+    /// or `None` for a window that is no member.
+    #[must_use]
+    pub fn primary_of(&self, index: usize) -> Option<usize> {
+        self.windows[index]
+            .primary
+            .and_then(|primary| self.index_of(primary))
+    }
+
+    /// The indices of the member windows onto window `index`'s document.
+    pub fn members(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
+        let primary = self.windows[index].id();
+        self.windows
+            .iter()
+            .enumerate()
+            .filter_map(move |(at, window)| (window.primary == Some(primary)).then_some(at))
+    }
+
+    /// Bring document window `index` forward and give it the keyboard, while
+    /// one of this application's windows holds it; a refusal is said.
+    pub fn raise_window(&mut self, index: usize) {
+        let id = self.windows[index].id();
+        if let Err(err) = self.client.activate_window(id) {
+            self.report(format!("a window could not be brought forward ({err})"));
+        }
+    }
+
+    /// Tell the member windows onto window `index`'s document the name and
+    /// access it took.
+    fn tell_members(&mut self, index: usize, renamed: Option<&str>, gained: Option<Access>) {
+        let members: Vec<usize> = self.members(index).collect();
+        for member in members {
+            let window = &mut self.windows[member];
+            if let Some(name) = renamed {
+                window.view.rename(String::from(name));
+            }
+            if let Some(access) = gained {
+                window.view.set_access(access);
+            }
+            window.owe(Repaint::Whole);
+        }
+    }
+
+    /// Close the member windows onto window `id`'s document: it closed, or
+    /// shows another. A member opens after its primary and windows keep their
+    /// order, so this never moves the primary's own index.
+    fn close_members(&mut self, id: u64) {
+        let closing: Vec<u64> = members_of(
+            id,
+            self.windows
+                .iter()
+                .map(|window| (window.id(), window.primary)),
+        )
+        .collect();
+        for member in closing {
+            if let Some(index) = self.index_of(member) {
+                self.close_window(index);
+            }
+        }
     }
 
     /// Open a window of the application's own showing `view`, answering its
@@ -1519,10 +1643,12 @@ impl<A: DocumentApp> Host<A> {
     /// document asked for and is still waiting is withdrawn, and whatever of
     /// it answers later is told apart.
     fn move_on(&mut self, index: usize) {
-        let withdrawn = self.withdraw(self.windows[index].id());
+        let id = self.windows[index].id();
+        let withdrawn = self.withdraw(id);
         let window = &mut self.windows[index];
         window.epoch = window.epoch.wrapping_add(1);
         window.own_held = window.own_held.saturating_sub(withdrawn);
+        self.close_members(id);
     }
 
     /// Withdraw what window `id`'s document has waiting, on the queue and on
@@ -1640,6 +1766,7 @@ impl<A: DocumentApp> Host<A> {
             let _ = pane.chrome.pane.close(&mut self.client);
         }
         let _ = window.chrome.pane.close(&mut self.client);
+        self.close_members(id);
     }
 
     /// Have the desktop show the user, in the file manager, where window
@@ -1647,8 +1774,9 @@ impl<A: DocumentApp> Host<A> {
     /// its descriptor tells the desktop. A refusal is said in an alert, since
     /// the window it would have shown is going.
     fn reveal_document(&mut self, index: usize) {
-        let window = &self.windows[index];
-        let Some(handle) = window.file.handle() else {
+        let held = self.primary_of(index).unwrap_or(index);
+        let (window, file) = (&self.windows[index], &self.windows[held].file);
+        let Some(handle) = file.handle() else {
             return;
         };
         let (id, fd) = (window.id(), handle.fd());
@@ -1673,8 +1801,31 @@ impl<A: DocumentApp> Host<A> {
         );
     }
 
-    /// Carry out one request of window `index`.
+    /// Carry out one request of window `index`: a member's request about its
+    /// document is its primary's.
     fn carry_out(&mut self, index: usize, request: RequestOf<A>) {
+        if self.windows[index].is_member() {
+            let primary = self.primary_of(index);
+            match (route(&request), primary) {
+                (Route::Member, _) => {}
+                (Route::Close, _) | (Route::Primary | Route::SaveThenClose, None) => {
+                    self.close_window(index);
+                    return;
+                }
+                (Route::Primary, Some(primary)) => {
+                    self.carry_out(primary, request);
+                    return;
+                }
+                (Route::SaveThenClose, Some(primary)) => {
+                    let member = self.windows[index].id();
+                    self.save(primary, None, false);
+                    if let Some(index) = self.index_of(member) {
+                        self.close_window(index);
+                    }
+                    return;
+                }
+            }
+        }
         match request {
             Request::Save => self.save(index, None, false),
             Request::SaveThenClose => self.save(index, None, true),
@@ -1773,6 +1924,8 @@ impl<A: DocumentApp> Host<A> {
             );
         }
         let window = &mut self.windows[index];
+        let named = rename.is_some().then(|| String::from(window.view.name()));
+        let access = window.view.access();
         let landed = window
             .file
             .saved(&mut window.view, target, generation, rename, result);
@@ -1780,6 +1933,15 @@ impl<A: DocumentApp> Host<A> {
             .damage
             .add(<A::View as DocumentView>::message_area(&window.layout));
         window.owe_reported();
+        // A Save As that landed renamed the document, and may have made it
+        // writable: its members show it by that name and as that.
+        let renamed = named
+            .filter(|before| before != window.view.name())
+            .map(|_| String::from(window.view.name()));
+        let gained = (window.view.access() != access).then(|| window.view.access());
+        if renamed.is_some() || gained.is_some() {
+            self.tell_members(index, renamed.as_deref(), gained);
+        }
         // What was to close stays open to say why, and a quit waiting on it
         // is given up.
         self.quitting &= !landed.close_abandoned;
@@ -2660,10 +2822,14 @@ impl<A: DocumentApp> Host<A> {
         // The first question goes up before the rest come down, while the
         // user's own quit still lets it come forward.
         self.carry_quit_on(None);
+        // A member closes with its primary, so a quit the primary's question
+        // turns down leaves it open.
         let done: Vec<u64> = self
             .windows
             .iter()
-            .filter(|window| window.loading() || !window.view.is_modified())
+            .filter(|window| {
+                !window.is_member() && (window.loading() || !window.view.is_modified())
+            })
             .map(DocWindow::id)
             .collect();
         for id in done {

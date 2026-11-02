@@ -90,8 +90,8 @@ pub use service::{
 };
 pub use vfs::Vfs;
 pub use volsvc::{
-    AnswerSink, ChunkSink, ChunkSource, ImageSource, NullVolumeService, OfferingServer, Principal,
-    ServeChannel, VolumeService, NULL_VOLUME_SERVICE,
+    AnswerSink, ChunkSink, ChunkSource, ImageDirectory, ImageSource, NullVolumeService,
+    OfferingServer, Principal, ServeChannel, VolumeService, NULL_VOLUME_SERVICE,
 };
 pub use volumes::{VolumeForest, VolumePublishError, NULL_VOLUME_FOREST};
 

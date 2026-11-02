@@ -3933,17 +3933,18 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::IMAGE_ATTACH,
         name: "image_attach",
-        arg_count: 5,
+        arg_count: 6,
         args: [
             // The image's descriptor, non-null `UserPtr` to the
             // `ImageAttach` and its length, non-null `UserPtr` for the
-            // `ImageAttachReply` and its capacity.
+            // `ImageAttachReply` and its capacity, and the descriptor of the
+            // directory holding the image or `IMAGE_NO_DIRECTORY`.
             AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
+            AbiType::U32,
         ],
         ret: AbiType::U64,
         // The descriptor is the authority over the file, and a wider
@@ -3951,6 +3952,45 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // against the caller; every attach is audited.
         required_capability: None,
         audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::ARCHIVE_READ,
+        name: "archive_read",
+        arg_count: 5,
+        args: [
+            // Served-volume id, region, byte offset, non-null `UserPtr`
+            // destination, length in bytes.
+            AbiType::U64,
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // As `volume_read`: the data path of an authority decided at serve
+        // time, held to the one volume the grant names. Not audited.
+        required_capability: Some(CapabilityId::FS_SERVE),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::ARCHIVE_WRITE,
+        name: "archive_write",
+        arg_count: 5,
+        args: [
+            // Served-volume id, work-file region, byte offset, non-null
+            // `UserPtr` source, length in bytes.
+            AbiType::U64,
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // As `archive_read`, its source rather than its destination.
+        required_capability: Some(CapabilityId::FS_SERVE),
+        audit: false,
     },
 ];
 

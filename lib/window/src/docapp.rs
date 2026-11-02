@@ -29,6 +29,8 @@ mod host;
 #[cfg(all(freestanding, feature = "rt"))]
 pub use host::*;
 #[cfg(any(test, all(freestanding, feature = "rt")))]
+mod members;
+#[cfg(any(test, all(freestanding, feature = "rt")))]
 mod scroll;
 #[cfg(any(test, all(freestanding, feature = "rt")))]
 mod title;
@@ -255,6 +257,13 @@ pub trait DocumentView: SavedDocument {
 
     /// The smallest window it can be laid out in, as `(width, height)`.
     fn min_size(&self, theme: &Theme, scale: Scale, faces: Self::Faces) -> (u32, u32);
+
+    /// The size, in logical pixels, a window opened for this view takes, laid
+    /// out in `theme` with `faces` at the reference scale, or `None` for the
+    /// application's own.
+    fn open_size(&self, _theme: &Theme, _faces: Self::Faces) -> Option<(u32, u32)> {
+        None
+    }
 
     /// Bring the view into line with `layout`, reporting what moved.
     fn settle(&mut self, layout: &Self::Layout, damage: &mut Region);

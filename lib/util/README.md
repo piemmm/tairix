@@ -33,7 +33,9 @@ nothing from here: the rule for a hidden character it needs is `lib/visible`'s.
   request handed back; `JobQueue`: every request answered, in turn).
 * `fallible` — reserving a data-sized buffer before filling it (`filled`,
   `collected`, `grow_to`, `reserve`, `read_snapshot`), so an allocation the
-  machine refuses is a typed refusal rather than an abort; `trim` moves a
+  machine refuses is a typed refusal rather than an abort; `zeroed` asks for
+  its bytes zeroed, so a buffer filled only in part costs only the pages
+  written; `trim` moves a
   buffer kept long after it was filled into an allocation of exactly its
   length where one is granted, leaving it as it is otherwise; `held` counts
   the bytes a buffer's allocation holds, for charging them to a budget.

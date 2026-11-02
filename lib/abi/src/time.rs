@@ -776,6 +776,58 @@ impl CivilTime {
     }
 }
 
+/// An instant as MS-DOS records it — in FAT directories, zip and ARC headers
+/// alike: a date, and a time to two seconds, in a civil time that names no
+/// zone, which TAIRiX reads and writes as UTC.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DosTime {
+    /// The year less 1980 (bits 9 to 15), the month (5 to 8), the day (0 to
+    /// 4).
+    pub date: u16,
+    /// The hour (bits 11 to 15), the minute (5 to 10), the second halved (0
+    /// to 4).
+    pub time: u16,
+}
+
+impl DosTime {
+    /// The first instant DOS can record: 1980-01-01 00:00:00.
+    pub const EARLIEST: Time64 = Time64::from_secs(315_532_800);
+    /// The last instant DOS can record: 2107-12-31 23:59:58.
+    pub const LATEST: Time64 = Time64::from_secs(4_354_819_198);
+
+    /// `time` as DOS records it, its odd second dropped, or `None` outside
+    /// the years 1980 to 2107 the fields hold — never a clamped date.
+    #[must_use]
+    pub fn from_time64(time: Time64) -> Option<Self> {
+        let civil = CivilTime::from_time64(time);
+        let year = u16::try_from(civil.year.checked_sub(1980)?)
+            .ok()
+            .filter(|&year| year <= 127)?;
+        let field = |value: u32| u16::try_from(value).ok();
+        Some(Self {
+            date: (year << 9) | (field(civil.month)? << 5) | field(civil.day)?,
+            time: (field(civil.hour)? << 11)
+                | (field(civil.minute)? << 5)
+                | (field(civil.second)? / 2),
+        })
+    }
+
+    /// The instant the fields name, or `None` for fields that name no real
+    /// date and time.
+    #[must_use]
+    pub fn to_time64(self) -> Option<Time64> {
+        CivilTime {
+            year: i64::from(self.date >> 9) + 1980,
+            month: u32::from(self.date >> 5 & 0x0F),
+            day: u32::from(self.date & 0x1F),
+            hour: u32::from(self.time >> 11),
+            minute: u32::from(self.time >> 5 & 0x3F),
+            second: u32::from(self.time & 0x1F) * 2,
+        }
+        .to_time64()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -783,8 +835,64 @@ mod tests {
         weekday_from_days, CivilTime, Duration64, Time64, COARSE_CLOCK_GRANULARITY_NS,
         NANOS_PER_SEC, PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS,
     };
-    use super::{WallClockReading, WallTimeState};
+    use super::{DosTime, WallClockReading, WallTimeState};
     use crate::Errno;
+
+    #[test]
+    fn a_dos_stamp_holds_1980_to_2107_to_two_seconds_and_refuses_beyond() {
+        let at = |year, month, day, hour, minute, second| {
+            CivilTime {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+            }
+            .to_time64()
+            .unwrap()
+        };
+        let dos = |(year, month, day): (u16, u16, u16), (hour, minute, second): (u16, u16, u16)| {
+            DosTime {
+                date: (year - 1980) * 512 + month * 32 + day,
+                time: hour * 2048 + minute * 32 + second / 2,
+            }
+        };
+        let leap = DosTime::from_time64(at(2024, 2, 29, 23, 59, 59)).unwrap();
+        assert_eq!(leap, dos((2024, 2, 29), (23, 59, 59)));
+        assert_eq!(
+            leap.to_time64(),
+            Some(at(2024, 2, 29, 23, 59, 58)),
+            "the odd second is dropped"
+        );
+        for edge in [DosTime::EARLIEST, DosTime::LATEST] {
+            assert_eq!(
+                DosTime::from_time64(edge).and_then(DosTime::to_time64),
+                Some(edge)
+            );
+        }
+        assert_eq!(
+            DosTime::from_time64(Time64::from_secs(DosTime::EARLIEST.secs() - 1)),
+            None
+        );
+        assert_eq!(
+            DosTime::from_time64(Time64::from_secs(DosTime::LATEST.secs() + 2)),
+            None
+        );
+        assert_eq!(
+            DosTime::from_time64(Time64::from_secs(-1)),
+            None,
+            "before 1970"
+        );
+        // A month of thirteen, a thirtieth of February, an hour of 24.
+        for stamp in [
+            dos((1981, 13, 1), (0, 0, 0)),
+            dos((1981, 2, 30), (0, 0, 0)),
+            dos((1981, 1, 1), (24, 0, 0)),
+        ] {
+            assert_eq!(stamp.to_time64(), None, "{stamp:?}");
+        }
+    }
 
     #[test]
     fn only_a_set_and_plausible_reading_is_a_stamp() {

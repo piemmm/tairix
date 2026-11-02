@@ -816,6 +816,7 @@ fn imageattach_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
             target,
             expects,
             adopt: false,
+            file_name: None,
         };
         let mut out = vec![0u8; IMAGE_ATTACH_MAX];
         let len = attach.encode(&mut out).expect("encodes");
@@ -851,7 +852,7 @@ fn imageattach_frames_with_flipped_bits_round_trip_or_are_refused() {
 fn exercise_volume_requests(bytes: &[u8]) {
     use tairix_abi::volume::{
         VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeInfo, VOLUME_ATTACH_MAX_LEN,
-        VOLUME_DETACH_LEN, VOLUME_INFO_LEN,
+        VOLUME_DETACH_LEN,
     };
     if let Ok(attach) = VolumeAttachRequest::decode(bytes) {
         let mut out = [0u8; VOLUME_ATTACH_MAX_LEN];
@@ -876,10 +877,11 @@ fn exercise_volume_requests(bytes: &[u8]) {
     }
     if let Ok(info) = VolumeInfo::decode(bytes) {
         let out = info.encode();
-        let medium = VOLUME_INFO_LEN - tairix_abi::blkio::BLK_MEDIUM_LEN;
+        // The medium record, at 48, reads more spellings than it writes.
+        let medium = 48..48 + tairix_abi::blkio::BLK_MEDIUM_LEN;
         assert_eq!(
-            &out[..medium],
-            &bytes[..medium],
+            (&out[..medium.start], &out[medium.end..]),
+            (&bytes[..medium.start], &bytes[medium.end..]),
             "an accepted description is canonical"
         );
         assert_eq!(VolumeInfo::decode(&out), Ok(info));
@@ -890,8 +892,8 @@ fn exercise_volume_requests(bytes: &[u8]) {
 fn volume_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
     use tairix_abi::driver::block::{DiscLayout, DiscardCapability};
     use tairix_abi::volume::{
-        DetachMode, VolumeAttachRequest, VolumeCtl, VolumeCtlOp, VolumeDetachRequest, VolumeFsType,
-        VolumeInfo, VOLUME_ATTACH_MAX_LEN, VOLUME_DETACH_LEN,
+        DetachMode, VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeFsType, VolumeInfo,
+        ARCHIVE_WORK_FILES, VOLUME_ATTACH_MAX_LEN, VOLUME_DETACH_LEN,
     };
     let mut frames = std::vec::Vec::new();
     let mut attach = [0u8; VOLUME_ATTACH_MAX_LEN];
@@ -916,15 +918,29 @@ fn volume_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
         .expect("a detach in shape");
         frames.push(detach.to_vec());
     }
-    for (op, lba, blocks) in [
-        (VolumeCtlOp::Info, 0, 0),
-        (VolumeCtlOp::Flush, 0, 0),
-        (VolumeCtlOp::Discard, 64, 8),
+    for ctl in [
+        VolumeCtl::Info,
+        VolumeCtl::Flush,
+        VolumeCtl::Discard { lba: 64, blocks: 8 },
+        VolumeCtl::Copy {
+            from: 0,
+            from_offset: 4096,
+            to: 2,
+            to_offset: 77,
+            len: 1 << 20,
+        },
+        VolumeCtl::Truncate { region: 1, len: 9 },
+        VolumeCtl::Commit { len: 1 << 33 },
     ] {
-        frames.push(VolumeCtl { op, lba, blocks }.encode().to_vec());
+        frames.push(ctl.encode().to_vec());
     }
-    for (read_only, discard, disc_layout) in [
-        (false, DiscardCapability::unsupported(), None),
+    for (read_only, discard, disc_layout, work_files) in [
+        (
+            false,
+            DiscardCapability::unsupported(),
+            None,
+            ARCHIVE_WORK_FILES,
+        ),
         (
             true,
             DiscardCapability {
@@ -936,6 +952,7 @@ fn volume_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
                 last_session_start: 1000,
                 last_recorded: Some(5000),
             }),
+            0,
         ),
     ] {
         let info = VolumeInfo {
@@ -945,6 +962,12 @@ fn volume_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
             discard,
             disc_layout,
             medium: None,
+            byte_len: (2048 << 18) - 77,
+            work_files,
+            // A writable archive's frame carries the name it was attached by.
+            archive_name: (work_files > 0)
+                .then(|| tairix_abi::volume::ArchiveName::new(b"notes.tar.gz"))
+                .flatten(),
         };
         frames.push(info.encode().to_vec());
     }

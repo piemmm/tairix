@@ -146,6 +146,9 @@ tairix-arch-api = { path = "../arch/api", version = "=0.0.0" }
 # locally would duplicate `lib/util`. Consumed by
 # both ports' boot paths, so it is a common dependency.
 tairix-util = { path = "../../lib/util", version = "=0.0.0" }
+# The rule every staged replacement on the system is named by, which an
+# archive's work files are named by too.
+tairix-path = { path = "../../lib/path", version = "=0.0.0" }
 
 # The production root-volume unlock + users-database load composition
 # (`src/root_mount.rs`, `plans/PI.md` P11): the boot path mounts the
@@ -465,6 +468,8 @@ tairix-drv-fs-ext4 = { path = "../../drivers/filesystem/ext4", version = "=0.0.0
 tairix-drv-fs-adfs = { path = "../../drivers/filesystem/adfs", version = "=0.0.0" }
 tairix-drv-fs-affs = { path = "../../drivers/filesystem/affs", version = "=0.0.0" }
 tairix-drv-fs-iso9660 = { path = "../../drivers/filesystem/iso9660", version = "=0.0.0" }
+# Archives attached as images, served by their own driver.
+tairix-drv-fs-archive = { path = "../../drivers/filesystem/archive", version = "=0.0.0" }
 # The Amiga floppies and partitioned disk the image scenarios attach.
 tairix-test-amiga-image = { path = "../../tests/integration/amiga_image", version = "=0.0.0" }
 tairix-drv-fs-udf = { path = "../../drivers/filesystem/udf", version = "=0.0.0" }

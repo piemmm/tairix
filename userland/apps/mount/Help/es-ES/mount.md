@@ -1,6 +1,6 @@
 ## NAME
 
-mount — listar los sistemas de archivos montados o montar una imagen de disco
+mount — listar los sistemas de archivos montados o montar una imagen de disco o un archivo comprimido
 
 ## SYNOPSIS
 
@@ -34,6 +34,19 @@ nombre. Cualquier otro `target`, un directorio vacío de su propiedad
 bajo `/Users` o en un volumen de `/Storage`, muestra también el volumen
 allí; un directorio en un volumen FAT32 o ADFS no puede mostrarlo.
 
+Un archivo comprimido se monta del mismo modo, y sus elementos pasan a
+ser los archivos y las carpetas del volumen: un zip (`.zip`), un tar,
+sin comprimir o comprimido con gzip o bzip2 (`.tar`, `.tar.gz`, `.tgz`,
+`.tar.bz2`), un solo archivo comprimido con gzip o bzip2 (`.gz`,
+`.bz2`), un archivo comprimido Spark o ArcFS de RISC OS (`.spk`, `.arc`)
+o un archivo RAR (`.rar`). Los tipos de archivo y los atributos de
+RISC OS acompañan a cada elemento. Los cambios se guardan sustituyendo
+el archivo comprimido, así que este solo se monta en modo de lectura y
+escritura cuando usted puede escribir tanto en él como en la carpeta que
+lo contiene. Un archivo RAR se monta siempre en modo de solo lectura. No
+se monta un archivo comprimido dividido en varias partes ni uno cuyos
+nombres estén cifrados, y un elemento cifrado no se puede leer.
+
 El volumen sigue montado hasta que usted lo desmonte con `unmount` o
 termine su sesión. Una imagen que contiene un disco particionado, uno
 de los discos de un conjunto RAID o un sistema de archivos cuyos
@@ -52,8 +65,9 @@ no se monta, y `mount` indica el motivo.
   decide si el volumen queda en modo de solo lectura.
 - `-t, --types <list>` — los sistemas de archivos, separados por comas,
   de los cuales la imagen debe contener uno, tal como los nombra la
-  lista de montajes (`iso9660`, `udf`, `adfs`, `affs`, `fat32`), o
-  `auto` para cualquiera que contenga; una lista que empieza por `no`
+  lista de montajes (`iso9660`, `udf`, `adfs`, `affs`, `fat32`, `zip`,
+  `tar`, `tar.gz`, `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`, `rar`),
+  o `auto` para cualquiera que contenga; una lista que empieza por `no`
   nombra los que la imagen no debe contener. Lo que guarda la imagen se
   reconoce por su contenido, así que el orden no elige nada: un disco
   que contiene a la vez UDF e ISO 9660 se monta como UDF, salvo que su
@@ -78,6 +92,10 @@ no se monta, y `mount` indica el motivo.
   modo de solo lectura como `disc`.
 - `mount -v -t adfs Elite.adl` — montar una imagen de disquete de
   Acorn, indicando dónde.
+- `mount Photos.zip` — montar un archivo zip, en modo de lectura y
+  escritura cuando usted puede escribir en él y en su carpeta.
+- `mount -r backup.tar.gz /Storage/backup` — montar un tar comprimido en
+  modo de solo lectura como `backup`.
 
 ## EXIT STATUS
 

@@ -1032,7 +1032,7 @@ fn a_serve_frame_round_trips_and_refuses_what_it_cannot_name() {
         (5, 2),
         (6, 19),
         (7, 0),
-        (7, 11),
+        (7, 20),
     ] {
         let mut bad = good;
         bad[at] = value;

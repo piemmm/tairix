@@ -377,6 +377,12 @@ pub const TARGETS: &[Target] = &[
             "ADFS mount / decode (maps, disc records, boot block, fixed + big directories)",
     },
     Target {
+        package: "tairix-drv-fs-archive",
+        test: "fuzz_archive_open",
+        description:
+            "archive open / walk / commit (zip, tar plain and compressed, gzip, Spark, ArcFS)",
+    },
+    Target {
         package: "tairix-drv-fs-affs",
         test: "fuzz_affs_mount",
         description:
@@ -422,6 +428,16 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_zlib",
         description:
             "zlib envelope decode (untrusted header, body, and Adler-32 trailer) + streaming round trip",
+    },
+    Target {
+        package: "tairix-compress",
+        test: "fuzz_bzip2",
+        description: "bzip2 decode (untrusted blocks, tables, selectors) + round trip + block resume",
+    },
+    Target {
+        package: "tairix-compress",
+        test: "fuzz_arc",
+        description: "ARC family decode (packed, squeezed, crunched, LZW) + dynamic LZW round trip",
     },
     Target {
         package: "tairix-crc32c",

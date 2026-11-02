@@ -18,7 +18,7 @@ use tairix_fuzzseed::Prng;
 use super::frame::Header;
 use super::info::DECODER_DELAY;
 use crate::bits::BitWriter;
-use crate::crc::{crc16, crc16_bits, crc16_reflected};
+use crate::crc::{crc16, crc16_bits};
 use crate::input::Patchy;
 use crate::{DecodeError, DecodeLimits, Encoding, PcmSource, SoundFormat};
 
@@ -316,7 +316,7 @@ fn tag_frame(
         lame[22] = ((delay & 0xF) << 4) as u8 | (padding >> 8) as u8;
         lame[23] = padding as u8;
         frame.extend_from_slice(&lame);
-        let crc = crc16_reflected(0, &frame[..at + 34]) ^ u16::from(!crc_holds);
+        let crc = tairix_crc16::checksum(&frame[..at + 34]) ^ u16::from(!crc_holds);
         frame[at + 34..at + 36].copy_from_slice(&crc.to_be_bytes());
     }
     frame.resize(len, 0);

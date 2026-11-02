@@ -237,6 +237,15 @@ pub const ADFS_DRIVER: ServedFsDriver = ServedFsDriver {
     store_path: &[b"Drivers", b"filesystem", b"adfs", b"Run"],
 };
 
+/// The archive driver: every archive format an image attach recognises —
+/// zip, tar plain and compressed, gzip and bzip2 streams, Spark, `ArcFS` and
+/// RAR.
+pub const ARCHIVE_DRIVER: ServedFsDriver = ServedFsDriver {
+    package: "tairix-drv-fs-archive",
+    bind_keys: tairix_drv_fs_archive::BIND_KEYS,
+    store_path: &[b"Drivers", b"filesystem", b"archive", b"Run"],
+};
+
 /// The AmigaDOS driver: the disk-image vertical's Amiga floppy is one.
 pub const AFFS_DRIVER: ServedFsDriver = ServedFsDriver {
     package: "tairix-drv-fs-affs",
@@ -269,6 +278,7 @@ pub const SERVED_FS_DRIVERS: &[ServedFsDriver] = &[
     },
     ADFS_DRIVER,
     AFFS_DRIVER,
+    ARCHIVE_DRIVER,
 ];
 
 /// Cross-compile `package` for the freestanding aarch64 target, convert the
@@ -1697,11 +1707,12 @@ pub fn optical_driver_store_files(
 }
 
 /// The signed **disk-image set** — the ADFS, AmigaDOS and ISO 9660 drivers
-/// the disk-image vertical's three images are served by — each paired with
-/// its store path. An image volume's node hangs off the kernel's
-/// image-volumes node, which no driver binds, so no bus or device driver rides
-/// with them, and the console stays the text console the serial script drives.
-/// Built once per xtask process and memoised.
+/// the disk-image vertical's three images are served by, and the archive
+/// driver its archives are — each paired with its store path. An image
+/// volume's node hangs off the kernel's image-volumes node, which no driver
+/// binds, so no bus or device driver rides with them, and the console stays
+/// the text console the serial script drives. Built once per xtask process
+/// and memoised.
 ///
 /// # Errors
 ///
@@ -1715,7 +1726,7 @@ pub fn images_driver_store_files(
         [const { OnceLock::new() }; MEMO_SLOTS];
     FILES[memo_slot(arch, profile)]
         .get_or_init(|| {
-            [ADFS_DRIVER, AFFS_DRIVER, ISO9660_DRIVER]
+            [ADFS_DRIVER, AFFS_DRIVER, ISO9660_DRIVER, ARCHIVE_DRIVER]
                 .iter()
                 .map(|driver| served_fs_store_file(ctx, arch, driver, profile))
                 .collect()

@@ -32,6 +32,15 @@ drivers therefore preserve the widest range and precision their on-disk
 format supports and surface an out-of-range exact-preservation write as
 an error rather than corrupting the stored time.
 
+## MS-DOS stamps
+
+[`DosTime`] is the one MS-DOS date and time, as FAT, zip and RAR records
+carry it: local time to two seconds, 1980 to 2107, with no zone, so it is
+read as UTC. `DosTime::from_time64` refuses an instant outside that range
+and `to_time64` a stamp whose fields name no date; a format that must store
+one anyway clamps first, as zip does, and keeps the exact time beside it
+where it has a field for it.
+
 ## Tests
 
 Unit tests cover the epoch, dates before 1970, dates past the 2038 (`i32`)

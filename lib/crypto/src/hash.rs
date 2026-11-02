@@ -1,10 +1,13 @@
-//! Hashing primitives: the SHA-2 family.
+//! Hashing primitives: the SHA-2 family, and BLAKE2sp.
 //!
 //! SHA-256 is `abi-v1`'s hash (the syscall-table fingerprint embedded in
 //! every manifest). SHA-384 and SHA-512 are the exchange hashes RFC 5656 and
 //! RFC 8268 bind to the P-384/P-521 and larger finite-field key exchanges, so
 //! they arrive with the same one-shot-plus-streaming surface rather than a
 //! caller's slice of it.
+//!
+//! BLAKE2sp is the integrity hash a RAR 5 archive may record of a member in
+//! place of its CRC-32; it checks a foreign format's bytes and keys nothing.
 //!
 //! SHA-1 is deliberately absent: its one sanctioned use is the hashed
 //! `known_hosts` index, which is keyed, so it is reachable only as
@@ -115,6 +118,44 @@ sha2_variant!(
     sha512,
     Sha512Stream
 );
+
+/// Length, in bytes, of a BLAKE2sp digest.
+pub const BLAKE2SP_OUTPUT_LEN: usize = 32;
+
+/// A BLAKE2sp digest as raw bytes.
+pub type Blake2spDigest = [u8; BLAKE2SP_OUTPUT_LEN];
+
+/// Incremental BLAKE2sp, unkeyed, with its full 32-byte digest.
+pub struct Blake2spStream {
+    inner: blake2s_simd::blake2sp::State,
+}
+
+impl Blake2spStream {
+    /// Start a new streaming BLAKE2sp computation.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: blake2s_simd::blake2sp::State::new(),
+        }
+    }
+
+    /// Feed the next `chunk` of the message.
+    pub fn update(&mut self, chunk: &[u8]) {
+        self.inner.update(chunk);
+    }
+
+    /// The digest of everything fed so far.
+    #[must_use]
+    pub fn finalize(&self) -> Blake2spDigest {
+        *self.inner.finalize().as_array()
+    }
+}
+
+impl Default for Blake2spStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[cfg(test)]
 #[path = "hash_tests.rs"]

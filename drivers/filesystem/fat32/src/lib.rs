@@ -64,7 +64,7 @@ use tairix_abi::driver::filesystem::{
     NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats,
 };
 use tairix_abi::fs::FS_NAME_MAX;
-use tairix_abi::time::{CivilTime, Time64};
+use tairix_abi::time::{DosTime, Time64};
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_bytedev::ByteDevice;
 use tairix_collections::RadixTree;
@@ -869,17 +869,12 @@ impl DosStamp {
     /// TAIRiX keeps zones out of what it stores — or `None` outside the
     /// 1980–2107 they hold, never a clamped date.
     fn of(time: Time64) -> Option<Self> {
-        let civil = CivilTime::from_time64(time);
-        let year = u16::try_from(civil.year.checked_sub(1980)?)
-            .ok()
-            .filter(|&y| y <= 127)?;
-        let field = |value: u32| u16::try_from(value).ok();
-        let second = field(civil.second)?;
+        let DosTime { date, time: clock } = DosTime::from_time64(time)?;
+        let odd = u32::from(time.secs().rem_euclid(2) == 1);
         Some(Self {
-            date: (year << 9) | (field(civil.month)? << 5) | field(civil.day)?,
-            time: (field(civil.hour)? << 11) | (field(civil.minute)? << 5) | (second / 2),
-            centis: u8::try_from(u32::from(second % 2) * 100 + time.subsec_nanos() / 10_000_000)
-                .ok()?,
+            date,
+            time: clock,
+            centis: u8::try_from(odd * 100 + time.subsec_nanos() / 10_000_000).ok()?,
         })
     }
 
@@ -908,27 +903,13 @@ fn dos_creation_to_time64(date: u16, time: u16, centis: u8) -> Time64 {
     .unwrap_or(Time64::UNIX_EPOCH)
 }
 
-/// Decode a DOS (FAT) date/time pair into a [`Time64`], UTC.
-///
-/// `date` packs `year-1980` (bits 9..16), month `1..=12` (bits 5..9), and
-/// day `1..=31` (bits 0..5); `time` packs hours (bits 11..16), minutes
-/// (bits 5..11), and two-second units (bits 0..5). FAT keeps no timezone,
-/// and TAIRiX writes these fields as UTC civil time, so they are read as
-/// UTC — the declared zone policy. Every decodable pair (1980..=2107) is
-/// representable in [`Time64`], so the conversion never truncates; a field
-/// combination that is not a real calendar date/time is not decodable and
-/// yields [`Time64::UNIX_EPOCH`], the documented "no stamp" value — never a
-/// clamped or guessed date.
+/// A DOS date/time pair as a [`Time64`], read as UTC, or the documented
+/// no-stamp [`Time64::UNIX_EPOCH`] for fields that name no real date and
+/// time — never a clamped or guessed one.
 fn dos_datetime_to_time64(date: u16, time: u16) -> Time64 {
-    let civil = CivilTime {
-        year: i64::from(date >> 9) + 1980,
-        month: u32::from((date >> 5) & 0x0F),
-        day: u32::from(date & 0x1F),
-        hour: u32::from(time >> 11),
-        minute: u32::from((time >> 5) & 0x3F),
-        second: u32::from(time & 0x1F) * 2,
-    };
-    civil.to_time64().unwrap_or(Time64::UNIX_EPOCH)
+    DosTime { date, time }
+        .to_time64()
+        .unwrap_or(Time64::UNIX_EPOCH)
 }
 
 /// VFAT short-name checksum binding a long-name set to its 8.3 entry.

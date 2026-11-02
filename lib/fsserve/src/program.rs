@@ -4,22 +4,21 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::filesystem::FilesystemWrite;
 use tairix_abi::driver::{DriverExit, DriverHandle};
 use tairix_abi::fsserve::{ServeFrame, Span, FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX};
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::time::Time64;
 use tairix_abi::volume::{VolumeCtl, VolumeInfo, VOLUME_INFO_LEN};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-use tairix_abi::Errno;
+use tairix_abi::{DriverError, Errno};
 use tairix_drvrt::exit::{end, error, step};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 
 use tairix_rt::shm::ServeWindow;
 
 use crate::{
-    Clock, GrantedVolume, ServedFilesystem, ServedFormat, ServedHost, Server, VolumeAccess, Window,
-    WritebackBudget, REQUIRED_CAPABILITIES,
+    Clock, GrantedVolume, Opened, ServedArchive, ServedFilesystem, ServedFormat, ServedHost,
+    Server, VolumeAccess, Window, WritebackBudget, REQUIRED_CAPABILITIES,
 };
 
 /// The kernel's calls on the volume a grant names.
@@ -41,6 +40,14 @@ impl VolumeAccess for RtVolume {
             return Ok(None);
         }
         VolumeInfo::decode(reply.get(..len).ok_or(Errno::OutOfRange)?).map(Some)
+    }
+
+    fn region_read(&self, region: u8, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        tairix_rt::archive_read(self.0, region, offset, buf)
+    }
+
+    fn region_write(&self, region: u8, offset: u64, buf: &[u8]) -> Result<(), Errno> {
+        tairix_rt::archive_write(self.0, region, offset, buf)
     }
 }
 
@@ -70,6 +77,20 @@ const PRESSURE_TOKEN: u64 = 1;
 /// status the driver ends with.
 #[must_use]
 pub fn run<F: ServedFormat>() -> i32 {
+    serve_volume(F::open)
+}
+
+/// Serve the archive attachment this driver's grant names in format `F`,
+/// answering the status the driver ends with.
+#[must_use]
+pub fn run_archive<F: ServedArchive>() -> i32 {
+    serve_volume(F::open)
+}
+
+/// Serve the volume this driver's grant names as `open` opens it.
+fn serve_volume<S: ServedFilesystem>(
+    open: impl FnOnce(GrantedVolume<RtVolume>, bool, WritebackBudget) -> Result<Opened<S>, DriverError>,
+) -> i32 {
     let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
     let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
         return end(DriverExit::NoHost, &[]);
@@ -117,7 +138,7 @@ pub fn run<F: ServedFormat>() -> i32 {
         gauge: tairix_rt::pressure::gauge(),
     };
     let read_only = granted.info().read_only;
-    let mut opened = match F::open(granted, read_only, budget) {
+    let mut opened = match open(granted, read_only, budget) {
         Ok(opened) => opened,
         Err(why) => {
             // The kernel retracts the volume with this reason on record.

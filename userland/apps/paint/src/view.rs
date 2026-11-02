@@ -35,7 +35,7 @@ use crate::brush::Spray;
 use crate::canvas::{Canvas, CanvasError, Kind, OutOfMemory, Tile};
 use crate::colour::{Ink, BLACK, WHITE};
 use crate::dialog::{Form, Purpose};
-use crate::document::{Document, Layer, NewPicture, Picture, Snapshot};
+use crate::document::{Document, EntryId, Layer, NewPicture, Picture, Snapshot};
 use crate::fill;
 use crate::filter::{Filter, FilterError};
 use crate::gradient::Gradient;
@@ -59,7 +59,7 @@ use crate::viewport::{Viewport, ACTUAL, ZOOMS};
 pub const APP_TITLE: &str = "Paint";
 
 /// A new sprite's size to start.
-const SPRITE_SIZE: (u32, u32) = (32, 32);
+pub(crate) const SPRITE_SIZE: (u32, u32) = (32, 32);
 
 /// The most wells the palette strip holds: a 256-colour palette and the
 /// clear ink of its mask.
@@ -174,6 +174,14 @@ pub enum Compute {
         /// The picture's pixels, which hold it.
         within: Bounds,
     },
+    /// Draw a sprite file window's thumbnails, each `side` pixels square.
+    Thumbnails {
+        /// The square's side.
+        side: u32,
+        /// Each sprite: its identity, its content revision, and its picture
+        /// as it stood.
+        pictures: Vec<(EntryId, u64, Picture)>,
+    },
 }
 
 /// What a worker answers.
@@ -193,6 +201,15 @@ pub enum Computed {
     Filtered(Result<Vec<(usize, Arc<Tile>)>, FilterError>),
     /// A histogram.
     Histogram(Result<crate::histogram::Histogram, OutOfMemory>),
+    /// Thumbnails, each `side` pixels square of straight-alpha RGBA8 where
+    /// one could be drawn.
+    Thumbnails {
+        /// The square's side.
+        side: u32,
+        /// Each sprite's identity, the revision it was drawn from, and its
+        /// pixels.
+        drawn: Vec<(EntryId, u64, Option<Vec<u8>>)>,
+    },
 }
 
 /// Carry out `work`: what the worker runs.
@@ -251,6 +268,16 @@ pub fn compute(work: Compute) -> Computed {
             edge,
             within,
         )),
+        Compute::Thumbnails { side, pictures } => Computed::Thumbnails {
+            side,
+            drawn: pictures
+                .into_iter()
+                .map(|(id, revision, picture)| {
+                    let pixels = crate::thumb::thumbnail(&picture, side).map(|(pixels, _)| pixels);
+                    (id, revision, pixels)
+                })
+                .collect(),
+        },
     }
 }
 
@@ -353,6 +380,12 @@ pub enum Own {
         /// What.
         work: Compute,
     },
+    /// Open each of these sprites in a window of its own, or bring forward
+    /// the one it has.
+    OpenSprites(Vec<EntryId>),
+    /// Bring forward the window of the sprite file this sprite window's
+    /// sprite is in.
+    ShowSpriteFile,
 }
 
 /// What the window asks of `Run`.
@@ -494,6 +527,11 @@ pub enum Action {
     /// Take the next press on the picture as a colour for the ink the
     /// colour pane edits.
     PickColour,
+    /// Open the sprites chosen in a sprite file window, each in a window of
+    /// its own.
+    EditEntry,
+    /// Bring forward the sprite file window a sprite window's sprite is in.
+    SpriteFile,
 }
 
 impl Action {
@@ -561,7 +599,7 @@ impl Action {
 
 /// The actions with no argument, by id: an action's position here is its
 /// menu id, less one.
-const PLAIN_ACTIONS: [Action; 59] = [
+const PLAIN_ACTIONS: [Action; 61] = [
     Action::NewPicture,
     Action::Open,
     Action::Save,
@@ -621,6 +659,8 @@ const PLAIN_ACTIONS: [Action; 59] = [
     Action::ResetPanes,
     Action::ResetColours,
     Action::PickColour,
+    Action::EditEntry,
+    Action::SpriteFile,
 ];
 
 /// Where the argument-carrying families' ids start, and the one entry
@@ -629,7 +669,7 @@ const TOOL_IDS: u16 = 100;
 const ZOOM_IDS: u16 = 200;
 const RENAME_ID: u16 = 300;
 const GO_TO_ENTRY: u16 = 301;
-const RENAME_ENTRY: u16 = 302;
+pub(crate) const RENAME_ENTRY: u16 = 302;
 const GO_TO_LAYER: u16 = 303;
 const FILTER_IDS: u16 = 400;
 const PANE_IDS: u16 = 500;
@@ -810,6 +850,8 @@ enum Then {
     SaveThenClose,
     /// A menu's entry field committed: its id and the text it held.
     Enter(u16, String),
+    /// A sprite window closing: its sprite is its file's, so nothing is asked.
+    Close,
 }
 
 /// A form of settings the window asks in a dialog of its own.
@@ -877,6 +919,20 @@ pub(crate) struct PaletteEdit {
     pub(crate) before: Vec<Rgba8>,
 }
 
+/// What a sprite window (`plans/PAINT.md` PT33) holds of the sprite file
+/// its one sprite is in.
+#[derive(Debug)]
+pub struct Member {
+    /// The sprite's identity in its file.
+    id: EntryId,
+    /// What the file calls it.
+    sprite: tairix_image::SpriteName,
+    /// Whether the file holds changes it has not saved.
+    file_modified: bool,
+    /// The document's generation last handed to the file.
+    handed: u64,
+}
+
 /// One painter window's state.
 #[derive(Debug)]
 pub struct View {
@@ -885,6 +941,8 @@ pub struct View {
     /// The filetype the volume records for the file the document came from,
     /// for as long as that is the file it is saved to.
     recorded: Option<Filetype>,
+    /// The sprite file its one sprite is in, for a sprite window.
+    member: Option<Member>,
     access: Access,
     viewport: Viewport,
     tool: Tool,
@@ -927,6 +985,8 @@ pub struct View {
     palette_edit: Option<PaletteEdit>,
     vertical: ScrollBar,
     horizontal: ScrollBar,
+    /// The palette strip's own bar, which scrolls its row of wells.
+    palette_bar: ScrollBar,
     gesture: Option<Gesture>,
     /// The button that began the drag under way: only its release ends it.
     dragging: Option<PointerButton>,
@@ -1285,6 +1345,7 @@ impl View {
             document,
             name,
             recorded,
+            member: None,
             access,
             viewport: Viewport::new(aspect),
             tool,
@@ -1313,6 +1374,7 @@ impl View {
             palette_edit: None,
             vertical: ScrollBar::new(ScrollOrientation::Vertical, flat()),
             horizontal: ScrollBar::new(ScrollOrientation::Horizontal, flat()),
+            palette_bar: ScrollBar::new(ScrollOrientation::Horizontal, flat()),
             gesture: None,
             dragging: None,
             selection: None,
@@ -1375,13 +1437,79 @@ impl View {
         self.message.as_deref()
     }
 
-    /// Write what the window's title reads over `title`, reusing its room.
+    /// Write what the window's title reads over `title`, reusing its room: a
+    /// sprite window names its sprite and the file it is in, marked as that
+    /// file is.
     pub fn write_title(&self, title: &mut String) {
-        let (modified, read_only) = (
-            SavedDocument::is_modified(self),
-            self.access == Access::ReadOnly,
-        );
-        write_document_title(title, &self.name, modified, read_only, APP_TITLE);
+        let read_only = self.access == Access::ReadOnly;
+        if let Some(member) = &self.member {
+            let shown = alloc::format!("{} in {}", member.sprite, self.name);
+            write_document_title(title, &shown, member.file_modified, read_only, APP_TITLE);
+        } else {
+            let modified = SavedDocument::is_modified(self);
+            write_document_title(title, &self.name, modified, read_only, APP_TITLE);
+        }
+    }
+
+    /// A sprite window over `document`, the one sprite `id` of the sprite file
+    /// `file`, which calls it `sprite` and is written as `access` allows.
+    #[must_use]
+    pub fn sprite_window(
+        document: Document,
+        (file, file_modified): (String, bool),
+        (id, sprite): (EntryId, tairix_image::SpriteName),
+        access: Access,
+    ) -> Self {
+        let mut view = Self::new(document, file, None, access);
+        view.member = Some(Member {
+            id,
+            sprite,
+            file_modified,
+            handed: view.document.generation(),
+        });
+        view
+    }
+
+    /// The sprite this sprite window edits, by its identity in its file.
+    #[must_use]
+    pub fn member(&self) -> Option<EntryId> {
+        self.member.as_ref().map(|member| member.id)
+    }
+
+    /// The sprite as it now stands, where it changed since it was last
+    /// handed to its file; `None` for no change, for a window that is no
+    /// sprite window, or where memory is refused — tried again on the next
+    /// change.
+    pub fn take_edit(&mut self) -> Option<Picture> {
+        let generation = self.document.generation();
+        let member = self
+            .member
+            .as_mut()
+            .filter(|member| member.handed != generation)?;
+        let copy = self.document.picture()?.try_clone().ok()?;
+        member.handed = generation;
+        Some(copy)
+    }
+
+    /// The sprite file `file` calls this window's sprite `sprite`, and holds
+    /// unsaved changes when `modified`: answers whether the title changed.
+    pub fn set_member(
+        &mut self,
+        sprite: tairix_image::SpriteName,
+        file: &str,
+        modified: bool,
+    ) -> bool {
+        let Some(member) = self.member.as_mut() else {
+            return false;
+        };
+        let changed =
+            member.sprite != sprite || member.file_modified != modified || self.name != file;
+        member.sprite = sprite;
+        member.file_modified = modified;
+        if self.name != file {
+            self.name = String::from(file);
+        }
+        changed
     }
 
     /// The tool in use.
@@ -1639,6 +1767,7 @@ impl View {
             swatches: &self.swatches,
             vertical: &self.vertical,
             horizontal: &self.horizontal,
+            palette_bar: &self.palette_bar,
         }
     }
 
@@ -1764,6 +1893,7 @@ impl View {
             self.swatches.set_columns(layout.columns());
             damage.add(layout.palette());
         }
+        self.settle_palette_bar(layout, damage);
         let size = self.picture_size();
         let area = layout.canvas();
         if self.viewport.settle(size, area) {
@@ -2166,6 +2296,7 @@ pub(crate) struct Controls<'a> {
     pub(crate) swatches: &'a SwatchGrid,
     pub(crate) vertical: &'a ScrollBar,
     pub(crate) horizontal: &'a ScrollBar,
+    pub(crate) palette_bar: &'a ScrollBar,
 }
 
 /// The pixel `bounds` grown by `by` on every side.

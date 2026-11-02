@@ -114,7 +114,7 @@ fn replace_link<F: ReplaceFs>(
 }
 
 /// Random bytes in a temporary's name.
-const TAG_LEN: usize = 8;
+const TAG_LEN: usize = tairix_path::STAGING_TAG_LEN;
 
 /// What a replacement keeps of the file it replaces.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -277,34 +277,20 @@ fn staged_name(name: &str, tag: [u8; TAG_LEN]) -> Result<String, Errno> {
     String::from_utf8(staged_path(name.as_bytes(), tag)?).map_err(|_| Errno::OutOfRange)
 }
 
-/// `<path>.<tag>.new`, the tag in lowercase hex; a name too long to carry the
-/// tag is staged as `.<tag>.new` in the same directory instead, so a name of
-/// any length can be replaced.
+/// `path` with its last component staged by [`tairix_path::staging_name`],
+/// in the same directory.
 fn staged_path(path: &[u8], tag: [u8; TAG_LEN]) -> Result<Vec<u8>, Errno> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    const SUFFIX: &[u8] = b".new";
-    let tagged = 1 + 2 * TAG_LEN + SUFFIX.len();
-    let leaf = path.len()
-        - path
-            .iter()
-            .rposition(|&b| b == b'/')
-            .map_or(0, |slash| slash + 1);
-    let stem = if leaf + tagged <= tairix_abi::fs::FS_NAME_MAX {
-        path
-    } else {
-        &path[..path.len() - leaf]
-    };
+    let dir = path
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map_or(0, |slash| slash + 1);
+    let leaf = tairix_path::staging_name(&path[dir..], tag).map_err(|_| Errno::OutOfMemory)?;
     let mut staged = Vec::new();
     staged
-        .try_reserve_exact(stem.len() + tagged)
+        .try_reserve_exact(dir + leaf.len())
         .map_err(|_| Errno::OutOfMemory)?;
-    staged.extend_from_slice(stem);
-    staged.push(b'.');
-    for byte in tag {
-        staged.push(HEX[usize::from(byte >> 4)]);
-        staged.push(HEX[usize::from(byte & 0x0f)]);
-    }
-    staged.extend_from_slice(SUFFIX);
+    staged.extend_from_slice(&path[..dir]);
+    staged.extend_from_slice(&leaf);
     Ok(staged)
 }
 

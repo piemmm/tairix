@@ -176,6 +176,8 @@ pub struct Layout {
     corner: Rect,
     palette: Rect,
     swatches: Rect,
+    wells_view: Rect,
+    palette_bar: Rect,
     columns: usize,
     status: Rect,
     position: Rect,
@@ -278,6 +280,8 @@ impl Layout {
             corner: around.corner,
             palette: around.palette,
             swatches: around.swatches,
+            wells_view: around.wells_view,
+            palette_bar: around.palette_bar,
             columns: around.columns,
             status,
             position,
@@ -333,7 +337,9 @@ impl Layout {
         let width = (left + (canvas + bar).max(dock) + dock)
             .max(floor.controls + floor.view_strip + gap * 3);
         let middle = width - left - dock;
-        let palette = palette_grid(floor.wells, middle.saturating_sub(gap * 2), scale).height;
+        let across = middle.saturating_sub(gap * 2);
+        let row = palette_row(floor.wells, across, scale);
+        let palette = row.side + if row.length > across { bar } else { 0 };
         let rows = bar_rows(Self::controls_width(width, floor.view_strip, theme, scale));
         let height = top_height(rows, strip_height(theme, scale), gap)
             + status_height(faces, gap)
@@ -553,13 +559,26 @@ impl Layout {
         self.palette
     }
 
-    /// Where the palette's wells are drawn.
+    /// The whole row of the palette's wells, unscrolled: longer than the
+    /// strip where they overflow it.
     #[must_use]
     pub const fn swatches(&self) -> Rect {
         self.swatches
     }
 
-    /// The palette's wells to a row.
+    /// The part of the strip the wells show in.
+    #[must_use]
+    pub const fn wells_view(&self) -> Rect {
+        self.wells_view
+    }
+
+    /// The bar the wells scroll by, empty while every well shows.
+    #[must_use]
+    pub const fn palette_bar(&self) -> Rect {
+        self.palette_bar
+    }
+
+    /// The palette's wells to a row: all of them.
     #[must_use]
     pub const fn columns(&self) -> usize {
         self.columns
@@ -617,34 +636,29 @@ fn status_height(faces: Faces, gap: u32) -> u32 {
     faces.status.line_height().max(1) + gap * 2
 }
 
-/// The palette's wells as the strip sets them out.
-struct PaletteGrid {
-    columns: usize,
-    width: u32,
-    height: u32,
+/// The palette's wells as the strip sets them out: one row.
+struct PaletteRow {
+    /// A well's side.
+    side: u32,
+    /// The row's whole length, which overflows the strip when longer than
+    /// it.
+    length: u32,
 }
 
-/// How the palette strip sets `wells` across `width`: in as few rows as hold
-/// every well at least [`LEAST_WELL`] across, the rows evened out, each well
-/// as broad as its row allows up to [`MOST_WELL`].
-fn palette_grid(wells: usize, width: u32, scale: Scale) -> PaletteGrid {
+/// How the palette strip sets `wells` across `width`: in one row, each well
+/// as broad as the row allows between [`LEAST_WELL`] and [`MOST_WELL`], the
+/// row longer than `width` where even the least would not fit.
+fn palette_row(wells: usize, width: u32, scale: Scale) -> PaletteRow {
     let least = scale.scale_length(LEAST_WELL).max(1);
     let most = scale.scale_length(MOST_WELL).max(least);
     let count = u32::try_from(wells).unwrap_or(u32::MAX);
-    if count == 0 || width < least {
-        return PaletteGrid {
-            columns: 1,
-            width: 0,
-            height: 0,
-        };
+    if count == 0 {
+        return PaletteRow { side: 0, length: 0 };
     }
-    let rows = count.div_ceil(width / least);
-    let columns = count.div_ceil(rows);
-    let side = (width / columns).min(most);
-    PaletteGrid {
-        columns: usize::try_from(columns).unwrap_or(1),
-        width: columns.saturating_mul(side),
-        height: rows.saturating_mul(side),
+    let side = (width / count).clamp(least, most);
+    PaletteRow {
+        side,
+        length: side.saturating_mul(count),
     }
 }
 
@@ -653,6 +667,8 @@ fn palette_grid(wells: usize, width: u32, scale: Scale) -> PaletteGrid {
 struct CanvasBands {
     palette: Rect,
     swatches: Rect,
+    wells_view: Rect,
+    palette_bar: Rect,
     columns: usize,
     vertical_bar: Rect,
     horizontal_bar: Rect,
@@ -663,19 +679,25 @@ impl CanvasBands {
     /// Claim the palette strip of `wells` and the scroll bars `bar` broad
     /// from `rest`, leaving it the canvas.
     fn claim(rest: &mut Rect, wells: usize, (gap, bar): (u32, u32), scale: Scale) -> Self {
-        let grid = palette_grid(wells, rest.width.saturating_sub(gap * 2), scale);
-        let palette = rest.take_bottom(if grid.height == 0 {
+        let across = rest.width.saturating_sub(gap * 2);
+        let row = palette_row(wells, across, scale);
+        let overflows = row.length > across;
+        let palette = rest.take_bottom(if row.side == 0 {
             0
         } else {
-            grid.height + gap * 2
+            row.side + gap * 2 + if overflows { bar } else { 0 }
         });
-        let swatches = Rect::new(
+        let (left, top) = (
             palette.left().saturating_add_unsigned(gap),
             palette.top().saturating_add_unsigned(gap),
-            grid.width,
-            grid.height,
-        )
-        .intersection(&palette.inset(gap));
+        );
+        let swatches = Rect::new(left, top, row.length, row.side);
+        let wells_view = Rect::new(left, top, row.length.min(across), row.side);
+        let palette_bar = if overflows {
+            Rect::new(left, top.saturating_add_unsigned(row.side), across, bar)
+        } else {
+            Rect::EMPTY
+        };
         let under = rest.take_bottom(bar);
         let vertical_bar = rest.take_right(bar);
         let corner = if under.is_empty() || vertical_bar.is_empty() {
@@ -691,7 +713,9 @@ impl CanvasBands {
         Self {
             palette,
             swatches,
-            columns: grid.columns,
+            wells_view,
+            palette_bar,
+            columns: wells.max(1),
             vertical_bar,
             horizontal_bar: Rect::new(rest.left(), under.top(), rest.width, under.height),
             corner,

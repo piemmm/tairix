@@ -1422,8 +1422,9 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   (`IconRequest::listed_bundle`), so one replaced, or changed where its folder
   sees it, is decoded afresh and the old answer ages out of the cache. Nothing
   invalidates it.
-- **A picture file is drawn as its own content.** A file whose type the shared
-  raster decoders read asks for its thumbnail ahead of its class artwork
+- **A picture file is drawn as its own content.** A file of one picture whose
+  type the shared raster decoders read asks for its thumbnail ahead of its
+  class artwork — a sprite file, holding many, draws the sprite file icon
   (`IconRequest::thumbnail`, keyed by the path and the `DocumentStamp` its
   listing reports — identity, size, modification time and content generation —
   so a changed file is decoded afresh and a refusal is cached under the same
@@ -1441,7 +1442,7 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   on the first thumbnail and laid out for the thumbnail decoder's revision
   (`plans/FILES-INTERACTION.md` FI25). Only a file whose
   listing reports a content generation is kept, under (volume, inode,
-  generation, reading), so a stale picture cannot be served; a hit is served
+  generation), so a stale picture cannot be served; a hit is served
   only after the open has matched the listing's stamp, and a decode is kept
   only when the open handle still reports that version afterwards. A decoder
   holds the store for one lookup and one insert (`tairix_icon::serve_thumbnail`

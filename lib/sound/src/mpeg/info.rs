@@ -3,7 +3,6 @@
 //! extension, and Fraunhofer's VBRI.
 
 use super::frame::{Header, HEADER_LEN};
-use crate::crc::crc16_reflected;
 
 /// Bytes of LAME's extension; its last two are a CRC over the frame up to
 /// them.
@@ -68,7 +67,7 @@ fn lame(frame: &[u8], at: usize) -> Option<(u64, u64)> {
         return None;
     }
     let stated = u16::from_be_bytes([tag[34], tag[35]]);
-    if crc16_reflected(0, &frame[..at + LAME_LEN - 2]) != stated {
+    if tairix_crc16::checksum(&frame[..at + LAME_LEN - 2]) != stated {
         return None;
     }
     let delay = u64::from(tag[21]) << 4 | u64::from(tag[22] >> 4);

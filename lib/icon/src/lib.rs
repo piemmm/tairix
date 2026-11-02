@@ -90,5 +90,5 @@ pub use store::{serve_thumbnail, StoreAccess, StoreFile, StoreKey, ThumbnailStor
 pub use svg::decode as decode_svg;
 #[cfg(feature = "rt")]
 pub use thumbnail::RtDocument;
-pub use thumbnail::{ArtworkDocument, DocumentStamp, Reading, Thumbnail, MAX_THUMBNAIL_BYTES};
+pub use thumbnail::{ArtworkDocument, DocumentStamp, Thumbnail, MAX_THUMBNAIL_BYTES};
 pub use vector::{IconLayer, VectorIcon};

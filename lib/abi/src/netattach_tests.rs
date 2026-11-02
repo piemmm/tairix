@@ -270,6 +270,8 @@ fn an_attach_frame_out_of_shape_is_refused() {
     };
     let mut trailing = good.clone();
     trailing.push(b'x');
+    let mut leaf = trailing.clone();
+    leaf[17] = 1;
     for (what, bytes, refused) in [
         (
             "another version",
@@ -284,7 +286,7 @@ fn an_attach_frame_out_of_shape_is_refused() {
         ),
         ("a mode on a private one", changed(12, 1), Errno::OutOfRange),
         ("an unknown flag", changed(3, 2), Errno::OutOfRange),
-        ("a pad", changed(17, 1), Errno::OutOfRange),
+        ("a leaf", leaf, Errno::OutOfRange),
         ("a word of its own", changed(20, 1), Errno::OutOfRange),
         (
             "a relative target",

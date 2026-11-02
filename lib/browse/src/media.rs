@@ -53,9 +53,7 @@ use tairix_abi::fs::{DirEntry, FileKind};
 use tairix_abi::home::USERS_DIR;
 use tairix_abi::{BundleEntry, ProgramKind, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR};
 use tairix_fsmeta::preset::acorn::{self, Filetype};
-use tairix_icon::{
-    DocumentStamp, FolderSample, IconKind, IconRequest, Reading, SampleCard, Thumbnail,
-};
+use tairix_icon::{DocumentStamp, FolderSample, IconKind, IconRequest, SampleCard, Thumbnail};
 
 use crate::entry::{is_bundle_name, Entry, EntryKind};
 use crate::presentation::Pictures;
@@ -148,6 +146,9 @@ pub enum MediaType {
     /// A RISC OS Obey file, a script of command lines
     /// (`application/x-riscos-obey`).
     RiscOsObey,
+    /// A RISC OS Desktop file: the commands that set a desktop up
+    /// (`application/x-riscos-desktop`).
+    RiscOsDesktop,
     /// A RISC OS Command file, keystrokes `*Exec` feeds to the command line
     /// (`application/x-riscos-command`).
     RiscOsCommand,
@@ -231,6 +232,11 @@ pub enum MediaType {
     RiscOsSquash,
     /// An `ArcFS` archive (`application/x-arcfs`).
     ArcFs,
+    /// A Spark archive (`application/x-spark`).
+    ArchiveSpark,
+    /// RISC OS's Archive type, which its contents say is Spark or zip
+    /// (`application/x-riscos-archive`).
+    RiscOsArchive,
     /// The image of a disk, holding one volume (`application/x-raw-disk-image`):
     /// a hard-disk partition's, and the broader type of the disc and floppy
     /// images.
@@ -279,11 +285,18 @@ pub enum MediaType {
     VideoArMovie,
     /// Any content of no recognised type (`application/octet-stream`).
     ApplicationOctetStream,
+    /// RISC OS's Data type (`application/x-riscos-data`): bytes of no other
+    /// type, as RISC OS types a file it was told nothing about.
+    RiscOsData,
 }
 
 impl MediaType {
     /// What a person calls this type: the name a listing's type column shows.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm a type: the registry's names read as the one table they are"
+    )]
     pub const fn name(self) -> &'static str {
         match self {
             Self::InodeDirectory => "Folder",
@@ -321,6 +334,7 @@ impl MediaType {
             Self::Rtf => "Rich Text document",
             Self::ShellScript => "Shell script",
             Self::RiscOsObey => "Obey script",
+            Self::RiscOsDesktop => "Desktop file",
             Self::RiscOsCommand => "Command script",
             Self::Pdf => "PDF document",
             Self::PostScript => "PostScript document",
@@ -360,6 +374,8 @@ impl MediaType {
             Self::JavaArchive => "Java archive",
             Self::RiscOsSquash => "Squash file",
             Self::ArcFs => "ArcFS archive",
+            Self::ArchiveSpark => "Spark archive",
+            Self::RiscOsArchive => "Archive",
             Self::RawDiskImage => "Disk image",
             Self::CdImage => "Disc image",
             Self::RawFloppyDiskImage => "Floppy disk image",
@@ -382,11 +398,16 @@ impl MediaType {
             Self::VideoMpeg => "MPEG video",
             Self::VideoArMovie => "Replay movie",
             Self::ApplicationOctetStream => "Data",
+            Self::RiscOsData => "RISC OS data",
         }
     }
 
     /// The IANA (or TAIRiX vendor) media-type spelling.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm a type: the registry's spellings read as the one table they are"
+    )]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InodeDirectory => "inode/directory",
@@ -424,6 +445,7 @@ impl MediaType {
             Self::Rtf => "application/rtf",
             Self::ShellScript => "application/x-shellscript",
             Self::RiscOsObey => "application/x-riscos-obey",
+            Self::RiscOsDesktop => "application/x-riscos-desktop",
             Self::RiscOsCommand => "application/x-riscos-command",
             Self::Pdf => "application/pdf",
             Self::PostScript => "application/postscript",
@@ -463,6 +485,8 @@ impl MediaType {
             Self::JavaArchive => "application/java-archive",
             Self::RiscOsSquash => "application/x-riscos-squash",
             Self::ArcFs => "application/x-arcfs",
+            Self::ArchiveSpark => "application/x-spark",
+            Self::RiscOsArchive => "application/x-riscos-archive",
             Self::RawDiskImage => "application/x-raw-disk-image",
             Self::CdImage => "application/x-cd-image",
             Self::RawFloppyDiskImage => "application/x-raw-floppy-disk-image",
@@ -485,6 +509,7 @@ impl MediaType {
             Self::VideoMpeg => "video/mpeg",
             Self::VideoArMovie => "video/x-armovie",
             Self::ApplicationOctetStream => "application/octet-stream",
+            Self::RiscOsData => "application/x-riscos-data",
         }
     }
 
@@ -522,6 +547,10 @@ impl MediaType {
     /// type and the broadest ones return `None`, so a walk from any variant
     /// reaches `None` in a bounded number of steps.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm a type: the registry's parents read as the one table they are"
+    )]
     pub const fn parent(self) -> Option<Self> {
         match self {
             Self::TextMarkdown
@@ -547,6 +576,7 @@ impl MediaType {
             | Self::RiscOsObey
             | Self::RiscOsCommand
             | Self::PostScript => Some(Self::TextPlain),
+            Self::RiscOsDesktop => Some(Self::RiscOsObey),
             Self::ImageSvg => Some(Self::Xml),
             Self::JavaArchive => Some(Self::ArchiveZip),
             Self::AudioOpus => Some(Self::AudioOgg),
@@ -601,6 +631,9 @@ impl MediaType {
             | Self::ArchiveRar
             | Self::RiscOsSquash
             | Self::ArcFs
+            | Self::ArchiveSpark
+            | Self::RiscOsArchive
+            | Self::RiscOsData
             | Self::RawDiskImage
             | Self::AudioMpeg
             | Self::AudioFlac
@@ -622,6 +655,24 @@ impl MediaType {
         }
     }
 
+    /// Whether a file of this type is drawn as its own picture: a single
+    /// picture the shared raster decoders read by its signature
+    /// (`lib/image`). A sprite area is not, since one file holds many.
+    #[must_use]
+    pub const fn has_thumbnail(self) -> bool {
+        matches!(
+            self,
+            Self::ImagePng
+                | Self::ImageJpeg
+                | Self::ImageGif
+                | Self::ImageBmp
+                | Self::ImageIcon
+                | Self::ImageWebp
+                | Self::ImageTiff
+                | Self::ImageOpenRaster
+        )
+    }
+
     /// The icon that represents this content type.
     ///
     /// **This mapping is deliberately many-to-one, and it is the only part of
@@ -634,24 +685,6 @@ impl MediaType {
     /// application whose manifest declares the type that disappeared would
     /// silently stop matching its own files.
     ///
-    /// How a thumbnail of a file of this type reads its format, or `None` for
-    /// a type the shared raster decoders do not read (`lib/image`).
-    #[must_use]
-    pub const fn thumbnail(self) -> Option<Reading> {
-        match self {
-            Self::ImagePng
-            | Self::ImageJpeg
-            | Self::ImageGif
-            | Self::ImageBmp
-            | Self::ImageIcon
-            | Self::ImageWebp
-            | Self::ImageTiff
-            | Self::ImageOpenRaster => Some(Reading::Signature),
-            Self::ImageSprite => Some(Reading::Sprite),
-            _ => None,
-        }
-    }
-
     /// A fine-grained kind shares its broad family's glyph when the system
     /// ships no distinct raster artwork for it, so the returned kind is always
     /// drawable (`lib/icon`).
@@ -673,7 +706,6 @@ impl MediaType {
             Self::RiscOsBasic | Self::RiscOsBasicText => IconKind::BasicProgram,
             Self::TextPlain
             | Self::TextMarkdown
-            | Self::TextCsv
             | Self::Json
             | Self::Yaml
             | Self::Toml
@@ -684,14 +716,17 @@ impl MediaType {
             | Self::TextPython
             | Self::TextLua
             | Self::TextPerl
-            | Self::TextMakefile
             | Self::TextTex
             | Self::Rtf => IconKind::Text,
+            Self::TextCsv => IconKind::TextCsv,
+            Self::TextMakefile => IconKind::TextMakefile,
             Self::TextHtml => IconKind::TextHtml,
             Self::TextRust => IconKind::TextRust,
             Self::TextJava => IconKind::TextJava,
             Self::ShellScript => IconKind::ShellScript,
-            Self::RiscOsObey | Self::RiscOsCommand => IconKind::RiscOsObey,
+            Self::RiscOsObey => IconKind::RiscOsObey,
+            Self::RiscOsCommand => IconKind::RiscOsCommand,
+            Self::RiscOsDesktop => IconKind::RiscOsDesktop,
             Self::Pdf => IconKind::Pdf,
             Self::PostScript => IconKind::PostScript,
             Self::Pcl | Self::RiscOsPrintout => IconKind::PrintData,
@@ -714,17 +749,19 @@ impl MediaType {
                 IconKind::Font
             }
             Self::RiscOsPalette => IconKind::Palette,
-            Self::ArchiveZip
-            | Self::ArchiveTar
-            | Self::ArchiveGzip
-            | Self::ArchiveXz
-            | Self::ArchiveBzip2
-            | Self::ArchiveZstd
-            | Self::Archive7z
-            | Self::ArchiveRar
-            | Self::JavaArchive
-            | Self::RiscOsSquash
-            | Self::ArcFs => IconKind::Archive,
+            Self::ArchiveZip => IconKind::ArchiveZip,
+            Self::ArchiveTar => IconKind::ArchiveTar,
+            Self::ArchiveGzip => IconKind::ArchiveGzip,
+            Self::ArchiveXz => IconKind::ArchiveXz,
+            Self::ArchiveBzip2 => IconKind::ArchiveBzip2,
+            Self::ArchiveZstd => IconKind::ArchiveZstd,
+            Self::Archive7z => IconKind::Archive7z,
+            Self::ArchiveRar => IconKind::ArchiveRar,
+            Self::JavaArchive => IconKind::JavaArchive,
+            Self::RiscOsSquash => IconKind::RiscOsSquash,
+            Self::ArcFs => IconKind::ArchiveArcFs,
+            Self::ArchiveSpark => IconKind::ArchiveSpark,
+            Self::RiscOsArchive => IconKind::Archive,
             Self::RawDiskImage => IconKind::DiskHard,
             Self::CdImage => IconKind::DiskOptical,
             Self::RawFloppyDiskImage => IconKind::DiskFloppy,
@@ -747,19 +784,36 @@ impl MediaType {
             | Self::VideoMpeg
             | Self::VideoArMovie => IconKind::Video,
             Self::ApplicationOctetStream => IconKind::File,
+            Self::RiscOsData => IconKind::RiscOsData,
         }
     }
 
     /// Whether a file of this type holds a volume, so opening it is mounting
-    /// it: a disk image of any kind.
+    /// it: a disk image of any kind, or an archive of a format the system
+    /// serves as one (`plans/ARCHIVES.md`). A format built on an archive — a
+    /// Java archive is a zip — is its own document, not one.
     #[must_use]
     pub fn holds_a_volume(self) -> bool {
-        ancestry(self).any(|media| media == Self::RawDiskImage)
+        matches!(
+            self,
+            Self::ArchiveZip
+                | Self::ArchiveTar
+                | Self::ArchiveGzip
+                | Self::ArchiveBzip2
+                | Self::ArchiveRar
+                | Self::ArchiveSpark
+                | Self::RiscOsArchive
+                | Self::ArcFs
+        ) || ancestry(self).any(|media| media == Self::RawDiskImage)
     }
 
     /// What a new, empty document of this type is called, or `None` when an
     /// empty file is not a complete document of it.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm a type: the registry's blank nouns read as the one table they are"
+    )]
     pub const fn blank_noun(self) -> Option<&'static str> {
         match self {
             Self::TextPlain => Some("Text Document"),
@@ -836,6 +890,7 @@ impl MediaType {
             | Self::Rtf
             | Self::RiscOsObey
             | Self::RiscOsCommand
+            | Self::RiscOsDesktop
             | Self::PostScript
             | Self::Pcl
             | Self::RiscOsPrintout
@@ -855,12 +910,15 @@ impl MediaType {
             | Self::JavaArchive
             | Self::RiscOsSquash
             | Self::ArcFs
+            | Self::ArchiveSpark
+            | Self::RiscOsArchive
             | Self::AudioAiff
             | Self::AudioMidi
             | Self::AudioTracker
             | Self::VideoMpeg
             | Self::VideoArMovie
-            | Self::ApplicationOctetStream => None,
+            | Self::ApplicationOctetStream
+            | Self::RiscOsData => None,
         }
     }
 }
@@ -953,7 +1011,8 @@ impl MediaType {
             | Self::RiscOsBasicText
             | Self::ShellScript
             | Self::RiscOsObey
-            | Self::RiscOsCommand => Some(Family::Text),
+            | Self::RiscOsCommand
+            | Self::RiscOsDesktop => Some(Family::Text),
             Self::Pdf | Self::Rtf | Self::PostScript | Self::Pcl | Self::RiscOsPrintout => {
                 Some(Family::Document)
             }
@@ -986,6 +1045,8 @@ impl MediaType {
             | Self::JavaArchive
             | Self::RiscOsSquash
             | Self::ArcFs
+            | Self::ArchiveSpark
+            | Self::RiscOsArchive
             | Self::RawDiskImage
             | Self::CdImage
             | Self::RawFloppyDiskImage => Some(Family::Archive),
@@ -1006,7 +1067,7 @@ impl MediaType {
             Self::RiscOsFont | Self::BbcFont | Self::FontTtf | Self::FontOtf | Self::FontWoff => {
                 Some(Family::Font)
             }
-            Self::InodeDirectory | Self::ApplicationOctetStream => None,
+            Self::InodeDirectory | Self::ApplicationOctetStream | Self::RiscOsData => None,
         }
     }
 }
@@ -1094,29 +1155,26 @@ pub fn folder_sample<'n>(
             continue;
         };
         let kind = media.icon();
-        let reading = media
-            .thumbnail()
-            .filter(|_| record.kind == FileKind::Regular && !record.id.is_none());
-        cards[slot] = Some(match reading {
-            Some(reading) => {
-                let dir = path.get_or_insert_with(|| crate::vfs::spell_absolute_path(folder));
-                let mut member = dir.clone();
-                crate::vfs::push_child(&mut member, name);
-                SampleCard::Picture(
-                    kind,
-                    Thumbnail {
-                        path: member,
-                        stamp: DocumentStamp {
-                            size: record.size,
-                            modified: record.modified,
-                            id: record.id,
-                            content_gen: record.content_gen,
-                        },
-                        reading,
+        let pictured =
+            media.has_thumbnail() && record.kind == FileKind::Regular && !record.id.is_none();
+        cards[slot] = Some(if pictured {
+            let dir = path.get_or_insert_with(|| crate::vfs::spell_absolute_path(folder));
+            let mut member = dir.clone();
+            crate::vfs::push_child(&mut member, name);
+            SampleCard::Picture(
+                kind,
+                Thumbnail {
+                    path: member,
+                    stamp: DocumentStamp {
+                        size: record.size,
+                        modified: record.modified,
+                        id: record.id,
+                        content_gen: record.content_gen,
                     },
-                )
-            }
-            None => SampleCard::Kind(kind),
+                },
+            )
+        } else {
+            SampleCard::Kind(kind)
         });
     }
     FolderSample::new(cards.into_iter().flatten())
@@ -1161,6 +1219,7 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::Rtf,
     MediaType::ShellScript,
     MediaType::RiscOsObey,
+    MediaType::RiscOsDesktop,
     MediaType::RiscOsCommand,
     MediaType::Pdf,
     MediaType::PostScript,
@@ -1200,6 +1259,8 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::JavaArchive,
     MediaType::RiscOsSquash,
     MediaType::ArcFs,
+    MediaType::ArchiveSpark,
+    MediaType::RiscOsArchive,
     MediaType::RawDiskImage,
     MediaType::CdImage,
     MediaType::RawFloppyDiskImage,
@@ -1222,6 +1283,7 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::VideoMpeg,
     MediaType::VideoArMovie,
     MediaType::ApplicationOctetStream,
+    MediaType::RiscOsData,
 ];
 
 /// Extension → [`MediaType`] table, the one source for the mapping a file
@@ -1286,8 +1348,10 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::ArchiveZip, &["zip"]),
     (MediaType::ArchiveTar, &["tar"]),
     (MediaType::ArchiveGzip, &["gz", "tgz"]),
-    (MediaType::ArchiveXz, &["xz"]),
-    (MediaType::ArchiveBzip2, &["bz2"]),
+    (MediaType::ArchiveXz, &["xz", "txz"]),
+    (MediaType::ArchiveBzip2, &["bz2", "tbz2", "tbz"]),
+    (MediaType::ArchiveSpark, &["spk"]),
+    (MediaType::ArcFs, &["arc"]),
     (MediaType::ArchiveZstd, &["zst"]),
     (MediaType::Archive7z, &["7z"]),
     (MediaType::ArchiveRar, &["rar"]),
@@ -1342,7 +1406,8 @@ const FILETYPE_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::TextTex, &["ce5", "aca"]),
     (MediaType::RiscOsBasicText, &["fd1"]),
     (MediaType::Rtf, &["c32"]),
-    (MediaType::RiscOsObey, &["feb", "fd7", "fea", "f7b"]),
+    (MediaType::RiscOsObey, &["feb", "fd7", "f7b"]),
+    (MediaType::RiscOsDesktop, &["fea"]),
     (MediaType::RiscOsCommand, &["ffe", "fd6"]),
     (MediaType::Pdf, &["adf"]),
     (MediaType::PostScript, &["ff5"]),
@@ -1370,7 +1435,8 @@ const FILETYPE_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::FontOtf, &["07f"]),
     (MediaType::FontWoff, &["7ff"]),
     (MediaType::RiscOsPalette, &["fed"]),
-    (MediaType::ArchiveZip, &["ddc", "a91"]),
+    (MediaType::ArchiveZip, &["a91"]),
+    (MediaType::RiscOsArchive, &["ddc"]),
     (MediaType::ArchiveTar, &["c46"]),
     (MediaType::ArchiveGzip, &["f89"]),
     (MediaType::JavaArchive, &["ae4"]),
@@ -1389,7 +1455,7 @@ const FILETYPE_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::VideoMatroska, &["a63"]),
     (MediaType::VideoMpeg, &["bf8"]),
     (MediaType::VideoArMovie, &["ae7"]),
-    (MediaType::ApplicationOctetStream, &["ffd"]),
+    (MediaType::RiscOsData, &["ffd"]),
 ];
 
 /// Every filetype's row in [`FILETYPE_TABLE`] plus one, or zero where it has
@@ -1762,23 +1828,23 @@ pub fn entry_icon<'a>(
     // A link's listed size and time are its own, not its target's, so they
     // cannot key the picture of what it points at; a listing naming no file
     // gives an open nothing to be checked against.
-    let thumbnail = match entry.kind() {
-        EntryKind::File if pictures.thumbnails && !entry.id().is_none() => media.thumbnail(),
-        _ => None,
-    };
-    if thumbnail.is_none() && !entry.is_bundle() {
+    let thumbnail = entry.kind() == EntryKind::File
+        && pictures.thumbnails
+        && !entry.id().is_none()
+        && media.has_thumbnail();
+    if !thumbnail && !entry.is_bundle() {
         return (kind, IconRequest::kind(kind));
     }
     scratch.clear();
     scratch.push_str(dir);
     crate::vfs::push_child(scratch, entry.name());
     let request = match (thumbnail, entry.kind()) {
-        (Some(reading), _) => IconRequest::thumbnail(kind, scratch, entry.stamp(), reading),
+        (true, _) => IconRequest::thumbnail(kind, scratch, entry.stamp()),
         // A link to a bundle carries its own stamp, not its target's.
-        (None, EntryKind::Bundle) if !entry.id().is_none() => {
+        (false, EntryKind::Bundle) if !entry.id().is_none() => {
             IconRequest::listed_bundle(kind, scratch, entry.stamp())
         }
-        (None, _) => IconRequest::bundle(kind, scratch),
+        (false, _) => IconRequest::bundle(kind, scratch),
     };
     (kind, request)
 }

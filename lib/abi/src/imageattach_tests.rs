@@ -11,6 +11,7 @@ use super::{
     ImageAccess, ImageAttach, ImageAttachReply, ImageRefusal, IMAGE_ATTACH_MAX,
     IMAGE_ATTACH_REPLY_LEN, IMAGE_ATTACH_VERSION,
 };
+use crate::fs::FS_NAME_MAX;
 use crate::netattach::{AttachReply, Presentation};
 use crate::sysinfo::MOUNT_TARGET_MAX;
 use crate::volume::{VolumeFsType, VolumeFsTypes, VOLUME_NAME_MAX};
@@ -24,6 +25,7 @@ fn attach<'a>(name: Option<&'a str>, target: Option<&'a str>) -> ImageAttach<'a>
         target,
         expects: None,
         adopt: false,
+        file_name: None,
     }
 }
 
@@ -42,6 +44,7 @@ fn encoded(attach: &ImageAttach<'_>) -> Vec<u8> {
 #[test]
 fn every_attach_round_trips_and_the_largest_fits_its_bound() {
     let name = "a".repeat(VOLUME_NAME_MAX);
+    let leaf = "f".repeat(FS_NAME_MAX);
     let target = {
         let mut target = String::from("/Users/a/");
         target.push_str(&"t".repeat(MOUNT_TARGET_MAX - target.len()));
@@ -71,10 +74,16 @@ fn every_attach_round_trips_and_the_largest_fits_its_bound() {
                 dir_mode: 0o750,
                 file_mode: 0o640,
             },
+            file_name: Some(&leaf),
             ..attach(Some(&name), Some(&target))
         },
         ImageAttach {
             adopt: true,
+            ..attach(None, None)
+        },
+        ImageAttach {
+            access: ImageAccess::Writable,
+            file_name: Some("Backup.zip"),
             ..attach(None, None)
         },
     ];
@@ -154,7 +163,7 @@ fn an_attach_frame_out_of_shape_is_refused() {
             |b| b[3] |= 0x01 | 0x04,
             Errno::OutOfRange,
         ),
-        ("unknown filesystem", |b| b[20] |= 0x80, Errno::OutOfRange),
+        ("unknown filesystem", |b| b[21] |= 0x80, Errno::OutOfRange),
         (
             "a claim naming no filesystem",
             |b| b[20..24].fill(0),
@@ -175,7 +184,11 @@ fn an_attach_frame_out_of_shape_is_refused() {
             |b| b[18] = 1,
             Errno::LengthOutOfRange,
         ),
-        ("nonzero pad", |b| b[17] = 1, Errno::OutOfRange),
+        (
+            "a file name past the frame",
+            |b| b[17] = 1,
+            Errno::LengthOutOfRange,
+        ),
         ("name not UTF-8", |b| b[24] = 0xFF, Errno::OutOfRange),
         (
             "frame cut short",
@@ -296,6 +309,7 @@ fn an_image_attach_is_the_network_attach_frame_with_its_own_version_and_claim() 
         target: Some("/Users/a/Home/disk"),
         expects: None,
         adopt: false,
+        file_name: None,
     };
     let network = NetworkAttach {
         name: "floppy",
@@ -306,7 +320,7 @@ fn an_image_attach_is_the_network_attach_frame_with_its_own_version_and_claim() 
     let mut out = [0; NETWORK_ATTACH_MAX];
     let len = network.encode(&mut out).expect("encodes");
     let image_bytes = encoded(&image);
-    assert_eq!(IMAGE_ATTACH_MAX, NETWORK_ATTACH_MAX);
+    assert_eq!(IMAGE_ATTACH_MAX, NETWORK_ATTACH_MAX + FS_NAME_MAX);
     assert_eq!(image_bytes.len(), len);
     assert_eq!(image_bytes[2..], out[2..len], "one layout past the version");
     let claimed = encoded(&ImageAttach {
@@ -337,4 +351,26 @@ fn an_expected_set_round_trips_and_unknown_bits_are_refused() {
         Err(Errno::OutOfRange),
         "a bit naming no filesystem"
     );
+}
+
+#[test]
+fn a_file_name_is_one_directory_entry() {
+    for refused in [".", "..", "a/b"] {
+        let attach = ImageAttach {
+            file_name: Some(refused),
+            ..attach(None, None)
+        };
+        assert_eq!(
+            attach.encode(&mut [0; IMAGE_ATTACH_MAX]),
+            Err(Errno::OutOfRange),
+            "{refused:?}"
+        );
+    }
+    let mut bytes = encoded(&ImageAttach {
+        file_name: Some("a.b"),
+        ..attach(None, None)
+    });
+    let dot = bytes.len() - 2;
+    bytes[dot] = b'/';
+    assert_eq!(ImageAttach::decode(&bytes), Err(Errno::OutOfRange));
 }

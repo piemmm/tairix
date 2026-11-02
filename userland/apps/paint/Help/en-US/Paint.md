@@ -44,9 +44,18 @@ for 2 colours, Wimp colours 0 and 7; for 4 colours, Wimp colours 0, 2, 4 and
 7; for 256 colours, the RISC OS tint arrangement — never a PC palette. A
 sprite whose pixels are taller than wide, as in mode 12, is shown so. A
 sprite this editor cannot read, such as a CMYK one, is kept exactly as it
-was and saved back unchanged. The Sprites menu goes to, adds, copies,
-renames, deletes and reorders sprites. A TIFF holds any number of pages, and
-for one the Pages menu goes to, adds, copies, deletes and reorders them.
+was and saved back unchanged. A TIFF holds any number of pages, and for one
+the Pages menu goes to, adds, copies, deletes and reorders them.
+
+A sprite file opens in a small window of its sprites, each shown as a picture
+over its name. Choose sprites by pressing them, with Ctrl to add one and Shift
+for a run; the window's menu makes, renames, copies, deletes and reorders
+them, and saves the file. Double-click a sprite, or press Enter, to edit it in
+a window of its own; any number of sprites can be open at once, from any
+number of files. A sprite window's changes are its file's as soon as they are
+made, and saving there saves the file. Closing a sprite window asks nothing;
+closing the file's window asks whether to save every sprite's changes, and
+closes their windows too.
 
 The primary (left) button paints with the primary colour and the middle
 button with the secondary colour; holding Alt picks a colour instead, as
@@ -58,8 +67,9 @@ size, hardness, opacity, flow and spacing, a fill's tolerance, a gradient's
 shape, the text's size, a rectangle's corners — typed or stepped with the
 arrow keys, and the buttons that zoom and show the pixel grid; the palette
 strip beneath the picture holds the picture's palette, or the desktop
-colours. The airbrush keeps spraying while it is held still. Holding Shift
-draws a square, a circle or a line at a multiple of 45 degrees.
+colours, in one row that scrolls sideways when it is longer than the window.
+The airbrush keeps spraying while it is held still. Holding Shift draws a
+square, a circle or a line at a multiple of 45 degrees.
 
 Panes run down both sides of the window: by default the Tools pane on the left
 and the Colour pane on the right, with the Adjustment pane beneath it once an
@@ -145,7 +155,7 @@ a hostile file cannot touch anything the painter can.
 
 Pressing the secondary (right) mouse button anywhere in the window opens
 its menu: Cut, Copy, Paste, Select all and Deselect, then File, Edit, Image,
-Layers, Colours, Adjust, Sprites or Pages, View and Tools, each opening its
+Layers, Colours, Adjust, Pages for a TIFF, View and Tools, each opening its
 own submenu. The window has no menu bar. Closing a window or quitting with
 changes not saved asks first. Closing a window with the secondary (right)
 button on its close button also shows its file in the file manager, in the
@@ -175,7 +185,8 @@ folder that holds it.
 * Pinch with two fingers — zoom smoothly; on a touchscreen the picture follows the fingers
 * `G` — show or hide the grid between pixels
 * `Ctrl+'` — show or hide the grid
-* `Page Up` / `Page Down` — the sprite or page before or after
+* `Page Up` / `Page Down` — the page before or after
+* In a sprite file's window: arrow keys, `Home` and `End` — choose a sprite; `Enter` — edit the chosen sprites; `Delete` — delete them
 * arrow keys — move a floating selection a pixel; with `Shift`, ten; in the palette strip, step through its colours
 
 ## OPTIONS

@@ -1,11 +1,13 @@
 # tairix-compress
 
 The single shared **compression codec** for TAIRiX (`AGENTS.md` §6, §16.4 —
-compression is a curated shared-library class). It holds two codecs: the
-first-party `RLZ1` LZ77 codec TAIRiX's own storage uses, and the RFC 1951
-DEFLATE / RFC 1950 zlib codec — *both* directions — that foreign software
-needs. PNG's `IDAT` stream (`lib/image`) is read with it; SSH's
-`zlib@openssh.com` (`plans/SSH.md`) is written with it.
+compression is a curated shared-library class). It holds the first-party
+`RLZ1` LZ77 codec TAIRiX's own storage uses, and the foreign codecs other
+software needs, each in both directions: RFC 1951 DEFLATE / RFC 1950 zlib,
+bzip2, and the ARC family's methods. PNG's `IDAT` stream (`lib/image`) is
+read with DEFLATE and SSH's `zlib@openssh.com` (`plans/SSH.md`) written with
+it; the archive driver (`drivers/filesystem/archive`) reads and writes gzip,
+bzip2, zip, Spark and ArcFS members with all three.
 
 - `compress(src, dst) -> Result<usize, Error>` — a single greedy LZ77 pass
   over a small hash table of recent 4-byte sequences. Writes into a
@@ -59,11 +61,35 @@ and flushes it per packet — later packets still back-reference earlier ones:
 - `inflate::Inflater` / `zlib::Decoder` — resumable at any bit, which a peer
   flushing with zlib's `Z_PARTIAL_FLUSH` requires, and absorbing every byte
   handed to them so a caller never carries a remainder forward.
+- `inflate::Checkpoint` — where an `Inflater` stood at a block's start: its
+  held bits and its `WINDOW_SIZE` of history. `inflate_by_block` stops at
+  each block so `checkpoint` can record one, `resume` stands there again,
+  and `after_sync` records the block an encoder begins after `Flush::Sync`,
+  so a reader seeks into a long stream without decoding it from the start.
 
 The state values are large by nature: a decoder carries the 32 KiB history a
 back-reference may reach into (~34 KiB), and an encoder additionally carries
 the match finder (~220 KiB). Heap-own one; that is why there is no one-shot
 *encode* function to put one on a stack by accident.
+
+## Archive formats: `bzip2` and `arc`
+
+- `bzip2::Decoder` / `bzip2::Encoder` — the bzip2 stream, levels 1 to 9.
+  Every block's CRC and the stream's combined CRC are checked. The decoder
+  reports the bit each block began at (`Next::Block { at }`) and can
+  `resume` at one; the encoder reports each block's start through
+  `BlockIndex`. A reader or writer can therefore index a stream and later
+  seek into it.
+- `arc::Decoder` — every method ARC, Spark and ArcFS members use: RLE90
+  packing, squeezing, ARC 4's hashed 12-bit crunching (methods 5 to 7), and
+  the compress-style dynamic LZW of 9 to 16 bits. `arc::Encoder` writes the
+  dynamic LZW, with a dictionary `encoder_work` sizes to its input.
+
+Both stream through the crate-root `Input` (a byte at a time) and `Output`
+traits, over workspace the caller places. That workspace is large: a bzip2
+block decodes through four bytes a symbol (3.6 MB at level 9) and encodes
+through twenty (18 MB), and an ARC table is up to 256 KiB to decode and
+1 MiB to encode. None of it belongs on a stack.
 
 Every module keeps the crate's zero-`unsafe`, no-panic, fail-closed
 discipline and allocates nothing of its own; see their rustdoc for the full
@@ -88,8 +114,8 @@ is depended on, never depends.
 `experimental` — the Stage 6 ARXFS compression seam
 (`docs/src/filesystem/arxfs-spec.md` §15.6, §18). It is `no_std`, performs no
 allocation (it works through caller-provided slices, caller-owned state
-values, and fixed-size internal tables, in `deflate`/`inflate`/`zlib` as much
-as in the LZ codec), and has no dependencies. No `unsafe`,
+values and workspace, and fixed-size internal tables, in every module), and
+has no dependencies. No `unsafe`,
 and no `unwrap`/`expect`/`panic!` in production paths: every entry point is
 `Result`-based and total, and malformed compressed input returns a typed
 error rather than panicking (`AGENTS.md` §2.9). A future on-disk format

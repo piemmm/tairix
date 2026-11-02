@@ -46,7 +46,7 @@ fn a_document_is_a_sprite_area_by_what_it_holds_or_was_read_from() {
 }
 
 #[test]
-fn names_are_found_without_regard_to_case() {
+fn names_are_taken_without_regard_to_case() {
     let doc = Document::of(
         vec![named("one"), named("two")],
         Origin::New(SaveFormat::Png),
@@ -55,7 +55,6 @@ fn names_are_found_without_regard_to_case() {
     )
     .expect("ok");
     let two = SpriteName::from_bytes(b"TWO").expect("a name");
-    assert_eq!(doc.find(&two), Some(1));
     assert!(doc.names_taken(&two, None));
     assert!(
         !doc.names_taken(&two, Some(1)),

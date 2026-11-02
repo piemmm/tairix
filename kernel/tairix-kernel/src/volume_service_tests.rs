@@ -70,7 +70,8 @@ use tairix_drv_fs_fat32::Fat32;
 use tairix_drv_fs_iso9660::Iso9660;
 use tairix_drv_fs_udf::{FormatOptions, Udf};
 use tairix_fsserve::{
-    Clock, GrantedVolume, ServedFormat, ServedHost, Server, VolumeAccess, WritebackBudget,
+    Clock, GrantedVolume, ServedArchive, ServedFilesystem, ServedFormat, ServedHost, Server,
+    VolumeAccess, WritebackBudget,
 };
 use tairix_hash::{HashSeed, SipHash13};
 use tairix_kernel_core::devres::{install_shared_mem_facility, SharedChunk, SharedMemFacility};
@@ -710,6 +711,9 @@ static DEFER: AtomicBool = AtomicBool::new(false);
 /// as.
 static DRIVEN: Mutex<Vec<(u32, u64)>> = Mutex::new(Vec::new());
 
+/// The served volume each test driver was started for, in turn.
+static STARTED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
 /// The process numbers test drivers run as.
 static NEXT_DRIVER: AtomicU64 = AtomicU64::new(0x7D_0000);
 
@@ -775,6 +779,22 @@ impl VolumeAccess for ServiceAccess {
     ) -> Result<Option<tairix_abi::volume::VolumeInfo>, Errno> {
         VOLUME_SERVICE.ctl(self.0, ctl)
     }
+
+    fn region_read(&self, region: u8, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        let len = buf.len();
+        VOLUME_SERVICE.archive_read(self.0, region, offset, len, &mut |at, chunk| {
+            buf[at..at + chunk.len()].copy_from_slice(chunk);
+            Ok(())
+        })
+    }
+
+    fn region_write(&self, region: u8, offset: u64, buf: &[u8]) -> Result<(), Errno> {
+        VOLUME_SERVICE.archive_write(self.0, region, offset, buf.len(), &mut |at, chunk| {
+            let len = chunk.len();
+            chunk.copy_from_slice(&buf[at..at + len]);
+            Ok(())
+        })
+    }
 }
 
 /// Attach `request` as the volume manager does, then serve each volume node
@@ -827,6 +847,7 @@ fn serve_published(facility: &'static TestFacility) {
 fn start_driver(facility: &'static TestFacility, node: u32, volume: u64, fstype: VolumeFsType) {
     let owner = NEXT_DRIVER.fetch_add(1, Ordering::Relaxed);
     DRIVEN.lock().unwrap().push((node, owner));
+    STARTED.lock().unwrap().push(volume);
     let defer = DEFER.load(Ordering::Relaxed);
     let (offered, outcome) = mpsc::channel();
     let driver = Driver {
@@ -844,6 +865,13 @@ fn start_driver(facility: &'static TestFacility, node: u32, volume: u64, fstype:
         VolumeFsType::Udf => driver.start::<tairix_drv_fs_udf::Served>(offered),
         VolumeFsType::Adfs => driver.start::<tairix_drv_fs_adfs::Served>(offered),
         VolumeFsType::Affs => driver.start::<tairix_drv_fs_affs::Served>(offered),
+        VolumeFsType::Zip
+        | VolumeFsType::Tar
+        | VolumeFsType::Gzip
+        | VolumeFsType::Bzip2
+        | VolumeFsType::Spark
+        | VolumeFsType::ArcFs
+        | VolumeFsType::Rar => driver.start_archive::<tairix_drv_fs_archive::Served>(offered),
     }
     // Every path of the driver's start sends, and a driver that dies first
     // drops the sender, so this waits on completion rather than the clock.
@@ -874,15 +902,28 @@ struct Driver {
     defer: bool,
 }
 
+/// How a served driver opens the volume its grant names.
+type Open<S> = fn(
+    GrantedVolume<ServiceAccess>,
+    bool,
+    WritebackBudget,
+) -> Result<tairix_fsserve::Opened<S>, DriverError>;
+
 impl Driver {
     fn start<F: ServedFormat + 'static>(self, offered: mpsc::Sender<()>) {
-        thread::spawn(move || self.run::<F>(&offered));
+        let open: Open<F::Fs<GrantedVolume<ServiceAccess>>> = F::open;
+        thread::spawn(move || self.run(&offered, open));
+    }
+
+    fn start_archive<F: ServedArchive + 'static>(self, offered: mpsc::Sender<()>) {
+        let open: Open<F::Fs<ServiceAccess>> = F::open;
+        thread::spawn(move || self.run(&offered, open));
     }
 
     /// Open the volume over its grant, offer it, and answer the kernel until
     /// the node leaves the tree — when `devmgr` unloads the driver — or its
     /// endpoint goes; the driver's process then ends, taking its endpoint.
-    fn run<F: ServedFormat>(self, offered: &mpsc::Sender<()>) {
+    fn run<S: ServedFilesystem>(self, offered: &mpsc::Sender<()>, open: Open<S>) {
         let host: &'static ServedHost<DriverClock> =
             Box::leak(Box::new(ServedHost::new(DriverClock { defer: self.defer })));
         HOSTS.lock().unwrap().push((self.node, host));
@@ -892,7 +933,7 @@ impl Driver {
         };
         let opened = GrantedVolume::open(ServiceAccess(self.volume)).and_then(|granted| {
             let read_only = granted.info().read_only;
-            F::open(granted, read_only, budget)
+            open(granted, read_only, budget)
         });
         let mut opened = match opened {
             Ok(opened) => opened,
@@ -1040,14 +1081,7 @@ fn an_unwired_service_fails_closed() {
         Err(Errno::NotImplemented)
     );
     assert_eq!(
-        service.ctl(
-            1,
-            &tairix_abi::volume::VolumeCtl {
-                op: tairix_abi::volume::VolumeCtlOp::Info,
-                lba: 0,
-                blocks: 0,
-            }
-        ),
+        service.ctl(1, &tairix_abi::volume::VolumeCtl::Info),
         Err(Errno::NotImplemented)
     );
     let offer = tairix_abi::netattach::OfferId::new(1).expect("an id");

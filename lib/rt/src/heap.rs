@@ -28,6 +28,13 @@
 //!   does not pay a syscall per page; mapping beyond what the caller asked for
 //!   is speculation about the next allocation, so that pad shrinks with the
 //!   band and is gone under real pressure.
+//! * **Allocate zeroed.** The heap keeps a mark above which no arena byte has
+//!   been handed out since the kernel mapped its page, so `alloc_zeroed`
+//!   clears only the part of a block below it. A large zeroed buffer — a
+//!   decoder's dictionary, a model's heap — then costs the pages its writer
+//!   goes on to touch, not its length: the kernel backs each page on first
+//!   touch, and the heap never writes one first. Releasing the top lowers
+//!   the mark, as the kernel maps those pages afresh.
 //! * **Free.** The released region is inserted into the free list and coalesced
 //!   with its neighbours. Whole trailing pages left free at the very top of the
 //!   arena are returned to the kernel with `mem_unmap`, above that same
@@ -334,6 +341,9 @@ struct HeapState<S: SpanStore> {
     /// Why the current allocation's last page request was refused, if one
     /// was: the cause an exit over a failed allocation names.
     refusal: Option<Errno>,
+    /// No arena byte at or above this has been handed out since its page was
+    /// mapped, so each still reads as the zero the kernel mapped it as.
+    untouched: usize,
 }
 
 impl<S: SpanStore> HeapState<S> {
@@ -346,6 +356,7 @@ impl<S: SpanStore> HeapState<S> {
             mapped_end: ARENA_BASE as usize,
             release_refused_at: None,
             refusal: None,
+            untouched: ARENA_BASE as usize,
         }
     }
 
@@ -487,6 +498,7 @@ impl<S: SpanStore> HeapState<S> {
                 let aligned = align_up(span.start, align)?;
                 let needed = aligned.checked_add(size)?;
                 if needed <= span.end() && self.carve(i, aligned, size) {
+                    self.untouched = self.untouched.max(needed);
                     return Some(aligned);
                 }
                 i += 1;
@@ -497,6 +509,20 @@ impl<S: SpanStore> HeapState<S> {
             self.grow(size, align, pager, policy)?;
             grown = true;
         }
+    }
+
+    /// [`Self::alloc`], answering with the block how many of its leading bytes
+    /// may still hold an earlier block's: those below the untouched mark. The
+    /// rest are as the kernel mapped them, zero.
+    fn alloc_zeroed(
+        &mut self,
+        layout: Layout,
+        pager: &dyn Pager,
+        policy: ArenaPolicy,
+    ) -> Option<(usize, usize)> {
+        let untouched = self.untouched;
+        let addr = self.alloc(layout, pager, policy)?;
+        Some((addr, untouched.saturating_sub(addr).min(layout.size())))
     }
 
     /// Map fresh pages at the arena top sufficient for a `size`/`align`
@@ -631,6 +657,7 @@ impl<S: SpanStore> HeapState<S> {
                 let span = self.store.slots()[i];
                 if span.len >= extra {
                     self.shrink_span_front(i, extra);
+                    self.untouched = self.untouched.max(tail_start + extra);
                     return true;
                 }
                 // The following bytes are free but too few: only the top span
@@ -699,6 +726,8 @@ impl<S: SpanStore> HeapState<S> {
             return;
         }
         self.mapped_end = freeable_start;
+        // The kernel maps released pages afresh, zeroed, should they return.
+        self.untouched = self.untouched.min(self.mapped_end);
         if span.start == freeable_start {
             self.remove(top);
         } else {
@@ -802,6 +831,23 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
             Some(addr) => self.pager.pointer(addr),
             None => core::ptr::null_mut(),
         }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let block = {
+            let mut state = self.state.lock();
+            let policy = Self::policy(&state);
+            state.alloc_zeroed(layout, &self.pager, policy)
+        };
+        let Some((addr, used)) = block else {
+            return core::ptr::null_mut();
+        };
+        let ptr = self.pager.pointer(addr);
+        // SAFETY: `ptr` is the block just carved for this caller alone, at
+        // least `used` bytes long; the bytes past `used` were never handed out
+        // since the kernel mapped them zeroed, so only these need clearing.
+        unsafe { core::ptr::write_bytes(ptr, 0, used) };
+        ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -1177,6 +1223,110 @@ mod tests {
     /// An empty heap over an unbounded growable span store.
     fn heap_state() -> HeapState<VecSpanStore> {
         HeapState::new(VecSpanStore::unbounded())
+    }
+
+    /// A zeroed block clears only what an earlier block may have left: the
+    /// part below the untouched mark. Fresh pages, and pages the top gave back
+    /// and the kernel mapped again, are handed out as mapped.
+    #[test]
+    fn a_zeroed_block_clears_only_what_an_earlier_block_left() {
+        let pager = FakePager::new();
+        let mut heap = heap_state();
+        let first = layout(3 * PAGE_SIZE, 8);
+        let (addr, used) = heap
+            .alloc_zeroed(first, &pager, NO_RETENTION)
+            .expect("allocates");
+        assert_eq!((addr, used), (base(), 0), "a fresh block needs no clearing");
+        heap.free(addr, first, &pager, NO_RETENTION);
+        // The top was released, so the same pages come back as the kernel's.
+        let (again, used) = heap
+            .alloc_zeroed(first, &pager, NO_RETENTION)
+            .expect("allocates");
+        assert_eq!((again, used), (base(), 0));
+
+        // A block below another stays mapped when freed, and is reused dirty.
+        let low = layout(PAGE_SIZE, 8);
+        let (low_addr, _) = heap
+            .alloc_zeroed(low, &pager, NO_RETENTION)
+            .expect("allocates");
+        heap.free(again, first, &pager, NO_RETENTION);
+        let (reused, used) = heap
+            .alloc_zeroed(layout(2 * PAGE_SIZE, 8), &pager, NO_RETENTION)
+            .expect("allocates");
+        assert_eq!(reused, base(), "first fit in the freed block below");
+        assert_eq!(
+            used,
+            2 * PAGE_SIZE,
+            "every byte of it was handed out before"
+        );
+
+        heap.free(reused, layout(2 * PAGE_SIZE, 8), &pager, NO_RETENTION);
+        heap.free(low_addr, low, &pager, NO_RETENTION);
+        assert_eq!(
+            heap.untouched,
+            base(),
+            "releasing the whole top lowers the mark"
+        );
+    }
+
+    /// Through the wrapper, a zeroed allocation of fresh pages writes nothing:
+    /// the pager's pointers are unbacked, so a single write would fault.
+    #[test]
+    fn a_zeroed_allocation_of_fresh_pages_writes_none_of_them() {
+        let heap = Heap::new(FakePager::new(), VecSpanStore::unbounded());
+        let l = layout(64 * PAGE_SIZE, 16);
+        // SAFETY: `l` is a valid non-zero layout; the wrapper is freshly built.
+        let p = unsafe { heap.alloc_zeroed(l) };
+        assert_eq!(p.addr(), base());
+        assert_eq!(heap.state.lock().untouched, base() + 64 * PAGE_SIZE);
+    }
+
+    /// A block reaching past the untouched mark clears only the part below
+    /// it: a top page the heap retained, then a page mapped to grow it.
+    #[test]
+    fn a_zeroed_block_across_the_mark_clears_only_below_it() {
+        let pager = FakePager::new();
+        let mut heap = heap_state();
+        let keep_a_page = ArenaPolicy::exact(PAGE_SIZE);
+        let page = layout(PAGE_SIZE, 8);
+        let addr = heap.alloc(page, &pager, keep_a_page).expect("allocates");
+        heap.free(addr, page, &pager, keep_a_page);
+        assert_eq!(
+            heap.mapped_end,
+            base() + PAGE_SIZE,
+            "the freed top page is retained"
+        );
+        let (straddling, used) = heap
+            .alloc_zeroed(layout(2 * PAGE_SIZE, 8), &pager, keep_a_page)
+            .expect("allocates");
+        assert_eq!(straddling, base());
+        assert_eq!(
+            used, PAGE_SIZE,
+            "the retained page was handed out; the new one never was"
+        );
+    }
+
+    /// Growing a block in place hands its new tail out, so a block later
+    /// carved from that tail is cleared.
+    #[test]
+    fn growing_a_block_in_place_raises_the_untouched_mark() {
+        let pager = FakePager::new();
+        let mut heap = heap_state();
+        let small = layout(64, 8);
+        let addr = heap.alloc(small, &pager, NO_RETENTION).expect("allocates");
+        assert_eq!(heap.untouched, addr + 64);
+        assert!(heap.resize_in_place(addr, small, 4096, &pager, NO_RETENTION));
+        assert_eq!(heap.untouched, addr + 4096);
+        assert!(heap.resize_in_place(addr, layout(4096, 8), 128, &pager, NO_RETENTION));
+        let (tail, used) = heap
+            .alloc_zeroed(layout(256, 8), &pager, NO_RETENTION)
+            .expect("allocates");
+        assert_eq!(
+            tail,
+            addr + 128,
+            "carved from the tail the shrink gave back"
+        );
+        assert_eq!(used, 256);
     }
 
     #[test]

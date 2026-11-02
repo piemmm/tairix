@@ -29,6 +29,7 @@
 use crate::blkio::{BlkMedium, BLK_MEDIUM_LEN};
 use crate::driver::block::{DiscLayout, DiscardCapability, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE};
 use crate::driver::filesystem::MountFlags;
+use crate::fs::{is_component, FS_NAME_MAX};
 use crate::le::{exact_len, put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::sysinfo::MOUNT_TARGET_MAX;
 use crate::Errno;
@@ -56,11 +57,25 @@ pub enum VolumeFsType {
     Adfs = 5,
     /// The AmigaDOS filesystems, OFS and FFS (`drivers/filesystem/affs`).
     Affs = 6,
+    /// A zip archive (`drivers/filesystem/archive`), as every archive below.
+    Zip = 7,
+    /// A tar archive.
+    Tar = 8,
+    /// A gzip stream: a compressed tar, or one compressed file.
+    Gzip = 9,
+    /// A bzip2 stream: a compressed tar, or one compressed file.
+    Bzip2 = 10,
+    /// A RISC OS Spark archive.
+    Spark = 11,
+    /// A RISC OS `ArcFS` archive.
+    ArcFs = 12,
+    /// A RAR archive.
+    Rar = 13,
 }
 
 impl VolumeFsType {
     /// Every filesystem type, in wire order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 14] = [
         Self::ARXFS,
         Self::Ext4,
         Self::Fat32,
@@ -68,6 +83,13 @@ impl VolumeFsType {
         Self::Udf,
         Self::Adfs,
         Self::Affs,
+        Self::Zip,
+        Self::Tar,
+        Self::Gzip,
+        Self::Bzip2,
+        Self::Spark,
+        Self::ArcFs,
+        Self::Rar,
     ];
 
     /// The wire byte for this filesystem type.
@@ -90,7 +112,36 @@ impl VolumeFsType {
             4 => Ok(Self::Udf),
             5 => Ok(Self::Adfs),
             6 => Ok(Self::Affs),
+            7 => Ok(Self::Zip),
+            8 => Ok(Self::Tar),
+            9 => Ok(Self::Gzip),
+            10 => Ok(Self::Bzip2),
+            11 => Ok(Self::Spark),
+            12 => Ok(Self::ArcFs),
+            13 => Ok(Self::Rar),
             _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Whether a volume of this type is an archive: a file's members, read
+    /// from an attachment's exact bytes and never written in place.
+    #[must_use]
+    pub const fn is_archive(self) -> bool {
+        match self {
+            Self::ARXFS
+            | Self::Ext4
+            | Self::Fat32
+            | Self::Iso9660
+            | Self::Udf
+            | Self::Adfs
+            | Self::Affs => false,
+            Self::Zip
+            | Self::Tar
+            | Self::Gzip
+            | Self::Bzip2
+            | Self::Spark
+            | Self::ArcFs
+            | Self::Rar => true,
         }
     }
 
@@ -106,6 +157,13 @@ impl VolumeFsType {
             Self::Udf => b"tairix,volume-udf",
             Self::Adfs => b"tairix,volume-adfs",
             Self::Affs => b"tairix,volume-affs",
+            Self::Zip => b"tairix,volume-zip",
+            Self::Tar => b"tairix,volume-tar",
+            Self::Gzip => b"tairix,volume-gzip",
+            Self::Bzip2 => b"tairix,volume-bzip2",
+            Self::Spark => b"tairix,volume-spark",
+            Self::ArcFs => b"tairix,volume-arcfs",
+            Self::Rar => b"tairix,volume-rar",
         }
     }
 }
@@ -182,11 +240,29 @@ pub enum FormatName {
     Smb3 = 9,
     /// An AmigaDOS volume, OFS or FFS.
     Affs = 10,
+    /// A zip archive.
+    Zip = 11,
+    /// A tar archive.
+    Tar = 12,
+    /// A tar archive in a gzip stream.
+    TarGzip = 13,
+    /// A tar archive in a bzip2 stream.
+    TarBzip2 = 14,
+    /// One file in a gzip stream.
+    Gzip = 15,
+    /// One file in a bzip2 stream.
+    Bzip2 = 16,
+    /// A RISC OS Spark archive.
+    Spark = 17,
+    /// A RISC OS `ArcFS` archive.
+    ArcFs = 18,
+    /// A RAR archive.
+    Rar = 19,
 }
 
 impl FormatName {
     /// Every name, in wire order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 19] = [
         Self::Arxfs,
         Self::Ext2,
         Self::Ext3,
@@ -197,6 +273,15 @@ impl FormatName {
         Self::Adfs,
         Self::Smb3,
         Self::Affs,
+        Self::Zip,
+        Self::Tar,
+        Self::TarGzip,
+        Self::TarBzip2,
+        Self::Gzip,
+        Self::Bzip2,
+        Self::Spark,
+        Self::ArcFs,
+        Self::Rar,
     ];
 
     /// The format a user and `mount` call `name`, as [`as_str`](Self::as_str)
@@ -220,6 +305,15 @@ impl FormatName {
             Self::Adfs => "adfs",
             Self::Smb3 => "smb3",
             Self::Affs => "affs",
+            Self::Zip => "zip",
+            Self::Tar => "tar",
+            Self::TarGzip => "tar.gz",
+            Self::TarBzip2 => "tar.bz2",
+            Self::Gzip => "gzip",
+            Self::Bzip2 => "bzip2",
+            Self::Spark => "spark",
+            Self::ArcFs => "arcfs",
+            Self::Rar => "rar",
         }
     }
 
@@ -235,6 +329,13 @@ impl FormatName {
             Self::Udf => VolumeFsType::Udf,
             Self::Adfs => VolumeFsType::Adfs,
             Self::Affs => VolumeFsType::Affs,
+            Self::Zip => VolumeFsType::Zip,
+            Self::Tar => VolumeFsType::Tar,
+            Self::TarGzip | Self::Gzip => VolumeFsType::Gzip,
+            Self::TarBzip2 | Self::Bzip2 => VolumeFsType::Bzip2,
+            Self::Spark => VolumeFsType::Spark,
+            Self::ArcFs => VolumeFsType::ArcFs,
+            Self::Rar => VolumeFsType::Rar,
             Self::Smb3 => return None,
         })
     }
@@ -262,6 +363,15 @@ impl FormatName {
             8 => Self::Adfs,
             9 => Self::Smb3,
             10 => Self::Affs,
+            11 => Self::Zip,
+            12 => Self::Tar,
+            13 => Self::TarGzip,
+            14 => Self::TarBzip2,
+            15 => Self::Gzip,
+            16 => Self::Bzip2,
+            17 => Self::Spark,
+            18 => Self::ArcFs,
+            19 => Self::Rar,
             _ => return Err(Errno::OutOfRange),
         })
     }
@@ -293,41 +403,136 @@ pub const VOLUME_DETACH_LEN: usize = VOLUME_ID_LEN + 1;
 /// so a driver reads the data a call asks for in one transfer.
 pub const VOLUME_IO_MAX: usize = crate::fsserve::FSSERVE_WINDOW_LEN;
 
-/// What a `volume_ctl` call asks of a served volume.
+/// The region of an archive attachment that is the archive itself: read
+/// only, as the volume's blocks or by byte through `archive_read`.
+pub const ARCHIVE_REGION: u8 = 0;
+
+/// The work file a writable archive attachment's driver stages written data
+/// in: a file with no name, gone with the attachment.
+pub const ARCHIVE_STAGING: u8 = 1;
+
+/// The work file a writable archive attachment's driver writes the next
+/// archive into, and the one [`VolumeCtl::Commit`] makes the archive.
+pub const ARCHIVE_NEXT: u8 = 2;
+
+/// How many work files a writable archive attachment has, as the regions
+/// after [`ARCHIVE_REGION`]: [`ARCHIVE_STAGING`] and [`ARCHIVE_NEXT`]. A
+/// read-only attachment has none.
+pub const ARCHIVE_WORK_FILES: u8 = 2;
+
+/// The most bytes one [`VolumeCtl::Copy`] moves, so a long copy is a run of
+/// calls, each one the kernel can be interrupted between.
+pub const ARCHIVE_COPY_MAX: u64 = 16 << 20;
+
+/// What a `volume_ctl` call asks of a served volume, by its wire code.
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum VolumeCtlOp {
-    /// Describe the volume: a [`VolumeInfo`].
+    /// [`VolumeCtl::Info`].
     Info = 1,
-    /// Make every write the volume accepted durable on its medium.
+    /// [`VolumeCtl::Flush`].
     Flush = 2,
-    /// Tell the device `blocks` blocks from `lba` no longer hold data.
+    /// [`VolumeCtl::Discard`].
     Discard = 3,
+    /// [`VolumeCtl::Copy`].
+    Copy = 4,
+    /// [`VolumeCtl::Truncate`].
+    Truncate = 5,
+    /// [`VolumeCtl::Commit`].
+    Commit = 6,
 }
 
-/// A `volume_ctl` request: the operation and, for a discard, its range.
+/// A `volume_ctl` request.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct VolumeCtl {
-    /// The operation.
-    pub op: VolumeCtlOp,
-    /// The first block of a discard; zero otherwise.
-    pub lba: u64,
-    /// How many blocks a discard covers; zero otherwise.
-    pub blocks: u64,
+pub enum VolumeCtl {
+    /// Describe the volume: a [`VolumeInfo`].
+    Info,
+    /// Make every write the volume accepted durable on its medium.
+    Flush,
+    /// Tell the device `blocks` blocks from `lba` no longer hold data.
+    Discard {
+        /// The first block.
+        lba: u64,
+        /// How many, never zero.
+        blocks: u64,
+    },
+    /// Copy `len` bytes of an archive attachment's region `from`, from
+    /// `from_offset`, to its work file `to` at `to_offset`, which may extend
+    /// it: so a member kept unchanged reaches the next archive without passing
+    /// through its driver.
+    Copy {
+        /// The region read: the archive or another work file.
+        from: u8,
+        /// Where in it.
+        from_offset: u64,
+        /// The work file written.
+        to: u8,
+        /// Where in it.
+        to_offset: u64,
+        /// How many bytes, never zero and at most [`ARCHIVE_COPY_MAX`].
+        len: u64,
+    },
+    /// Cut or extend the archive attachment's work file `region` to `len`
+    /// bytes.
+    Truncate {
+        /// The work file.
+        region: u8,
+        /// Its new length.
+        len: u64,
+    },
+    /// Make the archive attachment's work file [`ARCHIVE_NEXT`], cut to
+    /// `len` bytes, the archive, kept under its name with its owner, mode and
+    /// attributes, only while that name still holds the archive attached. The
+    /// work file is then region [`ARCHIVE_REGION`], and [`ARCHIVE_NEXT`]
+    /// starts empty again.
+    Commit {
+        /// The new archive's length.
+        len: u64,
+    },
 }
 
-/// Encoded length of a [`VolumeCtl`]: `op(4) || pad(4) || lba(8) ||
-/// blocks(8)`.
-pub const VOLUME_CTL_LEN: usize = 24;
+/// Encoded length of a [`VolumeCtl`]: `op(4) || from(1) || to(1) || pad(2)
+/// || a(8) || b(8) || c(8)`, the three words a discard's, a copy's, a
+/// truncate's or a commit's own.
+pub const VOLUME_CTL_LEN: usize = 32;
 
 impl VolumeCtl {
+    /// The request's wire code.
+    #[must_use]
+    pub const fn op(&self) -> VolumeCtlOp {
+        match self {
+            Self::Info => VolumeCtlOp::Info,
+            Self::Flush => VolumeCtlOp::Flush,
+            Self::Discard { .. } => VolumeCtlOp::Discard,
+            Self::Copy { .. } => VolumeCtlOp::Copy,
+            Self::Truncate { .. } => VolumeCtlOp::Truncate,
+            Self::Commit { .. } => VolumeCtlOp::Commit,
+        }
+    }
+
     /// Encode the request.
     #[must_use]
     pub fn encode(&self) -> [u8; VOLUME_CTL_LEN] {
+        let (from, to, words) = match *self {
+            Self::Info | Self::Flush => (0, 0, [0; 3]),
+            Self::Discard { lba, blocks } => (0, 0, [lba, blocks, 0]),
+            Self::Copy {
+                from,
+                from_offset,
+                to,
+                to_offset,
+                len,
+            } => (from, to, [from_offset, to_offset, len]),
+            Self::Truncate { region, len } => (0, region, [len, 0, 0]),
+            Self::Commit { len } => (0, 0, [len, 0, 0]),
+        };
         let mut out = [0u8; VOLUME_CTL_LEN];
-        put_u32(&mut out, 0, self.op as u32);
-        put_u64(&mut out, 8, self.lba);
-        put_u64(&mut out, 16, self.blocks);
+        put_u32(&mut out, 0, self.op() as u32);
+        out[4] = from;
+        out[5] = to;
+        for (at, word) in words.into_iter().enumerate() {
+            put_u64(&mut out, 8 + 8 * at, word);
+        }
         out
     }
 
@@ -336,26 +541,43 @@ impl VolumeCtl {
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] for any length but [`VOLUME_CTL_LEN`];
-    /// [`Errno::OutOfRange`] for an unknown operation, a nonzero pad, a
-    /// range on an operation that takes none, or an empty discard.
+    /// [`Errno::OutOfRange`] for an unknown operation, a nonzero pad or field
+    /// the operation takes none of, an empty discard or copy, a copy past
+    /// [`ARCHIVE_COPY_MAX`] or onto its own region, or a region that is no
+    /// work file where one is named.
     pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
         exact_len(bytes, VOLUME_CTL_LEN).map_err(|_| Errno::LengthOutOfRange)?;
-        let op = match read_u32(bytes, 0) {
-            1 => VolumeCtlOp::Info,
-            2 => VolumeCtlOp::Flush,
-            3 => VolumeCtlOp::Discard,
-            _ => return Err(Errno::OutOfRange),
-        };
-        if read_u32(bytes, 4) != 0 {
+        let (from, to) = (bytes[4], bytes[5]);
+        let [a, b, c] = [8, 16, 24].map(|at| read_u64(bytes, at));
+        if read_u16(bytes, 6) != 0 {
             return Err(Errno::OutOfRange);
         }
-        let ctl = Self {
-            op,
-            lba: read_u64(bytes, 8),
-            blocks: read_u64(bytes, 16),
+        let work = |region: u8| (1..=ARCHIVE_WORK_FILES).contains(&region);
+        let ctl = match read_u32(bytes, 0) {
+            1 => Self::Info,
+            2 => Self::Flush,
+            3 if b != 0 => Self::Discard { lba: a, blocks: b },
+            4 if c != 0
+                && c <= ARCHIVE_COPY_MAX
+                && from <= ARCHIVE_WORK_FILES
+                && work(to)
+                && from != to =>
+            {
+                Self::Copy {
+                    from,
+                    from_offset: a,
+                    to,
+                    to_offset: b,
+                    len: c,
+                }
+            }
+            5 if work(to) => Self::Truncate { region: to, len: a },
+            6 => Self::Commit { len: a },
+            _ => return Err(Errno::OutOfRange),
         };
-        let ranged = op == VolumeCtlOp::Discard;
-        if ranged == (ctl.blocks == 0) || (!ranged && ctl.lba != 0) {
+        // Every field the request does not take is zero, so one frame has
+        // one meaning.
+        if ctl.encode().as_slice() != bytes {
             return Err(Errno::OutOfRange);
         }
         Ok(ctl)
@@ -378,12 +600,55 @@ pub struct VolumeInfo {
     pub disc_layout: Option<DiscLayout>,
     /// What the device said its medium is.
     pub medium: Option<BlkMedium>,
+    /// How many bytes the volume holds: its blocks' bytes, or for an archive
+    /// the file's exact length, its last block read as those bytes then zeros.
+    pub byte_len: u64,
+    /// The work files an archive attachment has: [`ARCHIVE_WORK_FILES`] for
+    /// a writable one, else none.
+    pub work_files: u8,
+    /// The name of the file an archive was attached from.
+    pub archive_name: Option<ArchiveName>,
+}
+
+/// The name of the file an archive volume was attached from: what a format
+/// that records no name of its own names its one member by.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ArchiveName {
+    len: u8,
+    bytes: [u8; FS_NAME_MAX],
+}
+
+impl ArchiveName {
+    /// `name`, where it can name a directory entry.
+    #[must_use]
+    pub fn new(name: &[u8]) -> Option<Self> {
+        if !is_component(name) {
+            return None;
+        }
+        let mut bytes = [0u8; FS_NAME_MAX];
+        bytes[..name.len()].copy_from_slice(name);
+        Some(Self {
+            len: u8::try_from(name.len()).ok()?,
+            bytes,
+        })
+    }
+
+    /// The name.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
 }
 
 /// Encoded length of a [`VolumeInfo`]: `block_size(4) || flags(4) ||
 /// block_count(8) || discard granularity(8) || discard maximum(8) ||
-/// last_session_start(8) || last_recorded(8) || medium(8)`.
-pub const VOLUME_INFO_LEN: usize = 56;
+/// last_session_start(8) || last_recorded(8) || medium(8) || byte_len(8) ||
+/// work_files(1) || archive name length(1) || pad(6) || archive name(255) ||
+/// pad(1)`.
+pub const VOLUME_INFO_LEN: usize = 72 + FS_NAME_MAX + 1;
+
+/// Where a [`VolumeInfo`]'s archive name starts.
+const INFO_NAME_AT: usize = 72;
 
 const INFO_READ_ONLY: u32 = 1 << 0;
 const INFO_DISCARD: u32 = 1 << 1;
@@ -414,7 +679,14 @@ impl VolumeInfo {
                 put_u64(&mut out, 40, recorded);
             }
         }
-        out[48..].copy_from_slice(&BlkMedium::encode(self.medium));
+        out[48..56].copy_from_slice(&BlkMedium::encode(self.medium));
+        put_u64(&mut out, 56, self.byte_len);
+        out[64] = self.work_files;
+        if let Some(name) = &self.archive_name {
+            out[65] = name.len;
+            out[INFO_NAME_AT..INFO_NAME_AT + name.as_bytes().len()]
+                .copy_from_slice(name.as_bytes());
+        }
         put_u32(&mut out, 4, flags);
         out
     }
@@ -425,8 +697,10 @@ impl VolumeInfo {
     ///
     /// [`Errno::LengthOutOfRange`] for any length but [`VOLUME_INFO_LEN`];
     /// [`Errno::OutOfRange`] for a block size outside the block layer's
-    /// range, an empty volume, an unknown flag, or a field its flag says is
-    /// absent but which is not zero.
+    /// range, an empty volume, an unknown flag, a field its flag says is
+    /// absent but which is not zero, a length its last block does not end in,
+    /// more work files than an attachment has, an archive name that names no
+    /// directory entry, or a nonzero pad.
     pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
         exact_len(bytes, VOLUME_INFO_LEN).map_err(|_| Errno::LengthOutOfRange)?;
         let block_size = read_u32(bytes, 0);
@@ -462,7 +736,25 @@ impl VolumeInfo {
             last_recorded: (flags & INFO_RECORDED != 0).then(|| read_u64(bytes, 40)),
         });
         let mut medium = [0u8; BLK_MEDIUM_LEN];
-        medium.copy_from_slice(&bytes[48..]);
+        medium.copy_from_slice(&bytes[48..56]);
+        let byte_len = read_u64(bytes, 56);
+        let work_files = bytes[64];
+        let name_end = INFO_NAME_AT + usize::from(bytes[65]);
+        let archive_name = match bytes[65] {
+            0 => None,
+            _ => Some(ArchiveName::new(&bytes[INFO_NAME_AT..name_end]).ok_or(Errno::OutOfRange)?),
+        };
+        let whole = u64::from(block_size)
+            .checked_mul(block_count)
+            .ok_or(Errno::OutOfRange)?;
+        if byte_len > whole
+            || byte_len <= whole - u64::from(block_size)
+            || work_files > ARCHIVE_WORK_FILES
+            || bytes[66..INFO_NAME_AT].iter().any(|&byte| byte != 0)
+            || bytes[name_end..].iter().any(|&byte| byte != 0)
+        {
+            return Err(Errno::OutOfRange);
+        }
         Ok(Self {
             block_size,
             block_count,
@@ -470,6 +762,9 @@ impl VolumeInfo {
             discard,
             disc_layout,
             medium: BlkMedium::decode(&medium),
+            byte_len,
+            work_files,
+            archive_name,
         })
     }
 }
@@ -545,13 +840,13 @@ impl<'a> VolumeAttachRequest<'a> {
     ///
     /// # Errors
     ///
-    /// * [`Errno::OutOfRange`] for a structurally invalid name or a
-    ///   zero-length extent — a frame that cannot mean what it says is
-    ///   never produced.
+    /// * [`Errno::OutOfRange`] for a structurally invalid name, a
+    ///   zero-length extent, or an archive, which is attached from its file
+    ///   alone — a frame that cannot mean what it says is never produced.
     /// * [`Errno::BufferTooSmall`] if `buf` cannot hold the encoding.
     pub fn encode(&self, buf: &mut [u8]) -> Result<usize, Errno> {
         validate_volume_name(self.name)?;
-        if self.blocks == 0 {
+        if self.blocks == 0 || self.fstype.is_archive() {
             return Err(Errno::OutOfRange);
         }
         let len = ATTACH_FIXED_LEN + self.name.len();
@@ -580,8 +875,8 @@ impl<'a> VolumeAttachRequest<'a> {
     ///   fixed prefix, longer than [`VOLUME_ATTACH_MAX_LEN`], or does not
     ///   carry exactly `name_len` name bytes — a frame is exact, never
     ///   padded or truncated.
-    /// * [`Errno::OutOfRange`] for an unknown filesystem type, a
-    ///   zero-length extent, an extent whose end overflows, or a
+    /// * [`Errno::OutOfRange`] for an unknown filesystem type or an
+    ///   archive, a zero-length extent, an extent whose end overflows, or a
     ///   structurally invalid name.
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
         if bytes.len() < ATTACH_FIXED_LEN || bytes.len() > VOLUME_ATTACH_MAX_LEN {
@@ -592,6 +887,9 @@ impl<'a> VolumeAttachRequest<'a> {
         let first_lba = read_u64(bytes, 16);
         let blocks = read_u64(bytes, 24);
         let fstype = VolumeFsType::from_u8(bytes[32])?;
+        if fstype.is_archive() {
+            return Err(Errno::OutOfRange);
+        }
         let name_len = usize::from(bytes[33]);
         if bytes.len() != ATTACH_FIXED_LEN + name_len {
             return Err(Errno::LengthOutOfRange);
@@ -893,56 +1191,108 @@ mod tests {
     }
 
     #[test]
-    fn a_control_request_round_trips_and_carries_a_range_only_to_a_discard() {
+    fn every_control_request_round_trips() {
         for ctl in [
-            VolumeCtl {
-                op: VolumeCtlOp::Info,
-                lba: 0,
-                blocks: 0,
+            VolumeCtl::Info,
+            VolumeCtl::Flush,
+            VolumeCtl::Discard { lba: 9, blocks: 7 },
+            VolumeCtl::Copy {
+                from: ARCHIVE_REGION,
+                from_offset: 123,
+                to: 2,
+                to_offset: 7,
+                len: ARCHIVE_COPY_MAX,
             },
-            VolumeCtl {
-                op: VolumeCtlOp::Flush,
-                lba: 0,
-                blocks: 0,
+            VolumeCtl::Copy {
+                from: 1,
+                from_offset: 0,
+                to: 2,
+                to_offset: u64::MAX,
+                len: 1,
             },
-            VolumeCtl {
-                op: VolumeCtlOp::Discard,
-                lba: 9,
-                blocks: 7,
-            },
+            VolumeCtl::Truncate { region: 1, len: 0 },
+            VolumeCtl::Commit { len: 1 << 40 },
         ] {
-            assert_eq!(VolumeCtl::decode(&ctl.encode()), Ok(ctl));
+            assert_eq!(VolumeCtl::decode(&ctl.encode()), Ok(ctl), "{ctl:?}");
         }
-        let mut stray = VolumeCtl {
-            op: VolumeCtlOp::Flush,
-            lba: 0,
-            blocks: 0,
-        }
-        .encode();
-        stray[8] = 1;
-        assert_eq!(VolumeCtl::decode(&stray), Err(Errno::OutOfRange));
-        let empty = VolumeCtl {
-            op: VolumeCtlOp::Discard,
-            lba: 1,
-            blocks: 0,
-        }
-        .encode();
-        assert_eq!(VolumeCtl::decode(&empty), Err(Errno::OutOfRange));
-        let mut unknown = empty;
-        unknown[0] = 4;
-        assert_eq!(VolumeCtl::decode(&unknown), Err(Errno::OutOfRange));
-        assert_eq!(VolumeCtl::decode(&[0; 23]), Err(Errno::LengthOutOfRange));
     }
 
     #[test]
-    fn a_volume_description_round_trips_every_optional_part() {
-        let plain = VolumeInfo {
+    fn a_control_request_out_of_shape_is_refused() {
+        type Corrupt = fn(&mut [u8; VOLUME_CTL_LEN]);
+        let copy = VolumeCtl::Copy {
+            from: 0,
+            from_offset: 0,
+            to: 1,
+            to_offset: 0,
+            len: 1,
+        };
+        let refused = |ctl: VolumeCtl, corrupt: Corrupt| {
+            let mut bytes = ctl.encode();
+            corrupt(&mut bytes);
+            VolumeCtl::decode(&bytes)
+        };
+        let cases: [(&str, VolumeCtl, Corrupt); 11] = [
+            ("a word an info takes none of", VolumeCtl::Info, |b| {
+                b[8] = 1;
+            }),
+            ("a region a flush takes none of", VolumeCtl::Flush, |b| {
+                b[5] = 1;
+            }),
+            (
+                "an empty discard",
+                VolumeCtl::Discard { lba: 1, blocks: 1 },
+                |b| b[16] = 0,
+            ),
+            ("a pad", VolumeCtl::Info, |b| b[6] = 1),
+            ("an unknown operation", VolumeCtl::Info, |b| b[0] = 7),
+            ("an empty copy", copy, |b| b[24] = 0),
+            ("a copy past its bound", copy, |b| {
+                b[24..32].copy_from_slice(&(ARCHIVE_COPY_MAX + 1).to_le_bytes());
+            }),
+            ("a copy onto the archive", copy, |b| b[5] = 0),
+            ("a copy onto its own region", copy, |b| b[4] = 1),
+            ("a copy from no region", copy, |b| {
+                b[4] = ARCHIVE_WORK_FILES + 1;
+            }),
+            (
+                "a commit naming a region",
+                VolumeCtl::Commit { len: 9 },
+                |b| b[5] = ARCHIVE_NEXT,
+            ),
+        ];
+        for (what, ctl, corrupt) in cases {
+            assert_eq!(refused(ctl, corrupt), Err(Errno::OutOfRange), "{what}");
+        }
+        assert_eq!(VolumeCtl::decode(&[0; 31]), Err(Errno::LengthOutOfRange));
+    }
+
+    fn plain_info() -> VolumeInfo {
+        VolumeInfo {
             block_size: 512,
-            block_count: 1 << 30,
+            block_count: 8,
             read_only: false,
             discard: DiscardCapability::unsupported(),
             disc_layout: None,
             medium: None,
+            byte_len: 4096,
+            work_files: 0,
+            archive_name: None,
+        }
+    }
+
+    #[test]
+    fn a_volume_description_round_trips_every_optional_part() {
+        let archive = VolumeInfo {
+            block_count: 3,
+            byte_len: 1025,
+            work_files: ARCHIVE_WORK_FILES,
+            archive_name: ArchiveName::new(b"notes.txt.gz"),
+            ..plain_info()
+        };
+        let longest = VolumeInfo {
+            archive_name: ArchiveName::new(&[b'n'; FS_NAME_MAX]),
+            ..archive
         };
         let full = VolumeInfo {
             block_size: 2048,
@@ -958,25 +1308,43 @@ mod tests {
                 last_recorded: Some(299_999),
             }),
             medium: Some(BlkMedium::of_transport(BlkTransport::Usb)),
+            byte_len: 2048 * 300_000,
+            work_files: 0,
+            archive_name: None,
         };
-        for info in [plain, full] {
+        assert!(longest.archive_name.is_some());
+        for info in [plain_info(), archive, longest, full] {
             assert_eq!(VolumeInfo::decode(&info.encode()), Ok(info));
         }
+    }
+
+    #[test]
+    fn an_archive_name_names_one_directory_entry() {
+        for refused in [
+            &b""[..],
+            b".",
+            b"..",
+            b"a/b",
+            b"a\0b",
+            &[b'n'; FS_NAME_MAX + 1],
+        ] {
+            assert_eq!(ArchiveName::new(refused), None, "{refused:?}");
+        }
+        assert_eq!(
+            ArchiveName::new(b"Spark,ddc").map(|name| name.as_bytes().to_vec()),
+            Some(b"Spark,ddc".to_vec())
+        );
     }
 
     #[test]
     fn a_volume_description_out_of_shape_is_refused() {
         type Corruption = (&'static str, fn(&mut [u8; VOLUME_INFO_LEN]));
         let good = VolumeInfo {
-            block_size: 512,
-            block_count: 8,
-            read_only: false,
-            discard: DiscardCapability::unsupported(),
-            disc_layout: None,
-            medium: None,
+            archive_name: ArchiveName::new(b"a.tar"),
+            ..plain_info()
         }
         .encode();
-        let cases: [Corruption; 5] = [
+        let cases: [Corruption; 13] = [
             ("block size", |b| {
                 b[0..4].copy_from_slice(&3u32.to_le_bytes());
             }),
@@ -984,6 +1352,21 @@ mod tests {
             ("unknown flag", |b| b[4] = 0x10),
             ("discard without its flag", |b| b[16] = 1),
             ("recorded without a layout", |b| b[4] = 0x08),
+            ("a length past its blocks", |b| {
+                b[56..64].copy_from_slice(&4097u64.to_le_bytes());
+            }),
+            ("a last block holding nothing", |b| {
+                b[56..64].copy_from_slice(&3584u64.to_le_bytes());
+            }),
+            ("too many work files", |b| b[64] = ARCHIVE_WORK_FILES + 1),
+            ("a pad", |b| b[71] = 1),
+            ("a byte past the name", |b| b[INFO_NAME_AT + 5] = b'x'),
+            ("the last pad", |b| b[VOLUME_INFO_LEN - 1] = 1),
+            ("a name holding a slash", |b| b[INFO_NAME_AT + 1] = b'/'),
+            ("a name of dots", |b| {
+                b[65] = 2;
+                b[INFO_NAME_AT..INFO_NAME_AT + 5].copy_from_slice(b"..\0\0\0");
+            }),
         ];
         for (what, corrupt) in cases {
             let mut bad = good;
@@ -1012,8 +1395,9 @@ mod tests {
         }
         assert_eq!(FormatName::Ext2.family(), Some(VolumeFsType::Ext4));
         assert_eq!(FormatName::Affs.family(), Some(VolumeFsType::Affs));
+        assert_eq!(FormatName::TarGzip.family(), Some(VolumeFsType::Gzip));
         assert_eq!(FormatName::from_u8(0), Err(Errno::OutOfRange));
-        assert_eq!(FormatName::from_u8(11), Err(Errno::OutOfRange));
+        assert_eq!(FormatName::from_u8(20), Err(Errno::OutOfRange));
     }
 
     #[test]
@@ -1042,8 +1426,24 @@ mod tests {
             assert_eq!(usize::from(fstype.as_u8()), at);
             assert_eq!(VolumeFsType::from_u8(fstype.as_u8()), Ok(fstype));
         }
-        assert_eq!(VolumeFsType::from_u8(7), Err(Errno::OutOfRange));
+        assert_eq!(VolumeFsType::from_u8(14), Err(Errno::OutOfRange));
         assert_eq!(VolumeFsType::from_u8(u8::MAX), Err(Errno::OutOfRange));
+        let archives: alloc::vec::Vec<VolumeFsType> = VolumeFsType::ALL
+            .into_iter()
+            .filter(|fstype| fstype.is_archive())
+            .collect();
+        assert_eq!(
+            archives,
+            [
+                VolumeFsType::Zip,
+                VolumeFsType::Tar,
+                VolumeFsType::Gzip,
+                VolumeFsType::Bzip2,
+                VolumeFsType::Spark,
+                VolumeFsType::ArcFs,
+                VolumeFsType::Rar,
+            ]
+        );
     }
 
     #[test]
@@ -1115,13 +1515,20 @@ mod tests {
     fn attach_decode_rejects_bad_fields() {
         let mut buf = [0u8; VOLUME_ATTACH_MAX_LEN];
         let n = attach().encode(&mut buf).expect("encodes");
-        // Unknown filesystem type.
-        let mut bad = buf;
-        bad[32] = 9;
-        assert_eq!(
-            VolumeAttachRequest::decode(&bad[..n]),
-            Err(Errno::OutOfRange)
-        );
+        // An unknown filesystem type, and an archive, which no device holds.
+        for fstype in [u8::MAX, VolumeFsType::Zip.as_u8()] {
+            let mut bad = buf;
+            bad[32] = fstype;
+            assert_eq!(
+                VolumeAttachRequest::decode(&bad[..n]),
+                Err(Errno::OutOfRange)
+            );
+        }
+        let archive = VolumeAttachRequest {
+            fstype: VolumeFsType::Tar,
+            ..attach()
+        };
+        assert_eq!(archive.encode(&mut buf), Err(Errno::OutOfRange));
         // Zero-length extent.
         let mut bad = buf;
         put_u64(&mut bad, 24, 0);

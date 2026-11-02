@@ -48,10 +48,22 @@ bureau RISC OS — pour 16 couleurs, la couleur n est la couleur Wimp n ; pour
 jamais une palette de PC. Un sprite dont les pixels sont plus hauts que
 larges, comme en mode 12, est montré ainsi. Un sprite que cet éditeur ne
 peut pas lire, comme un sprite CMJN, est gardé exactement tel quel et
-réécrit sans changement. Le menu Sprites va à des sprites, en ajoute, en
-copie, les renomme, les supprime et les réordonne. Un TIFF contient un
-nombre quelconque de pages ; pour lui, le menu Pages va à des pages, en
-ajoute, en copie, les supprime et les réordonne.
+réécrit sans changement. Un TIFF contient un nombre quelconque de pages ;
+pour lui, le menu Pages va à des pages, en ajoute, en copie, les supprime et
+les réordonne.
+
+Un fichier de sprites s'ouvre dans une petite fenêtre montrant ses sprites,
+chacun en image au-dessus de son nom. On choisit des sprites en appuyant
+dessus, avec Ctrl pour en ajouter un et Maj pour une suite ; le menu de la
+fenêtre en crée, les renomme, les copie, les supprime et les réordonne, et
+enregistre le fichier. On double-clique sur un sprite, ou on appuie sur
+Entrée, pour le modifier dans une fenêtre à lui ; un nombre quelconque de
+sprites peuvent être ouverts à la fois, issus d'un nombre quelconque de
+fichiers. Les modifications d'une fenêtre de sprite sont celles de son
+fichier dès qu'elles sont faites, et enregistrer depuis cette fenêtre
+enregistre le fichier. Fermer une fenêtre de sprite ne demande rien ; fermer
+la fenêtre du fichier demande s'il faut enregistrer les modifications de
+chaque sprite, et ferme aussi leurs fenêtres.
 
 Le bouton principal (gauche) peint avec la couleur principale et le bouton
 du milieu avec la couleur secondaire ; en tenant Alt, on prélève plutôt une
@@ -64,9 +76,10 @@ flux et l'espacement d'un pinceau, la tolérance d'un remplissage, la forme
 d'un dégradé, la taille du texte, les coins d'un rectangle — saisis ou réglés
 avec les flèches, et les boutons qui agrandissent et montrent la grille des
 pixels ; la bande de palette sous l'image contient la palette de l'image, ou
-les couleurs du bureau. L'aérographe continue de pulvériser tant qu'il est
-tenu immobile. En tenant Maj, on trace un carré, un cercle ou une ligne à un
-multiple de 45 degrés.
+les couleurs du bureau, sur une seule rangée qui défile latéralement quand
+elle est plus longue que la fenêtre. L'aérographe continue de pulvériser
+tant qu'il est tenu immobile. En tenant Maj, on trace un carré, un cercle ou
+une ligne à un multiple de 45 degrés.
 
 Des volets longent les deux côtés de la fenêtre : par défaut le volet Outils
 à gauche et le volet Couleur à droite, avec le volet Réglage en dessous dès
@@ -165,8 +178,8 @@ programme atteint.
 
 Le bouton secondaire (droit) de la souris, n'importe où dans la fenêtre,
 ouvre son menu : Couper, Copier, Coller, Tout sélectionner et Désélectionner,
-puis Fichier, Édition, Image, Calques, Couleurs, Réglages, Sprites ou
-Pages, Affichage et Outils, chacun ouvrant son propre sous-menu. La fenêtre
+puis Fichier, Édition, Image, Calques, Couleurs, Réglages, Pages pour un
+TIFF, Affichage et Outils, chacun ouvrant son propre sous-menu. La fenêtre
 n'a pas de barre de menus. Fermer une fenêtre ou quitter avec des
 modifications non enregistrées demande d'abord. Fermer une fenêtre en
 cliquant sur son bouton de fermeture avec le bouton secondaire (droit)
@@ -197,7 +210,8 @@ qui le contient.
 * Pincer à deux doigts — agrandir ou réduire en continu ; sur un écran tactile, l'image suit les doigts
 * `G` — afficher ou masquer la grille entre les pixels
 * `Ctrl+'` — afficher ou masquer la grille
-* `Page Up` / `Page Down` — le sprite précédent ou suivant, la page précédente ou suivante
+* `Page Up` / `Page Down` — la page précédente ou suivante
+* Dans la fenêtre d'un fichier de sprites : touches fléchées, `Home` et `End` — choisir un sprite ; `Enter` — modifier les sprites choisis ; `Delete` — les supprimer
 * touches fléchées — déplacer une sélection flottante d'un pixel ; avec `Shift`, de dix ; dans la bande de palette, parcourir ses couleurs
 
 ## OPTIONS

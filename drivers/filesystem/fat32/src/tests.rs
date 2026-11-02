@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::driver::filesystem::clock::TestClock;
 use tairix_abi::driver::filesystem::listing::{first_listed, listed};
+use tairix_abi::time::CivilTime;
 use tairix_abi::DriverKind;
 
 // What a test's creations ask for, which FAT has nowhere to keep.

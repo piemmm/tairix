@@ -467,7 +467,7 @@ mod program {
         })
         .ok()?;
         let side = side.min(MAX_ICON_SIDE);
-        let fitted = render_thumbnail(renderer, side, None).ok()?;
+        let fitted = render_thumbnail(renderer, side).ok()?;
         Surface::from_rgba8(side, side, &fitted.pixels)
     }
 

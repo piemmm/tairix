@@ -1,8 +1,7 @@
 //! The checksums the formats here carry, each starting from the value its
 //! format names: FLAC's CRC-8, the CRC-16 FLAC frames and MPEG audio frames
-//! share, the reflected CRC-16 LAME guards its stream tag with, and Ogg's
-//! CRC-32. Framing checks foreign formats specify, none a security
-//! primitive.
+//! share, and Ogg's CRC-32. Framing checks foreign formats specify, none a
+//! security primitive; LAME's reflected CRC-16 is `lib/crc16`'s.
 
 /// A CRC of `width` bits over a generator polynomial, a byte at a time.
 struct Crc {
@@ -80,35 +79,6 @@ pub(crate) fn crc16_bits(crc: u16, bytes: &[u8], bits: usize) -> u16 {
     crc
 }
 
-/// x^16 + x^15 + x^2 + 1 reflected, least significant bit first: the CRC
-/// LAME guards its stream tag with.
-const CRC16_REFLECTED: [u16; 256] = {
-    let mut table = [0u16; 256];
-    let mut byte: u16 = 0;
-    while byte < 256 {
-        let mut crc = byte;
-        let mut bit = 0;
-        while bit < 8 {
-            crc = if crc & 1 == 0 {
-                crc >> 1
-            } else {
-                (crc >> 1) ^ 0xA001
-            };
-            bit += 1;
-        }
-        table[byte as usize] = crc;
-        byte += 1;
-    }
-    table
-};
-
-/// `crc` carried on over `bytes`, least significant bit first.
-pub(crate) fn crc16_reflected(crc: u16, bytes: &[u8]) -> u16 {
-    bytes.iter().fold(crc, |crc, &byte| {
-        (crc >> 8) ^ CRC16_REFLECTED[usize::from((crc ^ u16::from(byte)) & 0xFF)]
-    })
-}
-
 /// `crc` carried on over `bytes`.
 pub(crate) fn crc32(crc: u32, bytes: &[u8]) -> u32 {
     CRC32.update(crc, bytes)
@@ -116,18 +86,17 @@ pub(crate) fn crc32(crc: u32, bytes: &[u8]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{crc16, crc16_bits, crc16_reflected, crc32, crc8};
+    use super::{crc16, crc16_bits, crc32, crc8};
 
     const CHECK: &[u8] = b"123456789";
 
     /// The catalogued check values: CRC-8/SMBUS, CRC-16/UMTS (FLAC's),
-    /// CRC-16/CMS (MPEG audio's), CRC-16/ARC (LAME's), and Ogg's.
+    /// CRC-16/CMS (MPEG audio's), and Ogg's.
     #[test]
     fn each_checksum_has_its_catalogued_check_value() {
         assert_eq!(crc8(CHECK), 0xF4);
         assert_eq!(crc16(0, CHECK), 0xFEE8);
         assert_eq!(crc16(0xFFFF, CHECK), 0xAEE7);
-        assert_eq!(crc16_reflected(0, CHECK), 0xBB3D);
         assert_eq!(crc32(0, CHECK), 0x89A1_897F);
     }
 

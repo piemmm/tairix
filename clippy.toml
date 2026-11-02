@@ -99,4 +99,6 @@ doc-valid-idents = [
     "NetBIOS",
     "AmigaDOS",
     "AmigaOS",
+    "PPMd",
+    "BLAKE2sp",
 ]

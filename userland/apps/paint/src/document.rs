@@ -760,6 +760,15 @@ impl Entry {
         }
     }
 
+    /// Its sprite name to change, for a picture that has one: a kept sprite's
+    /// is its bytes', which are written back as they were read.
+    pub(crate) fn name_mut(&mut self) -> Option<&mut SpriteName> {
+        match self {
+            Self::Picture(picture) => picture.sprite.as_mut().map(|sprite| &mut sprite.name),
+            Self::Kept(_) => None,
+        }
+    }
+
     /// The picture, for an entry that is one.
     #[must_use]
     pub const fn picture(&self) -> Option<&Picture> {
@@ -831,6 +840,8 @@ pub enum ListRefusal {
     LastEntry,
     /// There is no such entry.
     NoSuchEntry,
+    /// Another sprite has the name.
+    NameTaken,
     /// A document holds at most this many entries.
     Full,
     /// The allocator refused the room.
@@ -842,6 +853,7 @@ impl core::fmt::Display for ListRefusal {
         match self {
             Self::LastEntry => f.write_str("A sprite file keeps at least one sprite"),
             Self::NoSuchEntry => f.write_str("There is no such sprite"),
+            Self::NameTaken => f.write_str("Another sprite in the file has that name"),
             Self::Full => write!(f, "A sprite file here holds at most {MAX_ENTRIES} sprites"),
             Self::OutOfMemory => f.write_str("There is not enough memory to change the sprites"),
         }
@@ -919,10 +931,52 @@ pub fn free_name<'a>(
     SpriteName::from_bytes(&name[..stem.len() + digits])
 }
 
+/// One entry's identity within its document: the same entry wherever the
+/// list's changes and their undoing move it, and never another's.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct EntryId(u64);
+
+impl EntryId {
+    /// Its number, unique within its document.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// A new, blank sprite as `new` describes it: its canvas, its depth, its
+/// pixel shape and whether it is masked, its colours the desktop's. `None`
+/// where memory is refused.
+#[must_use]
+pub fn sprite_picture(new: &crate::dialog::NewSprite) -> Option<Picture> {
+    let blank = NewPicture {
+        size: new.size,
+        depth: new.depth,
+        transparent: new.masked,
+    };
+    let canvas = blank.canvas().ok()?;
+    let mode = match new.depth {
+        Some(depth) => SpriteMode::indexed(depth, new.eig, false),
+        None => SpriteMode::truecolour(new.eig, false),
+    };
+    let mut picture = Picture::plain(canvas);
+    picture.sprite = Some(SpriteInfo {
+        name: new.name,
+        mode,
+        palette: SpritePalette::Implied,
+        masked: new.masked,
+    });
+    Some(picture)
+}
+
 /// A document being edited.
 #[derive(Debug)]
 pub struct Document {
     entries: Vec<Entry>,
+    /// Each entry's identity, in step with `entries`.
+    ids: Vec<EntryId>,
+    /// The identity the next entry added takes.
+    next_id: u64,
     current: usize,
     origin: Origin,
     unkept: Unkept,
@@ -964,7 +1018,10 @@ impl Document {
     }
 
     fn built(entries: Vec<Entry>, origin: Origin, unkept: Unkept, settings: SaveSettings) -> Self {
+        let count = u64::try_from(entries.len()).unwrap_or(u64::MAX);
         Self {
+            ids: (0..count).map(EntryId).collect(),
+            next_id: count,
             entries,
             current: 0,
             origin,
@@ -1358,10 +1415,15 @@ impl Document {
         if self.entries.len() >= MAX_ENTRIES {
             return Err(ListRefusal::Full);
         }
-        if self.entries.try_reserve(1).is_err() || self.history.reserve().is_err() {
+        if self.entries.try_reserve(1).is_err()
+            || self.ids.try_reserve(1).is_err()
+            || self.history.reserve().is_err()
+        {
             return Err(ListRefusal::OutOfMemory);
         }
         self.entries.insert(index, entry);
+        self.ids.insert(index, EntryId(self.next_id));
+        self.next_id += 1;
         self.current = index;
         self.record(Step::Inserted { index });
         Ok(())
@@ -1383,8 +1445,9 @@ impl Document {
             .reserve()
             .map_err(|OutOfMemory| ListRefusal::OutOfMemory)?;
         let entry = self.entries.remove(index);
+        let id = self.ids.remove(index);
         self.current = index.min(self.entries.len() - 1);
-        self.record(Step::Removed { index, entry });
+        self.record(Step::Removed { index, entry, id });
         Ok(())
     }
 
@@ -1405,6 +1468,8 @@ impl Document {
             .map_err(|OutOfMemory| ListRefusal::OutOfMemory)?;
         let entry = self.entries.remove(from);
         self.entries.insert(to, entry);
+        let id = self.ids.remove(from);
+        self.ids.insert(to, id);
         self.current = to;
         self.record(Step::Moved { from: to, to: from });
         Ok(())
@@ -1416,7 +1481,7 @@ impl Document {
     ///
     /// [`Unapplied`]: nothing to undo, or no memory for it.
     pub fn undo(&mut self) -> Result<Applied, Unapplied> {
-        let applied = self.history.undo(&mut self.entries)?;
+        let applied = self.history.undo(&mut self.entries, &mut self.ids)?;
         Ok(self.adopt(applied))
     }
 
@@ -1426,7 +1491,7 @@ impl Document {
     ///
     /// [`Unapplied`]: nothing to redo, or no memory for it.
     pub fn redo(&mut self) -> Result<Applied, Unapplied> {
-        let applied = self.history.redo(&mut self.entries)?;
+        let applied = self.history.redo(&mut self.entries, &mut self.ids)?;
         Ok(self.adopt(applied))
     }
 
@@ -1447,6 +1512,63 @@ impl Document {
         }
     }
 
+    /// Each entry's identity, in the entries' order.
+    #[must_use]
+    pub fn ids(&self) -> &[EntryId] {
+        &self.ids
+    }
+
+    /// Where the entry `id` names now stands, if it is still in the document.
+    #[must_use]
+    pub fn index_of(&self, id: EntryId) -> Option<usize> {
+        self.ids.iter().position(|&held| held == id)
+    }
+
+    /// Call sprite `index` `name`: one step, undone by itself, that changes
+    /// the name alone, so undoing it never puts back anything else the
+    /// sprite was. A kept sprite is called what its bytes say; a name another
+    /// sprite has is refused.
+    ///
+    /// # Errors
+    ///
+    /// [`ListRefusal`]: no such sprite, a name taken, or no room to record
+    /// the change; nothing changed.
+    pub fn rename(&mut self, index: usize, name: SpriteName) -> Result<(), ListRefusal> {
+        if self.names_taken(&name, Some(index)) {
+            return Err(ListRefusal::NameTaken);
+        }
+        self.history
+            .reserve()
+            .map_err(|OutOfMemory| ListRefusal::OutOfMemory)?;
+        let held = self
+            .entries
+            .get_mut(index)
+            .and_then(Entry::name_mut)
+            .ok_or(ListRefusal::NoSuchEntry)?;
+        let name = core::mem::replace(held, name);
+        self.record(Step::Renamed { entry: index, name });
+        Ok(())
+    }
+
+    /// Take `picture` as entry `id`'s, as a window of its own edited it,
+    /// keeping the name the document gives it: a change no step of this
+    /// document's records — the other window's history holds it — so the
+    /// document reads as changed from its file until it is saved again.
+    /// Answers where the entry stands, or `None` for one no longer here.
+    pub fn adopt_edited(&mut self, id: EntryId, mut picture: Picture) -> Option<usize> {
+        let index = self.index_of(id)?;
+        let Entry::Picture(held) = &mut self.entries[index] else {
+            return None;
+        };
+        if let (Some(sprite), Some(kept)) = (picture.sprite.as_mut(), held.sprite.as_ref()) {
+            sprite.name = kept.name;
+        }
+        *held = picture;
+        self.generation += 1;
+        self.history.forget_saved();
+        Some(index)
+    }
+
     /// The names its sprites have.
     pub fn names(&self) -> impl Iterator<Item = &SpriteName> {
         self.entries.iter().filter_map(Entry::name)
@@ -1459,14 +1581,6 @@ impl Document {
         self.entries.iter().enumerate().any(|(index, entry)| {
             Some(index) != except && entry.name().is_some_and(|held| held.matches(name))
         })
-    }
-
-    /// The index of the sprite called `name`, matched without regard to case.
-    #[must_use]
-    pub fn find(&self, name: &SpriteName) -> Option<usize> {
-        self.entries
-            .iter()
-            .position(|entry| entry.name().is_some_and(|held| held.matches(name)))
     }
 
     /// How many steps can be undone.

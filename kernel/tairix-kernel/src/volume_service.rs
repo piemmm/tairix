@@ -144,7 +144,7 @@ use tairix_util::fallible::concatenated;
 use crate::block_cache::{BlockCache, REMOVABLE_DISK_OWNER};
 use crate::hwtree_store::HwTreeStore;
 use crate::kernel_fs::KernelFs;
-use crate::served_volume::{Granted, ServedVolume};
+use crate::served_volume::{Granted, ServedVolume, Window};
 use crate::shared_block::{OwnedBlockWindow, SharedBlock};
 use crate::system_mount::{cached, publish_volume_identity, LATE_FILESYSTEM, VOLUME_FOREST};
 use crate::volume_policy::{Presented, PresentedFs, LATE_STORAGE_GID};
@@ -966,7 +966,7 @@ impl RuntimeVolumeService {
     }
 
     /// Build the served volume over `window` and enter it under a fresh id.
-    fn new_served<W: Block + Send + 'static>(
+    fn new_served<W: Window + Send + 'static>(
         &self,
         window: W,
         read_only: bool,
@@ -1003,7 +1003,7 @@ impl RuntimeVolumeService {
     /// Take `served` out of service and out of the registry, and withdraw
     /// `node`, so its driver is unloaded. The grant the driver holds on it
     /// names nothing from here on, and a served volume's id is never reused.
-    fn retire_served<W: Block + Send>(
+    fn retire_served<W: Window + Send>(
         &self,
         served: Option<&ServedVolume<W>>,
         node: Option<(u32, u32)>,
@@ -1714,11 +1714,20 @@ fn identity_map_gid(fstype: VolumeFsType) -> Option<GroupId> {
 const fn records_owners(fstype: VolumeFsType) -> bool {
     match fstype {
         VolumeFsType::ARXFS | VolumeFsType::Ext4 => true,
+        // An archive's owners, where it records any, are its members'
+        // writers' and are presented as the attacher's.
         VolumeFsType::Fat32
         | VolumeFsType::Adfs
         | VolumeFsType::Iso9660
         | VolumeFsType::Udf
-        | VolumeFsType::Affs => false,
+        | VolumeFsType::Affs
+        | VolumeFsType::Zip
+        | VolumeFsType::Tar
+        | VolumeFsType::Gzip
+        | VolumeFsType::Bzip2
+        | VolumeFsType::Spark
+        | VolumeFsType::ArcFs
+        | VolumeFsType::Rar => false,
     }
 }
 
@@ -2026,6 +2035,32 @@ impl VolumeService for RuntimeVolumeService {
     fn ctl(&self, volume: u64, ctl: &VolumeCtl) -> Result<Option<VolumeInfo>, Errno> {
         self.wiring()?;
         self.served(volume)?.ctl(ctl)
+    }
+
+    fn archive_read(
+        &self,
+        volume: u64,
+        region: u8,
+        offset: u64,
+        len: usize,
+        deliver: &mut ChunkSink<'_>,
+    ) -> Result<usize, Errno> {
+        self.wiring()?;
+        self.served(volume)?
+            .archive_read(region, offset, len, deliver)
+    }
+
+    fn archive_write(
+        &self,
+        volume: u64,
+        region: u8,
+        offset: u64,
+        len: usize,
+        fill: &mut ChunkSource<'_>,
+    ) -> Result<(), Errno> {
+        self.wiring()?;
+        self.served(volume)?
+            .archive_write(region, offset, len, fill)
     }
 
     fn awaiting_server(&self, volume: u64) -> Result<(), Errno> {

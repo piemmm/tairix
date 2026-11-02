@@ -210,7 +210,7 @@ impl View {
             ),
             None => (Ink::Colour(black), Ink::Colour(white)),
         };
-        self.inks_changed(layout, damage);
+        self.inks_changed(SwatchMark::Primary, layout, damage);
     }
 
     /// Take up the one-shot pick: the next press on the picture takes the
@@ -318,7 +318,7 @@ impl View {
             SwatchMark::Primary => self.primary = ink,
             SwatchMark::Secondary => self.secondary = ink,
         }
-        self.inks_changed(layout, damage);
+        self.inks_changed(self.editing, layout, damage);
     }
 
     /// Give the recent colours the keyboard, where there are any to take it.

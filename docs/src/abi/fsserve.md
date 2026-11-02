@@ -92,7 +92,7 @@ read-only but never write one the device or the kernel refuses.
 
 ## The volume syscalls
 
-A driver reaches its volume, and only its volume, through four syscalls. Each
+A driver reaches its volume, and only its volume, through these syscalls. Each
 requires `CAP_FS_SERVE` and a grant covering the `HwResourceKind::Volume`
 resource its node carries.
 
@@ -100,14 +100,23 @@ resource its node carries.
 |-----|----------------|---------------------------------------------------|------------------------|
 | 155 | `volume_read`  | volume, first block, buffer, length               | `errno`                |
 | 156 | `volume_write` | volume, first block, buffer, length               | `errno`                |
-| 157 | `volume_ctl`   | volume, `VolumeCtl` (24 bytes), reply buffer      | reply length           |
+| 157 | `volume_ctl`   | volume, `VolumeCtl` (32 bytes), reply buffer      | reply length           |
 | 158 | `volume_serve` | volume, `ServeFrame`, grant buffer                | `SERVE_GRANT_LEN`, or `0` for a refusal |
+| 165 | `archive_read` | volume, region, byte offset, buffer, length       | bytes read             |
+| 166 | `archive_write`| volume, work-file region, byte offset, buffer, length | `errno`            |
 
 - A transfer is whole blocks within the volume, at most `VOLUME_IO_MAX` (the
   window's length) per call; anything else is `LengthOutOfRange`.
-- `volume_ctl` describes (`Info`, answering a 56-byte `VolumeInfo`: block size
-  and count, read-only, discard, an optical disc's layout, the medium),
-  flushes, or discards.
+- `volume_ctl` describes (`Info`, answering a `VOLUME_INFO_LEN`-byte
+  `VolumeInfo`: block size and count, read-only, discard, an optical disc's
+  layout, the medium, and for an archive its byte length, work files and the
+  name it was attached by), flushes, or discards; on a writable archive
+  attachment it also copies a range between regions, truncates a work file,
+  or commits the next archive ([Disk images](../filesystem/images.md)).
+- `archive_read` reads an archive attachment by byte: the archive itself
+  (`ARCHIVE_REGION`, up to its exact length) or a work file; `archive_write`
+  writes only a work file (`ARCHIVE_STAGING`, `ARCHIVE_NEXT`) of a writable
+  attachment.
 - A write to a read-only volume is `ReadOnly`. A volume that has left service
   answers `NotFound` or `DeviceOffline`.
 

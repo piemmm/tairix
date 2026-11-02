@@ -64,8 +64,10 @@
 
 use crate::format::{
     fixed_literal_length_lengths, CODE_LENGTH_ORDER, CODE_LENGTH_SYMBOLS, DIST_BASE, DIST_EXTRA,
-    FIXED_DISTANCE_LENGTHS, LENGTH_BASE, LENGTH_EXTRA, LIT_SYMBOLS, MAX_BITS, WINDOW_SIZE,
+    FIXED_DISTANCE_LENGTHS, LENGTH_BASE, LENGTH_EXTRA, LIT_SYMBOLS, MAX_BITS,
 };
+
+pub use crate::format::WINDOW_SIZE;
 
 /// Why decompression failed. Every variant is a fail-closed refusal: no
 /// malformed, truncated, or adversarial DEFLATE stream produces a panic or a
@@ -339,6 +341,10 @@ struct Core {
     mode: Mode,
     bits: Bits,
     last_block: bool,
+    /// Stop as each block ends rather than decode on into the next.
+    halt_at_block: bool,
+    /// A block ended in this call.
+    ended_block: bool,
     lit_table: HuffmanTable,
     dist_table: HuffmanTable,
     code_length_table: HuffmanTable,
@@ -359,6 +365,8 @@ impl Default for Core {
             mode: Mode::BlockHeader,
             bits: Bits::default(),
             last_block: false,
+            halt_at_block: false,
+            ended_block: false,
             lit_table: HuffmanTable::default(),
             dist_table: HuffmanTable::default(),
             code_length_table: HuffmanTable::default(),
@@ -488,9 +496,11 @@ impl Core {
     ) -> Result<Progress, Error> {
         let mut pos = 0usize;
         let mut produced = 0usize;
+        self.ended_block = false;
         loop {
             match self.mode {
                 Mode::Done => break,
+                Mode::BlockHeader if self.halt_at_block && self.ended_block => break,
                 Mode::BlockHeader => {
                     let Some(value) = self.take(src, &mut pos, 3) else {
                         break;
@@ -655,6 +665,7 @@ impl Core {
 
     /// Move on from a completed block.
     fn end_of_block(&mut self) {
+        self.ended_block = true;
         self.mode = if self.last_block {
             Mode::Done
         } else {
@@ -803,6 +814,54 @@ impl Core {
     }
 }
 
+/// Where an [`Inflater`] stood at a block's start: the bits it had pulled
+/// and not used, and the history a later block may reach back into — what a
+/// reader that seeks into a long stream resumes from rather than decoding it
+/// from its start.
+///
+/// Around 32 KiB, the history's window; heap-own it.
+pub struct Checkpoint {
+    hold: u64,
+    count: u32,
+    window: [u8; WINDOW_SIZE],
+    next: usize,
+    have: usize,
+}
+
+impl Default for Checkpoint {
+    // The window is the format's; the value is returned for the caller to
+    // place, as an `Inflater` is.
+    #[allow(clippy::large_stack_arrays)]
+    fn default() -> Self {
+        Self {
+            hold: 0,
+            count: 0,
+            window: [0; WINDOW_SIZE],
+            next: 0,
+            have: 0,
+        }
+    }
+}
+
+impl Checkpoint {
+    /// Stand at the block an encoder begins after a [`Flush::Sync`], whose
+    /// stream there is byte-aligned and whose plaintext so far ends with
+    /// `history`: what a writer records of its own stream, so a reader can
+    /// resume it without first decoding up to it.
+    ///
+    /// [`Flush::Sync`]: crate::deflate::Flush::Sync
+    pub fn after_sync(&mut self, history: &[u8]) {
+        let tail = history
+            .get(history.len().saturating_sub(WINDOW_SIZE)..)
+            .unwrap_or(history);
+        self.hold = 0;
+        self.count = 0;
+        self.window[..tail.len()].copy_from_slice(tail);
+        self.next = tail.len() % WINDOW_SIZE;
+        self.have = tail.len();
+    }
+}
+
 /// A streaming RFC 1951 DEFLATE decoder.
 ///
 /// Around 34 KiB — the 32 KiB history a back-reference may reach into, plus
@@ -849,12 +908,66 @@ impl Inflater {
     ///
     /// See [`Error`]. [`Error::Finished`] if the stream has already ended.
     pub fn inflate(&mut self, src: &[u8], dst: &mut [u8]) -> Result<Progress, Error> {
+        self.decode(src, dst, false)
+    }
+
+    /// As [`Self::inflate`], but stopping as each block ends, the decoder then
+    /// standing at the next block's start — where [`Self::checkpoint`] can
+    /// record it — with what of `src` it pulled into its held bits counted as
+    /// consumed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::inflate`].
+    pub fn inflate_by_block(&mut self, src: &[u8], dst: &mut [u8]) -> Result<Progress, Error> {
+        self.decode(src, dst, true)
+    }
+
+    fn decode(&mut self, src: &[u8], dst: &mut [u8], halt: bool) -> Result<Progress, Error> {
         if self.core.mode == Mode::Done {
             return Err(Error::Finished);
         }
-        let progress = self.core.run(src, dst, Some(&self.history))?;
+        self.core.halt_at_block = halt;
+        let progress = self.core.run(src, dst, Some(&self.history));
+        self.core.halt_at_block = false;
+        let progress = progress?;
         self.history.push(&dst[..progress.produced]);
         Ok(progress)
+    }
+
+    /// Whether the decoder stands at a block's start: what it holds of the
+    /// stream is then only the bits it has pulled and the history a later
+    /// block may reach back into.
+    #[must_use]
+    pub fn at_block_start(&self) -> bool {
+        self.core.mode == Mode::BlockHeader
+    }
+
+    /// Record where the decoder stands into `checkpoint`, if it stands at a
+    /// block's start, answering whether it did. A decoder [`Self::resume`]d
+    /// from it decodes the rest of the stream exactly as this one would, fed
+    /// the bytes after those this one has consumed.
+    pub fn checkpoint(&self, checkpoint: &mut Checkpoint) -> bool {
+        if !self.at_block_start() {
+            return false;
+        }
+        checkpoint.hold = self.core.bits.hold;
+        checkpoint.count = self.core.bits.count;
+        checkpoint.window.copy_from_slice(&self.history.buf);
+        checkpoint.next = self.history.next;
+        checkpoint.have = self.history.have;
+        true
+    }
+
+    /// Stand where `checkpoint` was taken: at a block's start, holding its
+    /// bits and its history.
+    pub fn resume(&mut self, checkpoint: &Checkpoint) {
+        self.core = Core::default();
+        self.core.bits.hold = checkpoint.hold;
+        self.core.bits.count = checkpoint.count;
+        self.history.buf.copy_from_slice(&checkpoint.window);
+        self.history.next = checkpoint.next;
+        self.history.have = checkpoint.have;
     }
 }
 

@@ -73,6 +73,7 @@ const fn private(read_only: bool) -> ImageAttach<'static> {
         target: None,
         expects: None,
         adopt: true,
+        file_name: None,
     }
 }
 

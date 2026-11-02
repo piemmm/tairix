@@ -2,7 +2,7 @@
 
 use super::{
     boxed_array, collected, concatenated, filled, grow_to, push, read_snapshot, reserve, trim,
-    written,
+    written, zeroed,
 };
 use alloc::vec::Vec;
 use tairix_abi::Errno;
@@ -21,6 +21,15 @@ fn a_refused_reservation_is_answered_not_aborted() {
     assert!(scratch.is_empty(), "a refused growth leaves the scratch");
     let mut buffer: Vec<u32> = Vec::new();
     assert!(!reserve(&mut buffer, UNRESERVABLE));
+}
+
+#[test]
+fn zeroed_bytes_are_zero_and_exactly_as_many_as_asked() {
+    assert_eq!(zeroed(0), Some(Vec::new()));
+    let bytes = zeroed(64 * 1024).expect("granted");
+    assert_eq!((bytes.len(), bytes.capacity()), (64 * 1024, 64 * 1024));
+    assert!(bytes.iter().all(|&byte| byte == 0));
+    assert_eq!(zeroed(usize::MAX), None, "no layout holds that many");
 }
 
 #[test]

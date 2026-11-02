@@ -287,17 +287,26 @@ mod tests {
     const BS: usize = 512;
     const BS_U32: u32 = 512;
 
-    /// The name the README's attached-format list gives `fstype`: exhaustive,
-    /// so a format added fails to build until the list is spelled for it.
-    fn named_in_readme(fstype: VolumeFsType) -> &'static str {
+    /// The name the README's attached-format list gives `fstype`, or `None`
+    /// for an archive, which only an image attach serves and a device never
+    /// holds: exhaustive, so a format added fails to build until the list is
+    /// spelled for it.
+    fn named_in_readme(fstype: VolumeFsType) -> Option<&'static str> {
         match fstype {
-            VolumeFsType::ARXFS => "ARXFS",
-            VolumeFsType::Ext4 => "ext2/3/4",
-            VolumeFsType::Fat32 => "FAT32",
-            VolumeFsType::Iso9660 => "ISO 9660",
-            VolumeFsType::Udf => "UDF",
-            VolumeFsType::Adfs => "ADFS",
-            VolumeFsType::Affs => "AmigaDOS",
+            VolumeFsType::ARXFS => Some("ARXFS"),
+            VolumeFsType::Ext4 => Some("ext2/3/4"),
+            VolumeFsType::Fat32 => Some("FAT32"),
+            VolumeFsType::Iso9660 => Some("ISO 9660"),
+            VolumeFsType::Udf => Some("UDF"),
+            VolumeFsType::Adfs => Some("ADFS"),
+            VolumeFsType::Affs => Some("AmigaDOS"),
+            VolumeFsType::Zip
+            | VolumeFsType::Tar
+            | VolumeFsType::Gzip
+            | VolumeFsType::Bzip2
+            | VolumeFsType::Spark
+            | VolumeFsType::ArcFs
+            | VolumeFsType::Rar => None,
         }
     }
 
@@ -316,10 +325,13 @@ mod tests {
         let list = &readme[start..end];
         for fstype in VolumeFsType::ALL {
             let name = named_in_readme(fstype);
-            assert!(
-                list.contains(name),
-                "README.md's attached formats omit {name}"
-            );
+            assert_eq!(name.is_none(), fstype.is_archive(), "{fstype:?}");
+            if let Some(name) = name {
+                assert!(
+                    list.contains(name),
+                    "README.md's attached formats omit {name}"
+                );
+            }
         }
     }
 

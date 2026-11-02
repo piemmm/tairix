@@ -14,8 +14,10 @@ pub(crate) const MIN_MATCH: usize = 3;
 /// Longest back-reference DEFLATE can encode.
 pub(crate) const MAX_MATCH: usize = 258;
 
-/// Largest back-reference distance, and so the sliding window's span.
-pub(crate) const WINDOW_SIZE: usize = 32_768;
+/// Largest back-reference distance, and so the sliding window's span: the
+/// plaintext a [`Checkpoint`](crate::inflate::Checkpoint) keeps, and so what a
+/// writer recording one must still hold.
+pub const WINDOW_SIZE: usize = 32_768;
 
 /// Most bytes one stored (uncompressed) block may carry, bounded by the
 /// 16-bit `LEN` field.

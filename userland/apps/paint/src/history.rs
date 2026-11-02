@@ -13,7 +13,9 @@ use tairix_image::Rgba8;
 use tairix_reclaim::PressureBand;
 
 use crate::canvas::{charge, OutOfMemory, Tile};
-use crate::document::{Entry, Layer, Picture, Shown, SpriteInfo};
+use tairix_image::SpriteName;
+
+use crate::document::{Entry, EntryId, Layer, Picture, Shown, SpriteInfo};
 use crate::shape::Bounds;
 
 /// One undoable change.
@@ -56,6 +58,15 @@ pub enum Step {
         index: usize,
         /// The entry.
         entry: Entry,
+        /// Its identity in the document, which it takes back.
+        id: EntryId,
+    },
+    /// Sprite `entry` was called `name`.
+    Renamed {
+        /// The entry renamed.
+        entry: usize,
+        /// The name to put back.
+        name: SpriteName,
     },
     /// The entry at `from` was moved to `to`.
     Moved {
@@ -139,16 +150,20 @@ impl Step {
             Self::LayerShown { shown, .. } => shown.name.len(),
             Self::Inserted { .. }
             | Self::Moved { .. }
+            | Self::Renamed { .. }
             | Self::LayerInserted { .. }
             | Self::LayerMoved { .. } => 0,
         }
     }
 
-    /// Hold the room putting this step into `entries` takes, so that applying
-    /// it cannot then fail for memory.
-    fn reserve(&self, entries: &mut Vec<Entry>) -> Result<(), OutOfMemory> {
+    /// Hold the room putting this step into `entries` and their `ids` takes,
+    /// so that applying it cannot then fail for memory.
+    fn reserve(&self, entries: &mut Vec<Entry>, ids: &mut Vec<EntryId>) -> Result<(), OutOfMemory> {
         match self {
-            Self::Removed { .. } => entries.try_reserve(1).map_err(|_| OutOfMemory),
+            Self::Removed { .. } => entries
+                .try_reserve(1)
+                .and(ids.try_reserve(1))
+                .map_err(|_| OutOfMemory),
             Self::LayerRemoved { entry, .. } => match entries.get_mut(*entry) {
                 Some(Entry::Picture(picture)) => picture.reserve_layer(),
                 _ => Ok(()),
@@ -157,10 +172,11 @@ impl Step {
         }
     }
 
-    /// Put this step into `entries`, its room held already, answering the
-    /// step that takes it back out and what it changed; `None` for a step
-    /// that no longer fits them, which is dropped.
-    fn apply(self, entries: &mut Vec<Entry>) -> Option<(Self, Applied)> {
+    /// Put this step into `entries`, whose identities `ids` holds in step, its
+    /// room held already, answering the step that takes it back out and what
+    /// it changed; `None` for a step that no longer fits them, which is
+    /// dropped.
+    fn apply(self, entries: &mut Vec<Entry>, ids: &mut Vec<EntryId>) -> Option<(Self, Applied)> {
         let whole = |entry| Applied {
             entry,
             damage: Damage::Whole,
@@ -199,27 +215,36 @@ impl Step {
                 Some((step, whole(entry)))
             }
             Self::Inserted { index } => {
-                if index >= entries.len() || entries.len() == 1 {
+                if index >= entries.len() || entries.len() == 1 || ids.len() != entries.len() {
                     return None;
                 }
                 let entry = entries.remove(index);
+                let id = ids.remove(index);
                 let shown = index.min(entries.len() - 1);
-                Some((Self::Removed { index, entry }, list(shown)))
+                Some((Self::Removed { index, entry, id }, list(shown)))
             }
-            Self::Removed { index, entry } => {
-                if index > entries.len() {
+            Self::Removed { index, entry, id } => {
+                if index > entries.len() || ids.len() != entries.len() {
                     return None;
                 }
                 entries.insert(index, entry);
+                ids.insert(index, id);
                 Some((Self::Inserted { index }, list(index)))
             }
             Self::Moved { from, to } => {
-                if from >= entries.len() || to >= entries.len() {
+                if from >= entries.len() || to >= entries.len() || ids.len() != entries.len() {
                     return None;
                 }
                 let entry = entries.remove(from);
                 entries.insert(to, entry);
+                let id = ids.remove(from);
+                ids.insert(to, id);
                 Some((Self::Moved { from: to, to: from }, list(to)))
+            }
+            Self::Renamed { entry, name } => {
+                let held = entries.get_mut(entry)?.name_mut()?;
+                let name = core::mem::replace(held, name);
+                Some((Self::Renamed { entry, name }, list(entry)))
             }
             step => step.apply_to_layers(entries),
         }
@@ -454,14 +479,18 @@ impl History {
     ///
     /// [`Unapplied`]: nothing to undo, or no memory for it — the document and
     /// both stacks unchanged.
-    pub fn undo(&mut self, entries: &mut Vec<Entry>) -> Result<Applied, Unapplied> {
+    pub fn undo(
+        &mut self,
+        entries: &mut Vec<Entry>,
+        ids: &mut Vec<EntryId>,
+    ) -> Result<Applied, Unapplied> {
         self.redo.try_reserve(1).map_err(|_| Unapplied::NoMemory)?;
         let held = self.undo.back().ok_or(Unapplied::Nothing)?;
         held.step
-            .reserve(entries)
+            .reserve(entries, ids)
             .map_err(|OutOfMemory| Unapplied::NoMemory)?;
         let held = self.undo.pop_back().ok_or(Unapplied::Nothing)?;
-        let (inverse, applied) = self.swap(held, entries)?;
+        let (inverse, applied) = self.swap(held, entries, ids)?;
         self.redo.push(inverse);
         Ok(applied)
     }
@@ -471,14 +500,18 @@ impl History {
     /// # Errors
     ///
     /// [`Unapplied`], as [`undo`](Self::undo) answers it.
-    pub fn redo(&mut self, entries: &mut Vec<Entry>) -> Result<Applied, Unapplied> {
+    pub fn redo(
+        &mut self,
+        entries: &mut Vec<Entry>,
+        ids: &mut Vec<EntryId>,
+    ) -> Result<Applied, Unapplied> {
         self.undo.try_reserve(1).map_err(|_| Unapplied::NoMemory)?;
         let held = self.redo.last().ok_or(Unapplied::Nothing)?;
         held.step
-            .reserve(entries)
+            .reserve(entries, ids)
             .map_err(|OutOfMemory| Unapplied::NoMemory)?;
         let held = self.redo.pop().ok_or(Unapplied::Nothing)?;
-        let (inverse, applied) = self.swap(held, entries)?;
+        let (inverse, applied) = self.swap(held, entries, ids)?;
         self.undo.push_back(inverse);
         Ok(applied)
     }
@@ -486,9 +519,14 @@ impl History {
     /// Apply `held`, its room held already, answering its inverse charged at
     /// what it holds. A step that no longer applies is lost, and the file's
     /// state with it, since the depth it was saved at no longer names it.
-    fn swap(&mut self, held: Held, entries: &mut Vec<Entry>) -> Result<(Held, Applied), Unapplied> {
+    fn swap(
+        &mut self,
+        held: Held,
+        entries: &mut Vec<Entry>,
+        ids: &mut Vec<EntryId>,
+    ) -> Result<(Held, Applied), Unapplied> {
         self.bytes = self.bytes.saturating_sub(held.bytes);
-        let Some((step, applied)) = held.step.apply(entries) else {
+        let Some((step, applied)) = held.step.apply(entries, ids) else {
             self.saved = None;
             return Err(Unapplied::Stale);
         };

@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use tairix_abi::fs::FileId;
 use tairix_abi::time::Time64;
 
-use super::{ArtworkDocument, DocumentStamp, Reading, Thumbnail, MAX_THUMBNAIL_BYTES};
+use super::{ArtworkDocument, DocumentStamp, Thumbnail, MAX_THUMBNAIL_BYTES};
 use crate::artwork::{
     render_artwork, ArtworkKey, ArtworkRasteriser, ArtworkReader, ArtworkResolver, InlineArtwork,
     Resolved,
@@ -103,7 +103,7 @@ impl ArtworkReader for Files {
 #[derive(Default)]
 struct Decoder {
     streamed: Vec<u8>,
-    readings: Vec<Reading>,
+    decodes: usize,
     short: bool,
     /// Where the fitted picture lies, when not the whole square.
     bounds: Option<Rect>,
@@ -114,13 +114,8 @@ impl ArtworkRasteriser for Decoder {
         None
     }
 
-    fn thumbnail(
-        &mut self,
-        side: u32,
-        reading: Reading,
-        document: &mut dyn ArtworkDocument,
-    ) -> Option<Fitted> {
-        self.readings.push(reading);
+    fn thumbnail(&mut self, side: u32, document: &mut dyn ArtworkDocument) -> Option<Fitted> {
+        self.decodes += 1;
         let length = document.stamp().size;
         let mut offset = 0;
         let mut run = [0u8; 3];
@@ -137,11 +132,11 @@ impl ArtworkRasteriser for Decoder {
     }
 }
 
-fn key(size: u64, modified: Time64, reading: Reading) -> ArtworkKey {
-    key_of(size, modified, LISTED, reading)
+fn key(size: u64, modified: Time64) -> ArtworkKey {
+    key_of(size, modified, LISTED)
 }
 
-fn key_of(size: u64, modified: Time64, id: FileId, reading: Reading) -> ArtworkKey {
+fn key_of(size: u64, modified: Time64, id: FileId) -> ArtworkKey {
     ArtworkKey::Thumbnail(Thumbnail {
         path: String::from(PATH),
         stamp: DocumentStamp {
@@ -150,7 +145,6 @@ fn key_of(size: u64, modified: Time64, id: FileId, reading: Reading) -> ArtworkK
             id,
             content_gen: LISTED_GEN,
         },
-        reading,
     })
 }
 
@@ -158,13 +152,8 @@ fn key_of(size: u64, modified: Time64, id: FileId, reading: Reading) -> ArtworkK
 fn a_thumbnail_streams_its_file_to_the_rasteriser_and_draws_its_reply() {
     let mut files = Files::holding(vec![1, 2, 3, 4, 5, 6, 7]);
     let mut decoder = Decoder::default();
-    let picture = render_artwork(
-        &mut files,
-        &mut decoder,
-        &key(7, WRITTEN, Reading::Sprite),
-        SIDE,
-    )
-    .expect("a picture");
+    let picture =
+        render_artwork(&mut files, &mut decoder, &key(7, WRITTEN), SIDE).expect("a picture");
     assert_eq!(
         (picture.surface().width(), picture.surface().height()),
         (SIDE, SIDE)
@@ -174,7 +163,7 @@ fn a_thumbnail_streams_its_file_to_the_rasteriser_and_draws_its_reply() {
         [1, 2, 3, 4, 5, 6, 7],
         "streamed whole, in order"
     );
-    assert_eq!(decoder.readings, [Reading::Sprite], "read as the key says");
+    assert_eq!(decoder.decodes, 1);
 }
 
 /// A file changed since it was listed is not the picture its key names, so it
@@ -183,23 +172,11 @@ fn a_thumbnail_streams_its_file_to_the_rasteriser_and_draws_its_reply() {
 fn a_file_changed_since_its_listing_is_not_drawn() {
     let mut decoder = Decoder::default();
     let mut grown = Files::holding(vec![0; 8]);
-    assert!(render_artwork(
-        &mut grown,
-        &mut decoder,
-        &key(7, WRITTEN, Reading::Signature),
-        SIDE
-    )
-    .is_none());
+    assert!(render_artwork(&mut grown, &mut decoder, &key(7, WRITTEN), SIDE).is_none());
     let mut touched = Files::holding(vec![0; 7]);
     let later = Time64::from_secs(1_700_000_001);
-    assert!(render_artwork(
-        &mut touched,
-        &mut decoder,
-        &key(7, later, Reading::Signature),
-        SIDE
-    )
-    .is_none());
-    assert!(decoder.readings.is_empty(), "neither reached the decode");
+    assert!(render_artwork(&mut touched, &mut decoder, &key(7, later), SIDE).is_none());
+    assert!(decoder.decodes == 0, "neither reached the decode");
 }
 
 /// A name now naming another file — swapped since the listing for one of the
@@ -212,14 +189,8 @@ fn a_file_replaced_since_its_listing_is_not_drawn() {
         volume: [7; 16],
         node: 43,
     };
-    assert!(render_artwork(
-        &mut swapped,
-        &mut decoder,
-        &key(7, WRITTEN, Reading::Signature),
-        SIDE
-    )
-    .is_none());
-    assert!(decoder.readings.is_empty() && decoder.streamed.is_empty());
+    assert!(render_artwork(&mut swapped, &mut decoder, &key(7, WRITTEN), SIDE).is_none());
+    assert!(decoder.decodes == 0 && decoder.streamed.is_empty());
 }
 
 /// A file whose data has moved to another version since it was listed is not
@@ -230,14 +201,8 @@ fn a_file_at_another_version_than_listed_is_not_drawn() {
     let mut decoder = Decoder::default();
     let mut rewritten = Files::holding(vec![1, 2, 3, 4, 5, 6, 7]);
     rewritten.content_gen = LISTED_GEN + 1;
-    assert!(render_artwork(
-        &mut rewritten,
-        &mut decoder,
-        &key(7, WRITTEN, Reading::Signature),
-        SIDE
-    )
-    .is_none());
-    assert!(decoder.readings.is_empty() && decoder.streamed.is_empty());
+    assert!(render_artwork(&mut rewritten, &mut decoder, &key(7, WRITTEN), SIDE).is_none());
+    assert!(decoder.decodes == 0 && decoder.streamed.is_empty());
 }
 
 /// A listing naming no file gives an open nothing to be checked against, so
@@ -250,7 +215,7 @@ fn a_listing_naming_no_file_opens_nothing() {
     assert!(render_artwork(
         &mut files,
         &mut decoder,
-        &key_of(7, WRITTEN, FileId::NONE, Reading::Signature),
+        &key_of(7, WRITTEN, FileId::NONE),
         SIDE
     )
     .is_none());
@@ -265,13 +230,7 @@ fn a_file_past_the_bound_is_not_streamed() {
     // The stamp is the open handle's, so a file that claims the bound and is
     // over it is refused without a byte being read.
     files.bytes = vec![0; usize::try_from(over).expect("fits")];
-    assert!(render_artwork(
-        &mut files,
-        &mut decoder,
-        &key(over, WRITTEN, Reading::Signature),
-        SIDE
-    )
-    .is_none());
+    assert!(render_artwork(&mut files, &mut decoder, &key(over, WRITTEN), SIDE).is_none());
     assert!(decoder.streamed.is_empty());
 }
 
@@ -282,13 +241,7 @@ fn a_reply_of_the_wrong_length_draws_nothing() {
         short: true,
         ..Decoder::default()
     };
-    assert!(render_artwork(
-        &mut files,
-        &mut decoder,
-        &key(4, WRITTEN, Reading::Signature),
-        SIDE
-    )
-    .is_none());
+    assert!(render_artwork(&mut files, &mut decoder, &key(4, WRITTEN), SIDE).is_none());
 }
 
 /// A reader and a rasteriser of icons alone draw no thumbnail: every picture
@@ -306,7 +259,7 @@ fn the_default_seams_draw_no_thumbnail() {
             None
         }
     }
-    let thumbnail = key(7, WRITTEN, Reading::Signature);
+    let thumbnail = key(7, WRITTEN);
     assert!(render_artwork(&mut Icons, &mut Decoder::default(), &thumbnail, SIDE).is_none());
     let mut files = Files::holding(vec![0; 7]);
     assert!(render_artwork(&mut files, &mut Icons, &thumbnail, SIDE).is_none());
@@ -320,7 +273,7 @@ fn the_inline_resolver_declines_a_thumbnail_without_opening_it() {
     let mut decoder = Decoder::default();
     let mut inline = InlineArtwork::new(&mut files, &mut decoder);
     assert!(matches!(
-        inline.resolve(&key(7, WRITTEN, Reading::Signature), SIDE),
+        inline.resolve(&key(7, WRITTEN), SIDE),
         Resolved::Done(None)
     ));
     assert_eq!(files.opens, 0);
@@ -334,7 +287,7 @@ fn icon(path: &str) -> ArtworkKey {
 #[test]
 fn a_thumbnail_waits_behind_every_icon() {
     let mut desk = ArtworkDesk::new();
-    let thumbnail = key(7, WRITTEN, Reading::Signature);
+    let thumbnail = key(7, WRITTEN);
     desk.want(&thumbnail, SIDE);
     desk.want(&icon("/a.png"), SIDE);
     assert!(desk.has_work());
@@ -356,10 +309,7 @@ fn a_thumbnail_waits_behind_every_icon() {
 #[test]
 fn an_icon_batch_is_not_held_back_by_waiting_thumbnails() {
     let mut desk = ArtworkDesk::new();
-    let (first, second) = (
-        key(7, WRITTEN, Reading::Signature),
-        key(8, WRITTEN, Reading::Signature),
-    );
+    let (first, second) = (key(7, WRITTEN), key(8, WRITTEN));
     desk.want(&first, SIDE);
     desk.want(&second, SIDE);
     desk.want(&icon("/a.png"), SIDE);
@@ -382,13 +332,8 @@ fn a_thumbnail_is_framed_where_its_picture_lies_and_a_wild_frame_is_refused() {
         bounds: Some(fitted),
         ..Decoder::default()
     };
-    let picture = render_artwork(
-        &mut files,
-        &mut decoder,
-        &key(3, WRITTEN, Reading::Signature),
-        SIDE,
-    )
-    .expect("a picture");
+    let picture =
+        render_artwork(&mut files, &mut decoder, &key(3, WRITTEN), SIDE).expect("a picture");
     assert_eq!(picture.frame(), Some(fitted));
 
     for wild in [Rect::new(1, 0, SIDE, SIDE), Rect::new(0, 0, 0, SIDE)] {
@@ -398,13 +343,7 @@ fn a_thumbnail_is_framed_where_its_picture_lies_and_a_wild_frame_is_refused() {
             ..Decoder::default()
         };
         assert!(
-            render_artwork(
-                &mut files,
-                &mut decoder,
-                &key(3, WRITTEN, Reading::Signature),
-                SIDE
-            )
-            .is_none(),
+            render_artwork(&mut files, &mut decoder, &key(3, WRITTEN), SIDE).is_none(),
             "{wild:?}"
         );
     }

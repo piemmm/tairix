@@ -1,0 +1,12 @@
+[package]
+name = "tairix-crc16"
+description = "TAIRiX CRC-16 (reflected 0xA001, the IBM/ARC CRC-16): the one first-party definition of the checksum ARC, Spark and ArcFS members, ext4 group descriptors and LAME's stream tag carry — table-driven, continued from any start value, no_std and allocation-free."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

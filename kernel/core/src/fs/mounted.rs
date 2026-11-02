@@ -2837,8 +2837,37 @@ where
         let from = Resolution::new(vfs, src, keep, Spelling::Unkept).map_err(VfsError::to_errno)?;
         let to = Resolution::new(vfs, dst, keep, Spelling::Unkept).map_err(VfsError::to_errno)?;
         let mut drivers = Registry { mount: self.mount };
-        vfs.rename_between(&cred, &mut drivers, from, to, flags, expect)
+        vfs.rename_between(&cred, &mut drivers, from, to, flags, expect, None)
             .map_err(VfsError::to_errno)
+    }
+
+    fn rename_replacing(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        src: At<'_>,
+        dst: At<'_>,
+        moving: &NodeExpect,
+        replacing: &NodeExpect,
+    ) -> Result<(), Errno> {
+        let moving = node_alone(moving)?;
+        let replacing = node_alone(replacing)?;
+        let (vfs, groups) = self.acting_in(uid)?;
+        let cred = credentials(uid, &groups, caps);
+        let keep = Posture::of(FinalLink::Keep);
+        let from = Resolution::new(vfs, src, keep, Spelling::Unkept).map_err(VfsError::to_errno)?;
+        let to = Resolution::new(vfs, dst, keep, Spelling::Unkept).map_err(VfsError::to_errno)?;
+        let mut drivers = Registry { mount: self.mount };
+        vfs.rename_between(
+            &cred,
+            &mut drivers,
+            from,
+            to,
+            RenameFlags::empty(),
+            Some(moving),
+            Some(replacing),
+        )
+        .map_err(VfsError::to_errno)
     }
 
     fn link(
@@ -3097,6 +3126,30 @@ where
     fn sync_node(&self, node: &NodeHandle, _who: &Acting<'_>) -> Result<(), Errno> {
         self.with_live(node, |fs, _| {
             fs.flush().map_err(|_| VfsError::Io.to_errno())
+        })
+    }
+
+    fn records_ownership_node(&self, node: &NodeHandle) -> Result<bool, Errno> {
+        self.with_live(node, |fs, _| {
+            fs.records_ownership(node.node.pinned())
+                .map_err(tairix_abi::DriverError::as_errno)
+        })
+    }
+
+    fn adopt_security_node(
+        &self,
+        node: &NodeHandle,
+        standing: &NodeHandle,
+        who: &Acting<'_>,
+    ) -> Result<(), Errno> {
+        if node.node.instance() != standing.node.instance() {
+            return Err(Errno::CrossVolume);
+        }
+        if !standing.projection.is_live() {
+            return Err(Errno::Stale);
+        }
+        self.with_node(node, who, |mut held, cred, _| {
+            held.adopt_security(cred, who.granted, standing.node.pinned())
         })
     }
 

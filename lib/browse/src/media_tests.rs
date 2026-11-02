@@ -13,7 +13,7 @@ use tairix_abi::time::Time64;
 use tairix_abi::{SYSTEM_COMPONENT_STORE, SYSTEM_SERVICE_STORE};
 use tairix_fsmeta::preset::acorn;
 use tairix_fsmeta::preset::acorn::Filetype;
-use tairix_icon::{FolderSample, IconKind, IconRequest, Reading, SampleCard};
+use tairix_icon::{FolderSample, IconKind, IconRequest, SampleCard};
 
 use super::{
     ancestry, entry_icon, folder_sample, media_for_document, media_for_entry, media_for_filetype,
@@ -56,7 +56,7 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
     ("network.conf", MediaType::TextPlain, IconKind::Text),
     ("README.md", MediaType::TextMarkdown, IconKind::Text),
     ("book.markdown", MediaType::TextMarkdown, IconKind::Text),
-    ("rows.csv", MediaType::TextCsv, IconKind::Text),
+    ("rows.csv", MediaType::TextCsv, IconKind::TextCsv),
     ("data.json", MediaType::Json, IconKind::Text),
     ("deploy.yaml", MediaType::Yaml, IconKind::Text),
     ("deploy.yml", MediaType::Yaml, IconKind::Text),
@@ -85,15 +85,20 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
     ("plate.tiff", MediaType::ImageTiff, IconKind::Image),
     ("plate.tif", MediaType::ImageTiff, IconKind::Image),
     ("layers.ora", MediaType::ImageOpenRaster, IconKind::Image),
-    ("release.zip", MediaType::ArchiveZip, IconKind::Archive),
-    ("backup.tar", MediaType::ArchiveTar, IconKind::Archive),
-    ("dump.gz", MediaType::ArchiveGzip, IconKind::Archive),
-    ("bundle.tgz", MediaType::ArchiveGzip, IconKind::Archive),
-    ("source.xz", MediaType::ArchiveXz, IconKind::Archive),
-    ("old.bz2", MediaType::ArchiveBzip2, IconKind::Archive),
-    ("new.zst", MediaType::ArchiveZstd, IconKind::Archive),
-    ("pack.7z", MediaType::Archive7z, IconKind::Archive),
-    ("disk.rar", MediaType::ArchiveRar, IconKind::Archive),
+    ("release.zip", MediaType::ArchiveZip, IconKind::ArchiveZip),
+    ("backup.tar", MediaType::ArchiveTar, IconKind::ArchiveTar),
+    ("dump.gz", MediaType::ArchiveGzip, IconKind::ArchiveGzip),
+    ("bundle.tgz", MediaType::ArchiveGzip, IconKind::ArchiveGzip),
+    ("source.xz", MediaType::ArchiveXz, IconKind::ArchiveXz),
+    ("source.txz", MediaType::ArchiveXz, IconKind::ArchiveXz),
+    ("old.bz2", MediaType::ArchiveBzip2, IconKind::ArchiveBzip2),
+    ("old.tbz2", MediaType::ArchiveBzip2, IconKind::ArchiveBzip2),
+    ("old.tbz", MediaType::ArchiveBzip2, IconKind::ArchiveBzip2),
+    ("new.zst", MediaType::ArchiveZstd, IconKind::ArchiveZstd),
+    ("pack.7z", MediaType::Archive7z, IconKind::Archive7z),
+    ("disk.rar", MediaType::ArchiveRar, IconKind::ArchiveRar),
+    ("games.spk", MediaType::ArchiveSpark, IconKind::ArchiveSpark),
+    ("apps.arc", MediaType::ArcFs, IconKind::ArchiveArcFs),
     ("Workbench.hdf", MediaType::RawDiskImage, IconKind::DiskHard),
     ("install.iso", MediaType::CdImage, IconKind::DiskOptical),
     (
@@ -140,8 +145,8 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
     ("plugin.lua", MediaType::TextLua, IconKind::Text),
     ("tool.pl", MediaType::TextPerl, IconKind::Text),
     ("Module.pm", MediaType::TextPerl, IconKind::Text),
-    ("rules.mk", MediaType::TextMakefile, IconKind::Text),
-    ("build.mak", MediaType::TextMakefile, IconKind::Text),
+    ("rules.mk", MediaType::TextMakefile, IconKind::TextMakefile),
+    ("build.mak", MediaType::TextMakefile, IconKind::TextMakefile),
     ("paper.tex", MediaType::TextTex, IconKind::Text),
     ("paper.ltx", MediaType::TextTex, IconKind::Text),
     ("letter.rtf", MediaType::Rtf, IconKind::Text),
@@ -155,7 +160,7 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
     ("Sans.ttf", MediaType::FontTtf, IconKind::Font),
     ("Sans.otf", MediaType::FontOtf, IconKind::Font),
     ("Sans.woff", MediaType::FontWoff, IconKind::Font),
-    ("app.jar", MediaType::JavaArchive, IconKind::Archive),
+    ("app.jar", MediaType::JavaArchive, IconKind::JavaArchive),
     ("loop.aif", MediaType::AudioAiff, IconKind::Audio),
     ("loop.aiff", MediaType::AudioAiff, IconKind::Audio),
     ("loop.aifc", MediaType::AudioAiff, IconKind::Audio),
@@ -529,6 +534,7 @@ const TEXTUAL: &[MediaType] = &[
     MediaType::Rtf,
     MediaType::ShellScript,
     MediaType::RiscOsObey,
+    MediaType::RiscOsDesktop,
     MediaType::RiscOsCommand,
     MediaType::PostScript,
     MediaType::ImageSvg,
@@ -538,6 +544,7 @@ const TEXTUAL: &[MediaType] = &[
 const CONTAINED: &[(MediaType, MediaType)] = &[
     (MediaType::AudioOpus, MediaType::AudioOgg),
     (MediaType::JavaArchive, MediaType::ArchiveZip),
+    (MediaType::RiscOsDesktop, MediaType::RiscOsObey),
 ];
 
 /// Each medium's image and the disk image it is a kind of.
@@ -655,7 +662,6 @@ fn distinct_types_deliberately_share_one_icon() {
     let share_the_text_glyph = [
         MediaType::TextPlain,
         MediaType::TextMarkdown,
-        MediaType::TextCsv,
         MediaType::Json,
         MediaType::Yaml,
         MediaType::Toml,
@@ -684,9 +690,17 @@ fn distinct_types_deliberately_share_one_icon() {
         MediaType::Archive7z,
         MediaType::ArchiveRar,
     ];
+    // Each archive format has its labelled master, and every one of them
+    // falls back to the one archive glyph.
     for media in archives {
-        assert_eq!(media.icon(), IconKind::Archive, "{media:?}");
+        assert_ne!(media.icon(), IconKind::Archive, "{media:?}");
+        assert_eq!(
+            tairix_icon::builtin_icon(media.icon(), tairix_raster::Color::rgb(0, 0, 0)),
+            tairix_icon::builtin_icon(IconKind::Archive, tairix_raster::Color::rgb(0, 0, 0)),
+            "{media:?}"
+        );
     }
+    assert_eq!(MediaType::RiscOsArchive.icon(), IconKind::Archive);
     for (position, media) in archives.iter().enumerate() {
         for other in &archives[position + 1..] {
             assert_ne!(media.as_str(), other.as_str());
@@ -763,7 +777,7 @@ fn every_type_but_a_directory_and_unknown_content_has_a_family() {
     for media in ALL {
         let none = matches!(
             media,
-            MediaType::InodeDirectory | MediaType::ApplicationOctetStream
+            MediaType::InodeDirectory | MediaType::ApplicationOctetStream | MediaType::RiscOsData
         );
         assert_eq!(media.family().is_none(), none, "{media:?}");
     }
@@ -777,9 +791,9 @@ const LISTED: FileId = FileId {
     node: 42,
 };
 
-/// `entry`'s icon, and how the thumbnail it asks for under its own path is
-/// read, or `None` when it asks for none — listed out of [`PICTURES`].
-fn pictured(entry: &Entry) -> (IconKind, Option<Reading>) {
+/// `entry`'s icon, and whether it asks for a thumbnail under its own path —
+/// listed out of [`PICTURES`].
+fn pictured(entry: &Entry) -> (IconKind, bool) {
     let mut scratch = String::new();
     let (kind, request) = entry_icon(
         PICTURES,
@@ -789,10 +803,10 @@ fn pictured(entry: &Entry) -> (IconKind, Option<Reading>) {
         &mut scratch,
     );
     let path = alloc::format!("{PICTURES}/{}", entry.name());
-    let reading = [Reading::Signature, Reading::Sprite]
-        .into_iter()
-        .find(|&reading| request == IconRequest::thumbnail(kind, &path, entry.stamp(), reading));
-    (kind, reading)
+    (
+        kind,
+        request == IconRequest::thumbnail(kind, &path, entry.stamp()),
+    )
 }
 
 /// A picture file asks for its own content, keyed by the file, path, size and
@@ -801,23 +815,26 @@ fn pictured(entry: &Entry) -> (IconKind, Option<Reading>) {
 fn a_picture_file_asks_for_its_own_content() {
     let written = Time64::from_secs(1_700_000_000);
     let photo = Entry::new("cat.jpg", EntryKind::File, 4096, written).with_id(LISTED);
-    let (kind, reading) = pictured(&photo);
+    let (kind, thumbnail) = pictured(&photo);
     assert_eq!(
         kind,
         MediaType::ImageJpeg.icon(),
         "drawn as its class meanwhile"
     );
-    assert_eq!(reading, Some(Reading::Signature));
+    assert!(thumbnail);
 }
 
-/// A sprite area carries no signature, so it is read as one only because its
-/// name says it is.
+/// A sprite area holds many pictures, so it draws the sprite file's own icon
+/// whether its name or the filetype its volume records says what it is.
 #[test]
-fn a_sprite_area_is_read_as_its_name_says() {
-    let sprites =
-        Entry::new("Sprites,ff9", EntryKind::File, 64, Time64::UNIX_EPOCH).with_id(LISTED);
-    let (_, reading) = pictured(&sprites);
-    assert_eq!(reading, Some(Reading::Sprite));
+fn a_sprite_area_draws_its_class_picture_never_a_thumbnail() {
+    let named = Entry::new("Sprites,ff9", EntryKind::File, 64, Time64::UNIX_EPOCH).with_id(LISTED);
+    let typed = Entry::new("Sprites", EntryKind::File, 64, Time64::UNIX_EPOCH)
+        .with_id(LISTED)
+        .with_filetype(filetype(0xFF9));
+    for sprites in [named, typed] {
+        assert_eq!(pictured(&sprites), (IconKind::ImageSprite, false));
+    }
 }
 
 /// Only a picture the shared raster decoders read has a thumbnail; a link's
@@ -833,11 +850,10 @@ fn only_a_listed_picture_the_decoders_read_has_a_thumbnail() {
         MediaType::ImageWebp,
         MediaType::ImageTiff,
         MediaType::ImageOpenRaster,
-        MediaType::ImageSprite,
     ];
     for media in ALL {
         assert_eq!(
-            media.thumbnail().is_some(),
+            media.has_thumbnail(),
             readable.contains(media),
             "{}",
             media.as_str()
@@ -1097,12 +1113,21 @@ fn a_layout_names_its_own_files_and_pictures_its_programs_by_kind() {
 }
 
 #[test]
-fn a_disk_image_of_any_kind_holds_a_volume_and_nothing_else_does() {
-    for media in [
+fn a_disk_image_or_a_served_archive_holds_a_volume_and_nothing_else_does() {
+    const VOLUMES: [MediaType; 11] = [
         MediaType::RawDiskImage,
         MediaType::CdImage,
         MediaType::RawFloppyDiskImage,
-    ] {
+        MediaType::ArchiveZip,
+        MediaType::ArchiveTar,
+        MediaType::ArchiveGzip,
+        MediaType::ArchiveBzip2,
+        MediaType::ArchiveRar,
+        MediaType::ArchiveSpark,
+        MediaType::RiscOsArchive,
+        MediaType::ArcFs,
+    ];
+    for media in VOLUMES {
         assert!(media.holds_a_volume(), "{media:?}");
         assert_eq!(media.family(), Some(Family::Archive));
     }
@@ -1111,12 +1136,9 @@ fn a_disk_image_of_any_kind_holds_a_volume_and_nothing_else_does() {
         MediaType::RawFloppyDiskImage.parent(),
         Some(MediaType::RawDiskImage)
     );
-    for media in ALL.iter().copied().filter(|media| {
-        !matches!(
-            media,
-            MediaType::RawDiskImage | MediaType::CdImage | MediaType::RawFloppyDiskImage
-        )
-    }) {
+    // A Java archive is a zip, but its own document; xz, Zstandard, 7z and
+    // Squash are no format the system serves as a volume.
+    for media in ALL.iter().copied().filter(|media| !VOLUMES.contains(media)) {
         assert!(!media.holds_a_volume(), "{media:?}");
     }
 }
@@ -1136,7 +1158,7 @@ fn a_risc_os_filetype_names_the_type_it_holds() {
         (0xFD1, MediaType::RiscOsBasicText),
         (0xFEB, MediaType::RiscOsObey),
         (0xFD7, MediaType::RiscOsObey),
-        (0xFEA, MediaType::RiscOsObey),
+        (0xFEA, MediaType::RiscOsDesktop),
         (0xFFE, MediaType::RiscOsCommand),
         (0xFF8, MediaType::RiscOsAbsolute),
         (0xFFC, MediaType::RiscOsUtility),
@@ -1152,14 +1174,15 @@ fn a_risc_os_filetype_names_the_type_it_holds() {
         (0xC85, MediaType::ImageJpeg),
         (0xB60, MediaType::ImagePng),
         (0xADF, MediaType::Pdf),
-        (0xDDC, MediaType::ArchiveZip),
+        (0xDDC, MediaType::RiscOsArchive),
+        (0x3FB, MediaType::ArcFs),
         (0xA91, MediaType::ArchiveZip),
         (0xFCA, MediaType::RiscOsSquash),
         (0xFCE, MediaType::RawFloppyDiskImage),
         (0xFCD, MediaType::RawDiskImage),
         (0xE1F, MediaType::Elf),
         (0x1AD, MediaType::AudioMpeg),
-        (0xFFD, MediaType::ApplicationOctetStream),
+        (0xFFD, MediaType::RiscOsData),
     ] {
         assert_eq!(media_for_filetype(filetype(raw)), Some(media), "&{raw:03X}");
     }
@@ -1173,7 +1196,11 @@ fn a_risc_os_filetype_names_the_type_it_holds() {
     // Each RISC OS type is pictured as what it is.
     assert_eq!(MediaType::RiscOsBasic.icon(), IconKind::BasicProgram);
     assert_eq!(MediaType::RiscOsObey.icon(), IconKind::RiscOsObey);
-    assert_eq!(MediaType::RiscOsCommand.icon(), IconKind::RiscOsObey);
+    assert_eq!(MediaType::RiscOsCommand.icon(), IconKind::RiscOsCommand);
+    assert_eq!(MediaType::RiscOsDesktop.icon(), IconKind::RiscOsDesktop);
+    assert_eq!(MediaType::RiscOsData.icon(), IconKind::RiscOsData);
+    assert_eq!(MediaType::RiscOsSquash.icon(), IconKind::RiscOsSquash);
+    assert_eq!(MediaType::ArcFs.icon(), IconKind::ArchiveArcFs);
     assert_eq!(MediaType::RiscOsAbsolute.icon(), IconKind::RiscOsProgram);
     assert_eq!(MediaType::RiscOsModule.icon(), IconKind::RiscOsModule);
     assert_eq!(MediaType::RiscOsDraw.icon(), IconKind::Drawing);

@@ -6,12 +6,15 @@
 //! writes, served again after their driver is lost, and undone when their
 //! answer cannot be delivered.
 
+use tairix_abi::driver::filesystem::MountFlags;
 use tairix_abi::imageattach::{ImageAccess, ImageAttach, ImageAttachReply, ImageRefusal};
 use tairix_abi::netattach::{AttachReply, FsserveCtl, Presentation};
 use tairix_abi::sysinfo::{VolumeClass, MOUNT_SOURCE_MAX};
-use tairix_abi::volume::VolumeFsTypes;
+use tairix_abi::volume::{
+    ViewBindRequest, VolumeCtl, VolumeFsTypes, ARCHIVE_NEXT, ARCHIVE_STAGING,
+};
 use tairix_abi::{DriverError, ProcId};
-use tairix_kernel_core::fs::ImageSource;
+use tairix_kernel_core::fs::{ImageDirectory, ImageSource};
 use tairix_kernel_core::procsignal::{self, DeferredTeardown};
 use tairix_kernel_core::session_reaper::SessionObserver as _;
 use tairix_kernel_sec::ProcessId;
@@ -67,6 +70,11 @@ pub(super) fn run(window_ptr: *mut u8, facility: &'static TestFacility) {
     a_name_an_image_awaits_its_driver_under_is_held_for_it_scenario(window_ptr, facility);
     an_image_opened_through_a_bind_outlives_its_unbind_scenario(window_ptr, facility);
     an_image_opened_through_a_bind_outlives_the_volume_it_stood_in_scenario(window_ptr, facility);
+    an_archive_without_its_directory_attaches_read_only_scenario(window_ptr, facility);
+    an_archive_is_written_by_replacing_its_file_scenario(window_ptr, facility);
+    an_archives_work_files_grow_only_by_what_is_written_scenario(window_ptr, facility);
+    an_archives_lost_driver_leaves_no_work_files_scenario(window_ptr, facility);
+    an_archive_reached_through_a_read_only_view_attaches_read_only_scenario(window_ptr, facility);
 }
 
 /// A served FAT32 volume shown as `/Storage/<name>`, the `n`th these
@@ -141,6 +149,7 @@ fn source(uid: u32, path: &str, flags: OpenFlags, session: ProcId, task: u64) ->
             ..opened.handle().clone()
         },
         writable: flags.is_write(),
+        directory: None,
         session,
         task,
     }
@@ -159,6 +168,7 @@ fn private(read_only: bool) -> ImageAttach<'static> {
         target: None,
         expects: None,
         adopt: true,
+        file_name: None,
     }
 }
 
@@ -2318,5 +2328,285 @@ fn an_image_opened_through_a_bind_outlives_the_volume_it_stood_in_scenario(
     eject(&inner, DetachMode::Plain, &member).expect("ejects, flushed");
     assert_eq!(carried_text(facility, &carry, 0x1A00_016B), b"ejected");
     eject(&carry, DetachMode::Plain, &member).expect("ejects");
+    retire(host_id, DetachMode::Plain, round);
+}
+
+/// A tar of `members`, each a ustar header and its bytes, ended by its two
+/// zero blocks.
+fn tar(members: &[(&[u8], &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for &(name, data) in members {
+        let mut header = [0u8; 512];
+        header[..name.len()].copy_from_slice(name);
+        header[100..107].copy_from_slice(b"0000644");
+        header[108..115].copy_from_slice(b"0000000");
+        header[116..123].copy_from_slice(b"0000000");
+        header[124..135].copy_from_slice(std::format!("{:011o}", data.len()).as_bytes());
+        header[136..147].copy_from_slice(b"00000000000");
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        header[148..156].fill(b' ');
+        let sum: u32 = header.iter().map(|&byte| u32::from(byte)).sum();
+        header[148..155].copy_from_slice(std::format!("{sum:06o}\0").as_bytes());
+        out.extend_from_slice(&header);
+        out.extend_from_slice(data);
+        out.resize(out.len().next_multiple_of(512), 0);
+    }
+    out.extend_from_slice(&[0; 1024]);
+    out
+}
+
+/// The directory `path` holding an archive, as an `image_attach` caller
+/// hands it over with the archive's name in it.
+fn directory(uid: u32, path: &str, name: &str) -> ImageDirectory {
+    let opened = Descriptor::open(uid, path, OpenFlags::READ.union(OpenFlags::DIRECTORY))
+        .unwrap_or_else(|err| std::panic!("open {path}: {err:?}"));
+    ImageDirectory {
+        dir: NodeHandle {
+            authority: Authority::Frozen(FrozenAuthority {
+                uid,
+                caps: CapabilitySet::empty(),
+                grant: None,
+            }),
+            ..opened.handle().clone()
+        },
+        name: String::from(name),
+        name_key: [0x5A; 32],
+    }
+}
+
+/// An archive attached with no directory to replace it in is served whole,
+/// at its exact length, and read only.
+fn an_archive_without_its_directory_attaches_read_only_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (host_id, round) = host(window_ptr, facility, 34, b"imgs34");
+    let path = "/Storage/imgs34/notes.tar";
+    // A length no block divides: the archive is read to its last byte.
+    let mut archive = tar(&[(b"ReadMe", b"read only")]);
+    archive.truncate(archive.len() - 7);
+    put(MEMBER_UID, path, &archive);
+    let member = plain(MEMBER_UID, STORAGE_GID);
+    let volume = mounted(attached(
+        facility,
+        &member,
+        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0100),
+        &private(false),
+    ));
+    assert_eq!(mount_record(b"notes.tar").fstype_bytes(), b"tar");
+    let file = std::format!("/Storage/{}/ReadMe", volume.name());
+    let mut buf = [0u8; 16];
+    let read = read_as(MEMBER_UID, &file, 0, &mut buf).expect("reads");
+    assert_eq!(&buf[..read], b"read only");
+    assert_eq!(write_as(MEMBER_UID, &file, 0, b"x"), Err(Errno::ReadOnly));
+    eject(&volume, DetachMode::Plain, &member).expect("ejects");
+    retire(host_id, DetachMode::Plain, round);
+}
+
+/// A writable archive is never written in place: each change is committed
+/// by writing the next archive and putting it in place of the file under
+/// its name, which then holds the change, and no work file outlasts the
+/// volume.
+fn an_archive_is_written_by_replacing_its_file_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (host_id, round) = host(window_ptr, facility, 35, b"imgs35");
+    let path = "/Storage/imgs35/notes.tar";
+    put(MEMBER_UID, path, &tar(&[(b"ReadMe", b"before")]));
+    let member = plain(MEMBER_UID, STORAGE_GID);
+    let mut from = source(MEMBER_UID, path, read_write(), session(), 0x1A00_0101);
+    from.directory = Some(directory(MEMBER_UID, "/Storage/imgs35", "notes.tar"));
+    let attach = ImageAttach {
+        file_name: Some("notes.tar"),
+        ..private(false)
+    };
+    let volume = mounted(attached(facility, &member, from, &attach));
+    let added = std::format!("/Storage/{}/Added", volume.name());
+    put(MEMBER_UID, &added, b"written through the volume");
+    eject(&volume, DetachMode::Plain, &member).expect("ejects");
+    let mut archive = vec![0u8; 8192];
+    let len = read_as(MEMBER_UID, path, 0, &mut archive).expect("reads the archive");
+    let archive = &archive[..len];
+    assert!(
+        archive.windows(5).any(|window| window == b"Added"),
+        "the commit put the next archive in place"
+    );
+    assert!(archive
+        .windows(26)
+        .any(|window| window == b"written through the volume"));
+    assert!(
+        archive.windows(6).any(|window| window == b"before"),
+        "the unchanged member is kept"
+    );
+    retire(host_id, DetachMode::Plain, round);
+}
+
+/// The names the directory `path` lists, as `uid`.
+fn listed(uid: u32, path: &str) -> Vec<Vec<u8>> {
+    FS_SERVICE
+        .readdir_bounded(uid, &NoCaps, root(path), FinalLink::Follow, 64)
+        .expect("lists")
+        .iter()
+        .map(|entry| entry.name.as_bytes().to_vec())
+        .collect()
+}
+
+/// A work file is only ever cut, and written from no further than its end:
+/// a hole, or a lengthening, would have the volume fill zeros for as long as
+/// its driver asked. None outlasts the volume.
+fn an_archives_work_files_grow_only_by_what_is_written_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (host_id, round) = host(window_ptr, facility, 36, b"imgs36");
+    let path = "/Storage/imgs36/notes.tar";
+    put(MEMBER_UID, path, &tar(&[(b"ReadMe", b"before")]));
+    let member = plain(MEMBER_UID, STORAGE_GID);
+    let mut from = source(MEMBER_UID, path, read_write(), session(), 0x1A00_0102);
+    from.directory = Some(directory(MEMBER_UID, "/Storage/imgs36", "notes.tar"));
+    let attach = ImageAttach {
+        file_name: Some("notes.tar"),
+        ..private(false)
+    };
+    let volume = mounted(attached(facility, &member, from, &attach));
+    let served = ServiceAccess(*STARTED.lock().unwrap().last().expect("its driver"));
+    let cut = |len| {
+        served.ctl(&VolumeCtl::Truncate {
+            region: ARCHIVE_STAGING,
+            len,
+        })
+    };
+    assert_eq!(
+        cut(1 << 20),
+        Err(Errno::LengthOutOfRange),
+        "never lengthened"
+    );
+    assert_eq!(
+        served.region_write(ARCHIVE_STAGING, 1 << 20, b"x"),
+        Err(Errno::LengthOutOfRange),
+        "never written past its end"
+    );
+    served
+        .region_write(ARCHIVE_STAGING, 0, b"staged")
+        .expect("written from its start");
+    assert_eq!(cut(7), Err(Errno::LengthOutOfRange));
+    assert_eq!(cut(2), Ok(None));
+    let before = listed(MEMBER_UID, "/Storage/imgs36");
+    // A next archive the attachment ends without committing.
+    served
+        .region_write(ARCHIVE_NEXT, 0, b"next")
+        .expect("the next archive begun");
+    assert_eq!(
+        listed(MEMBER_UID, "/Storage/imgs36").len(),
+        before.len() + 1
+    );
+    eject(&volume, DetachMode::Plain, &member).expect("ejects");
+    assert_eq!(listed(MEMBER_UID, "/Storage/imgs36"), before);
+    retire(host_id, DetachMode::Plain, round);
+}
+
+/// A driver serving an archive in place of one lost finds none of the lost
+/// one's work files, and its own change is committed as any is.
+fn an_archives_lost_driver_leaves_no_work_files_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (host_id, round) = host(window_ptr, facility, 38, b"imgs38");
+    let path = "/Storage/imgs38/notes.tar";
+    put(MEMBER_UID, path, &tar(&[(b"ReadMe", b"before")]));
+    let member = plain(MEMBER_UID, STORAGE_GID);
+    let mut from = source(MEMBER_UID, path, read_write(), session(), 0x1A00_0104);
+    from.directory = Some(directory(MEMBER_UID, "/Storage/imgs38", "notes.tar"));
+    let attach = ImageAttach {
+        file_name: Some("notes.tar"),
+        ..private(false)
+    };
+    let volume = mounted(attached(facility, &member, from, &attach));
+    let served = *STARTED.lock().unwrap().last().expect("its driver");
+    let regions = ServiceAccess(served);
+    regions
+        .region_write(ARCHIVE_STAGING, 0, b"staged")
+        .expect("the lost driver's staging");
+    let before = listed(MEMBER_UID, "/Storage/imgs38");
+    regions
+        .region_write(ARCHIVE_NEXT, 0, b"next")
+        .expect("the lost driver's next archive");
+    let (node, driver) = *DRIVEN.lock().unwrap().last().expect("a driver serves it");
+    tairix_kernel_core::callreg::teardown_owned_by(driver, &ASPACES, &SINK);
+    start_driver(facility, node, served, VolumeFsType::Tar);
+    assert_eq!(
+        listed(MEMBER_UID, "/Storage/imgs38"),
+        before,
+        "the lost driver's next archive is out of the directory"
+    );
+    let mut staged = [0u8; 8];
+    assert_eq!(
+        regions.region_read(ARCHIVE_STAGING, 0, &mut staged),
+        Ok(0),
+        "and its staging let go"
+    );
+    let added = std::format!("/Storage/{}/Added", volume.name());
+    put(MEMBER_UID, &added, b"after the restart");
+    eject(&volume, DetachMode::Plain, &member).expect("ejects");
+    assert_eq!(listed(MEMBER_UID, "/Storage/imgs38"), before);
+    let mut archive = vec![0u8; 8192];
+    let len = read_as(MEMBER_UID, path, 0, &mut archive).expect("reads the archive");
+    assert!(
+        archive[..len]
+            .windows(17)
+            .any(|window| window == b"after the restart"),
+        "the new driver's change is committed"
+    );
+    retire(host_id, DetachMode::Plain, round);
+}
+
+/// An archive whose directory was reached through a read-only view attaches
+/// read-only: the commit would hold the directory through its volume's own
+/// projection, past what the view allowed.
+fn an_archive_reached_through_a_read_only_view_attaches_read_only_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (host_id, round) = host(window_ptr, facility, 37, b"imgs37");
+    FS_SERVICE
+        .mkdir(
+            MEMBER_UID,
+            &NoCaps,
+            root("/Storage/imgs37/shelf"),
+            new_dir(),
+        )
+        .expect("the member's own directory");
+    let path = "/Storage/imgs37/shelf/notes.tar";
+    put(MEMBER_UID, path, &tar(&[(b"ReadMe", b"kept")]));
+    // The mount authority shows the shelf read-only to those it holds for.
+    FS_SERVICE
+        .view_bind(
+            0,
+            &MountAuthority,
+            &ViewBindRequest {
+                volume_id: host_id,
+                subtree: "/shelf",
+                target: "/Storage/shelf37",
+                narrowing: MountFlags::READ_ONLY,
+            },
+        )
+        .expect("a read-only view of the shelf");
+    let member = plain(MEMBER_UID, STORAGE_GID);
+    let mut from = source(MEMBER_UID, path, read_write(), session(), 0x1A00_0103);
+    from.directory = Some(directory(MEMBER_UID, "/Storage/shelf37", "notes.tar"));
+    let attach = ImageAttach {
+        file_name: Some("notes.tar"),
+        ..private(false)
+    };
+    let volume = mounted(attached(facility, &member, from, &attach));
+    let file = std::format!("/Storage/{}/ReadMe", volume.name());
+    assert_eq!(write_as(MEMBER_UID, &file, 0, b"x"), Err(Errno::ReadOnly));
+    eject(&volume, DetachMode::Plain, &member).expect("ejects");
+    FS_SERVICE
+        .view_unbind(0, &MountAuthority, "/Storage/shelf37")
+        .expect("unbinds");
     retire(host_id, DetachMode::Plain, round);
 }

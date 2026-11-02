@@ -146,8 +146,8 @@ different ways:
   *name* resolves to, through the program-store order, with the asking
   session's own home root. What a surface listing *processes* asks for (see
   below).
-- `IconRequest::thumbnail(kind, path, stamp, reading)` — a picture file drawn
-  as its own content, keyed by the path and by the `DocumentStamp` its listing
+- `IconRequest::thumbnail(kind, path, stamp)` — a picture file drawn as its
+  own content, its format the one its signature names, keyed by the path and by the `DocumentStamp` its listing
   reported (identity, size, modification time, content generation), so a
   changed or replaced file is decoded afresh. The reader opens it without following a
   link (`ArtworkReader::open`, the production `RtDocument` under the `rt`
@@ -463,14 +463,14 @@ those pixels away.
 `ThumbnailStore` keeps decoded thumbnails across runs in one blob of an
 application's own bulk store (`plans/FILES-INTERACTION.md` FI25; the file
 manager is its consumer, through its `ArtworkRasteriser::thumbnail`).
-`serve_thumbnail(store, reading, document, decode)` answers the stored picture
+`serve_thumbnail(store, document, decode)` answers the stored picture
 of the open document's version, or decodes and keeps it, reaching the store
 through `StoreAccess` for one lookup before the decode and one insert after it,
 never across it: a store several decoders share is held by none of them while
 it reads a document.
 
-- **Exact or not at all.** A `StoreKey` is (volume, inode, content generation,
-  reading), built only from a stamp naming an identity and a non-zero
+- **Exact or not at all.** A `StoreKey` is (volume, inode, content
+  generation), built only from a stamp naming an identity and a non-zero
   generation (`StoreKey::of`), so a changed file is another key and a file on a
   volume that keeps no generation is decoded and never stored.
 - **A hit is still re-proven.** The store is consulted only after

@@ -101,6 +101,8 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features
 # The shared fake app-data service the settings' host tests drive the client
 # over, speaking the real `appdata-v1` codec.
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["test-util"] }
+# The sink a sandbox driven in the tests' own process logs nowhere through.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

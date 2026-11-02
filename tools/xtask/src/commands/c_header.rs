@@ -4074,7 +4074,7 @@ fn emit_attach_contract(out: &mut String) {
     use tairix_abi::fsserve::FSSERVE_VERSION;
     use tairix_abi::imageattach::{
         IMAGE_ATTACH_FLAG_ADOPT, IMAGE_ATTACH_FLAG_EXPECTS, IMAGE_ATTACH_FLAG_WRITABLE,
-        IMAGE_ATTACH_MAX, IMAGE_ATTACH_VERSION,
+        IMAGE_ATTACH_MAX, IMAGE_ATTACH_VERSION, IMAGE_NO_DIRECTORY,
     };
     use tairix_abi::netattach::{
         ATTACH_FLAG_READ_ONLY, ATTACH_HEAD_LEN, NETWORK_ATTACH_MAX, PRESENTATION_EXPLICIT,
@@ -4096,11 +4096,16 @@ fn emit_attach_contract(out: &mut String) {
          * of; without it `own` is zero. `pad` is zero. TAIRIX_IMAGE_ATTACH_FLAG_ADOPT\n\
          * takes up a volume of the file attached already, one as writable as the\n\
          * attach asks, for the caller's login session too. Anything else is\n\
-         * refused. */\n",
+         * refused. image_attach()'s last argument is a descriptor of the directory\n\
+         * holding the image, or TAIRIX_IMAGE_NO_DIRECTORY. */\n",
     );
     let _ = writeln!(
         out,
         "#define TAIRIX_IMAGE_ATTACH_VERSION {IMAGE_ATTACH_VERSION}u"
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_IMAGE_NO_DIRECTORY {IMAGE_NO_DIRECTORY:#x}u"
     );
     let _ = writeln!(out, "#define TAIRIX_FSSERVE_VERSION {FSSERVE_VERSION}u");
     let _ = writeln!(out, "#define TAIRIX_ATTACH_HEAD_LEN {ATTACH_HEAD_LEN}u");
@@ -4140,6 +4145,13 @@ fn emit_attach_contract(out: &mut String) {
             VolumeFsType::Udf => "UDF",
             VolumeFsType::Adfs => "ADFS",
             VolumeFsType::Affs => "AFFS",
+            VolumeFsType::Zip => "ZIP",
+            VolumeFsType::Tar => "TAR",
+            VolumeFsType::Gzip => "GZIP",
+            VolumeFsType::Bzip2 => "BZIP2",
+            VolumeFsType::Spark => "SPARK",
+            VolumeFsType::ArcFs => "ARCFS",
+            VolumeFsType::Rar => "RAR",
         })
     });
     out.push_str(
@@ -6815,7 +6827,7 @@ mod tests {
     fn syscall_header_lays_the_attach_head_out_as_lib_abi_encodes_it() {
         use tairix_abi::imageattach::{
             ImageAccess, ImageAttach, IMAGE_ATTACH_FLAG_EXPECTS, IMAGE_ATTACH_FLAG_WRITABLE,
-            IMAGE_ATTACH_MAX, IMAGE_ATTACH_VERSION,
+            IMAGE_ATTACH_MAX, IMAGE_ATTACH_VERSION, IMAGE_NO_DIRECTORY,
         };
         use tairix_abi::netattach::{Presentation, ATTACH_HEAD_LEN, NETWORK_ATTACH_MAX};
         use tairix_abi::volume::{VolumeFsType, VolumeFsTypes, VOLUME_NAME_MAX};
@@ -6832,6 +6844,7 @@ mod tests {
             target: Some("/Users/ada/disk"),
             expects: VolumeFsTypes::of([VolumeFsType::Affs]),
             adopt: false,
+            file_name: None,
         };
         let mut frame = [0; IMAGE_ATTACH_MAX];
         let len = attach.encode(&mut frame).expect("a frame in shape");
@@ -6869,6 +6882,7 @@ mod tests {
         for line in [
             format!("#define TAIRIX_ATTACH_HEAD_LEN {ATTACH_HEAD_LEN}u"),
             format!("#define TAIRIX_IMAGE_ATTACH_VERSION {IMAGE_ATTACH_VERSION}u"),
+            format!("#define TAIRIX_IMAGE_NO_DIRECTORY {IMAGE_NO_DIRECTORY:#x}u"),
             format!("#define TAIRIX_IMAGE_ATTACH_MAX {IMAGE_ATTACH_MAX}u"),
             format!("#define TAIRIX_NETWORK_ATTACH_MAX {NETWORK_ATTACH_MAX}u"),
             format!("#define TAIRIX_VOLUME_NAME_MAX {VOLUME_NAME_MAX}u"),
@@ -6912,6 +6926,7 @@ mod tests {
             target: None,
             expects: None,
             adopt: false,
+            file_name: None,
         };
         read_only.encode(&mut frame).expect("a frame in shape");
         assert_flag(&h, "ATTACH_FLAG_READ_ONLY", frame[at("flags")]);

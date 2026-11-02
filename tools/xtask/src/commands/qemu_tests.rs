@@ -12305,10 +12305,11 @@ fn root_plants(
     Ok(plants)
 }
 
-/// The disk images the disk-image vertical plants in its account's home,
-/// the system's, so the account may only read them: an Acorn ADFS floppy and
-/// an AmigaDOS floppy each holding the fixture's `ReadMe`, and the RISC OS
-/// disc (`plans/DISK-IMAGES.md` DI7).
+/// The disk images and archives the disk-image vertical plants in its
+/// account's home, the system's, so the account may only read them: an Acorn
+/// ADFS floppy and an AmigaDOS floppy each holding the fixture's `ReadMe`,
+/// the RISC OS disc (`plans/DISK-IMAGES.md` DI7), and an archive of each
+/// format (`plans/ARCHIVES.md` AR11).
 fn disk_image_plants(t: &QemuTest) -> Result<Vec<RootPlant>, String> {
     use tairix_abi::driver::filesystem::{
         FilesystemRead as _, FilesystemWrite as _, NodeKind, NodeSecurity,
@@ -12350,11 +12351,54 @@ fn disk_image_plants(t: &QemuTest) -> Result<Vec<RootPlant>, String> {
     .into_bytes();
 
     let planted = |name: &str| root_volume_components(t, &format!("{PLANTED}/{name}"));
-    Ok(vec![
+    let mut plants = vec![
         (planted(ACORN)?, acorn),
         (planted(AMIGA)?, amiga),
         (planted(DISC)?, tairix_test_iso9660_image::riscos_disc()),
-    ])
+    ];
+    for archive in tairix_test_images::WRITTEN_ARCHIVES {
+        let bytes = written_archive(archive.file).map_err(|err| fail(archive.file, err))?;
+        plants.push((planted(archive.file)?, bytes));
+    }
+    let rar = tairix_test_images::RAR.file;
+    plants.push((
+        planted(rar)?,
+        tairix_test_archive_image::RAR5_BLAKE.to_vec(),
+    ));
+    Ok(plants)
+}
+
+/// The disk-image vertical's archive `file`: the least archive of the format
+/// its ending names, written back by the archive driver holding the
+/// fixture's `ReadMe`, typed as RISC OS text.
+fn written_archive(file: &str) -> Result<Vec<u8>, tairix_abi::DriverError> {
+    use tairix_abi::driver::filesystem::{
+        FilesystemAttrs as _, FilesystemRead as _, FilesystemWrite as _, NodeKind, NodeSecurity,
+    };
+    use tairix_test_archive_image::Format;
+    use tairix_test_images::{ARCHIVE_TEXT, FILETYPE, README, TEXT_TYPE};
+
+    let format = match file.rsplit_once('.').map(|(_, ending)| ending) {
+        Some("zip") => Format::Zip,
+        Some("tar") => Format::Tar,
+        Some("tgz") => Format::TarGzip,
+        Some("tbz2") => Format::TarBzip2,
+        Some("spk") => Format::Spark,
+        Some("arc") => Format::ArcFs,
+        _ => return Err(tairix_abi::DriverError::Unsupported),
+    };
+    let seed = tairix_test_archive_image::seed(format)?;
+    tairix_test_archive_image::written(&seed, file.as_bytes(), |fs| {
+        let root = fs.root();
+        let readme = fs.create(
+            root,
+            README.as_bytes(),
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )?;
+        fs.write_all(readme, 0, ARCHIVE_TEXT)?;
+        fs.set_attr(readme, FILETYPE.as_bytes(), TEXT_TYPE)
+    })
 }
 
 /// Borrow [`root_plants`] output as the component-slice pairs the image
@@ -21567,6 +21611,69 @@ mod tests {
             "the shell needs the return"
         );
         assert!(tairix_test_images::pass_line().starts_with(IMAGES_PASS_PREFIX));
+    }
+
+    /// Every archive the disk-image vertical plants holds what its fixture
+    /// reads: each written one its `ReadMe`, typed as text, and the RAR its
+    /// two members whole and alike.
+    #[test]
+    fn the_disk_image_verticals_archives_hold_what_its_fixture_reads() {
+        use tairix_abi::driver::filesystem::{FilesystemAttrs as _, FilesystemRead as _, NodeId};
+        use tairix_test_images::{
+            ARCHIVE_TEXT, FILETYPE, RAR, RAR_MEMBERS, RAR_MEMBER_LEN, README, TEXT_TYPE,
+            WRITTEN_ARCHIVES,
+        };
+
+        fn read<F: tairix_abi::driver::filesystem::FilesystemRead>(
+            fs: &mut F,
+            file: NodeId,
+        ) -> Vec<u8> {
+            let mut out = vec![0u8; 4096];
+            let mut at = 0;
+            loop {
+                let got = fs.read_at(file, at as u64, &mut out[at..]).expect("read");
+                if got == 0 {
+                    break;
+                }
+                at += got;
+            }
+            out.truncate(at);
+            out
+        }
+
+        for archive in WRITTEN_ARCHIVES {
+            let bytes = super::written_archive(archive.file).expect("written");
+            let mut fs =
+                tairix_test_archive_image::opened(&bytes, archive.file.as_bytes()).expect("opened");
+            let root = fs.root();
+            let readme = fs.lookup(root, README.as_bytes()).expect("a ReadMe");
+            assert_eq!(read(&mut fs, readme), ARCHIVE_TEXT, "{}", archive.file);
+            let mut value = [0u8; 8];
+            let len = fs
+                .get_attr(readme, FILETYPE.as_bytes(), &mut value)
+                .expect("read");
+            assert_eq!(
+                len.map(|len| &value[..len]),
+                Some(TEXT_TYPE),
+                "{}",
+                archive.file
+            );
+        }
+        let mut fs = tairix_test_archive_image::opened(
+            tairix_test_archive_image::RAR5_BLAKE,
+            RAR.file.as_bytes(),
+        )
+        .expect("opened");
+        let root = fs.root();
+        let members: Vec<Vec<u8>> = RAR_MEMBERS
+            .iter()
+            .map(|name| {
+                let member = fs.lookup(root, name.as_bytes()).expect("a member");
+                read(&mut fs, member)
+            })
+            .collect();
+        assert!(members.iter().all(|member| member.len() == RAR_MEMBER_LEN));
+        assert_eq!(members[0], members[1]);
     }
 
     /// The audio verticals' serial-script marker is exactly the `audiotone`

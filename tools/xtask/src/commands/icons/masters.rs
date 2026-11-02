@@ -13,6 +13,7 @@ use tairix_icon::IconKind;
 use super::canvas::{
     circle, cubic, rect, rgb, rounded, scaled, stroke, Canvas, Contour, Mask, Paint, Relief, Rgb,
 };
+use super::families;
 use super::sheet::{self, Foot, FOOT_TOP, MIDDLE};
 use super::text::{Fonts, Typeface};
 
@@ -43,43 +44,64 @@ pub const MASTERS: &[(IconKind, Draw)] = &[
     (IconKind::PostScript, postscript),
     (IconKind::PrintData, printout),
     (IconKind::Palette, palette),
+    (IconKind::RiscOsData, families::data),
+    (IconKind::RiscOsCommand, families::command),
+    (IconKind::RiscOsDesktop, families::desktop),
+    (IconKind::RiscOsSquash, families::squash),
+    (IconKind::Archive, families::archive),
+    (IconKind::ArchiveZip, families::zip),
+    (IconKind::ArchiveTar, families::tar),
+    (IconKind::ArchiveGzip, families::gzip),
+    (IconKind::ArchiveBzip2, families::bzip2),
+    (IconKind::ArchiveXz, families::xz),
+    (IconKind::ArchiveZstd, families::zstd),
+    (IconKind::Archive7z, families::seven_zip),
+    (IconKind::ArchiveRar, families::rar),
+    (IconKind::JavaArchive, families::jar),
+    (IconKind::ArchiveSpark, families::spark),
+    (IconKind::ArchiveArcFs, families::arcfs),
+    (IconKind::Audio, families::audio),
+    (IconKind::Video, families::video),
+    (IconKind::Image, families::image),
+    (IconKind::TextCsv, families::csv),
+    (IconKind::TextMakefile, families::makefile),
 ];
 
 /// A canvas holding the sheet, folded in `colour`, with `foot`.
-fn on_sheet(fonts: &Fonts, colour: u32, foot: Foot<'_>) -> Result<Canvas, String> {
+pub(super) fn on_sheet(fonts: &Fonts, colour: u32, foot: Foot<'_>) -> Result<Canvas, String> {
     let mut canvas = Canvas::new();
     sheet::draw(&mut canvas, fonts, rgb(colour), foot)?;
     Ok(canvas)
 }
 
 /// `shape` raised off the page: the emblem shadow, then the surface.
-fn raise(canvas: &mut Canvas, shape: &Mask, paint: Paint, relief: Relief) {
+pub(super) fn raise(canvas: &mut Canvas, shape: &Mask, paint: Paint, relief: Relief) {
     canvas.shadow(shape, 2.0, 3.5, 3.0, 0.35);
     canvas.paint(shape, paint, relief, 1.0);
 }
 
 /// A rectangle, its corners rounded to `radius`.
-fn block(x0: f64, y0: f64, x1: f64, y1: f64, radius: f64) -> Mask {
+pub(super) fn block(x0: f64, y0: f64, x1: f64, y1: f64, radius: f64) -> Mask {
     Mask::of(&[rounded(x0, y0, x1, y1, radius)])
 }
 
 /// A disc.
-fn disc(cx: f64, cy: f64, radius: f64) -> Mask {
+pub(super) fn disc(cx: f64, cy: f64, radius: f64) -> Mask {
     Mask::of(&[circle(cx, cy, radius)])
 }
 
 /// A polygon.
-fn polygon(points: &[(f64, f64)]) -> Mask {
+pub(super) fn polygon(points: &[(f64, f64)]) -> Mask {
     Mask::of(&[points.to_vec()])
 }
 
 /// `colour` from light at `y0` to dark at `y1`.
-fn lit(colour: Rgb, y0: f64, y1: f64) -> Paint {
+pub(super) fn lit(colour: Rgb, y0: f64, y1: f64) -> Paint {
     Paint::vertical(scaled(colour, 1.25), scaled(colour, 0.72), y0, y1)
 }
 
 /// A line of text on the page: a bar `width` long from `left`, centred on `y`.
-fn text_line(canvas: &mut Canvas, left: f64, y: f64, width: f64, colour: Rgb) {
+pub(super) fn text_line(canvas: &mut Canvas, left: f64, y: f64, width: f64, colour: Rgb) {
     let bar = block(left, y - 3.5, left + width, y + 3.5, 3.5);
     canvas.paint(
         &bar,
@@ -94,7 +116,7 @@ fn text_line(canvas: &mut Canvas, left: f64, y: f64, width: f64, colour: Rgb) {
 }
 
 /// The grey of text on the page.
-const INK: u32 = 0x8c_97_a8;
+pub(super) const INK: u32 = 0x8c_97_a8;
 
 fn file(fonts: &Fonts) -> Result<Canvas, String> {
     on_sheet(fonts, 0x8a_94_a6, Foot::Bare)
@@ -186,7 +208,7 @@ fn pdf(fonts: &Fonts) -> Result<Canvas, String> {
 }
 
 /// The light, land and sun of a photograph.
-struct Scene {
+pub(super) struct Scene {
     sky: (u32, u32),
     sun: (u32, f64, f64, f64),
     far: (u32, u32),
@@ -195,7 +217,11 @@ struct Scene {
 }
 
 /// A photograph of `scene` in a white mount from `(x0, y0)` to `(x1, y1)`.
-fn photograph(canvas: &mut Canvas, (x0, y0, x1, y1): (f64, f64, f64, f64), scene: &Scene) {
+pub(super) fn photograph(
+    canvas: &mut Canvas,
+    (x0, y0, x1, y1): (f64, f64, f64, f64),
+    scene: &Scene,
+) {
     let mount = block(x0, y0, x1, y1, 6.0);
     raise(
         canvas,
@@ -288,7 +314,7 @@ fn photograph(canvas: &mut Canvas, (x0, y0, x1, y1): (f64, f64, f64, f64), scene
 /// and above the plate.
 const MOUNT: (f64, f64, f64, f64) = (46.0, 70.0, 210.0, 174.0);
 
-const DAY: Scene = Scene {
+pub(super) const DAY: Scene = Scene {
     sky: (0x74_c0_fc, 0xe7_f5_ff),
     sun: (0xff_d4_3b, 0.78, 0.24, 9.0),
     far: (0x5c_7c_fa, 0x36_4f_c7),

@@ -8122,10 +8122,9 @@ mod program {
         fn thumbnail(
             &mut self,
             side: u32,
-            reading: tairix_icon::Reading,
             document: &mut dyn tairix_icon::ArtworkDocument,
         ) -> Option<tairix_icon::Fitted> {
-            tairix_sandbox::imagerender::thumbnail(&mut self.0, side, reading, document).ok()
+            tairix_sandbox::imagerender::thumbnail(&mut self.0, side, document).ok()
         }
 
         fn application_sprite(

@@ -163,8 +163,8 @@ over a resolution-independent design grid, so the same glyph is
   (`SpriteNames`), and the picture drawn through
   `ArtworkRasteriser::application_sprite` (`plans/ICONS.md` I17).
 - `store` — `ThumbnailStore`, thumbnails kept across runs in one blob of an
-  application's own bulk store, keyed by (volume, inode, content generation,
-  reading) so only an exact version is ever served, in a blob laid out for one
+  application's own bulk store, keyed by (volume, inode, content generation)
+  so only an exact version is ever served, in a blob laid out for one
   side and one thumbnail-decoder revision: four-way sets of checksummed slots,
   no scan to open, torn or interleaved writes reading as empty
   (`plans/FILES-INTERACTION.md` FI25).

@@ -60,7 +60,10 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   refuses. `filled` and `collected` reserve exactly what a one-shot
   buffer needs; `grow_to` reserves amortised for a scratch grown across
   uses, so repeated growth is not quadratic; `reserve` serves a buffer
-  filled by pushing. The rasteriser's surfaces and resample plans
+  filled by pushing; `zeroed` asks the allocator for its bytes zeroed, so
+  one that hands out pages as the kernel mapped them writes none, and a
+  large buffer filled only in part — the RAR decoder's PPMd model — costs
+  the pages written rather than its length. The rasteriser's surfaces and resample plans
   (`lib/raster`), the compositor's scan-out frame and layer buffers
   (`userland/gui/wm`), and the PNG decoder's row and output buffers
   (`lib/image`) all reserve through this one definition, so a desktop

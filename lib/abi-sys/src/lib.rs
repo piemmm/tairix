@@ -98,6 +98,8 @@ const NUM_FSSERVE_CTL: u64 = SyscallNumber::FSSERVE_CTL.as_u16() as u64;
 const NUM_VIEW_BIND: u64 = SyscallNumber::VIEW_BIND.as_u16() as u64;
 const NUM_VIEW_UNBIND: u64 = SyscallNumber::VIEW_UNBIND.as_u16() as u64;
 const NUM_IMAGE_ATTACH: u64 = SyscallNumber::IMAGE_ATTACH.as_u16() as u64;
+const NUM_ARCHIVE_READ: u64 = SyscallNumber::ARCHIVE_READ.as_u16() as u64;
+const NUM_ARCHIVE_WRITE: u64 = SyscallNumber::ARCHIVE_WRITE.as_u16() as u64;
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
@@ -1903,8 +1905,9 @@ pub extern "C" fn sys_view_unbind(target: *mut c_void, target_len: usize) -> i32
 
 /// `image_attach`: attach the volume the disk-image file open as `fd` holds,
 /// as the attach at `frame` asks, writing the reply to `reply`
-/// (`SyscallNumber::IMAGE_ATTACH`). Returns the reply's length or a
-/// `TAIRIX_E_*` code reinterpreted into the result.
+/// (`SyscallNumber::IMAGE_ATTACH`). `dir` is the descriptor of the directory
+/// holding the image, or `TAIRIX_IMAGE_NO_DIRECTORY`. Returns the reply's
+/// length or a `TAIRIX_E_*` code reinterpreted into the result.
 #[must_use]
 #[export_name = "tairix_sys_image_attach"]
 pub extern "C" fn sys_image_attach(
@@ -1913,6 +1916,7 @@ pub extern "C" fn sys_image_attach(
     frame_len: usize,
     reply: *mut c_void,
     reply_cap: usize,
+    dir: u32,
 ) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates both pointer pairs.
     unsafe {
@@ -1924,9 +1928,67 @@ pub extern "C" fn sys_image_attach(
                 frame_len as u64,
                 ptr_arg(reply),
                 reply_cap as u64,
+                u64::from(dir),
+            ],
+        )
+    }
+}
+
+/// `archive_read`: read `len` bytes from `offset` of region `region` of the
+/// archive attachment served as volume `volume` into `buf`
+/// (`SyscallNumber::ARCHIVE_READ`). Returns how many bytes were read, or a
+/// `TAIRIX_E_*` code reinterpreted into the result; needs
+/// `TAIRIX_CAP_FS_SERVE` and a grant on the volume.
+#[must_use]
+#[export_name = "tairix_sys_archive_read"]
+pub extern "C" fn sys_archive_read(
+    volume: u64,
+    region: u32,
+    offset: u64,
+    buf: *mut c_void,
+    len: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
+    unsafe {
+        raw_syscall(
+            NUM_ARCHIVE_READ,
+            [
+                volume,
+                u64::from(region),
+                offset,
+                ptr_arg(buf),
+                len as u64,
                 0,
             ],
         )
+    }
+}
+
+/// `archive_write`: write `len` bytes from `buf` at `offset` of work file
+/// `region` of the archive attachment served as volume `volume`
+/// (`SyscallNumber::ARCHIVE_WRITE`). Returns a `TAIRIX_E_*` code.
+#[must_use]
+#[export_name = "tairix_sys_archive_write"]
+pub extern "C" fn sys_archive_write(
+    volume: u64,
+    region: u32,
+    offset: u64,
+    buf: *mut c_void,
+    len: usize,
+) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_ARCHIVE_WRITE,
+            [
+                volume,
+                u64::from(region),
+                offset,
+                ptr_arg(buf),
+                len as u64,
+                0,
+            ],
+        ))
     }
 }
 
@@ -4188,7 +4250,9 @@ mod tests {
         (NUM_FSSERVE_CTL, "fsserve_ctl", 2),
         (NUM_VIEW_BIND, "view_bind", 2),
         (NUM_VIEW_UNBIND, "view_unbind", 2),
-        (NUM_IMAGE_ATTACH, "image_attach", 5),
+        (NUM_IMAGE_ATTACH, "image_attach", 6),
+        (NUM_ARCHIVE_READ, "archive_read", 5),
+        (NUM_ARCHIVE_WRITE, "archive_write", 5),
         (NUM_WAIT, "wait", 3),
         (NUM_RLIMIT_GET, "rlimit_get", 2),
         (NUM_RLIMIT_SET, "rlimit_set", 2),
@@ -5026,11 +5090,25 @@ mod tests {
                 20,
                 reply.as_mut_ptr().cast(),
                 64,
+                5,
             );
             assert_eq!(ret, 64);
         });
         assert_eq!(number, NUM_IMAGE_ATTACH);
-        assert_eq!(args, [3, at, 20, reply_at, 64, 0]);
+        assert_eq!(args, [3, at, 20, reply_at, 64, 5]);
+        let (number, args) = capture(300, || {
+            assert_eq!(
+                sys_archive_read(9, 2, 1 << 40, data.as_mut_ptr().cast(), 512),
+                300
+            );
+        });
+        assert_eq!(number, NUM_ARCHIVE_READ);
+        assert_eq!(args, [9, 2, 1 << 40, at, 512, 0]);
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_archive_write(9, 1, 7, data.as_mut_ptr().cast(), 512), 0);
+        });
+        assert_eq!(number, NUM_ARCHIVE_WRITE);
+        assert_eq!(args, [9, 1, 7, at, 512, 0]);
     }
 
     #[test]

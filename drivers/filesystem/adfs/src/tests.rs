@@ -1974,3 +1974,60 @@ fn a_new_object_reports_the_record_every_object_does() {
         );
     }
 }
+
+/// A name in RISC OS's Latin-1 is listed and found in UTF-8, and a big
+/// directory takes one made so; a fixed directory, keeping seven bits of a
+/// name byte, refuses it.
+#[test]
+fn a_name_crosses_risc_os_latin_1_and_utf_8_both_ways() {
+    for (variant, bytes) in VARIANTS {
+        let mut fs = fresh(variant, bytes);
+        let root = FilesystemRead::root(&fs);
+        let made = fs.create(
+            root,
+            "Caf\u{e9}.txt".as_bytes(),
+            NodeKind::RegularFile,
+            &FILE_RECORD,
+        );
+        if !fs.is_big_dir() {
+            assert_eq!(made, Err(DriverError::OutOfRange), "{variant:?}");
+            continue;
+        }
+        let file = made.expect("a big directory holds RISC OS's Latin-1");
+        let listed: Vec<Vec<u8>> = list(&mut fs, root).into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(listed, ["Caf\u{e9}.txt".as_bytes().to_vec()], "{variant:?}");
+        assert_eq!(
+            fs.lookup(root, "Caf\u{e9}.txt".as_bytes()),
+            Ok(file),
+            "{variant:?}"
+        );
+        assert_eq!(
+            fs.lookup(root, "\u{263a}".as_bytes()),
+            Err(DriverError::NotFound),
+            "{variant:?}"
+        );
+        assert_eq!(
+            fs.create(
+                root,
+                "\u{263a}".as_bytes(),
+                NodeKind::RegularFile,
+                &FILE_RECORD
+            ),
+            Err(DriverError::OutOfRange),
+            "{variant:?}: a character RISC OS's Latin-1 lacks"
+        );
+        let disc = fs.into_device().data;
+        assert!(
+            disc.windows(8).any(|window| window == b"Caf\xe9/txt"),
+            "{variant:?}"
+        );
+    }
+    for (name, spelled) in [
+        (&b"Euro\x80"[..], "Euro\u{20ac}"),
+        (b"Hard\xa0Space", "Hard\u{a0}Space"),
+    ] {
+        let crossed = super::Crossed::listed(name).expect("spellable");
+        assert_eq!(crossed.as_bytes(), spelled.as_bytes());
+    }
+    assert!(super::Crossed::listed(b"Bell\x07").is_none());
+}

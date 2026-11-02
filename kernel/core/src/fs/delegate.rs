@@ -1680,7 +1680,8 @@ impl<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized> Delegate
     /// permission on the moved directory itself is additionally required
     /// (POSIX). Either end must pass [`Metadata::admits_name_removal`] — its
     /// capability gate and its parent's sticky bit — even within one parent.
-    /// With `expect` the source name must still hold the node expected.
+    /// With `expect` the source name must still hold the node expected, and
+    /// with `replacing` the destination name must hold the node it names.
     ///
     /// Under [`RenameFlags::NO_REPLACE`] a destination naming any entry but
     /// the source's own refuses the move. The source's own entry is the same
@@ -1691,7 +1692,8 @@ impl<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized> Delegate
     ///
     /// * [`VfsError::NotFound`] if the source does not exist, or the
     ///   destination directory has no name left.
-    /// * [`VfsError::Stale`] if the source is not the node expected.
+    /// * [`VfsError::Stale`] if the source is not the node expected, or the
+    ///   destination holds anything but the node `replacing` names.
     /// * [`VfsError::AlreadyExists`] if the destination is occupied under
     ///   [`RenameFlags::NO_REPLACE`].
     /// * [`VfsError::NotEmpty`] if the destination is a non-empty directory.
@@ -1714,6 +1716,7 @@ impl<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized> Delegate
         dst_name: &str,
         flags: RenameFlags,
         expect: Option<Expected<'_>>,
+        replacing: Option<Expected<'_>>,
         guarded: &dyn Fn(NodeId) -> bool,
     ) -> Result<(), VfsError> {
         let src = self.place_in(src_dir, src_name)?.for_write(cred)?;
@@ -1736,6 +1739,12 @@ impl<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized> Delegate
         }
         if expect.is_some_and(|expect| !expect.met_by(src_info)) {
             return Err(VfsError::Stale);
+        }
+        if let Some(replacing) = replacing {
+            match &dst.found {
+                Some((_, dst_info, _)) if replacing.met_by(dst_info) => {}
+                _ => return Err(VfsError::Stale),
+            }
         }
         let onto_itself = src.parent == dst.parent
             && self
@@ -2160,6 +2169,46 @@ impl<R: FilesystemRead + FilesystemWrite + ?Sized> HeldNode<'_, R> {
 }
 
 impl<R: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized> HeldNode<'_, R> {
+    /// Give this file the whole security record of `standing`, another node
+    /// of its volume this one is to replace — owner, group, mode, ACL and
+    /// capability gate — so the replacement keeps exactly the protections of
+    /// what it replaces. A record the two share already, as every file of a
+    /// volume presented as one owner's does, asks nothing; otherwise the
+    /// caller must own both, hold any gate either carries, and act through
+    /// no grant.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::ReadOnly`] on a read-only projection,
+    /// [`VfsError::PermissionDenied`], [`VfsError::NotSupported`] for a node
+    /// that is no regular file or a format that stores no record of its own,
+    /// or the driver's other refusals.
+    pub fn adopt_security(
+        &mut self,
+        cred: &Credentials<'_>,
+        granted: bool,
+        standing: NodeId,
+    ) -> Result<(), VfsError> {
+        if self.info.kind != NodeKind::RegularFile {
+            return Err(VfsError::NotSupported);
+        }
+        let record = self.fs.security(standing).map_err(map_driver_error)?;
+        if self.fs.security(self.node).map_err(map_driver_error)? == record {
+            return Ok(());
+        }
+        self.changeable(cred, granted)?;
+        let kept = Metadata::from_node_security(&record);
+        if cred.uid != self.meta.owner || cred.uid != kept.owner {
+            return Err(VfsError::PermissionDenied);
+        }
+        if kept.required_cap.is_some_and(|cap| !cred.caps.holds(cap)) {
+            return Err(VfsError::PermissionDenied);
+        }
+        let node = self.node;
+        with_class(self.fs, self.class, |fs| fs.set_security(node, record))
+            .map_err(map_driver_error)
+    }
+
     /// Set the node's permission bits to `mode` (the `chmod(2)` shape),
     /// leaving its ownership, ACL, and capability gate untouched.
     ///

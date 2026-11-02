@@ -1,5 +1,5 @@
-//! Little-endian field access, the legacy crc16, the crc32c a record takes
-//! over its own checksum field, and the narrowing every on-disk number goes
+//! Little-endian field access, the crc32c a record takes over its own
+//! checksum field, and the narrowing every on-disk number goes
 //! through. An out-of-range read answers zero and an out-of-range write does
 //! nothing, so a short buffer can never panic.
 
@@ -53,22 +53,6 @@ pub(crate) fn put_le32(buf: &mut [u8], off: usize, value: u32) {
     if let Some(b) = buf.get_mut(off..off + 4) {
         b.copy_from_slice(&value.to_le_bytes());
     }
-}
-
-/// CRC-16 with the reversed polynomial `0xA001`, continued from `crc` — the
-/// checksum the legacy `gdt_csum` feature stores in each group descriptor.
-pub(crate) fn crc16(mut crc: u16, data: &[u8]) -> u16 {
-    for &byte in data {
-        crc ^= u16::from(byte);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xA001
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    crc
 }
 
 /// crc32c of `bytes` continuing from `state`, the `N` bytes at `at` — the

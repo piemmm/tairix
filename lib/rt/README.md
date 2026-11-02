@@ -68,7 +68,11 @@ genuine resource exhaustion — `mem_map` can no longer supply an arena page *or
 a metadata page — returns a null pointer per the `GlobalAlloc` contract:
 deterministic OOM, never a panic (`AGENTS.md` §4 / §2.9). The kernel zeroes
 pages on map and on free, so the heap does not re-zero on free; a process
-reusing its own freed bytes is not a security boundary (`AGENTS.md` §2.16). The
+reusing its own freed bytes is not a security boundary (`AGENTS.md` §2.16).
+`alloc_zeroed` clears only the part of a block below a mark above which no
+arena byte has been handed out since its page was mapped, so a large zeroed
+buffer costs the pages its writer touches, the kernel backing each on first
+touch, rather than its length. The
 arena and metadata bases are fixed virtual addresses documented in
 `src/heap.rs`.
 

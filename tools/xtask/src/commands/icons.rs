@@ -9,6 +9,7 @@
 //! size and at the sizes the desktop draws it, into `images/icon-sheet.png`.
 
 mod canvas;
+mod families;
 mod masters;
 mod sheet;
 #[cfg(test)]

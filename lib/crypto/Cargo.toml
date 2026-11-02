@@ -41,6 +41,14 @@ sha1 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 # cannot express. Already in the tree beneath `chacha20poly1305`, so naming
 # it directly adds no crate.
 poly1305 = { version = "=0.9.1", default-features = false, features = ["zeroize"] }
+# BLAKE2sp, the tree mode of BLAKE2s, for exactly one caller: the integrity
+# hash a RAR 5 archive records of a member in place of its CRC-32. RustCrypto's
+# `blake2` fixes its parameter block to sequential mode, so it cannot express
+# the fanout, depth, node offsets and last-node flag BLAKE2sp's leaves and root
+# carry; this is the maintained implementation that can. `no_std` without its
+# default `std`, which only adds run-time SIMD detection. It brings `arrayvec`
+# and `constant_time_eq`, and no second `digest`.
+blake2s_simd = { version = "=1.0.5", default-features = false }
 
 # --- Ciphers --------------------------------------------------------------
 # ChaCha20-Poly1305 (RFC 8439). The kernel's encrypted-swap layer pages

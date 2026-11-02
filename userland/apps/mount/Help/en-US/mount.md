@@ -1,6 +1,6 @@
 ## NAME
 
-mount — list the mounted filesystems, or mount a disk image
+mount — list the mounted filesystems, or mount a disk image or archive
 
 ## SYNOPSIS
 
@@ -31,6 +31,17 @@ other `target`, an empty directory of your own under `/Users` or on a
 volume in `/Storage`, shows the volume there as well; a directory on a
 FAT32 or ADFS volume cannot show it.
 
+An archive mounts the same way, its members the volume's files and
+folders: a zip (`.zip`), a tar, plain or compressed with gzip or bzip2
+(`.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`), a single file compressed with
+gzip or bzip2 (`.gz`, `.bz2`), a RISC OS Spark or ArcFS archive (`.spk`,
+`.arc`), or a RAR archive (`.rar`). RISC OS file types and attributes
+travel with each member. Changes are saved by replacing the archive file,
+so an archive is mounted read-write only where you may write both the
+file and the folder it is in. A RAR archive is always mounted read-only.
+An archive split into several volumes, or one whose names are encrypted,
+is not mounted, and an encrypted member cannot be read.
+
 The volume stays mounted until you detach it with `unmount`, or your
 login session ends. An image that holds a partitioned disk, one disk of
 a RAID array, or a filesystem whose recorded owners are always honoured
@@ -46,8 +57,9 @@ a RAID array, or a filesystem whose recorded owners are always honoured
   `-o rw` decides whether it is read-only.
 - `-t, --types <list>` — the filesystems, comma-separated, one of which
   the image must hold, as the mount listing names them (`iso9660`,
-  `udf`, `adfs`, `affs`, `fat32`), or `auto` for whatever it holds; a
-  list beginning `no` names the ones it may not hold. What the image
+  `udf`, `adfs`, `affs`, `fat32`, `zip`, `tar`, `tar.gz`, `tar.bz2`,
+  `gzip`, `bzip2`, `spark`, `arcfs`, `rar`), or `auto` for whatever it
+  holds; a list beginning `no` names the ones it may not hold. What the image
   holds is recognised from its contents, so the order chooses nothing:
   a disc holding both UDF and ISO 9660 is mounted as UDF, unless its
   ISO 9660 keeps Rock Ridge or RISC OS records. An image holding none
@@ -71,6 +83,10 @@ a RAID array, or a filesystem whose recorded owners are always honoured
   `disc`.
 - `mount -v -t adfs Elite.adl` — mount an Acorn floppy image, saying
   where.
+- `mount Photos.zip` — mount a zip archive, read-write where you may
+  write it and its folder.
+- `mount -r backup.tar.gz /Storage/backup` — mount a compressed tar
+  read-only as `backup`.
 
 ## EXIT STATUS
 

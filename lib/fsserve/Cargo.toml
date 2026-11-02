@@ -17,6 +17,9 @@ workspace = true
 # only where a bare-metal driver is built and the library stays host-testable.
 [features]
 program = ["dep:tairix-rt", "dep:tairix-drvrt", "dep:tairix-procinfo", "dep:tairix-util"]
+# The in-memory archive attachment an archive driver's own tests serve
+# through. Never enabled by a shipping build.
+test-util = []
 
 [dependencies]
 # The fsserve-v1 codec, the filesystem driver traits it is dispatched onto,

@@ -1,6 +1,6 @@
 ## NAME
 
-mount — die eingehängten Dateisysteme auflisten oder ein Datenträgerabbild einhängen
+mount — die eingehängten Dateisysteme auflisten oder ein Datenträgerabbild oder Archiv einhängen
 
 ## SYNOPSIS
 
@@ -35,6 +35,20 @@ unter `/Users` oder auf einem Datenträger in `/Storage`, zeigt den
 Datenträger zusätzlich dort; ein Verzeichnis auf einem FAT32- oder
 ADFS-Datenträger kann ihn nicht zeigen.
 
+Ein Archiv wird ebenso eingehängt, wobei seine Einträge die Dateien und
+Ordner des Datenträgers bilden: ein zip-Archiv (`.zip`), ein tar-Archiv,
+unkomprimiert oder mit gzip oder bzip2 komprimiert (`.tar`, `.tar.gz`,
+`.tgz`, `.tar.bz2`), eine einzelne, mit gzip oder bzip2 komprimierte
+Datei (`.gz`, `.bz2`), ein Spark- oder ArcFS-Archiv von RISC OS (`.spk`,
+`.arc`) oder ein RAR-Archiv (`.rar`). RISC-OS-Dateitypen und -Attribute
+werden mit jedem Eintrag mitgeführt. Änderungen werden gespeichert,
+indem die Archivdatei ersetzt wird; daher wird ein Archiv nur dann
+beschreibbar eingehängt, wenn Sie sowohl in die Datei als auch in den
+Ordner, in dem sie liegt, schreiben dürfen. Ein RAR-Archiv wird stets
+schreibgeschützt eingehängt. Ein auf mehrere Teile aufgeteiltes Archiv
+oder eines mit verschlüsselten Namen wird nicht eingehängt, und ein
+verschlüsselter Eintrag kann nicht gelesen werden.
+
 Der Datenträger bleibt eingehängt, bis Sie ihn mit `unmount` aushängen
 oder Ihre Anmeldesitzung endet. Ein Abbild, das eine partitionierte
 Platte, eine Platte eines RAID-Verbunds oder ein Dateisystem enthält,
@@ -53,15 +67,16 @@ wird nicht eingehängt, und `mount` nennt den Grund.
   entscheidet die letzte Angabe, ob er schreibgeschützt ist.
 - `-t, --types <list>` — die Dateisysteme, kommagetrennt, von denen das
   Abbild eines enthalten muss, benannt wie in der Einhängeliste
-  (`iso9660`, `udf`, `adfs`, `affs`, `fat32`), oder `auto` für das, was
-  es enthält; eine Liste, die mit `no` beginnt, nennt diejenigen, die es
-  nicht enthalten darf. Was das Abbild enthält, wird an seinem Inhalt
-  erkannt, daher wählt die Reihenfolge nichts aus: Eine Disc, die sowohl
-  UDF als auch ISO 9660 enthält, wird als UDF eingehängt, es sei denn,
-  ihr ISO-9660-Dateisystem enthält Rock-Ridge- oder RISC-OS-Datensätze.
-  Enthält das Abbild keines dieser Dateisysteme oder nennt die Liste
-  keinen Typ, den ein Datenträgerabbild enthält, wird es nicht
-  eingehängt.
+  (`iso9660`, `udf`, `adfs`, `affs`, `fat32`, `zip`, `tar`, `tar.gz`,
+  `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`, `rar`), oder `auto` für
+  das, was es enthält; eine Liste, die mit `no` beginnt, nennt
+  diejenigen, die es nicht enthalten darf. Was das Abbild enthält, wird
+  an seinem Inhalt erkannt, daher wählt die Reihenfolge nichts aus: Eine
+  Disc, die sowohl UDF als auch ISO 9660 enthält, wird als UDF
+  eingehängt, es sei denn, ihr ISO-9660-Dateisystem enthält
+  Rock-Ridge- oder RISC-OS-Datensätze. Enthält das Abbild keines dieser
+  Dateisysteme oder nennt die Liste keinen Typ, den ein
+  Datenträgerabbild enthält, wird es nicht eingehängt.
 - `-o, --options <list>` — eine kommagetrennte Liste aus `ro`, `rw`
   (beschreibbar, sofern das möglich ist; die Voreinstellung), `noexec`,
   `loop` und `name=name`, dem Namen, den der Datenträger erhalten soll.
@@ -81,6 +96,10 @@ wird nicht eingehängt, und `mount` nennt den Grund.
   als `disc` einhängen.
 - `mount -v -t adfs Elite.adl` — ein Acorn-Diskettenabbild einhängen
   und melden, wo.
+- `mount Photos.zip` — ein zip-Archiv einhängen, beschreibbar, sofern
+  Sie in das Archiv und seinen Ordner schreiben dürfen.
+- `mount -r backup.tar.gz /Storage/backup` — ein komprimiertes
+  tar-Archiv schreibgeschützt als `backup` einhängen.
 
 ## EXIT STATUS
 

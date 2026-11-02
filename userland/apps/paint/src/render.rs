@@ -116,9 +116,18 @@ pub fn render_into(
     fill_area(surface, layout.corner(), Color::from(palette.scroll_track));
     if !withheld(surface, layout.palette()) {
         fill_area(surface, layout.palette(), chrome);
-        controls
-            .swatches
-            .render(surface, layout.swatches(), scale, theme);
+        let shown = layout.wells_view();
+        let bounds = view.swatch_bounds(layout);
+        if let (Ok(x), Ok(y)) = (u32::try_from(shown.left()), u32::try_from(shown.top())) {
+            surface.with_clip(x, y, shown.width, shown.height, |surface| {
+                controls.swatches.render(surface, bounds, scale, theme);
+            });
+        }
+        if !layout.palette_bar().is_empty() {
+            controls
+                .palette_bar
+                .render(surface, layout.palette_bar(), scale, theme);
+        }
     }
     if !withheld(surface, layout.status()) {
         status(surface, view, layout, theme, faces.status);

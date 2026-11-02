@@ -294,17 +294,17 @@ The occupancy probe reads one `PROBE_BUF_LEN` batch of the folder's entries
 
 ## FI12 — thumbnails
 
-An image file whose format the shared decoders read (`lib/image`: all nine) is
-drawn as its own picture.
+An image file of one picture whose format the shared decoders read
+(`lib/image`: all but the sprite area) is drawn as its own picture.
 
-- `entry_icon` (`lib/browse`) asks a regular file whose `MediaType::thumbnail`
-  names a reading for `IconRequest::thumbnail`: the request's own tier, ahead
-  of the class picture. A sprite area, which carries no signature, is read as
-  one because its name, or the filetype its volume records, says so
-  (`Reading::Sprite`). A link is not
+- `entry_icon` (`lib/browse`) asks a regular file whose
+  `MediaType::has_thumbnail` holds for `IconRequest::thumbnail`: the request's
+  own tier, ahead of the class picture, its format the one its signature
+  names. A sprite area draws its class picture, never a thumbnail: one file
+  holds many pictures, as RISC OS's Filer shows it. A link is not
   thumbnailed: its listed size and time are its own.
-- The key (`ArtworkKey::Thumbnail`) is the path, the file's identity, size and
-  modification time as listed, and the reading, with the side as for any
+- The key (`ArtworkKey::Thumbnail`) is the path, and the file's identity, size
+  and modification time as listed, with the side as for any
   artwork, so a changed or replaced file is decoded afresh and a refusal is
   cached under the same key. The reader opens the file without following a
   link, under the program's own identity (`ArtworkReader::open`, `RtDocument`);
@@ -486,10 +486,10 @@ its end.
 
 - `FolderSample` holds up to three `SampleCard`s, each a member's kind or a
   member **picture** (its `Thumbnail` key: path, identity, size, modification
-  time, content generation, reading). The probe keeps what each record of its
-  batch already carries, so no member is opened or statted to choose it. A
-  picture card is a regular file with an identity whose type has a reading,
-  exactly as `entry_icon` decides a tile's thumbnail.
+  time, content generation). The probe keeps what each record of its batch
+  already carries, so no member is opened or statted to choose it. A picture
+  card is a regular file with an identity whose type has a thumbnail, exactly
+  as `entry_icon` decides a tile's thumbnail.
 - **Variety first, then fill.** One card for each of the most frequent families
   in turn; any cards left go round the families again, in the same order, while
   a family has members not yet shown. Within a family, members come in the
@@ -646,9 +646,8 @@ account tiles and every other control draw none.
 
 - **Exact or not at all.** Only a file whose listing reports a content
   generation is stored; anything else decodes as before and lives in memory
-  only. A stored picture is keyed by (volume, inode, content generation,
-  reading), so a changed file is a different key and a stale picture cannot be
-  served.
+  only. A stored picture is keyed by (volume, inode, content generation), so a
+  changed file is a different key and a stale picture cannot be served.
 - **One side.** A blob holds pictures of one side: the grid tile's picture,
   the only side the file manager draws a thumbnail at, and the side every
   folder card is decoded at before it is resampled. It is laid out for the side

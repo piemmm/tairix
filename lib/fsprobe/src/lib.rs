@@ -26,6 +26,7 @@ extern crate alloc;
 
 pub mod adfs;
 pub mod affs;
+pub mod archive;
 pub mod iso9660;
 pub mod name;
 pub mod udf;
@@ -635,7 +636,7 @@ pub(crate) fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
 }
 
 /// Little-endian `u64` at `offset`, or `None` past the end.
-fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+pub(crate) fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     let raw = bytes.get(offset..offset.checked_add(8)?)?;
     let mut buf = [0u8; 8];
     buf.copy_from_slice(raw);

@@ -1259,42 +1259,54 @@ fn share_base_bytes(record: &tairix_fsprobe::adfs::DiscRecord, indaddr: u32) -> 
 /// Largest big directory the format permits (4096 KiB).
 const MAX_BIG_DIR: u32 = 4096 * 1024;
 
-/// A name crossed between the disc's spelling and the VFS's, which differ only
-/// in having the dot and the slash exchanged ([`acorn::crossed_name_byte`]):
-/// every name is crossed once as it enters or leaves the driver, and nothing
-/// within it sees the VFS's spelling.
+/// A name crossed between the disc's spelling — RISC OS's Latin-1, a dot
+/// written as `/` — and the VFS's UTF-8 ([`acorn::name_char`],
+/// [`acorn::crossed_name_byte`]): every name is crossed once as it enters or
+/// leaves the driver, and nothing within it sees the VFS's spelling.
 struct Crossed {
     bytes: [u8; dir::MAX_NAME_LEN],
     len: usize,
 }
 
 impl Crossed {
-    /// `name` in the other spelling.
+    /// The VFS's `name` as the disc spells it.
     ///
     /// # Errors
     ///
-    /// [`DriverError::LengthOutOfRange`] for a name no directory format holds.
+    /// [`DriverError::LengthOutOfRange`] for a name no directory format
+    /// holds; [`DriverError::OutOfRange`] for one with a character RISC OS's
+    /// Latin-1 lacks.
     fn of(name: &[u8]) -> Result<Self, DriverError> {
+        let text = core::str::from_utf8(name).map_err(|_| DriverError::OutOfRange)?;
         let mut bytes = [0u8; dir::MAX_NAME_LEN];
-        let slots = bytes
-            .get_mut(..name.len())
-            .ok_or(DriverError::LengthOutOfRange)?;
-        for (slot, &byte) in slots.iter_mut().zip(name) {
-            *slot = acorn::crossed_name_byte(byte);
+        let mut len = 0;
+        for ch in text.chars() {
+            let byte = acorn::name_byte(ch).ok_or(DriverError::OutOfRange)?;
+            *bytes.get_mut(len).ok_or(DriverError::LengthOutOfRange)? =
+                acorn::crossed_name_byte(byte);
+            len += 1;
         }
-        Ok(Self {
-            bytes,
-            len: name.len(),
-        })
+        Ok(Self { bytes, len })
     }
 
     /// `name`, read from the disc, as the VFS lists it, or `None` where no
-    /// path can spell it: RISC OS's `/` and `//` become `.` and `..`, and a
-    /// `.` RISC OS keeps out of a name would become a separator.
+    /// path can spell it: RISC OS's `/` and `//` become `.` and `..`, a `.`
+    /// RISC OS keeps out of a name would become a separator, and a control
+    /// code is no character at all.
     fn listed(name: &[u8]) -> Option<Self> {
-        Self::of(name)
-            .ok()
-            .filter(|crossed| tairix_abi::fs::is_component(crossed.as_bytes()))
+        let mut bytes = [0u8; dir::MAX_NAME_LEN];
+        let mut len = 0;
+        for &byte in name {
+            let ch = acorn::name_char(acorn::crossed_name_byte(byte))?;
+            let mut utf8 = [0u8; 4];
+            let spelt = ch.encode_utf8(&mut utf8).as_bytes();
+            bytes
+                .get_mut(len..len + spelt.len())?
+                .copy_from_slice(spelt);
+            len += spelt.len();
+        }
+        let crossed = Self { bytes, len };
+        tairix_abi::fs::is_component(crossed.as_bytes()).then_some(crossed)
     }
 
     fn as_bytes(&self) -> &[u8] {
@@ -1313,9 +1325,19 @@ impl<B: Block> Adfs<B> {
         if name.is_empty() || name.len() > max {
             return Err(DriverError::LengthOutOfRange);
         }
+        // A fixed directory keeps seven bits of each name byte; a big one
+        // keeps RISC OS's Latin-1 whole.
+        let big = self.is_big_dir();
+        let held = |byte: u8| {
+            if big {
+                byte != b' ' && acorn::name_char(byte).is_some()
+            } else {
+                (0x21..=0x7E).contains(&byte)
+            }
+        };
         if name
             .iter()
-            .any(|&b| !(0x21..=0x7E).contains(&b) || acorn::RESERVED_NAME_BYTES.contains(&b))
+            .any(|&byte| !held(byte) || acorn::RESERVED_NAME_BYTES.contains(&byte))
         {
             return Err(DriverError::OutOfRange);
         }
@@ -1544,7 +1566,8 @@ impl<B: Block> FilesystemRead for Adfs<B> {
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
-        let name = Crossed::of(name)?;
+        // A name RISC OS cannot spell names nothing on its disc.
+        let name = Crossed::of(name).map_err(|_| DriverError::NotFound)?;
         let dir_addr = self.entries_addr(dir)?;
         let (index, object) = self.child(dir_addr, name.as_bytes())?;
         let node = self.reported(&object, dir_addr);
@@ -2393,58 +2416,16 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
         }
         let target = self.write_target(node)?;
         let (_, object) = target.object().ok_or(DriverError::Unsupported)?;
-        let decoded = acorn::decode_load_exec(object.load, object.exec);
-        let mut updated = object;
-        match key.as_bytes() {
-            acorn::LOADADDR_KEY => {
-                updated.load =
-                    acorn::addr_from_value(value).map_err(|_| DriverError::OutOfRange)?;
-            }
-            acorn::EXECADDR_KEY => {
-                updated.exec =
-                    acorn::addr_from_value(value).map_err(|_| DriverError::OutOfRange)?;
-            }
-            acorn::ATTR_KEY => {
-                let attr = acorn::attr_from_value(value).map_err(|_| DriverError::OutOfRange)?;
-                // The directory bit is the object's kind, not a free
-                // attribute, and the volume's directory format bounds
-                // the storable bits.
-                if (attr & acorn::ATTR_DIRECTORY != 0) != object.is_dir()
-                    || attr & !self.storable_attr_bits() != 0
-                {
-                    return Err(DriverError::OutOfRange);
-                }
-                updated.attr = attr;
-            }
-            acorn::FILETYPE_KEY => {
-                let filetype =
-                    acorn::filetype_from_value(value).map_err(|_| DriverError::OutOfRange)?;
-                let centiseconds = match decoded {
-                    acorn::LoadExec::Typed { centiseconds, .. } => centiseconds,
-                    acorn::LoadExec::Untyped { .. } => 0,
-                };
-                let (load, exec) = acorn::encode_typed(filetype, centiseconds)
-                    .map_err(|_| DriverError::OutOfRange)?;
-                updated.load = load;
-                updated.exec = exec;
-            }
-            acorn::DATESTAMP_KEY => {
-                let centiseconds =
-                    acorn::datestamp_from_value(value).map_err(|_| DriverError::OutOfRange)?;
-                let acorn::LoadExec::Typed { filetype, .. } = decoded else {
-                    // The stamp lives inside the filetype encoding; an
-                    // untyped object has nowhere to keep one.
-                    return Err(DriverError::Unsupported);
-                };
-                let (load, exec) = acorn::encode_typed(filetype, centiseconds)
-                    .map_err(|_| DriverError::OutOfRange)?;
-                updated.load = load;
-                updated.exec = exec;
-            }
-            // ADFS stores no general-purpose attributes; every other
-            // namespace has nowhere to live.
-            _ => return Err(DriverError::Unsupported),
-        }
+        // ADFS stores no general-purpose attributes; every other namespace
+        // has nowhere to live.
+        let mut fields = acorn_object(&object);
+        fields.set(key.as_bytes(), value, self.storable_attr_bits())?;
+        let updated = Object {
+            load: fields.load,
+            exec: fields.exec,
+            attr: fields.attr,
+            ..object
+        };
         self.store(&target, &updated)
     }
 
@@ -2480,34 +2461,13 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
         }
         let target = self.write_target(node)?;
         let (_, object) = target.object().ok_or(DriverError::NotFound)?;
-        let decoded = acorn::decode_load_exec(object.load, object.exec);
-        let mut updated = object;
-        match key.as_bytes() {
-            acorn::FILETYPE_KEY => match decoded {
-                acorn::LoadExec::Typed { .. } => {
-                    // Untyping clears the whole encoding — the stamp
-                    // lives inside it.
-                    updated.load = 0;
-                    updated.exec = 0;
-                }
-                acorn::LoadExec::Untyped { .. } => return Err(DriverError::NotFound),
-            },
-            acorn::DATESTAMP_KEY => match decoded {
-                acorn::LoadExec::Typed { filetype, .. } => {
-                    let (load, exec) =
-                        acorn::encode_typed(filetype, 0).map_err(|_| DriverError::OutOfRange)?;
-                    updated.load = load;
-                    updated.exec = exec;
-                }
-                acorn::LoadExec::Untyped { .. } => return Err(DriverError::NotFound),
-            },
-            // The addresses and attribute bits are structural fields of
-            // every entry; they cannot be absent.
-            acorn::LOADADDR_KEY | acorn::EXECADDR_KEY | acorn::ATTR_KEY => {
-                return Err(DriverError::Unsupported)
-            }
-            _ => return Err(DriverError::NotFound),
-        }
+        let mut fields = acorn_object(&object);
+        fields.remove(key.as_bytes())?;
+        let updated = Object {
+            load: fields.load,
+            exec: fields.exec,
+            ..object
+        };
         self.store(&target, &updated)
     }
 }

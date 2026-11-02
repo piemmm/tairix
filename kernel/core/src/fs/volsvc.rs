@@ -18,6 +18,7 @@
 //! file holds, attached for the principal that handed over the file
 //! (`plans/DISK-IMAGES.md`).
 
+use alloc::string::String;
 use alloc::sync::Arc;
 
 use tairix_abi::fsserve::ServeOffer;
@@ -82,10 +83,33 @@ pub struct ImageSource {
     pub file: NodeHandle,
     /// Whether the caller's descriptor may write it.
     pub writable: bool,
+    /// The directory the caller named the file in, which a writable archive
+    /// is replaced in.
+    pub directory: Option<ImageDirectory>,
     /// The caller's login session, whose end detaches the volume.
     pub session: ProcId,
     /// The calling task, which waits for the volume's driver.
     pub task: u64,
+}
+
+/// The directory holding an image, as an `image_attach` caller handed it
+/// over: what a writable archive's commit replaces the file in.
+pub struct ImageDirectory {
+    /// The directory, acting as the caller's identity frozen at the attach.
+    pub dir: NodeHandle,
+    /// The name the caller said the file has in it, which the attach holds
+    /// to the file.
+    pub name: String,
+    /// A key drawn from the kernel's random reserve for this attach alone,
+    /// from which the names of the archive's work files are derived, so no
+    /// one sharing the directory can claim one first.
+    pub name_key: [u8; 32],
+}
+
+impl Drop for ImageDirectory {
+    fn drop(&mut self) {
+        tairix_util::secret::wipe(&mut self.name_key);
+    }
 }
 
 /// The runtime volume attach/detach operations the syscall handlers
@@ -168,13 +192,51 @@ pub trait VolumeService: Sync {
         fill: &mut ChunkSource<'_>,
     ) -> Result<(), Errno>;
 
-    /// Describe, flush or discard served volume `volume`; a description
-    /// answers [`Some`].
+    /// Describe, flush, discard, copy within, truncate or commit served
+    /// volume `volume`; a description answers [`Some`].
     ///
     /// # Errors
     ///
-    /// As [`Self::read`].
+    /// As [`Self::read`], and for an archive's operations as
+    /// [`Self::archive_read`] and the refusals of the commit.
     fn ctl(&self, volume: u64, ctl: &VolumeCtl) -> Result<Option<VolumeInfo>, Errno>;
+
+    /// Read up to `len` bytes at `offset` of region `region` of served archive
+    /// attachment `volume`, handing `deliver` each chunk at its offset into
+    /// the transfer. Answers how many it read: fewer only where the region
+    /// ends.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no such volume, [`Errno::NotSupported`] for
+    /// one that is no archive, [`Errno::OutOfRange`] for a region it does not
+    /// have, [`Errno::DeviceOffline`] for one retired, the file's own error,
+    /// or what `deliver` refused.
+    fn archive_read(
+        &self,
+        volume: u64,
+        region: u8,
+        offset: u64,
+        len: usize,
+        deliver: &mut ChunkSink<'_>,
+    ) -> Result<usize, Errno>;
+
+    /// Write `len` bytes at `offset` of work file `region` of served archive
+    /// attachment `volume`, `fill` supplying each chunk at its offset into the
+    /// transfer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::archive_read`], and [`Errno::ReadOnly`] for a volume that
+    /// takes no writes.
+    fn archive_write(
+        &self,
+        volume: u64,
+        region: u8,
+        offset: u64,
+        len: usize,
+        fill: &mut ChunkSource<'_>,
+    ) -> Result<(), Errno>;
 
     /// Whether served volume `volume` awaits a driver to serve it: asked
     /// before the kernel builds a channel for one.
@@ -315,6 +377,28 @@ impl VolumeService for NullVolumeService {
         Err(Errno::NotImplemented)
     }
 
+    fn archive_read(
+        &self,
+        _volume: u64,
+        _region: u8,
+        _offset: u64,
+        _len: usize,
+        _deliver: &mut ChunkSink<'_>,
+    ) -> Result<usize, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn archive_write(
+        &self,
+        _volume: u64,
+        _region: u8,
+        _offset: u64,
+        _len: usize,
+        _fill: &mut ChunkSource<'_>,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
     fn awaiting_server(&self, _volume: u64) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
@@ -436,6 +520,7 @@ mod tests {
         let source = ImageSource {
             file,
             writable: true,
+            directory: None,
             session: tairix_kernel_sec::session::ROOT_SESSION,
             task: 1,
         };
@@ -446,6 +531,7 @@ mod tests {
             target: None,
             expects: None,
             adopt: false,
+            file_name: None,
         };
         let mut answered = false;
         assert_eq!(

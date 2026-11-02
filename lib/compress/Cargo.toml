@@ -1,6 +1,6 @@
 [package]
 name = "tairix-compress"
-description = "First-party TAIRiX LZ (zstd-fast-style) compression codec, plus the RFC 1951/1950 DEFLATE/zlib codec foreign formats need — no external zstd/compression dependency (arxfs-spec §3, §10)."
+description = "First-party TAIRiX LZ (zstd-fast-style) compression codec, plus the codecs foreign formats need — RFC 1951/1950 DEFLATE and zlib, bzip2, and the ARC family's methods — with no external compression dependency (arxfs-spec §3, §10)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

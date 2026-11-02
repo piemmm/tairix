@@ -921,3 +921,38 @@ fn fileswitch_attributes_map_by_meaning_not_by_position() {
     );
     assert_eq!(acorn::attr_from_fileswitch(0b1100_0000), 0, "reserved bits");
 }
+
+#[test]
+fn risc_os_latin_1_spells_every_name_byte_one_way_and_back() {
+    for byte in 0..=u8::MAX {
+        match acorn::name_char(byte) {
+            Some(ch) => assert_eq!(acorn::name_byte(ch), Some(byte), "{byte:#04x}"),
+            None => assert!(
+                byte < 0x20 || byte == 0x7F || matches!(byte, 0x83 | 0x84 | 0x87..=0x8B),
+                "{byte:#04x}"
+            ),
+        }
+    }
+    assert_eq!(acorn::name_char(0x80), Some('\u{20AC}'));
+    assert_eq!(acorn::name_char(0xA0), Some('\u{00A0}'));
+    assert_eq!(acorn::name_char(0xE9), Some('\u{00E9}'));
+    assert_eq!(acorn::name_byte('\u{FB02}'), Some(0x9F));
+    for unspelt in ['\u{0080}', '\u{0100}', '\u{263A}', '\n'] {
+        assert_eq!(acorn::name_byte(unspelt), None, "{unspelt:?}");
+    }
+}
+
+#[test]
+fn a_risc_os_name_crosses_its_dot_and_slash_and_nothing_else() {
+    let name: Vec<u8> = b"ReadMe/txt"
+        .iter()
+        .map(|&byte| acorn::crossed_name_byte(byte))
+        .collect();
+    assert_eq!(name, b"ReadMe.txt");
+    for byte in 0..=u8::MAX {
+        assert_eq!(
+            acorn::crossed_name_byte(acorn::crossed_name_byte(byte)),
+            byte
+        );
+    }
+}

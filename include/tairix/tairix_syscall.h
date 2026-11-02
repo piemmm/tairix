@@ -189,6 +189,8 @@ extern "C" {
 #define TAIRIX_SYS_VIEW_BIND 162u
 #define TAIRIX_SYS_VIEW_UNBIND 163u
 #define TAIRIX_SYS_IMAGE_ATTACH 164u
+#define TAIRIX_SYS_ARCHIVE_READ 165u
+#define TAIRIX_SYS_ARCHIVE_WRITE 166u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -466,11 +468,13 @@ typedef struct tairix_spawn_attach {
 * of; without it `own` is zero. `pad` is zero. TAIRIX_IMAGE_ATTACH_FLAG_ADOPT
 * takes up a volume of the file attached already, one as writable as the
 * attach asks, for the caller's login session too. Anything else is
-* refused. */
+* refused. image_attach()'s last argument is a descriptor of the directory
+* holding the image, or TAIRIX_IMAGE_NO_DIRECTORY. */
 #define TAIRIX_IMAGE_ATTACH_VERSION 1u
+#define TAIRIX_IMAGE_NO_DIRECTORY 0xffffffffu
 #define TAIRIX_FSSERVE_VERSION 1u
 #define TAIRIX_ATTACH_HEAD_LEN 24u
-#define TAIRIX_IMAGE_ATTACH_MAX 120u
+#define TAIRIX_IMAGE_ATTACH_MAX 375u
 #define TAIRIX_NETWORK_ATTACH_MAX 120u
 #define TAIRIX_VOLUME_NAME_MAX 32u
 #define TAIRIX_PRESENTATION_PRIVATE ((uint8_t)1u)
@@ -487,6 +491,13 @@ typedef struct tairix_spawn_attach {
 #define TAIRIX_VOLUME_FS_UDF ((uint8_t)4u)
 #define TAIRIX_VOLUME_FS_ADFS ((uint8_t)5u)
 #define TAIRIX_VOLUME_FS_AFFS ((uint8_t)6u)
+#define TAIRIX_VOLUME_FS_ZIP ((uint8_t)7u)
+#define TAIRIX_VOLUME_FS_TAR ((uint8_t)8u)
+#define TAIRIX_VOLUME_FS_GZIP ((uint8_t)9u)
+#define TAIRIX_VOLUME_FS_BZIP2 ((uint8_t)10u)
+#define TAIRIX_VOLUME_FS_SPARK ((uint8_t)11u)
+#define TAIRIX_VOLUME_FS_ARCFS ((uint8_t)12u)
+#define TAIRIX_VOLUME_FS_RAR ((uint8_t)13u)
 typedef struct tairix_attach_head {
     uint16_t version;
     uint8_t presentation;
@@ -927,7 +938,9 @@ uint64_t tairix_sys_fsserve_attach(uint64_t a0, void * a1, uintptr_t a2, void * 
 int32_t tairix_sys_fsserve_ctl(uint64_t a0, uint32_t a1);
 int32_t tairix_sys_view_bind(void * a0, uintptr_t a1);
 int32_t tairix_sys_view_unbind(void * a0, uintptr_t a1);
-uint64_t tairix_sys_image_attach(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
+uint64_t tairix_sys_image_attach(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4, uint32_t a5);
+uint64_t tairix_sys_archive_read(uint64_t a0, uint32_t a1, uint64_t a2, void * a3, uintptr_t a4);
+int32_t tairix_sys_archive_write(uint64_t a0, uint32_t a1, uint64_t a2, void * a3, uintptr_t a4);
 
 #ifdef __cplusplus
 } /* extern "C" */

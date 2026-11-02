@@ -15,7 +15,12 @@ grid, marked while it shows). A dock of panes runs down each side — by default
 the Tools pane on the left and the Colour pane on the right, with the
 Adjustment pane beneath it once an adjustment is opened — the canvas and its
 bars lie between them with the palette strip beneath, and the status band runs
-along the bottom.
+along the bottom. The palette strip is one row of wells: every entry of a
+palette picture's own palette, or the desktop's colours where it has none, and
+the clear ink of its mask. A row longer than the window shows scrolls sideways
+by the wheel or by a bar beneath it, shown only then, and keeps the well of the
+ink last chosen, primary or secondary, in view. A well is chosen by a press
+and release on it; one pressed and let go elsewhere is not.
 
 Each pane is headed by a mini title band naming it, with a roll-up control
 that folds it to its band and a close mark that hides it; View ▸ Panes shows a
@@ -213,8 +218,9 @@ lands on the next.
 
 The window has no menu bar. A secondary press anywhere opens its menu — Cut,
 Copy, Paste, Select all and Deselect, then File, Edit, Image, Layers, Colours,
-Adjust, Sprites, View and Tools, each a submenu — drawn by the desktop like
-every application's ([menus](menus.md)).
+Adjust, Pages for a TIFF's pages, View and Tools, each a submenu — drawn by the
+desktop like every application's ([menus](menus.md)). A sprite window adds
+*Show sprite file*, which brings its sprite file's window forward.
 
 ## The Colour pane
 
@@ -265,12 +271,43 @@ GIF, BMP, TIFF, RISC OS sprite areas and OpenRaster. Each file is read as it
 stores its picture: a palette picture as its indices and palette, a TIFF as its
 pages, a sprite area as its sprites, an OpenRaster file as its layers, each
 placed where its stack puts it on the canvas, the topmost painted on, and every
-picture with the density its file states. A sprite area holds any number of
-sprites, each with its name, mode, palette and mask, and the Sprites menu adds,
-duplicates, renames, deletes and reorders them; a new sprite is offered the
-name `sprite`, numbered with the least number free when taken. A TIFF holds any
-number of pages, and for one the Pages menu does the same; a page has no name.
-A document of several pictures read from any other format is a sprite area.
+picture with the density its file states. A TIFF holds any number of pages,
+and its Pages menu goes to, adds, duplicates, deletes and reorders them; a page
+has no name.
+
+## Sprite files
+
+A sprite file — read as one, typed &FF9 by its volume, or made as one by New
+picture or as the untitled window when the settings make new pictures sprite
+files — opens as a small window of its sprites, as RISC OS Paint shows one:
+each sprite's thumbnail, at the shape its mode gives its pixels, over its name,
+in a grid that reflows to the window's width and scrolls down. A thumbnail is
+drawn on a worker from the sprite as it stands and drawn again when the sprite
+or the window's scale changes; until it lands the sprite shows as a plain
+card, and a sprite the editor cannot read is always one. The window opens
+sized to its sprites, at most five across and three down, with room for its
+theme's text. A press chooses a sprite, Ctrl adds or takes
+one, Shift chooses the run from the last one pressed, and the arrows, Page Up,
+Page Down, Home and End walk them. The window's menu edits the chosen sprites,
+makes a new sprite, renames, duplicates, deletes and reorders them, and saves
+the file; those changes are undone in that window. A new sprite is offered the
+name `sprite`, numbered with the least number free when taken, and opens in a
+window of its own as it is made. What the window says in its band stays until
+the next press, key or menu choice.
+
+A double-click, Enter or *Edit* opens a sprite in a window of its own: the
+whole editor over that one sprite, titled with its name and its file's. One
+choice opens at most sixteen, saying how many it left shut, and stops at the
+first window the desktop refuses; opening a sprite already open brings its
+window forward. Each sprite window has its own undo, and its edits
+become the file's as they are made, so the file window's thumbnail follows and
+the file shows as changed. Save in a sprite window saves its file. A floating
+selection belongs to its window until it is put down, so a save made from
+another window writes the sprite without it; closing the sprite window puts it
+down first. Closing a sprite window never asks anything; closing the file
+window asks whether to save every sprite's changes, and its sprite windows
+close with it. Deleting a sprite closes its window; renaming one, saving its
+file, or saving it under another name retitles it.
 
 Every form Paint asks — New picture, the page and sprite questions, Scale,
 Canvas, Convert, Save As and a layer's properties — is a dialog window of its
@@ -363,21 +400,30 @@ pasted as they show together. What is copied goes to the clipboard as a PNG.
 ## The loop
 
 Paint runs in the shared document host (`tairix_window::docapp`), which owns
-its windows — its picture windows and its settings window — their saves and
-choosers, and the work queue saves are written on; the settings are written by
-a worker of their own, and the last of them is seen out before the process
-ends. Nothing that grows with the picture rather than with the brush runs on the
-loop: a decode worker reads documents and pastes, and the queue encodes saves
-and copies and carries out fills, gradients, selections, adjustments and their
-previews, transforms of every layer, merges and flattens, the Save As survey,
-and the putting down or clearing of a floating selection. A job lands on the
+its windows — its picture windows, its sprite file windows and their sprite
+windows, and its settings window — their saves and choosers, and the work
+queue saves are written on; the settings are written by a worker of their own,
+and the last of them is seen out before the process ends. A sprite window is a
+member window of its file's (`Host::open_member`): it has no file of its own,
+so its saves are its file window's, it is never asked whether to save, and it
+closes with that window. After every outcome a window's engine produces, the
+host hands Paint the window (`DocumentApp::driven`) before carrying out what
+was asked, so a sprite window's edit has reached its file before a save
+freezes it, and a file window's renames, changes and deletions reach its
+sprite windows. Nothing that grows with the picture rather than with the brush
+runs on the loop: a decode worker reads documents and pastes, and the queue
+encodes saves and copies and carries out fills, gradients, selections,
+adjustments and their previews, transforms of every layer, merges and
+flattens, the Save As survey, a sprite file's thumbnails, and the putting down
+or clearing of a floating selection. A job lands on the
 layer it was asked of. While a job is out, nothing changes the document, the
 sprite showing or the layer painted on, so its answer is written over exactly
 the state it was asked of, and one that no longer finds that state is refused.
 A save chooses its format from the frozen document it writes. Every allocation
 that grows with the picture is asked for, so a refusal is said in the window
 rather than ending the program; closing a window, or quitting, with unsaved
-changes asks first.
+changes asks first; a sprite window's changes are its file's, asked about by
+the file window.
 
 ## Limits
 

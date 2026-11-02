@@ -204,6 +204,10 @@ const NUM_VIEW_BIND: u64 = SyscallNumber::VIEW_BIND.as_u16() as u64;
 const NUM_VIEW_UNBIND: u64 = SyscallNumber::VIEW_UNBIND.as_u16() as u64;
 /// `image_attach` syscall number (as above).
 const NUM_IMAGE_ATTACH: u64 = SyscallNumber::IMAGE_ATTACH.as_u16() as u64;
+/// `archive_read` syscall number (as above).
+const NUM_ARCHIVE_READ: u64 = SyscallNumber::ARCHIVE_READ.as_u16() as u64;
+/// `archive_write` syscall number (as above).
+const NUM_ARCHIVE_WRITE: u64 = SyscallNumber::ARCHIVE_WRITE.as_u16() as u64;
 
 /// `mmio_map` syscall number (as above).
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
@@ -2341,6 +2345,51 @@ pub fn volume_write(volume: u64, lba: u64, buf: &[u8]) -> Result<(), Errno> {
     status(ret as i64)
 }
 
+/// Read up to `buf.len()` bytes at `offset` of region `region` of the archive
+/// attachment this filesystem driver serves (`SyscallNumber::ARCHIVE_READ`,
+/// `plans/ARCHIVES.md` §2), answering how many it read: fewer only where the
+/// region ends.
+///
+/// # Errors
+///
+/// The kernel's refusal: no grant covering `volume`, a volume that is no
+/// archive, a region it does not have, a length past
+/// [`VOLUME_IO_MAX`](tairix_abi::volume::VOLUME_IO_MAX), the volume gone,
+/// or the file's own error.
+pub fn archive_read(volume: u64, region: u8, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: as `volume_read`: the kernel validates the `(ptr, len)` pair
+    // before writing it, and `buf` is a live exclusive `&mut [u8]`.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_ARCHIVE_READ,
+            [volume, u64::from(region), offset, ptr, buf.len() as u64, 0],
+        )
+    };
+    count_result(ret, buf.len()).map_err(Errno::from_syscall)
+}
+
+/// Write `buf` at `offset` of work file `region` of the archive attachment
+/// this driver serves, extending it as needed (`SyscallNumber::ARCHIVE_WRITE`).
+///
+/// # Errors
+///
+/// As [`archive_read`], and [`Errno::ReadOnly`] once the volume takes no
+/// writes.
+pub fn archive_write(volume: u64, region: u8, offset: u64, buf: &[u8]) -> Result<(), Errno> {
+    let ptr = buf.as_ptr() as usize as u64;
+    // SAFETY: as `volume_write`: the kernel validates the `(ptr, len)` pair
+    // before reading it, and `buf` is a live shared `&[u8]`.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_ARCHIVE_WRITE,
+            [volume, u64::from(region), offset, ptr, buf.len() as u64, 0],
+        )
+    };
+    #[allow(clippy::cast_possible_wrap)] // The kernel's errno-result encoding.
+    status(ret as i64)
+}
+
 /// Describe, flush or discard the volume this filesystem driver serves, as
 /// `ctl` asks, answering into `reply` (`SyscallNumber::VOLUME_CTL`).
 /// Returns the reply's length.
@@ -2490,11 +2539,11 @@ pub fn fsserve_attach(
 }
 
 /// Attach the volume the disk-image file open as `fd` holds, as `attach`
-/// asks (`SyscallNumber::IMAGE_ATTACH`). Waits until the volume's driver
-/// serves or refuses it; a file holding nothing the kernel attaches, a target
-/// that will not take the volume and a name asked that it may not take are
-/// answered as such
-/// ([`ImageAttachReply`](tairix_abi::imageattach::ImageAttachReply)).
+/// asks (`SyscallNumber::IMAGE_ATTACH`), `dir` the directory holding it in
+/// which `attach` names it, if any. Waits until the volume's driver serves or
+/// refuses it; a file holding nothing the kernel attaches, a target that will
+/// not take the volume and a name asked that it may not take are answered as
+/// such ([`ImageAttachReply`](tairix_abi::imageattach::ImageAttachReply)).
 ///
 /// # Errors
 ///
@@ -2507,12 +2556,16 @@ pub fn fsserve_attach(
 /// [`Errno::LimitExceeded`]
 /// past the caller's image bound; [`Errno::TimedOut`] for a driver that never
 /// answered; [`Errno::NotAttached`] for a volume detached before the attach
-/// could answer. A reply the kernel cannot write back attaches nothing.
+/// could answer; [`Errno::Stale`] for a file name `dir` no longer holds the
+/// file under. A reply the kernel cannot write back attaches nothing.
 pub fn image_attach(
     fd: u32,
     attach: &tairix_abi::imageattach::ImageAttach<'_>,
+    dir: Option<u32>,
 ) -> Result<tairix_abi::imageattach::ImageAttachReply, Errno> {
-    use tairix_abi::imageattach::{ImageAttachReply, IMAGE_ATTACH_MAX, IMAGE_ATTACH_REPLY_LEN};
+    use tairix_abi::imageattach::{
+        ImageAttachReply, IMAGE_ATTACH_MAX, IMAGE_ATTACH_REPLY_LEN, IMAGE_NO_DIRECTORY,
+    };
     let mut frame = [0u8; IMAGE_ATTACH_MAX];
     let len = attach.encode(&mut frame)?;
     let mut reply = [0u8; IMAGE_ATTACH_REPLY_LEN];
@@ -2527,7 +2580,7 @@ pub fn image_attach(
                 len as u64,
                 reply.as_mut_ptr() as usize as u64,
                 reply.len() as u64,
-                0,
+                u64::from(dir.unwrap_or(IMAGE_NO_DIRECTORY)),
             ],
         )
     };
@@ -2535,10 +2588,13 @@ pub fn image_attach(
     ImageAttachReply::decode(reply.get(..answered).ok_or(Errno::OutOfRange)?)
 }
 
-/// Attach the volume the disk image at `path` holds, as `attach` asks
-/// ([`image_attach`]), the image opened as its access asks: read-only,
-/// read-write where the caller may write it, or read-write. The descriptor
-/// closes on return; the kernel keeps its own hold on the file.
+/// Attach the volume the disk image or archive at `path` holds, as `attach`
+/// asks ([`image_attach`]), the file opened as its access asks: read-only,
+/// read-write where the caller may write it, or read-write. An attach that
+/// may write also hands over the directory the file's canonical path ends
+/// in, opened where the caller can, with the file named in it, since an
+/// archive is written by replacing its file there. The descriptors close on
+/// return; the kernel keeps its own holds.
 ///
 /// # Errors
 ///
@@ -2547,14 +2603,42 @@ pub fn image_attach_path(
     path: &[u8],
     attach: &tairix_abi::imageattach::ImageAttach<'_>,
 ) -> Result<tairix_abi::imageattach::ImageAttachReply, Errno> {
-    use tairix_abi::imageattach::ImageAccess;
-    let file = match attach.access {
-        ImageAccess::ReadOnly => File::open(path, OpenFlags::READ).map_err(Errno::from_syscall)?,
-        ImageAccess::WritableWherePossible => File::open_preferring_write(path, true)?.0,
-        ImageAccess::Writable => File::open(path, OpenFlags::READ.union(OpenFlags::WRITE))
-            .map_err(Errno::from_syscall)?,
+    use tairix_abi::imageattach::{ImageAccess, ImageAttach};
+    let open = |at: &dyn Fn(OpenFlags) -> Result<File, Errno>| match attach.access {
+        ImageAccess::ReadOnly => at(OpenFlags::READ),
+        ImageAccess::WritableWherePossible => {
+            writable_else_readable(true, at).map(|(file, _)| file)
+        }
+        ImageAccess::Writable => at(OpenFlags::READ.union(OpenFlags::WRITE)),
     };
-    image_attach(file.fd(), attach)
+    let placed = match attach.access {
+        ImageAccess::ReadOnly => None,
+        ImageAccess::WritableWherePossible | ImageAccess::Writable => image_directory(path),
+    };
+    let Some((dir, canonical)) = placed else {
+        let file = open(&|flags| File::open(path, flags).map_err(Errno::from_syscall))?;
+        return image_attach(file.fd(), attach, None);
+    };
+    let leaf = tairix_path::leaf_name(&canonical);
+    let file = open(&|flags| {
+        dir.open_file(leaf.as_bytes(), flags.union(OpenFlags::NO_FOLLOW))
+            .map_err(Errno::from_syscall)
+    })?;
+    let named = ImageAttach {
+        file_name: Some(leaf),
+        ..*attach
+    };
+    image_attach(file.fd(), &named, Some(dir.fd()))
+}
+
+/// The directory `path`'s canonical spelling ends in, opened, and that
+/// spelling; `None` where either is refused, which leaves an archive at
+/// `path` attachable read-only.
+fn image_directory(path: &[u8]) -> Option<(Dir, alloc::string::String)> {
+    let path = core::str::from_utf8(path).ok()?;
+    let canonical = realpath(path, tairix_abi::RealpathMode::Existing).ok()?;
+    let dir = Dir::open(tairix_path::dir_name(&canonical).as_bytes()).ok()?;
+    Some((dir, canonical))
 }
 
 /// Tell the kernel `op` of a network volume this server offered
@@ -8573,13 +8657,31 @@ mod tests {
     }
 
     #[test]
+    fn archive_transfers_marshal_the_region_and_offset_and_count_no_further_than_the_buffer() {
+        let mut inbound = [0u8; 100];
+        let (number, args) = capture(60, || {
+            assert_eq!(archive_read(9, 0, 1 << 40, &mut inbound), Ok(60));
+        });
+        assert_eq!(number, NUM_ARCHIVE_READ);
+        assert_eq!(
+            args,
+            [9, 0, 1 << 40, inbound.as_ptr() as usize as u64, 100, 0]
+        );
+        let (_, _) = capture(101, || {
+            assert_eq!(archive_read(9, 0, 0, &mut inbound), Ok(100));
+        });
+        let outbound = [7u8; 33];
+        let (number, args) = capture(refusal(Errno::ReadOnly), || {
+            assert_eq!(archive_write(9, 2, 5, &outbound), Err(Errno::ReadOnly));
+        });
+        assert_eq!(number, NUM_ARCHIVE_WRITE);
+        assert_eq!(args, [9, 2, 5, outbound.as_ptr() as usize as u64, 33, 0]);
+    }
+
+    #[test]
     fn volume_ctl_marshals_both_buffers_and_never_counts_past_its_reply() {
-        use tairix_abi::volume::{VolumeCtl, VolumeCtlOp, VOLUME_CTL_LEN, VOLUME_INFO_LEN};
-        let ctl = VolumeCtl {
-            op: VolumeCtlOp::Info,
-            lba: 0,
-            blocks: 0,
-        };
+        use tairix_abi::volume::{VolumeCtl, VOLUME_CTL_LEN, VOLUME_INFO_LEN};
+        let ctl = VolumeCtl::Info;
         let mut reply = [0u8; VOLUME_INFO_LEN];
         let (number, args) = capture(VOLUME_INFO_LEN as u64, || {
             assert_eq!(volume_ctl(3, &ctl, &mut reply), Ok(VOLUME_INFO_LEN));
@@ -8687,11 +8789,12 @@ mod tests {
             target: None,
             expects: None,
             adopt: false,
+            file_name: None,
         };
         let (number, args) = capture(
             tairix_abi::imageattach::IMAGE_ATTACH_REPLY_LEN as u64,
             || {
-                assert_eq!(image_attach(5, &image).err(), Some(Errno::OutOfRange));
+                assert_eq!(image_attach(5, &image, None).err(), Some(Errno::OutOfRange));
             },
         );
         assert_eq!(number, NUM_IMAGE_ATTACH);

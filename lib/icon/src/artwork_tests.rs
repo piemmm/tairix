@@ -1625,12 +1625,7 @@ fn still_shown_names_a_pending_thumbnail_and_the_tier_beneath_it() {
         },
         content_gen: 1,
     };
-    let request = IconRequest::thumbnail(
-        IconKind::ImagePng,
-        "/Users/ann/Home/a.png",
-        stamp,
-        crate::Reading::Signature,
-    );
+    let request = IconRequest::thumbnail(IconKind::ImagePng, "/Users/ann/Home/a.png", stamp);
 
     c.still_shown(&mut deferring, request, 8);
     let named: Vec<bool> = deferring

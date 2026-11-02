@@ -2,15 +2,15 @@ extern crate std;
 
 use alloc::sync::Arc;
 use alloc::vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
-use tairix_abi::volume::{VolumeCtl, VolumeCtlOp};
+use tairix_abi::volume::VolumeCtl;
 use tairix_abi::{DriverError, Errno};
 
-use super::{Granted, ServedVolume};
+use super::{Granted, ServedVolume, Window};
 use crate::test_support::{RamBlock, BLOCK_SIZE};
 
 /// A RAM device that says when it is let go.
@@ -24,6 +24,8 @@ impl Drop for Tracked {
         self.dropped.store(true, Ordering::SeqCst);
     }
 }
+
+impl Window for Tracked {}
 
 impl Block for Tracked {
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
@@ -97,13 +99,7 @@ fn a_transfer_outside_whole_blocks_of_the_volume_is_refused() {
         Err(Errno::LengthOutOfRange)
     );
     assert_eq!(read(&volume, 0, &mut []), Err(Errno::LengthOutOfRange));
-    let discard = |lba, blocks| {
-        volume.ctl(&VolumeCtl {
-            op: VolumeCtlOp::Discard,
-            lba,
-            blocks,
-        })
-    };
+    let discard = |lba, blocks| volume.ctl(&VolumeCtl::Discard { lba, blocks });
     assert_eq!(discard(10, 7), Err(Errno::LengthOutOfRange));
 }
 
@@ -112,19 +108,11 @@ fn a_read_only_volume_refuses_every_write_and_describes_itself() {
     let (volume, _) = volume(16, true);
     assert_eq!(write(&volume, 0, &[0; BLOCK_SIZE]), Err(Errno::ReadOnly));
     assert_eq!(
-        volume.ctl(&VolumeCtl {
-            op: VolumeCtlOp::Discard,
-            lba: 0,
-            blocks: 1,
-        }),
+        volume.ctl(&VolumeCtl::Discard { lba: 0, blocks: 1 }),
         Err(Errno::ReadOnly)
     );
     let info = volume
-        .ctl(&VolumeCtl {
-            op: VolumeCtlOp::Info,
-            lba: 0,
-            blocks: 0,
-        })
+        .ctl(&VolumeCtl::Info)
         .expect("described")
         .expect("a description");
     assert!(info.read_only);
@@ -206,20 +194,61 @@ fn a_volume_refusing_writes_lets_the_one_under_way_land_and_takes_no_more() {
     assert!(back.iter().all(|&byte| byte == 0xA5));
     assert_eq!(write(&volume, 2, &[0; BLOCK_SIZE]), Err(Errno::ReadOnly));
     assert_eq!(
-        volume.ctl(&VolumeCtl {
-            op: VolumeCtlOp::Discard,
-            lba: 0,
-            blocks: 1,
-        }),
+        volume.ctl(&VolumeCtl::Discard { lba: 0, blocks: 1 }),
         Err(Errno::ReadOnly)
     );
     let info = volume
-        .ctl(&VolumeCtl {
-            op: VolumeCtlOp::Info,
-            lba: 0,
-            blocks: 0,
-        })
+        .ctl(&VolumeCtl::Info)
         .expect("described")
         .expect("a description");
     assert!(info.read_only, "it describes itself as it now is");
+}
+
+/// A RAM device counting what its work files were asked to give up.
+struct Discarding {
+    block: RamBlock,
+    discarded: Arc<AtomicUsize>,
+}
+
+impl Window for Discarding {
+    fn discard_work(&mut self) {
+        self.discarded.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Block for Discarding {
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        self.block.geometry()
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.block.read_blocks(lba, buf)
+    }
+
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.block.write_blocks(lba, buf)
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn work_files_are_given_up_when_asked_never_as_the_volume_goes() {
+    let discarded = Arc::new(AtomicUsize::new(0));
+    let device = Discarding {
+        block: RamBlock::new(8),
+        discarded: Arc::clone(&discarded),
+    };
+    let volume = ServedVolume::new(7, device, false).expect("a served volume");
+    volume.retire();
+    volume.discard_work();
+    assert_eq!(
+        discarded.load(Ordering::SeqCst),
+        1,
+        "retired, and still asked"
+    );
+    drop(volume);
+    assert_eq!(discarded.load(Ordering::SeqCst), 1, "going does no work");
 }

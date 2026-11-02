@@ -886,6 +886,8 @@ impl Vfs {
     ///
     /// [`VfsError::CrossVolume`] for two projections, and otherwise as
     /// [`DelegatedFs::rename_places`].
+    // Two places, what the move may do, and what each end must hold.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn rename_between<D>(
         &self,
         cred: &Credentials<'_>,
@@ -894,6 +896,7 @@ impl Vfs {
         to: Resolution<'_>,
         flags: RenameFlags,
         expect: Option<Expect<'_>>,
+        replacing: Option<Expect<'_>>,
     ) -> Result<(), VfsError>
     where
         D: Drivers,
@@ -921,6 +924,7 @@ impl Vfs {
                 &dst.name,
                 flags,
                 expect.map(|expect| expect.on(D::volume(facts))),
+                replacing.map(|replacing| replacing.on(D::volume(facts))),
                 &guarded,
             )
         })

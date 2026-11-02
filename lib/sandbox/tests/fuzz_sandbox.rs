@@ -525,8 +525,8 @@ fn fuzz_view_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &mut P
 }
 
 /// Mutated pictures, a truncation and noise, each drawn as a thumbnail at a
-/// random side and named format: every reply is either a refusal or exactly
-/// the square asked for.
+/// random side: every reply is either a refusal or exactly the square asked
+/// for.
 fn fuzz_thumbnail_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &mut Prng) {
     let mut png = png_template();
     for _ in 0..rng.at_most(6) {
@@ -538,11 +538,11 @@ fn fuzz_thumbnail_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &
         let side = u32::try_from(rng.at_most(64)).unwrap_or(0) + 1;
         // Drawn before anything is uploaded too, so the no-document refusal is
         // reached whether or not the upload below succeeds.
-        let _ = render_thumbnail(honest, side, None);
+        let _ = render_thumbnail(honest, side);
         if send_document(honest, document).is_err() {
             continue;
         }
-        if let Ok(fitted) = render_thumbnail(honest, side, *rng.pick(&NAMED_FORMATS)) {
+        if let Ok(fitted) = render_thumbnail(honest, side) {
             assert_fitted(&fitted, side);
         }
     }
@@ -1168,7 +1168,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = disassemble(&mut hostile, isa, nops, 8);
         let _ = render_help(&mut hostile, mode, Styling::Colour, "en-US", HELP_TEMPLATE);
         let _ = rasterise_icon(&mut hostile, side, SVG_TEMPLATE, &mut NoFonts);
-        if let Ok(fitted) = render_thumbnail(&mut hostile, side, None) {
+        if let Ok(fitted) = render_thumbnail(&mut hostile, side) {
             assert_fitted(&fitted, side);
         }
         fuzz_application_sprite_iteration(&mut hostile, &noise, &mut rng);

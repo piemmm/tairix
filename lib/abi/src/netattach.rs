@@ -12,7 +12,7 @@
 
 use core::num::NonZeroU64;
 
-use crate::fs::FS_PERMISSION_BITS;
+use crate::fs::{FS_NAME_MAX, FS_PERMISSION_BITS};
 use crate::fsserve::{Lanes, ServeFrame, ServeGrant, ServeOffer, FSSERVE_VERSION, SERVE_FRAME_LEN};
 use crate::le::{exact_len, put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::sysinfo::{MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX};
@@ -244,19 +244,20 @@ pub enum Presentation {
     },
 }
 
-/// The head every attach frame opens with, ahead of its name and then its
-/// target: the version (2), the presentation (1), the flags (1), the explicit
-/// owner (4), group (4), directory mode (2) and file mode (2), the name's
-/// length (1), a zero pad (1), the target's length (2), and a word the frame's
-/// own (4), each field aligned as a C struct lays it out.
+/// The head every attach frame opens with, ahead of its name, its target
+/// and its leaf: the version (2), the presentation (1), the flags (1), the
+/// explicit owner (4), group (4), directory mode (2) and file mode (2), the
+/// name's length (1), the leaf's length (1), the target's length (2), and a
+/// word the frame's own (4), each field aligned as a C struct lays it out.
 pub const ATTACH_HEAD_LEN: usize = 24;
 
-/// The largest attach frame: a name at [`VOLUME_NAME_MAX`] and a target at
-/// [`MOUNT_TARGET_MAX`].
-pub(crate) const ATTACH_MAX: usize = ATTACH_HEAD_LEN + VOLUME_NAME_MAX + MOUNT_TARGET_MAX;
+/// The largest attach frame: a name at [`VOLUME_NAME_MAX`], a target at
+/// [`MOUNT_TARGET_MAX`] and a leaf at [`FS_NAME_MAX`].
+pub(crate) const ATTACH_MAX: usize =
+    ATTACH_HEAD_LEN + VOLUME_NAME_MAX + MOUNT_TARGET_MAX + FS_NAME_MAX;
 
-/// The largest [`NetworkAttach`].
-pub const NETWORK_ATTACH_MAX: usize = ATTACH_MAX;
+/// The largest [`NetworkAttach`], which carries no leaf.
+pub const NETWORK_ATTACH_MAX: usize = ATTACH_MAX - FS_NAME_MAX;
 
 /// The wire kind of [`Presentation::Private`].
 pub const PRESENTATION_PRIVATE: u8 = 1;
@@ -278,6 +279,9 @@ pub(crate) struct AttachFrame<'a> {
     /// Empty for none.
     pub(crate) name: &'a str,
     pub(crate) target: Option<&'a str>,
+    /// A directory entry's name the frame's kind gives a meaning; empty for
+    /// none.
+    pub(crate) leaf: &'a str,
 }
 
 impl<'a> AttachFrame<'a> {
@@ -289,22 +293,26 @@ impl<'a> AttachFrame<'a> {
     /// [`Errno::BufferTooSmall`] when `out` cannot hold it.
     pub(crate) fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
         let target = self.target.unwrap_or("");
-        let len = ATTACH_HEAD_LEN + self.name.len() + target.len();
+        let len = ATTACH_HEAD_LEN + self.name.len() + target.len() + self.leaf.len();
         let out = out.get_mut(..len).ok_or(Errno::BufferTooSmall)?;
         out.fill(0);
         put_u16(out, 0, self.version);
         PresentationWire::of(self.presentation).put(out);
         out[3] = self.flags;
         out[16] = u8::try_from(self.name.len()).map_err(|_| Errno::OutOfRange)?;
+        out[17] = u8::try_from(self.leaf.len()).map_err(|_| Errno::OutOfRange)?;
         put_u16(
             out,
             18,
             u16::try_from(target.len()).map_err(|_| Errno::OutOfRange)?,
         );
         put_u32(out, 20, self.own);
-        let names = &mut out[ATTACH_HEAD_LEN..];
-        names[..self.name.len()].copy_from_slice(self.name.as_bytes());
-        names[self.name.len()..].copy_from_slice(target.as_bytes());
+        let mut tail = &mut out[ATTACH_HEAD_LEN..];
+        for part in [self.name, target, self.leaf] {
+            let (here, rest) = tail.split_at_mut(part.len());
+            here.copy_from_slice(part.as_bytes());
+            tail = rest;
+        }
         Ok(len)
     }
 
@@ -314,9 +322,9 @@ impl<'a> AttachFrame<'a> {
     ///
     /// [`Errno::AbiVersionUnsupported`] for another version;
     /// [`Errno::OutOfRange`] for an unknown presentation or flag, an owner or
-    /// mode carried by a presentation that names none, a nonzero pad, or a
-    /// name or target that is not UTF-8; [`Errno::LengthOutOfRange`] for a
-    /// frame that does not end where its target does.
+    /// mode carried by a presentation that names none, or a name, target or
+    /// leaf that is not UTF-8; [`Errno::LengthOutOfRange`] for a frame that
+    /// does not end where its leaf does.
     pub(crate) fn decode(bytes: &'a [u8], version: u16, known: u8) -> Result<Self, Errno> {
         if bytes.len() < ATTACH_HEAD_LEN || bytes.len() > ATTACH_MAX {
             return Err(Errno::LengthOutOfRange);
@@ -326,15 +334,17 @@ impl<'a> AttachFrame<'a> {
         }
         let presentation = PresentationWire::read(bytes).presentation()?;
         let flags = bytes[3];
-        if flags & !known != 0 || bytes[17] != 0 {
+        if flags & !known != 0 {
             return Err(Errno::OutOfRange);
         }
         let name_len = usize::from(bytes[16]);
+        let leaf_len = usize::from(bytes[17]);
         let target_len = usize::from(read_u16(bytes, 18));
-        if bytes.len() != ATTACH_HEAD_LEN + name_len + target_len {
+        if bytes.len() != ATTACH_HEAD_LEN + name_len + target_len + leaf_len {
             return Err(Errno::LengthOutOfRange);
         }
-        let (name, target) = bytes[ATTACH_HEAD_LEN..].split_at(name_len);
+        let (name, rest) = bytes[ATTACH_HEAD_LEN..].split_at(name_len);
+        let (target, leaf) = rest.split_at(target_len);
         let text = |bytes| core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange);
         Ok(Self {
             version,
@@ -346,6 +356,7 @@ impl<'a> AttachFrame<'a> {
                 0 => None,
                 _ => Some(text(target)?),
             },
+            leaf: text(leaf)?,
         })
     }
 }
@@ -496,6 +507,7 @@ impl<'a> NetworkAttach<'a> {
             own: 0,
             name: self.name,
             target: self.target,
+            leaf: "",
         }
         .encode(out)
     }
@@ -512,7 +524,7 @@ impl<'a> NetworkAttach<'a> {
     /// frame that does not end where its target does.
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
         let frame = AttachFrame::decode(bytes, FSSERVE_VERSION, ATTACH_FLAG_READ_ONLY)?;
-        if frame.own != 0 {
+        if frame.own != 0 || !frame.leaf.is_empty() {
             return Err(Errno::OutOfRange);
         }
         let attach = Self {

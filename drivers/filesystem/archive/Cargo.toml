@@ -1,0 +1,67 @@
+[package]
+name = "tairix-drv-fs-archive"
+description = "TAIRiX archive filesystem driver: zip, tar (plain, gzip, bzip2), RISC OS Spark and ArcFS read and written, RAR read, each served as a volume of its members."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The `Run` binary is the driver process `devmgr` loads for an archive's
+# volume node. It links the userland runtime, so it is built only with
+# `program`, which the bundle builder enables.
+[features]
+program = ["dep:tairix-rt", "tairix-fsserve/program"]
+
+[[bin]]
+name = "tairix-drv-fs-archive"
+path = "src/main.rs"
+required-features = ["program"]
+
+[dependencies]
+# The served-filesystem runtime: the archive format trait this driver is
+# served through, the volume's regions, and its bind keys.
+tairix-fsserve = { path = "../../../lib/fsserve", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The archive recognition and the opening structures the volume probe shares,
+# so the probe and the driver never disagree about what an archive is.
+tairix-fsprobe = { path = "../../../lib/fsprobe", version = "=0.0.0" }
+# The Acorn metadata preset a member's RISC OS fields are surfaced through.
+tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
+# DEFLATE, which zip members and gzip streams are compressed with, and
+# bzip2.
+tairix-compress = { path = "../../../lib/compress", version = "=0.0.0" }
+# The CRC-32 every zip member, gzip stream and RAR record is checked by.
+tairix-crc32 = { path = "../../../lib/crc32", version = "=0.0.0" }
+# The CRC-16 every Spark and ArcFS member is checked by.
+tairix-crc16 = { path = "../../../lib/crc16", version = "=0.0.0" }
+# The byte-addressed reader the archive recognisers read through.
+tairix-bytedev = { path = "../../../lib/bytedev", version = "=0.0.0" }
+# Fallible buffers and number formatting.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The dirty-age commit scheduler a staged change is committed by.
+tairix-writeback = { path = "../../../lib/writeback", version = "=0.0.0" }
+# BLAKE2sp, the hash a RAR 5 member may be checked by in place of its CRC.
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+
+[dev-dependencies]
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+# The least archive of each format and the streams members are packed in.
+tairix-test-archive-image = { path = "../../../tests/integration/archive_image", version = "=0.0.0" }
+# The archive attachment in memory the tests serve archives through.
+tairix-fsserve = { path = "../../../lib/fsserve", version = "=0.0.0", features = ["test-util"] }
+# The memory gauge a test's write-back budget reads.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The settable host a commit's window is driven through.
+tairix-writeback = { path = "../../../lib/writeback", version = "=0.0.0", features = ["test-util"] }
+
+[lints]
+workspace = true
+
+# The `Run` binary's runtime, pulled only by `program`.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

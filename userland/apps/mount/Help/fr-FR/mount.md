@@ -1,6 +1,6 @@
 ## NAME
 
-mount — lister les systèmes de fichiers montés, ou monter une image disque
+mount — lister les systèmes de fichiers montés, ou monter une image disque ou une archive
 
 ## SYNOPSIS
 
@@ -35,6 +35,20 @@ appartenant sous `/Users` ou sur un volume de `/Storage`, y fait aussi
 apparaître le volume ; un répertoire situé sur un volume FAT32 ou ADFS
 ne peut pas le faire apparaître.
 
+Une archive se monte de la même façon, ses éléments devenant les
+fichiers et dossiers du volume : une archive zip (`.zip`), une archive
+tar, non compressée ou compressée avec gzip ou bzip2 (`.tar`, `.tar.gz`,
+`.tgz`, `.tar.bz2`), un fichier unique compressé avec gzip ou bzip2
+(`.gz`, `.bz2`), une archive Spark ou ArcFS de RISC OS (`.spk`, `.arc`)
+ou une archive RAR (`.rar`). Les types de fichiers et les attributs
+RISC OS accompagnent chaque élément. Les modifications sont enregistrées
+par remplacement du fichier de l'archive, si bien qu'une archive n'est
+montée en lecture-écriture que si vous pouvez écrire à la fois dans le
+fichier et dans le dossier qui le contient. Une archive RAR est toujours
+montée en lecture seule. Une archive découpée en plusieurs parties, ou
+dont les noms sont chiffrés, n'est pas montée, et un élément chiffré ne
+peut pas être lu.
+
 Le volume reste monté jusqu'à ce que vous le détachiez avec `unmount`,
 ou que votre session de connexion se termine. Une image qui contient
 un disque partitionné, l'un des disques d'une grappe RAID ou un
@@ -54,8 +68,9 @@ donne la raison.
   `-o rw` détermine si le volume est en lecture seule.
 - `-t, --types <list>` — les systèmes de fichiers, séparés par des
   virgules, dont l'image doit contenir l'un, tels que la liste des
-  montages les nomme (`iso9660`, `udf`, `adfs`, `affs`, `fat32`), ou
-  `auto` pour celui qu'elle contient, quel qu'il soit ; une liste
+  montages les nomme (`iso9660`, `udf`, `adfs`, `affs`, `fat32`, `zip`,
+  `tar`, `tar.gz`, `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`, `rar`),
+  ou `auto` pour celui qu'elle contient, quel qu'il soit ; une liste
   commençant par `no` nomme ceux que l'image ne doit pas contenir. Ce
   que renferme l'image se reconnaît à son contenu, si bien que l'ordre
   ne choisit rien : un disque optique contenant à la fois UDF et
@@ -82,6 +97,10 @@ donne la raison.
   optique en lecture seule sous le nom `disc`.
 - `mount -v -t adfs Elite.adl` — monter une image de disquette Acorn,
   en indiquant où.
+- `mount Photos.zip` — monter une archive zip, en lecture-écriture si
+  vous pouvez écrire dans l'archive et dans son dossier.
+- `mount -r backup.tar.gz /Storage/backup` — monter une archive tar
+  compressée en lecture seule sous le nom `backup`.
 
 ## EXIT STATUS
 

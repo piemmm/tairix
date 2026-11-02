@@ -49,13 +49,16 @@ struct Window {
 
 impl Window {
     fn new(document: Document) -> Self {
-        let registry = ThemeRegistry::with_builtins();
-        let view = View::new(
+        Self::over(View::new(
             document,
             String::from("picture.png"),
             None,
             Access::Writable,
-        );
+        ))
+    }
+
+    fn over(view: View) -> Self {
+        let registry = ThemeRegistry::with_builtins();
         let layout = view.layout(
             WINDOW.0,
             WINDOW.1,
@@ -688,44 +691,105 @@ fn every_action_is_chosen_by_its_own_id() {
 }
 
 #[test]
-fn the_window_menu_offers_the_layer_and_sprite_rows_with_their_fields() {
+fn the_window_menu_offers_the_layer_and_page_rows_with_their_fields() {
+    let fields = |window: &Window| -> vec::Vec<u16> {
+        window
+            .view
+            .menu(MenuKind::Window)
+            .rows()
+            .filter_map(|(row, _)| match row {
+                AppMenuRowView::Item(item) => item.entry.map(|entry| entry.id.get()),
+                _ => None,
+            })
+            .collect()
+    };
     let window = Window::white(10, 10);
-    let menu = window.view.menu(MenuKind::Window);
-    let fields: vec::Vec<u16> = menu
-        .rows()
-        .filter_map(|(row, _)| match row {
-            AppMenuRowView::Item(item) => item.entry.map(|entry| entry.id.get()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(fields, [GO_TO_LAYER, GO_TO_ENTRY, RENAME_ENTRY]);
+    assert_eq!(fields(&window), [GO_TO_LAYER], "one picture has no pages");
+    assert_eq!(fields(&tiff_pages(2)), [GO_TO_LAYER, GO_TO_ENTRY]);
     let zoom = window.view.menu(MenuKind::Zoom);
     assert_eq!(zoom.rows().count(), crate::viewport::ZOOMS.len());
 }
 
-/// Nothing the window menu offers is left out for want of room in the
-/// bounds a menu is carried in.
+/// Nothing a picture window offers is left out for want of room in the
+/// bounds a menu is carried in: a TIFF's pages hold every command but the
+/// sprite file window's and a sprite window's own, which a sprite window
+/// offers.
 #[test]
 fn the_window_menu_holds_every_command() {
-    let window = Window::white(10, 10);
-    let menu = window.view.menu(MenuKind::Window);
-    assert!(menu.len() < tairix_abi::window_ipc::APP_MENU_MAX_TOTAL_ROWS);
-    let ids: Vec<u16> = menu
-        .rows()
-        .filter_map(|(row, _)| match row {
-            AppMenuRowView::Item(item) => Some(item.id.get()),
-            _ => None,
-        })
-        .collect();
-    let offered = super::PLAIN_ACTIONS
+    let offered = |window: &Window| -> vec::Vec<u16> {
+        let menu = window.view.menu(MenuKind::Window);
+        assert!(menu.len() < tairix_abi::window_ipc::APP_MENU_MAX_TOTAL_ROWS);
+        menu.rows()
+            .filter_map(|(row, _)| match row {
+                AppMenuRowView::Item(item) => Some(item.id.get()),
+                _ => None,
+            })
+            .collect()
+    };
+    let ids = offered(&tiff_pages(2));
+    let theirs = [Action::EditEntry, Action::SpriteFile];
+    let every = super::PLAIN_ACTIONS
         .into_iter()
+        .filter(|action| !theirs.contains(action))
         .chain(Tool::ALL.map(Action::Tool))
         .chain((0..crate::filter::Filter::ALL.len()).map(Action::Adjust))
-        .chain(PaneKind::ALL.map(Action::Pane))
-        .chain([Action::Rename]);
-    for action in offered {
+        .chain(PaneKind::ALL.map(Action::Pane));
+    for action in every {
         assert!(ids.contains(&action.id()), "{action:?} is offered");
     }
+    assert!(!ids.contains(&Action::SpriteFile.id()));
+    let sprite_window = offered(&sprite_window());
+    assert!(sprite_window.contains(&Action::SpriteFile.id()));
+    assert!(
+        !sprite_window.contains(&Action::NewEntry.id()),
+        "no list of its own"
+    );
+}
+
+/// A TIFF of `count` white pages.
+fn tiff_pages(count: usize) -> Window {
+    let page = || {
+        Entry::Picture(Picture::plain(
+            Canvas::new(6, 4, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits"),
+        ))
+    };
+    let document = Document::of(
+        (0..count).map(|_| page()).collect(),
+        Origin::Read(tairix_sandbox::imagerender::ViewFormat::Tiff),
+        Unkept::default(),
+        SaveSettings::default(),
+    )
+    .expect("entries");
+    Window::new(document)
+}
+
+/// A sprite window over the sprite `one` of the file `Sprites`.
+fn sprite_window() -> Window {
+    let file = Document::of(
+        vec![sprite("one", 10), sprite("two", 20)],
+        Origin::Read(tairix_sandbox::imagerender::ViewFormat::Sprite),
+        Unkept::default(),
+        SaveSettings::default(),
+    )
+    .expect("entries");
+    let id = file.ids()[0];
+    let Some(Entry::Picture(picture)) = file.entries().first() else {
+        panic!("a picture");
+    };
+    let document = Document::of(
+        vec![Entry::Picture(picture.try_clone().expect("room"))],
+        Origin::Read(tairix_sandbox::imagerender::ViewFormat::Sprite),
+        Unkept::default(),
+        SaveSettings::default(),
+    )
+    .expect("one sprite");
+    let view = View::sprite_window(
+        document,
+        (String::from("Sprites"), false),
+        (id, SpriteName::new("one").expect("a name")),
+        Access::Writable,
+    );
+    Window::over(view)
 }
 
 fn sprite(name: &str, shade: u8) -> Entry {
@@ -779,59 +843,64 @@ fn sprites() -> Window {
     Window::new(document)
 }
 
-/// A copy of a sprite takes the least numbered name its own leaves free, and
-/// a new sprite is offered the stem itself while no sprite has it.
 #[test]
-fn a_copied_sprite_takes_a_name_of_its_own() {
-    let mut window = sprites();
-    window.act(Action::DuplicateEntry);
-    assert_eq!(window.view.document().current(), 1, "the copy shows");
-    window.act(Action::PreviousEntry);
-    window.act(Action::DuplicateEntry);
-    let names: vec::Vec<String> = window
-        .view
-        .document()
-        .names()
-        .map(|name| alloc::format!("{name}"))
-        .collect();
-    assert_eq!(names, ["one", "one2", "one1", "two"]);
-    window.act(Action::NewEntry);
-    let Some(super::Modal::Form(form)) = &window.view.modal else {
-        panic!("the new sprite form shows");
-    };
-    let offered = form.new_sprite_answer().expect("the offer stands");
-    assert_eq!(offered.name.as_bytes(), b"sprite");
-}
-
-#[test]
-fn sprites_are_stepped_through_found_by_name_and_renamed() {
-    let mut window = sprites();
+fn pages_are_stepped_through_and_gone_to_by_number() {
+    let mut window = tiff_pages(2);
     window.key(Key::Named(NamedKey::PageDown), plain());
     assert_eq!(window.view.document().current(), 1);
-    let entered = |window: &mut Window, id: u16, text: &str| {
-        let id = AppMenuItemId::new(id).expect("an id");
+    let go_to = |window: &mut Window, text: &str| {
+        let id = AppMenuItemId::new(GO_TO_ENTRY).expect("an id");
         let outcome = window
             .view
             .entered(id, text, &window.layout, &mut Region::new());
         window.apply(&outcome);
     };
-    entered(&mut window, GO_TO_ENTRY, "ONE");
+    go_to(&mut window, "1");
     assert_eq!(window.view.document().current(), 0);
-    entered(&mut window, RENAME_ENTRY, "two");
+    go_to(&mut window, "9");
     assert_eq!(
         window.view.message(),
-        Some("A sprite of that name is already here")
+        Some("There is no page of that number")
     );
-    entered(&mut window, RENAME_ENTRY, "first");
-    let name = window
+}
+
+/// A sprite window is titled by its sprite and the file it is in, marked as
+/// that file is.
+#[test]
+fn a_sprite_window_is_titled_by_its_sprite_and_its_file() {
+    let mut window = sprite_window();
+    let mut title = String::new();
+    window.view.write_title(&mut title);
+    assert_eq!(title, "one in Sprites \u{2014} Paint");
+    let leaf = SpriteName::new("leaf").expect("a name");
+    assert!(window.view.set_member(leaf, "Sprites", true));
+    window.view.write_title(&mut title);
+    assert_eq!(title, "*leaf in Sprites \u{2014} Paint");
+    assert!(!window.view.set_member(leaf, "Sprites", true));
+    // Saved, its file holds no changes.
+    assert!(window.view.set_member(leaf, "Sprites", false));
+    window.view.write_title(&mut title);
+    assert_eq!(title, "leaf in Sprites \u{2014} Paint");
+    // Saved under another name, it is in that file.
+    assert!(window.view.set_member(leaf, "Leaves", false));
+    window.view.write_title(&mut title);
+    assert_eq!(title, "leaf in Leaves \u{2014} Paint");
+}
+
+/// A sprite window hands its sprite to its file once a change, and never
+/// asks whether to save: the file window does.
+#[test]
+fn a_sprite_window_hands_each_change_to_its_file_and_closes_unasked() {
+    let mut window = sprite_window();
+    assert!(window.view.take_edit().is_none(), "nothing changed yet");
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((1, 1), (1, 1));
+    assert!(window.view.take_edit().is_some());
+    assert!(window.view.take_edit().is_none(), "handed once");
+    let outcome = window
         .view
-        .document()
-        .entry()
-        .name()
-        .map(|n| n.as_bytes().to_vec());
-    assert_eq!(name.as_deref(), Some(&b"first"[..]));
-    entered(&mut window, GO_TO_ENTRY, "2");
-    assert_eq!(window.view.document().current(), 1);
+        .close_requested(&window.layout, &mut Region::new());
+    assert!(matches!(outcome.request, Some(Request::Close)));
 }
 
 #[test]
@@ -1852,7 +1921,7 @@ fn well_rect(window: &Window, index: usize) -> Rect {
     window
         .view
         .swatches
-        .cell_rect(window.layout.swatches(), index)
+        .cell_rect(window.view.swatch_bounds(&window.layout), index)
         .expect("a well")
 }
 
@@ -2151,8 +2220,10 @@ fn the_arrows_walk_the_palette_only_while_it_has_the_keyboard() {
 }
 
 /// The palette's rows follow the window it is laid out in.
+/// A 256-colour palette is one row longer than the strip: the wheel scrolls
+/// it along, and a well scrolled into view is chosen where it is shown.
 #[test]
-fn the_palettes_rows_follow_the_layout() {
+fn a_long_palette_scrolls_along_its_strip() {
     let kind = Kind::Indexed {
         depth: IndexDepth::Eight,
         palette: tairix_image::desktop_palette(IndexDepth::Eight)
@@ -2162,20 +2233,30 @@ fn the_palettes_rows_follow_the_layout() {
         masked: false,
     };
     let canvas = Canvas::new(8, 8, kind, Sample::Index(0, 255)).expect("fits");
-    let window = Window::new(Document::new(Picture::plain(canvas)));
+    let mut window = Window::new(Document::new(Picture::plain(canvas)));
     assert_eq!(window.view.wells.len(), 256);
-    assert_eq!(window.view.swatches.columns(), window.layout.columns());
-    assert!(window.view.swatches.rows() > 1);
-    let last = window
-        .view
-        .swatches
-        .cell_rect(window.layout.swatches(), 255)
-        .expect("the last entry has a well");
-    assert_eq!(
-        last.intersection(&window.layout.palette()),
-        last,
-        "inside the strip"
+    assert_eq!(window.view.swatches.rows(), 1, "one row");
+    assert!(!window.layout.palette_bar().is_empty());
+    let before = window.view.swatch_bounds(&window.layout).left();
+    window.move_to(window.layout.wells_view().center());
+    for _ in 0..400 {
+        window.pointer(InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        });
+    }
+    assert!(
+        window.view.swatch_bounds(&window.layout).left() < before,
+        "scrolled along"
     );
+    let last = well_rect(&window, 255);
+    assert_eq!(
+        last.intersection(&window.layout.wells_view()),
+        last,
+        "the last well shows at the end"
+    );
+    click_on(&mut window, last);
+    assert_eq!(window.view.inks().0, window.view.wells[255]);
 }
 
 /// The tool box, the view strip and the bar each carry their tips.
@@ -4416,5 +4497,65 @@ fn a_moved_selections_corner_lands_on_the_grid() {
         (floating.x0, floating.y0),
         (8, 0),
         "eleven across lands on the cell beyond"
+    );
+}
+
+/// A well pressed and let go off the strip is let go: a release over it
+/// later, with no press, chooses nothing.
+#[test]
+fn a_well_pressed_and_let_go_elsewhere_is_let_go() {
+    let mut window = Window::white(16, 16);
+    let inks = window.view.inks();
+    let red = well_rect(&window, 11);
+    window.move_to(red.center());
+    window.press(PointerButton::Primary);
+    window.move_to(window.layout.message().center());
+    window.release(PointerButton::Primary);
+    assert_eq!(window.view.inks(), inks);
+    window.move_to(red.center());
+    window.release(PointerButton::Primary);
+    assert_eq!(window.view.inks(), inks, "a release alone is no choice");
+}
+
+/// A palette of the desktop's 256 colours, which one row of the strip
+/// cannot show at once.
+fn long_palette() -> Window {
+    let kind = Kind::Indexed {
+        depth: IndexDepth::Eight,
+        palette: tairix_image::desktop_palette(IndexDepth::Eight)
+            .iter()
+            .map(|&[r, g, b]| [r, g, b, 255])
+            .collect(),
+        masked: false,
+    };
+    let canvas = Canvas::new(8, 8, kind, Sample::Index(0, 255)).expect("fits");
+    Window::new(Document::new(Picture::plain(canvas)))
+}
+
+/// The strip scrolls to the ink that changed, and repaints its bar's thumb
+/// as it does.
+#[test]
+fn the_strip_scrolls_to_the_ink_that_changed_and_repaints_its_bar() {
+    let mut window = long_palette();
+    window.view.secondary = window.view.wells[255];
+    let mut damage = Region::new();
+    window.view.inks_changed(
+        tairix_controls::SwatchMark::Secondary,
+        &window.layout,
+        &mut damage,
+    );
+    let last = well_rect(&window, 255);
+    assert_eq!(
+        last.intersection(&window.layout.wells_view()),
+        last,
+        "the secondary's well shows"
+    );
+    let bar = window.layout.palette_bar();
+    assert!(
+        damage
+            .rects()
+            .iter()
+            .any(|rect| rect.intersection(&bar) == bar),
+        "its bar is repainted"
     );
 }

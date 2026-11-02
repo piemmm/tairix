@@ -1,12 +1,12 @@
-//! Unit tests for the SHA-2 wrappers.
+//! Unit tests for the SHA-2 and BLAKE2sp wrappers.
 //!
 //! Every known-answer vector is FIPS 180-4 §A; the streaming tests pin that
 //! any chunking of a message agrees with the one-shot over the whole of it,
 //! so a wrapper that restarted or mis-fed its core would fail here.
 
 use super::{
-    sha256, sha384, sha512, Sha256Stream, Sha384Stream, Sha512Stream, SHA256_OUTPUT_LEN,
-    SHA384_OUTPUT_LEN, SHA512_OUTPUT_LEN,
+    sha256, sha384, sha512, Blake2spStream, Sha256Stream, Sha384Stream, Sha512Stream,
+    BLAKE2SP_OUTPUT_LEN, SHA256_OUTPUT_LEN, SHA384_OUTPUT_LEN, SHA512_OUTPUT_LEN,
 };
 
 /// A deterministic 96-byte message spanning two SHA-256 blocks and one
@@ -130,4 +130,53 @@ fn distinct_messages_give_distinct_digests() {
     assert_ne!(sha256(b""), sha256(b"abc"));
     assert_ne!(sha384(b""), sha384(b"abc"));
     assert_ne!(sha512(b""), sha512(b"abc"));
+}
+
+/// The digest of `chunks` fed in turn to one BLAKE2sp stream.
+fn blake2sp_of(chunks: &[&[u8]]) -> [u8; BLAKE2SP_OUTPUT_LEN] {
+    let mut stream = Blake2spStream::new();
+    for chunk in chunks {
+        stream.update(chunk);
+    }
+    stream.finalize()
+}
+
+/// BLAKE2sp known answers, as BLAKE2's reference implementation computes them:
+/// the empty message, `abc`, and messages short of, at and past the 512-byte
+/// stride across its eight leaves.
+#[test]
+fn blake2sp_matches_the_reference_and_any_chunking_agrees() {
+    let hex = |text: &str| -> [u8; BLAKE2SP_OUTPUT_LEN] {
+        let mut out = [0u8; BLAKE2SP_OUTPUT_LEN];
+        for (at, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&text[2 * at..2 * at + 2], 16).expect("hex");
+        }
+        out
+    };
+    assert_eq!(
+        blake2sp_of(&[]),
+        hex("dd0e891776933f43c7d032b08a917e25741f8aa9a12c12e1cac8801500f2ca4f")
+    );
+    assert_eq!(
+        blake2sp_of(&[b"abc"]),
+        hex("70f75b58f1fecab821db43c88ad84edde5a52600616cd22517b7bb14d440a7d5")
+    );
+    let mut counting = [0u8; 1024];
+    for (at, byte) in counting.iter_mut().enumerate() {
+        *byte = u8::try_from(at % 256).expect("a byte");
+    }
+    let expected = hex("c9f79171d19c3703b7ebf9f762ce3fd24b302e2281f72da31a65014ff923c859");
+    assert_eq!(blake2sp_of(&[&counting]), expected);
+    assert_eq!(
+        blake2sp_of(&[&counting[..1], &counting[1..513], &counting[513..]]),
+        expected
+    );
+    let mut long = [0u8; 2049];
+    for (at, byte) in long.iter_mut().enumerate() {
+        *byte = u8::try_from((at * 7 + 3) % 256).expect("a byte");
+    }
+    assert_eq!(
+        blake2sp_of(&[&long[..700], &long[700..]]),
+        hex("d1f502b5cccc8d05bd33812a5edca7bae56f6315dbea7cf8fa1f990e4fb9c25a")
+    );
 }

@@ -4,11 +4,14 @@
 //! The caller opens the image and passes the descriptor to `image_attach`
 //! with an [`ImageAttach`]: the catalog name it wants, how the volume is
 //! presented, how writable it is to be, a directory it is also bound at, and
-//! the filesystem it expects. The kernel recognises the file itself
-//! and answers an [`ImageAttachReply`]: the volume it attached, the one the
-//! principal had attached from that file already, or the [`ImageRefusal`]
-//! saying why the file holds nothing it can attach.
+//! the filesystem it expects. An archive is written by replacing its file, so
+//! a writable one also needs the descriptor of the directory holding it and
+//! its name there. The kernel recognises the file itself and answers an
+//! [`ImageAttachReply`]: the volume it attached, the one the principal had
+//! attached from that file already, or the [`ImageRefusal`] saying why the
+//! file holds nothing it can attach.
 
+use crate::fs::is_component;
 use crate::le::exact_len;
 use crate::netattach::{
     check_attach_fields, AttachFrame, AttachReply, Presentation, ATTACH_FLAG_READ_ONLY, ATTACH_MAX,
@@ -21,8 +24,12 @@ use crate::Errno;
 pub const IMAGE_ATTACH_VERSION: u16 = 1;
 
 /// The largest [`ImageAttach`]: the attach frame every attach shares, whose
-/// own word is here the filesystems expected.
+/// own word is here the filesystems expected and whose leaf is the file's
+/// name.
 pub const IMAGE_ATTACH_MAX: usize = ATTACH_MAX;
+
+/// The directory descriptor an `image_attach` passes when it names none.
+pub const IMAGE_NO_DIRECTORY: u32 = u32::MAX;
 
 /// The [`ImageAttach`] flag saying the frame's own word is the
 /// [`VolumeFsTypes`] the file must hold one of.
@@ -92,6 +99,12 @@ pub struct ImageAttach<'a> {
     /// `access` does not accept, such an attach is answered and changes
     /// nothing.
     pub adopt: bool,
+    /// The file's name in the directory whose descriptor the call passes
+    /// beside it, which it must name. An archive's attachment holds both and
+    /// is written by replacing its file under this name, so an archive is
+    /// writable only with them; a disk image is written in place and uses
+    /// neither.
+    pub file_name: Option<&'a str>,
 }
 
 impl<'a> ImageAttach<'a> {
@@ -123,6 +136,7 @@ impl<'a> ImageAttach<'a> {
             own: self.expects.map_or(0, VolumeFsTypes::bits),
             name: self.name.unwrap_or(""),
             target: self.target,
+            leaf: self.file_name.unwrap_or(""),
         }
         .encode(out)
     }
@@ -136,9 +150,9 @@ impl<'a> ImageAttach<'a> {
     /// [`Errno::OutOfRange`] for an unknown presentation, flag or filesystem,
     /// read-only and writable both asked, a claim naming no filesystem,
     /// an owner or mode carried by a presentation that names none, a
-    /// filesystem word with no claim, or a name, mode or target out of shape;
-    /// [`Errno::LengthOutOfRange`] for a frame that does not end where its
-    /// target does.
+    /// filesystem word with no claim, or a name, mode, target or file name out
+    /// of shape; [`Errno::LengthOutOfRange`] for a frame that does not end
+    /// where its file name does.
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
         let frame = AttachFrame::decode(
             bytes,
@@ -166,13 +180,21 @@ impl<'a> ImageAttach<'a> {
             target: frame.target,
             expects,
             adopt: frame.flags & IMAGE_ATTACH_FLAG_ADOPT != 0,
+            file_name: (!frame.leaf.is_empty()).then_some(frame.leaf),
         };
         attach.check()?;
         Ok(attach)
     }
 
-    /// Whether its name, modes and target are each in shape.
+    /// Whether its name, modes, target and file name are each in shape: the
+    /// file name one directory entry's.
     fn check(&self) -> Result<(), Errno> {
+        if self
+            .file_name
+            .is_some_and(|name| !is_component(name.as_bytes()))
+        {
+            return Err(Errno::OutOfRange);
+        }
         check_attach_fields(self.name, self.presentation, self.target)
     }
 }

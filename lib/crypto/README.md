@@ -6,9 +6,11 @@ The single place TAIRiX calls cryptographic code, and the only crate in the
 workspace permitted to name a cryptographic dependency — not in a production
 path, a test, or a build script. Per the charter no cryptographic primitive is
 hand-rolled here: every function is a thin wrapper over a vetted upstream
-implementation, and every upstream crate sits on one generation of the
+implementation, and every upstream crate but one sits on one generation of the
 RustCrypto and dalek-cryptography stacks, so the tree holds a single copy of
-`digest`, `cipher`, and the curve arithmetic rather than two of each. The
+`digest`, `cipher`, and the curve arithmetic rather than two of each. The one
+is `blake2s_simd`, for BLAKE2sp, whose tree mode RustCrypto's `blake2` cannot
+express; it brings no second copy of either. The
 wrappers expose a deliberately *narrower* API than upstream (fixed-size byte
 arrays, no upstream traits) to keep the boundary auditable.
 

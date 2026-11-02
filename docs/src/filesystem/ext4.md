@@ -318,8 +318,8 @@ cryptographic primitive.
   `ext4_dir_entry_tail`, each index block's `dx_tail`, each extent
   block's `ext4_extent_tail`, each attribute block, and each orphan-file
   block.
-- **`gdt_csum`/`uninit_bg`** uses crc16 (reversed polynomial `0xA001`)
-  for the legacy group-descriptor checksum.
+- **`gdt_csum`/`uninit_bg`** uses `lib/crc16` (reversed polynomial
+  `0xA001`), carried from all ones, for the legacy group-descriptor checksum.
 - **`64bit`** descriptors carry the high halves of the bitmap checksums
   and `bg_itable_unused`, which the allocator also maintains.
 

@@ -2,17 +2,16 @@
 //! menu rows, and the answers its workers send back.
 
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuSymbol as S};
 use tairix_colour::Rgba;
 use tairix_controls::{
-    wheel_steps, Keystroke, PickerOutcome, ScrollAction, SwatchAction, SwatchMark, ToolActivation,
-    ToolbarOutcome,
+    wheel_steps, Keystroke, PickerOutcome, ScrollAction, ScrollModel, SwatchAction, SwatchMark,
+    ToolActivation, ToolbarOutcome,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_image::{SpriteMode, SpriteName, SpritePalette};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton};
 use tairix_raster::Color;
 use tairix_theme::Theme;
@@ -24,13 +23,13 @@ use super::adjust::Applying;
 use super::{
     Action, Aim, Clip, Compute, Computed, Draft, Gesture, Lands, MenuKind, Modal, NewPicture,
     Outcome, Own, PaletteEdit, Pending, Request, Settles, Then, View, APP_TITLE, GO_TO_ENTRY,
-    GO_TO_LAYER, RENAME_ENTRY, SPRITE_SIZE,
+    GO_TO_LAYER,
 };
 use crate::brush::{Path, Spray, Tip};
 use crate::canvas::{Canvas, Kind, OutOfMemory, Sample};
 use crate::colour::Ink;
 use crate::dialog::{Answer, Form, Purpose, SaveChoices};
-use crate::document::{free_name, Entry, Layer, Picture, SpriteInfo, NAME_REFUSAL, SPRITE_STEM};
+use crate::document::{Entry, Layer, Picture};
 use crate::history::{Applied, Damage, Unapplied};
 use crate::layout::Layout;
 use crate::mask::{Combine, Mask, Recipe};
@@ -275,6 +274,13 @@ impl View {
             return Some(outcome);
         }
         if let Some(ScrollAction::ScrollTo { offset }) =
+            self.palette_bar
+                .on_pointer(event, layout.palette_bar(), scale, theme, damage)
+        {
+            self.scroll_palette(offset, layout, damage);
+            return Some(Outcome::none());
+        }
+        if let Some(ScrollAction::ScrollTo { offset }) =
             self.vertical
                 .on_pointer(event, layout.vertical_bar(), scale, theme, damage)
         {
@@ -347,27 +353,94 @@ impl View {
         layout: &Layout,
         damage: &mut Region,
     ) -> Option<Outcome> {
-        let middle = matches!(
-            event,
-            InputEvent::PointerPressed {
-                button: PointerButton::Middle
-            }
-        );
-        if middle {
-            if let Some(index) = self.swatches.well_at(layout.swatches(), self.pointer) {
+        let inside = layout.wells_view().contains(self.pointer);
+        // Wells scrolled out of the strip still lie under the pointer, so a
+        // press beside it is none of theirs; a release or a move reaches them
+        // wherever it lands, so one pressed and let go elsewhere is let go.
+        if !inside && matches!(event, InputEvent::PointerPressed { .. }) {
+            return None;
+        }
+        let bounds = self.swatch_bounds(layout);
+        if inside
+            && matches!(
+                event,
+                InputEvent::PointerPressed {
+                    button: PointerButton::Middle
+                }
+            )
+        {
+            if let Some(index) = self.swatches.well_at(bounds, self.pointer) {
                 self.choose_well(SwatchMark::Secondary, index, layout, damage);
                 return Some(Outcome::none());
             }
         }
         match self
             .swatches
-            .on_pointer(event, layout.swatches(), SwatchMark::Primary, damage)
+            .on_pointer(event, bounds, SwatchMark::Primary, damage)
         {
-            Some(SwatchAction::Selected { mark, index }) => {
+            Some(SwatchAction::Selected { mark, index }) if inside => {
                 self.choose_well(mark, index, layout, damage);
                 Some(Outcome::none())
             }
-            None => None,
+            Some(SwatchAction::Selected { .. }) | None => None,
+        }
+    }
+
+    /// The row of wells where each now lies, scrolled along the strip.
+    pub(crate) fn swatch_bounds(&self, layout: &Layout) -> Rect {
+        let offset = self.palette_bar.model().range().offset();
+        let swatches = layout.swatches();
+        Rect::new(
+            swatches
+                .left()
+                .saturating_sub(i32::try_from(offset).unwrap_or(i32::MAX)),
+            swatches.top(),
+            swatches.width,
+            swatches.height,
+        )
+    }
+
+    /// Scroll the row of wells to `offset` along the strip.
+    fn scroll_palette(&mut self, offset: u64, layout: &Layout, damage: &mut Region) {
+        let range = self.palette_bar.model().range().with_offset(offset);
+        self.palette_bar.set_model(ScrollModel::in_pixels(
+            range,
+            u64::from(layout.wells_view().height.max(1)),
+        ));
+        damage.add(layout.palette());
+    }
+
+    /// Bring the strip's bar into line with its row of wells, keeping the
+    /// offset within it.
+    pub(crate) fn settle_palette_bar(&mut self, layout: &Layout, damage: &mut Region) {
+        let range = self.palette_bar.model().range();
+        let fresh = range.resize(
+            u64::from(layout.swatches().width),
+            u64::from(layout.wells_view().width),
+        );
+        if fresh != range {
+            damage.add(layout.palette());
+        }
+        self.palette_bar.set_model(ScrollModel::in_pixels(
+            fresh,
+            u64::from(layout.wells_view().height.max(1)),
+        ));
+    }
+
+    /// Scroll the strip so well `well` shows.
+    fn reveal_well(&mut self, well: usize, layout: &Layout, damage: &mut Region) {
+        let Some(cell) = self.swatches.cell_rect(layout.swatches(), well) else {
+            return;
+        };
+        let start = u64::try_from(cell.left() - layout.swatches().left()).unwrap_or(0);
+        let model = self
+            .palette_bar
+            .model()
+            .revealing(start, u64::from(cell.width));
+        if model.range().offset() != self.palette_bar.model().range().offset() {
+            self.palette_bar.set_model(model);
+            // The bar's thumb moved with the wells.
+            damage.add(layout.palette());
         }
     }
 
@@ -386,16 +459,29 @@ impl View {
             SwatchMark::Primary => self.primary = ink,
             SwatchMark::Secondary => self.secondary = ink,
         }
-        self.inks_changed(layout, damage);
+        self.inks_changed(mark, layout, damage);
     }
 
-    /// The inks changed from outside the dock: show them in the wells, the
-    /// palette's marks and the picker.
-    pub(super) fn inks_changed(&mut self, layout: &Layout, damage: &mut Region) {
+    /// The inks changed, `changed` among them: show them in the wells, the
+    /// palette's marks and the picker, the changed ink's well scrolled into
+    /// the strip.
+    pub(super) fn inks_changed(
+        &mut self,
+        changed: SwatchMark,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
         self.mark_wells();
+        let ink = match changed {
+            SwatchMark::Primary => self.primary,
+            SwatchMark::Secondary => self.secondary,
+        };
+        if let Some(well) = self.wells.iter().position(|&well| well == ink) {
+            self.reveal_well(well, layout, damage);
+        }
         self.sync_picker();
         damage.add(layout.wells());
-        damage.add(layout.swatches());
+        damage.add(layout.wells_view());
         damage.add(layout.picker());
     }
 
@@ -503,7 +589,7 @@ impl View {
     fn release_palette(&mut self, layout: &Layout, damage: &mut Region) {
         if self.swatches.state().focus.focused {
             self.swatches.set_focused(false);
-            damage.add(layout.swatches());
+            damage.add(layout.wells_view());
         }
     }
 
@@ -611,11 +697,11 @@ impl View {
             Keyboard::Picture => true,
             Keyboard::Bar => self.bar.enter_focus(forward, layout.bar(), damage),
             Keyboard::Palette => {
-                if self.swatches.is_empty() || layout.swatches().is_empty() {
+                if self.swatches.is_empty() || layout.wells_view().is_empty() {
                     return false;
                 }
                 self.swatches.set_focused(true);
-                damage.add(layout.swatches());
+                damage.add(layout.wells_view());
                 true
             }
             Keyboard::Dock => {
@@ -658,7 +744,7 @@ impl View {
                 }
                 self.mark_wells();
                 damage.add(layout.wells());
-                damage.add(layout.swatches());
+                damage.add(layout.wells_view());
             }
             (Kind::Indexed { .. }, Ink::Index(entry)) => {
                 self.edit_entry(entry, colour, settled, layout, damage);
@@ -705,7 +791,7 @@ impl View {
         }
         if let Some(well) = self.wells.iter().position(|&ink| ink == Ink::Index(entry)) {
             self.swatches.set_colour(well, Color::from(colour));
-            if let Some(cell) = self.swatches.cell_rect(layout.swatches(), well) {
+            if let Some(cell) = self.swatches.cell_rect(self.swatch_bounds(layout), well) {
                 damage.add(cell);
             }
         }
@@ -783,6 +869,18 @@ impl View {
         if layout.controls().contains(self.pointer) {
             let turned = InputEvent::PointerScrolled { dx, dy };
             self.bar_pointer(&turned, layout, scale, theme, damage);
+            return Outcome::none();
+        }
+        if layout.palette().contains(self.pointer) {
+            // The strip scrolls only sideways, so the wheel's either turn
+            // moves it.
+            let along = if dx == 0 { dy } else { dx };
+            if let Some(ScrollAction::ScrollTo { offset }) =
+                self.palette_bar
+                    .wheel(along, 0, scale, layout.palette_bar(), damage)
+            {
+                self.scroll_palette(offset, layout, damage);
+            }
             return Outcome::none();
         }
         if !layout.canvas().contains(self.pointer) {
@@ -1081,15 +1179,17 @@ impl View {
         } else {
             Ink::of_colour(picture.shown_at((x, y), kind.colour(sample)))
         };
-        if secondary {
+        let changed = if secondary {
             self.secondary = ink;
+            SwatchMark::Secondary
         } else {
             self.primary = ink;
-        }
+            SwatchMark::Primary
+        };
         if let Ink::Colour(colour) = ink {
             self.remember_colour(Rgba::from_array(colour), layout, damage);
         }
-        self.inks_changed(layout, damage);
+        self.inks_changed(changed, layout, damage);
     }
 
     pub(super) fn begin_stroke(
@@ -2083,6 +2183,7 @@ impl View {
             Then::Float(floating) => self.float(floating, layout, damage),
             Then::SaveThenClose => self.save_then_close(layout, damage),
             Then::Enter(id, text) => self.carry_out_entry(id, &text, layout, damage),
+            Then::Close => Outcome::asking(Request::Close),
         }
     }
 
@@ -2265,6 +2366,14 @@ impl View {
     pub fn close_requested(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         self.end_gesture(layout, damage);
         self.commit_text(layout, damage);
+        if self.member.is_some() {
+            // Its sprite is its file's: what floats is put down into it, and
+            // the file window asks about the file.
+            if self.held.is_some() {
+                return self.put_down_then(Then::Close, layout, damage);
+            }
+            return Outcome::asking(Request::Close);
+        }
         if tairix_window::document::SavedDocument::is_modified(self) {
             Outcome::asking(Request::AskToClose)
         } else {
@@ -2330,13 +2439,8 @@ impl View {
                 Ok(shown) => self.reshow_layer(shown, layout, damage),
                 Err(reason) => refused(self, form, &reason),
             },
-            Purpose::NewSprite => match form.new_sprite_answer() {
-                Ok(new) if self.document.names_taken(&new.name, None) => {
-                    refused(self, form, "A sprite of that name is already here")
-                }
-                Ok(new) => self.add_sprite(new, layout, damage),
-                Err(reason) => refused(self, form, &reason),
-            },
+            // A sprite file window's form: no picture window asks it.
+            Purpose::NewSprite => Outcome::none(),
             Purpose::Scale => match form.scale_answer() {
                 Ok(((width, height), smooth)) => self.transform(
                     Transform::Scale {
@@ -2587,40 +2691,6 @@ impl View {
         }
     }
 
-    /// Add the sprite `new` describes after the one showing.
-    fn add_sprite(
-        &mut self,
-        new: crate::dialog::NewSprite,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
-        if !self.idle(layout, damage) {
-            return Outcome::none();
-        }
-        let blank = NewPicture {
-            size: new.size,
-            depth: new.depth,
-            transparent: new.masked,
-        };
-        let Ok(canvas) = blank.canvas() else {
-            self.state("There is not enough memory for the sprite", layout, damage);
-            return Outcome::none();
-        };
-        let mode = match new.depth {
-            Some(depth) => SpriteMode::indexed(depth, new.eig, false),
-            None => SpriteMode::truecolour(new.eig, false),
-        };
-        let sprite = SpriteInfo {
-            name: new.name,
-            mode,
-            palette: SpritePalette::Implied,
-            masked: new.masked,
-        };
-        let mut picture = Picture::plain(canvas);
-        picture.sprite = Some(sprite);
-        self.insert_entry(Entry::Picture(picture), layout, damage)
-    }
-
     /// Show entry `index`: a floating selection was put down before this was
     /// reached.
     fn show(&mut self, index: usize, layout: &Layout, damage: &mut Region) -> Outcome {
@@ -2767,7 +2837,8 @@ impl View {
         damage: &mut Region,
     ) -> Option<Outcome> {
         if let Some(SwatchAction::Selected { mark, index }) =
-            self.swatches.on_key(stroke.key, layout.swatches(), damage)
+            self.swatches
+                .on_key(stroke.key, self.swatch_bounds(layout), damage)
         {
             self.choose_well(mark, index, layout, damage);
             return Some(Outcome::none());
@@ -2847,8 +2918,7 @@ impl View {
         self.end_gesture(layout, damage);
         self.settle_tool(layout, damage);
         let id = id.get();
-        // Renaming touches no pixel, so a floating selection rides it out.
-        if self.held.is_none() || id == RENAME_ENTRY {
+        if self.held.is_none() {
             return self.carry_out_entry(id, text, layout, damage);
         }
         let mut held = String::new();
@@ -2872,69 +2942,23 @@ impl View {
         match id {
             GO_TO_ENTRY => self.go_to(text, layout, damage),
             GO_TO_LAYER => self.go_to_layer(text, layout, damage),
-            RENAME_ENTRY => {
-                self.rename(text, layout, damage);
-                Outcome::none()
-            }
             _ => Outcome::none(),
         }
     }
 
     /// Show the sprite `text` names, or numbers from one.
     fn go_to(&mut self, text: &str, layout: &Layout, damage: &mut Region) -> Outcome {
-        let text = text.trim();
-        let index = SpriteName::new(text)
-            .and_then(|name| self.document.find(&name))
-            .or_else(|| {
-                text.parse::<usize>()
-                    .ok()
-                    .and_then(|number| number.checked_sub(1))
-                    .filter(|&index| index < self.document.entries().len())
-            });
+        let index = text
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .and_then(|number| number.checked_sub(1))
+            .filter(|&index| index < self.document.entries().len());
         if let Some(index) = index {
             return self.show(index, layout, damage);
         }
-        let missing = if self.document.is_pages() {
-            "There is no page of that number"
-        } else {
-            "There is no sprite of that name or number"
-        };
-        self.state(missing, layout, damage);
+        self.state("There is no page of that number", layout, damage);
         Outcome::none()
-    }
-
-    /// Rename the sprite showing `text`.
-    fn rename(&mut self, text: &str, layout: &Layout, damage: &mut Region) {
-        if !self.idle(layout, damage) {
-            return;
-        }
-        let Some(name) = SpriteName::new(text.trim()) else {
-            self.state(NAME_REFUSAL, layout, damage);
-            return;
-        };
-        if self
-            .document
-            .names_taken(&name, Some(self.document.current()))
-        {
-            self.state("A sprite of that name is already here", layout, damage);
-            return;
-        }
-        let Some(picture) = self.document.picture() else {
-            self.state("A kept sprite keeps its name", layout, damage);
-            return;
-        };
-        let sprite = picture.sprite.as_ref().map_or_else(
-            || SpriteInfo::for_canvas(name, picture.canvas()),
-            |sprite| SpriteInfo {
-                name,
-                ..sprite.clone()
-            },
-        );
-        if self.document.set_details(None, Some(sprite)).is_ok() {
-            damage.add(layout.sprite());
-        } else {
-            self.state("There is not enough memory to rename it", layout, damage);
-        }
     }
 
     /// Turn down what the tool is in the middle of — a polygon's corners, a
@@ -3081,7 +3105,7 @@ impl View {
             }
             Action::SwapColours => {
                 core::mem::swap(&mut self.primary, &mut self.secondary);
-                self.inks_changed(layout, damage);
+                self.inks_changed(SwatchMark::Primary, layout, damage);
             }
             Action::PreviousEntry => {
                 let current = self.document.current();
@@ -3094,14 +3118,12 @@ impl View {
             Action::NewEntry if self.document.is_pages() => {
                 self.ask(Form::new_page(self.picture_size()), layout, damage);
             }
-            Action::NewEntry => {
-                let name = SpriteName::new(SPRITE_STEM)
-                    .and_then(|stem| free_name(&stem, self.document.names()))
-                    .map_or_else(String::new, |name| name.to_string());
-                self.ask(Form::new_sprite(&name, SPRITE_SIZE), layout, damage);
+            Action::DuplicateEntry if self.document.is_pages() => {
+                return self.duplicate(layout, damage);
             }
-            Action::DuplicateEntry => return self.duplicate(layout, damage),
-            Action::DeleteEntry => return self.delete_sprite(layout, damage),
+            Action::DeleteEntry if self.document.is_pages() => {
+                return self.delete_page(layout, damage);
+            }
             Action::EntryUp | Action::EntryDown => {
                 let current = self.document.current();
                 let to = if action == Action::EntryUp {
@@ -3151,7 +3173,14 @@ impl View {
             Action::ShowLayer => return self.toggle_layer(layout, damage),
             Action::LayerProperties => return self.ask_layer(layout, damage),
             // Put down before this was reached, which is all the action asks.
-            Action::PutDown | Action::GoTo | Action::GoToLayer | Action::Rename => {}
+            Action::PutDown
+            | Action::GoTo
+            | Action::GoToLayer
+            | Action::Rename
+            | Action::EditEntry
+            | Action::NewEntry
+            | Action::DuplicateEntry
+            | Action::DeleteEntry => {}
             Action::Tool(tool) => return self.choose_tool(tool, layout, damage),
             Action::Adjust(index) => {
                 if let Some(&filter) = crate::filter::Filter::ALL.get(index) {
@@ -3162,6 +3191,7 @@ impl View {
             Action::ResetPanes => return self.reset_panes(layout, damage),
             Action::ResetColours => self.reset_colours(layout, damage),
             Action::PickColour => self.toggle_colour_pick(layout, damage),
+            Action::SpriteFile => return Outcome::asking(Request::Own(Own::ShowSpriteFile)),
         }
         Outcome::none()
     }
@@ -3317,42 +3347,27 @@ impl View {
             return Outcome::none();
         }
         let Entry::Picture(picture) = self.document.entry() else {
-            self.state("A kept sprite cannot be copied", layout, damage);
             return Outcome::none();
         };
-        // Only a sprite has a name, and the copy's must be its own.
-        let name = match &picture.sprite {
-            None => None,
-            Some(sprite) => {
-                let Some(name) = free_name(&sprite.name, self.document.names()) else {
-                    self.state("No name is free for a copy", layout, damage);
-                    return Outcome::none();
-                };
-                Some(name)
-            }
-        };
-        let Ok(mut copy) = picture.try_clone() else {
+        let Ok(copy) = picture.try_clone() else {
             self.state(
-                "There is not enough memory to copy the sprite",
+                "There is not enough memory to copy the page",
                 layout,
                 damage,
             );
             return Outcome::none();
         };
-        if let (Some(sprite), Some(name)) = (copy.sprite.as_mut(), name) {
-            sprite.name = name;
-        }
         self.insert_entry(Entry::Picture(copy), layout, damage)
     }
 
-    fn delete_sprite(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn delete_page(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         if !self.idle(layout, damage) {
             return Outcome::none();
         }
         let current = self.document.current();
         match self.document.remove(current) {
             Ok(()) => {
-                // A selection floating over the sprite goes with it, and only then.
+                // A selection floating over the page goes with it, and only then.
                 self.held = None;
                 self.after_picture_change(layout, damage)
             }
@@ -3427,10 +3442,20 @@ impl View {
         if let Some(adjust) = menu.submenu("Adjust", S::Adjust, Plate::Root) {
             self.adjust_rows(menu, adjust, picture);
         }
-        let pages = self.document.is_pages();
-        let entries_label = if pages { "Pages" } else { "Sprites" };
-        if let Some(entries) = menu.submenu(entries_label, S::Pages, Plate::Root) {
-            self.entry_rows(menu, entries, pages);
+        if self.document.is_pages() {
+            if let Some(pages) = menu.submenu("Pages", S::Pages, Plate::Root) {
+                self.page_rows(menu, pages);
+            }
+        }
+        if self.member.is_some() {
+            menu.item(
+                Action::SpriteFile,
+                S::OpenFolder,
+                "Show sprite file",
+                "",
+                true,
+                Plate::Root,
+            );
         }
         if let Some(view) = menu.submenu("View", S::View, Plate::Root) {
             self.view_rows(menu, view);
@@ -3779,12 +3804,10 @@ impl View {
         );
     }
 
-    /// The sprites' or the pages' rows: a page has no name, so it is gone
-    /// to by number alone and never renamed.
-    fn entry_rows(&self, menu: &mut MenuBuilder, plate: Plate, pages: bool) {
+    /// A TIFF's pages' rows: a page has no name, so it is gone to by number.
+    fn page_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
         let count = self.document.entries().len();
         let current = self.document.current();
-        let many = count > 1;
         menu.item(
             Action::PreviousEntry,
             S::Previous,
@@ -3810,12 +3833,14 @@ impl View {
             plate,
         );
         menu.separator(plate);
-        let new = if pages {
-            "New page\u{2026}"
-        } else {
-            "New sprite\u{2026}"
-        };
-        menu.item(Action::NewEntry, S::NewDocument, new, "", true, plate);
+        menu.item(
+            Action::NewEntry,
+            S::NewDocument,
+            "New page\u{2026}",
+            "",
+            true,
+            plate,
+        );
         menu.item(
             Action::DuplicateEntry,
             S::Duplicate,
@@ -3824,22 +3849,14 @@ impl View {
             self.document.picture().is_some(),
             plate,
         );
-        if !pages {
-            let name = self
-                .document
-                .entry()
-                .name()
-                .map_or_else(String::new, ToString::to_string);
-            menu.entry(
-                Action::Rename,
-                RENAME_ENTRY,
-                S::Rename,
-                "Rename\u{2026}",
-                &name,
-                plate,
-            );
-        }
-        menu.destructive(Action::DeleteEntry, S::Delete, "Delete", "", many, plate);
+        menu.destructive(
+            Action::DeleteEntry,
+            S::Delete,
+            "Delete",
+            "",
+            count > 1,
+            plate,
+        );
         menu.item(
             Action::EntryUp,
             S::MoveUp,

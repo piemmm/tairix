@@ -35,6 +35,11 @@ version = "1.1.4"
 sha256 = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
 
 [[source-pin]]
+name = "arrayvec"
+version = "0.7.8"
+sha256 = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[source-pin]]
 name = "autocfg"
 version = "1.5.1"
 sha256 = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
@@ -53,6 +58,11 @@ sha256 = "144e573728da132683b9488acd528274c790e07fc06ff81ee29f9d8f8b1041e0"
 name = "bitflags"
 version = "2.11.1"
 sha256 = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+
+[[source-pin]]
+name = "blake2s_simd"
+version = "1.0.5"
+sha256 = "2380c0236432f7b22a70229df30f218f5293870c056beb76f5ca068e3273a366"
 
 [[source-pin]]
 name = "block-buffer"
@@ -113,6 +123,11 @@ sha256 = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 name = "const-oid"
 version = "0.10.2"
 sha256 = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[source-pin]]
+name = "constant_time_eq"
+version = "0.4.2"
+sha256 = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[source-pin]]
 name = "cpubits"

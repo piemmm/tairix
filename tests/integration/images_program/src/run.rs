@@ -69,6 +69,18 @@ mod program {
         fn exists(&mut self, path: &str) -> bool {
             File::open(path.as_bytes(), OpenFlags::empty()).is_ok()
         }
+
+        fn attribute(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+            File::open(path.as_bytes(), OpenFlags::empty())
+                .and_then(|file| file.attr_value(key.as_bytes()))
+                .map_err(Errno::from_syscall)
+        }
+
+        fn set_attribute(&mut self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+            File::open(path.as_bytes(), OpenFlags::empty())
+                .and_then(|file| file.attr_set(key.as_bytes(), value))
+                .map_err(Errno::from_syscall)
+        }
     }
 
     /// Report `reason` and park, so the vertical's end, armed on this

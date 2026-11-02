@@ -1,11 +1,13 @@
 //! The system allocator, metered per thread: what a call allocated, the
-//! largest request it made and their sum, the most bytes it held, and the
-//! refusal of every request past a size or past a count — what a host test
+//! largest request it made and their sum, how much of it was asked for
+//! zeroed, the most bytes it held, and the refusal of every request past a
+//! size, past a count or past a budget of bytes held — what a host test
 //! holds an allocation bound or a graceful refusal to.
 //!
 //! A test binary installs it as its global allocator,
 //! `#[global_allocator] static ALLOC: Metered = Metered;`, and measures with
-//! [`metered`], [`refusing_above`] and [`refusing_after`]. Every figure is the calling thread's,
+//! [`metered`], [`refusing_above`], [`refusing_after`] and
+//! [`refusing_past`]. Every figure is the calling thread's,
 //! so neither the harness's own threads nor tests running beside a
 //! measurement charge it. A block is charged to the thread that frees it, so a
 //! measured call that frees what another thread allocated reads as holding
@@ -19,6 +21,9 @@ std::thread_local! {
     // Destructor-free and const-initialised, so reading them never allocates
     // and cannot recurse into the allocator.
     static REFUSE_ABOVE: Cell<usize> = const { Cell::new(usize::MAX) };
+    /// The most bytes the thread may hold inside a [`refusing_past`] window,
+    /// counted as `LIVE` counts them.
+    static HOLD_AT_MOST: Cell<usize> = const { Cell::new(usize::MAX) };
     /// The requests still granted inside a [`refusing_after`] window; none
     /// outside one, where no request spends a grant.
     static GRANTS_LEFT: Cell<Option<usize>> = const { Cell::new(None) };
@@ -26,6 +31,7 @@ std::thread_local! {
     static FREES: Cell<usize> = const { Cell::new(0) };
     static LARGEST: Cell<usize> = const { Cell::new(0) };
     static REQUESTED: Cell<usize> = const { Cell::new(0) };
+    static ZEROED: Cell<usize> = const { Cell::new(0) };
     static LIVE: Cell<usize> = const { Cell::new(0) };
     static PEAK: Cell<usize> = const { Cell::new(0) };
 }
@@ -41,6 +47,9 @@ pub struct Metering {
     pub largest: usize,
     /// Every request's bytes, summed.
     pub requested: usize,
+    /// The bytes of those asked for zeroed: memory an allocator may hand over
+    /// as the kernel mapped it, never writing a page of it.
+    pub zeroed: usize,
     /// The most bytes held at once beyond what the thread held before.
     pub peak: usize,
     /// The bytes still held when `f` returned beyond what the thread held
@@ -55,6 +64,7 @@ pub fn metered<R>(f: impl FnOnce() -> R) -> (R, Metering) {
     FREES.with(|count| count.set(0));
     LARGEST.with(|largest| largest.set(0));
     REQUESTED.with(|requested| requested.set(0));
+    ZEROED.with(|zeroed| zeroed.set(0));
     PEAK.with(|peak| peak.set(before));
     let out = f();
     let metering = Metering {
@@ -62,6 +72,7 @@ pub fn metered<R>(f: impl FnOnce() -> R) -> (R, Metering) {
         frees: FREES.with(Cell::get),
         largest: LARGEST.with(Cell::get),
         requested: REQUESTED.with(Cell::get),
+        zeroed: ZEROED.with(Cell::get),
         peak: PEAK.with(Cell::get).saturating_sub(before),
         retained: LIVE.with(Cell::get).saturating_sub(before),
     };
@@ -87,6 +98,18 @@ pub fn refusing_after<R>(granted: usize, f: impl FnOnce() -> R) -> R {
     out
 }
 
+/// Run `f` with every request refused on the calling thread that would
+/// leave it holding more than `bytes` beyond what it held as `f` began, as a
+/// heap with that much room refuses it: what the thread frees inside `f`
+/// makes room again.
+pub fn refusing_past<R>(bytes: usize, f: impl FnOnce() -> R) -> R {
+    let limit = LIVE.with(Cell::get).saturating_add(bytes);
+    let previous = HOLD_AT_MOST.with(|most| most.replace(limit));
+    let out = f();
+    HOLD_AT_MOST.with(|limit| limit.set(previous));
+    out
+}
+
 /// The metered system allocator. Install it as a test binary's
 /// `#[global_allocator]`.
 pub struct Metered;
@@ -96,6 +119,13 @@ pub struct Metered;
 fn refused(size: usize) -> bool {
     if REFUSE_ABOVE
         .try_with(|limit| size > limit.get())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let held = LIVE.try_with(Cell::get).unwrap_or(0);
+    if HOLD_AT_MOST
+        .try_with(|limit| held.saturating_add(size) > limit.get())
         .unwrap_or(false)
     {
         return true;
@@ -148,6 +178,7 @@ unsafe impl GlobalAlloc for Metered {
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         requested(layout.size());
+        let _ = ZEROED.try_with(|zeroed| zeroed.set(zeroed.get().saturating_add(layout.size())));
         if refused(layout.size()) {
             return core::ptr::null_mut();
         }
@@ -185,7 +216,7 @@ unsafe impl GlobalAlloc for Metered {
 
 #[cfg(test)]
 mod tests {
-    use super::{metered, refusing_above, refusing_after, Metered};
+    use super::{metered, refusing_above, refusing_after, refusing_past, Metered};
 
     #[global_allocator]
     static ALLOC: Metered = Metered;
@@ -247,6 +278,37 @@ mod tests {
             sized_out,
             (false, true),
             "a request refused for its size spends no grant"
+        );
+    }
+
+    /// A zeroed request is counted as such; one filled after it is plain.
+    #[test]
+    fn requests_asked_for_zeroed_are_counted_apart() {
+        let ((), metering) = metered(|| {
+            drop(std::vec![0u8; 4096]);
+            let mut filled = std::vec::Vec::<u8>::new();
+            filled.try_reserve_exact(512).ok();
+            filled.resize(512, 0);
+        });
+        assert_eq!(metering.requested, 4096 + 512);
+        assert_eq!(metering.zeroed, 4096);
+    }
+
+    /// A request past the budget is refused while the thread holds what
+    /// fills it, and granted once it lets that go.
+    #[test]
+    fn a_request_past_the_budget_held_is_refused_until_room_is_made() {
+        let held = std::vec![0u8; 4096];
+        let answers = refusing_past(2048, || {
+            let crowded = std::vec::Vec::<u8>::new().try_reserve_exact(4096).is_ok();
+            drop(held);
+            let roomy = std::vec::Vec::<u8>::new().try_reserve_exact(4096).is_ok();
+            (crowded, roomy)
+        });
+        assert_eq!(answers, (false, true));
+        assert!(
+            std::vec::Vec::<u8>::new().try_reserve_exact(8192).is_ok(),
+            "the budget lifts"
         );
     }
 

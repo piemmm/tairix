@@ -211,6 +211,18 @@ Every master is drawn the same way, so the family reads as one:
   a page of text with the Archimedes A in its background — a white-edged
   yellow sail rising from the page's foot to a pole beneath the fold, a red
   pennant at its peak — and its kind at the head: `*`, `APP`, `UTIL`, `MOD`.
+  The rest of RISC OS's own types carry no Acorn mark: Data is a page of
+  hexadecimal byte pairs, Command a command line's `*` prompt and cursor,
+  Desktop a small desktop of windows over an icon bar, and Squash a page of
+  text pressed between two jaws.
+- **Archives** share one drawing, a sheet held by a zip down its middle, the
+  slider part way open, labelled by format (`ZIP`, `TAR`, `GZ`, `BZ2`, `XZ`,
+  `ZST`, `7Z`, `RAR`, `JAR`, `SPK`, `ARC`), and unlabelled for RISC OS's
+  Archive type (&DDC), whose format only its contents say
+  (`icons/families.rs`).
+- **Sound, video and pictures** of no format with a master of their own draw a
+  waveform, a frame of film with a play mark, and a photograph; CSV draws a
+  table under its badge, and a makefile its rules under `$@`.
 
 The drawing works at four times the master's size on a float canvas: every
 shape is filled at exact coverage by the one scan converter (`lib/raster`),
@@ -219,7 +231,7 @@ lettering is set from the faces the tree ships (Inter, Noto Serif) through
 far as the blur can reach, and the canvas is area-averaged down to the
 256-pixel master. Only IEEE arithmetic and `tairix_util::mathf` are used, so a
 master is the same bytes on every host. A new type is an `IconKind`, a drawing
-in `icons/masters.rs` and its row in `MASTERS`; the generator's tests hold
+in `icons/masters.rs` or `icons/families.rs` and its row in `MASTERS`; the generator's tests hold
 every drawing to the build's own check of an icon master.
 
 ## In the taskbar

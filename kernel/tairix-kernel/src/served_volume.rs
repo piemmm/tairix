@@ -6,7 +6,8 @@
 //! device, behind the uncommitted-write journal, so every block the driver
 //! writes reaches the journal exactly as an in-kernel driver's does and an
 //! unplug or a re-insert treats it the same way; or the disk-image file an
-//! image volume is held in.
+//! image volume is held in; or an archive attachment's file and work files,
+//! read and written by byte (`plans/ARCHIVES.md` §2).
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +15,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use alloc::sync::Arc;
 
 use tairix_abi::driver::block::{Block, DiscardCapability};
-use tairix_abi::volume::{VolumeCtl, VolumeCtlOp, VolumeInfo};
+use tairix_abi::volume::{ArchiveName, VolumeCtl, VolumeInfo};
 use tairix_abi::{DriverError, Errno};
 use tairix_kernel_core::fs::served::ServerActivity;
 use tairix_kernel_core::fs::{ChunkSink, ChunkSource};
@@ -27,7 +28,7 @@ use crate::volume_service::VolumeWindow;
 const BOUNCE_LEN: usize = 64 * 1024;
 
 /// A served volume as its grant reaches it, whatever keeps its blocks: a
-/// device's extent or a disk-image file.
+/// device's extent, a disk-image file, or an archive attachment.
 pub(crate) trait Granted: Send + Sync {
     /// The id its grant names.
     fn id(&self) -> u64;
@@ -40,14 +41,120 @@ pub(crate) trait Granted: Send + Sync {
     /// chunk at its offset into the transfer.
     fn write(&self, lba: u64, len: usize, fill: &mut ChunkSource<'_>) -> Result<(), Errno>;
 
-    /// Describe, flush or discard the volume.
+    /// Describe, flush, discard, copy within, truncate or commit the volume.
     fn ctl(&self, ctl: &VolumeCtl) -> Result<Option<VolumeInfo>, Errno>;
+
+    /// Read up to `len` bytes at `offset` of an archive attachment's region
+    /// `region`, handing `deliver` each chunk at its offset into the
+    /// transfer, answering how many it read.
+    fn archive_read(
+        &self,
+        region: u8,
+        offset: u64,
+        len: usize,
+        deliver: &mut ChunkSink<'_>,
+    ) -> Result<usize, Errno>;
+
+    /// Write `len` bytes at `offset` of an archive attachment's work file
+    /// `region`, `fill` supplying each chunk at its offset into the transfer.
+    fn archive_write(
+        &self,
+        region: u8,
+        offset: u64,
+        len: usize,
+        fill: &mut ChunkSource<'_>,
+    ) -> Result<(), Errno>;
 }
+
+/// What a served volume's window is beyond its blocks: for an archive
+/// attachment, its exact length and its regions, read and written by byte.
+/// Every operation a window of whole blocks lacks is refused
+/// [`Errno::NotSupported`].
+pub(crate) trait Window: Block {
+    /// The bytes the volume holds where they are not its whole blocks.
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
+
+    /// How many work files the attachment has.
+    fn work_files(&self) -> u8 {
+        0
+    }
+
+    /// The name of the file an archive was attached from.
+    fn archive_name(&self) -> Option<ArchiveName> {
+        None
+    }
+
+    /// Read up to `buf.len()` bytes at `offset` of region `region`,
+    /// answering how many: fewer only where the region ends.
+    fn region_read(&mut self, _region: u8, _offset: u64, _buf: &mut [u8]) -> Result<usize, Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    /// Write `data` at `offset` of work file `region`.
+    fn region_write(&mut self, _region: u8, _offset: u64, _data: &[u8]) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    /// Cut work file `region` to `len` bytes, never past its length.
+    fn region_truncate(&mut self, _region: u8, _len: u64) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    /// The length of region `region`.
+    fn region_len(&self, _region: u8) -> Result<u64, Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    /// Make the next-archive work file, cut to `len` bytes, the archive.
+    fn commit(&mut self, _len: u64) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    /// Let the volume's work files go uncommitted, where parking is allowed:
+    /// as it leaves service, or as a driver serves it in place of one lost.
+    fn discard_work(&mut self) {}
+}
+
+impl Window for VolumeWindow {}
 
 /// The volume's window and the buffer its transfers are staged in.
 struct Disk<W> {
     window: W,
     bounce: Vec<u8>,
+}
+
+impl<W: Window> Disk<W> {
+    /// Copy `len` bytes of region `from` at `from_offset` to work file `to`
+    /// at `to_offset`, through the staging buffer; a range past the source's
+    /// end is refused before anything is written.
+    fn copy(
+        &mut self,
+        (from, from_offset): (u8, u64),
+        (to, to_offset): (u8, u64),
+        len: u64,
+    ) -> Result<(), Errno> {
+        let end = from_offset
+            .checked_add(len)
+            .ok_or(Errno::LengthOutOfRange)?;
+        to_offset.checked_add(len).ok_or(Errno::LengthOutOfRange)?;
+        if end > self.window.region_len(from)? {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut done = 0;
+        while done < len {
+            let step = usize::try_from(len - done).map_or(BOUNCE_LEN, |left| left.min(BOUNCE_LEN));
+            let chunk = &mut self.bounce[..step];
+            if self.window.region_read(from, from_offset + done, chunk)? != step {
+                // The source shrank under the copy.
+                return Err(Errno::DeviceFault);
+            }
+            self.window.region_write(to, to_offset + done, chunk)?;
+            done += step as u64;
+        }
+        Ok(())
+    }
 }
 
 /// One volume a driver serves.
@@ -57,6 +164,8 @@ struct Disk<W> {
 /// until it ends.
 pub(crate) struct ServedVolume<W = VolumeWindow> {
     id: u64,
+    /// The block size and what the device can discard, which never change;
+    /// the rest of a description is read from the window as it answers.
     info: VolumeInfo,
     /// Whole blocks of the staging buffer: what one step of a transfer moves.
     chunk: usize,
@@ -69,7 +178,7 @@ pub(crate) struct ServedVolume<W = VolumeWindow> {
     disk: SleepLock<Disk<W>>,
 }
 
-impl<W: Block> ServedVolume<W> {
+impl<W: Window> ServedVolume<W> {
     /// The volume `id` names, over `window`, refusing writes when
     /// `read_only`.
     ///
@@ -93,6 +202,9 @@ impl<W: Block> ServedVolume<W> {
                 .unwrap_or_else(|_| DiscardCapability::unsupported()),
             disc_layout: window.disc_layout(),
             medium: window.medium(),
+            byte_len: 0,
+            work_files: window.work_files(),
+            archive_name: window.archive_name(),
         };
         let mut bounce = Vec::new();
         bounce
@@ -139,10 +251,35 @@ impl<W: Block> ServedVolume<W> {
         self.retired.store(true, Ordering::Release);
     }
 
+    /// Let its window's work files go uncommitted. Parks on the disk, so only
+    /// a path that may park calls it.
+    pub(crate) fn discard_work(&self) {
+        self.disk.lock().window.discard_work();
+    }
+
+    /// The volume as its window describes it now: an archive's commit changes
+    /// its length.
+    fn described(&self, window: &W) -> Result<VolumeInfo, Errno> {
+        let geometry = window.geometry().map_err(DriverError::as_errno)?;
+        let whole = u64::from(geometry.block_size)
+            .checked_mul(geometry.block_count)
+            .ok_or(Errno::OutOfRange)?;
+        Ok(VolumeInfo {
+            block_count: geometry.block_count,
+            read_only: self.read_only(),
+            byte_len: window.byte_len().unwrap_or(whole),
+            ..self.info
+        })
+    }
+
     /// Refuse a range of `blocks` from `lba` that runs past the volume.
-    fn within(&self, lba: u64, blocks: u64) -> Result<(), Errno> {
+    fn within(window: &W, lba: u64, blocks: u64) -> Result<(), Errno> {
+        let count = window
+            .geometry()
+            .map_err(DriverError::as_errno)?
+            .block_count;
         match lba.checked_add(blocks) {
-            Some(end) if blocks > 0 && end <= self.info.block_count => Ok(()),
+            Some(end) if blocks > 0 && end <= count => Ok(()),
             _ => Err(Errno::LengthOutOfRange),
         }
     }
@@ -156,6 +293,21 @@ impl<W: Block> ServedVolume<W> {
             return Err(Errno::DeviceOffline);
         }
         op(&mut disk)
+    }
+
+    /// As [`Self::with_disk`], for an operation that writes: refused once
+    /// the volume takes no writes, judged under the disk so a refusal settles
+    /// every write either side of it.
+    fn with_disk_writing<T>(
+        &self,
+        op: impl FnOnce(&mut Disk<W>) -> Result<T, Errno>,
+    ) -> Result<T, Errno> {
+        self.with_disk(|disk| {
+            if self.read_only() {
+                return Err(Errno::ReadOnly);
+            }
+            op(disk)
+        })
     }
 
     /// Move `len` bytes of whole blocks from `lba` a staged chunk at a time,
@@ -172,13 +324,8 @@ impl<W: Block> ServedVolume<W> {
         if len == 0 || !len.is_multiple_of(block) {
             return Err(Errno::LengthOutOfRange);
         }
-        self.within(lba, (len / block) as u64)?;
-        self.with_disk(|disk| {
-            // Judged under the disk, so a refusal of writes settles every
-            // transfer either side of it.
-            if writes && self.read_only() {
-                return Err(Errno::ReadOnly);
-            }
+        let moved = |disk: &mut Disk<W>| {
+            Self::within(&disk.window, lba, (len / block) as u64)?;
             let mut offset = 0;
             while offset < len {
                 let bytes = self.chunk.min(len - offset);
@@ -186,11 +333,16 @@ impl<W: Block> ServedVolume<W> {
                 offset += bytes;
             }
             Ok(())
-        })
+        };
+        if writes {
+            self.with_disk_writing(moved)
+        } else {
+            self.with_disk(moved)
+        }
     }
 }
 
-impl<W: Block + Send> Granted for ServedVolume<W> {
+impl<W: Window + Send> Granted for ServedVolume<W> {
     fn id(&self) -> u64 {
         self.id
     }
@@ -216,30 +368,93 @@ impl<W: Block + Send> Granted for ServedVolume<W> {
     }
 
     fn ctl(&self, ctl: &VolumeCtl) -> Result<Option<VolumeInfo>, Errno> {
-        match ctl.op {
-            VolumeCtlOp::Info => Ok(Some(VolumeInfo {
-                read_only: self.read_only(),
-                ..self.info
-            })),
-            VolumeCtlOp::Flush => self
+        match *ctl {
+            VolumeCtl::Info => self
+                .with_disk(|disk| self.described(&disk.window))
+                .map(Some),
+            VolumeCtl::Flush => self
                 .with_disk(|disk| match disk.window.flush() {
                     Ok(()) | Err(DriverError::Unsupported) => Ok(()),
                     Err(err) => Err(err.as_errno()),
                 })
                 .map(|()| None),
-            VolumeCtlOp::Discard => {
-                self.within(ctl.lba, ctl.blocks)?;
-                self.with_disk(|disk| {
-                    if self.read_only() {
-                        return Err(Errno::ReadOnly);
-                    }
+            VolumeCtl::Discard { lba, blocks } => self
+                .with_disk_writing(|disk| {
+                    Self::within(&disk.window, lba, blocks)?;
                     disk.window
-                        .discard(ctl.lba, ctl.blocks)
+                        .discard(lba, blocks)
                         .map_err(DriverError::as_errno)
                 })
-                .map(|()| None)
-            }
+                .map(|()| None),
+            VolumeCtl::Copy {
+                from,
+                from_offset,
+                to,
+                to_offset,
+                len,
+            } => self
+                .with_disk_writing(|disk| disk.copy((from, from_offset), (to, to_offset), len))
+                .map(|()| None),
+            VolumeCtl::Truncate { region, len } => self
+                .with_disk_writing(|disk| disk.window.region_truncate(region, len))
+                .map(|()| None),
+            VolumeCtl::Commit { len } => self
+                .with_disk_writing(|disk| disk.window.commit(len))
+                .map(|()| None),
         }
+    }
+
+    fn archive_read(
+        &self,
+        region: u8,
+        offset: u64,
+        len: usize,
+        deliver: &mut ChunkSink<'_>,
+    ) -> Result<usize, Errno> {
+        self.with_disk(|disk| {
+            let mut done = 0;
+            while done < len {
+                let ask = BOUNCE_LEN.min(len - done);
+                let at = offset
+                    .checked_add(done as u64)
+                    .ok_or(Errno::LengthOutOfRange)?;
+                let chunk = &mut disk.bounce[..ask];
+                let got = disk.window.region_read(region, at, chunk)?;
+                if got == 0 {
+                    break;
+                }
+                deliver(done, &chunk[..got])?;
+                done += got;
+                if got < ask {
+                    break;
+                }
+            }
+            Ok(done)
+        })
+    }
+
+    fn archive_write(
+        &self,
+        region: u8,
+        offset: u64,
+        len: usize,
+        fill: &mut ChunkSource<'_>,
+    ) -> Result<(), Errno> {
+        offset
+            .checked_add(len as u64)
+            .ok_or(Errno::LengthOutOfRange)?;
+        self.with_disk_writing(|disk| {
+            let mut done = 0;
+            while done < len {
+                let step = BOUNCE_LEN.min(len - done);
+                let chunk = &mut disk.bounce[..step];
+                fill(done, chunk)?;
+                disk.window
+                    .region_write(region, offset + done as u64, chunk)?;
+                done += step;
+            }
+            Ok(())
+        })
     }
 }
 

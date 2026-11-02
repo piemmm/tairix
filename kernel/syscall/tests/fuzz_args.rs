@@ -1214,6 +1214,7 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    #[allow(clippy::too_many_arguments)] // Matches the trait declaration's justified count.
     fn image_attach(
         &self,
         _c: &CallerContext<'_>,
@@ -1222,6 +1223,31 @@ impl SyscallHandlers for AcceptingHandlers {
         _frame_len: usize,
         _reply: u64,
         _reply_cap: usize,
+        _dir: u32,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn archive_read(
+        &self,
+        _c: &CallerContext<'_>,
+        _volume: u64,
+        _region: u32,
+        _offset: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn archive_write(
+        &self,
+        _c: &CallerContext<'_>,
+        _volume: u64,
+        _region: u32,
+        _offset: u64,
+        _buf: u64,
+        _len: usize,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

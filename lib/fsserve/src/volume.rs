@@ -1,14 +1,16 @@
 //! The volume a served driver reaches through its grant, as the block device
-//! its format is opened over.
+//! its format is opened over, and for an archive the regions it reads and
+//! writes by byte.
 
 use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscLayout, DiscardCapability};
 use tairix_abi::driver::BufferClass;
-use tairix_abi::volume::{VolumeCtl, VolumeCtlOp, VolumeInfo, VOLUME_IO_MAX};
+use tairix_abi::volume::{VolumeCtl, VolumeInfo, VOLUME_IO_MAX};
 use tairix_abi::{DriverError, Errno};
 
 /// The kernel's operations on the one volume a driver's grant names: the
-/// `volume_read`, `volume_write` and `volume_ctl` calls.
+/// `volume_read`, `volume_write`, `volume_ctl`, `archive_read` and
+/// `archive_write` calls.
 pub trait VolumeAccess {
     /// Read whole blocks from `lba` into `buf`, at most [`VOLUME_IO_MAX`]
     /// bytes of them.
@@ -26,13 +28,30 @@ pub trait VolumeAccess {
     /// The kernel's refusal.
     fn write(&self, lba: u64, buf: &[u8]) -> Result<(), Errno>;
 
-    /// Describe, flush or discard the volume; a description answers
-    /// [`Some`].
+    /// Describe, flush, discard, copy within, truncate or commit the volume;
+    /// a description answers [`Some`].
     ///
     /// # Errors
     ///
     /// The kernel's refusal.
     fn ctl(&self, ctl: &VolumeCtl) -> Result<Option<VolumeInfo>, Errno>;
+
+    /// Read up to `buf.len()` bytes, at most [`VOLUME_IO_MAX`], at `offset`
+    /// of an archive attachment's region `region`, answering how many: fewer
+    /// only where the region ends.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal.
+    fn region_read(&self, region: u8, offset: u64, buf: &mut [u8]) -> Result<usize, Errno>;
+
+    /// Write `buf`, at most [`VOLUME_IO_MAX`] bytes, at `offset` of an archive
+    /// attachment's work file `region`.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal.
+    fn region_write(&self, region: u8, offset: u64, buf: &[u8]) -> Result<(), Errno>;
 }
 
 /// The granted volume as a block device.
@@ -52,11 +71,7 @@ impl<A: VolumeAccess> GrantedVolume<A> {
     /// that is no description.
     pub fn open(access: A) -> Result<Self, DriverError> {
         let info = access
-            .ctl(&VolumeCtl {
-                op: VolumeCtlOp::Info,
-                lba: 0,
-                blocks: 0,
-            })
+            .ctl(&VolumeCtl::Info)
             .map_err(DriverError::from_errno)?
             .ok_or(DriverError::DeviceFault)?;
         let block = usize::try_from(info.block_size).map_err(|_| DriverError::DeviceFault)?;
@@ -75,6 +90,13 @@ impl<A: VolumeAccess> GrantedVolume<A> {
     #[must_use]
     pub const fn info(&self) -> &VolumeInfo {
         &self.info
+    }
+
+    /// The kernel's calls on the volume, for what a block device does not
+    /// say: an archive's regions.
+    #[must_use]
+    pub fn into_access(self) -> A {
+        self.access
     }
 
     /// Run `op` over `len` bytes from `lba` a call's worth at a time, handing
@@ -98,9 +120,9 @@ impl<A: VolumeAccess> GrantedVolume<A> {
         Ok(())
     }
 
-    fn ctl(&self, op: VolumeCtlOp, lba: u64, blocks: u64) -> Result<(), DriverError> {
+    fn ctl(&self, ctl: &VolumeCtl) -> Result<(), DriverError> {
         self.access
-            .ctl(&VolumeCtl { op, lba, blocks })
+            .ctl(ctl)
             .map(|_| ())
             .map_err(DriverError::from_errno)
     }
@@ -126,7 +148,7 @@ impl<A: VolumeAccess> Block for GrantedVolume<A> {
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
-        self.ctl(VolumeCtlOp::Flush, 0, 0)
+        self.ctl(&VolumeCtl::Flush)
     }
 
     // The kernel stages a served volume's transfers in buffers of its own,
@@ -160,7 +182,7 @@ impl<A: VolumeAccess> Block for GrantedVolume<A> {
     }
 
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
-        self.ctl(VolumeCtlOp::Discard, lba, blocks)
+        self.ctl(&VolumeCtl::Discard { lba, blocks })
     }
 
     fn medium(&self) -> Option<BlkMedium> {

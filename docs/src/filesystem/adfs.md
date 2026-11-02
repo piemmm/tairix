@@ -146,12 +146,17 @@ RISC OS separates a path with `.` and writes the dot of a name from elsewhere
 as `/`, the reverse of TAIRiX, so every name crosses the driver with the two
 exchanged (`tairix_fsmeta::preset::acorn::crossed_name_byte`): a RISC OS
 `ReadMe/txt` is listed and found as `ReadMe.txt`, and `notes.txt` is written
-`notes/txt`. A name holding a slash is refused, since it would reach the disc as
-a separator, as are a space, any byte outside printable ASCII and RISC OS's own
-specials (`$ & % @ \ ^ : # * " |`). An entry on the disc no path can spell —
-RISC OS's `/` or `//`, which cross to `.` and `..`, or a name holding the `.`
-RISC OS keeps out — is left out of a listing rather than refusing the
-directory.
+`notes/txt`. A name's characters cross between UTF-8 and RISC OS's Latin-1 —
+ISO 8859-1 with RISC OS's own characters in `0x80`–`0x9F` — through
+`acorn::name_byte` and `acorn::name_char`. A big directory keeps the whole of
+that Latin-1; a fixed-format one keeps seven bits, so there a name is held to
+printable ASCII. A name holding a slash is refused, since it would reach the
+disc as a separator, as are a space, a character the directory cannot hold,
+and RISC OS's own specials (`$ & % @ \ ^ : # * " |`). An entry on the disc no
+path can spell — RISC OS's `/` or `//`, which cross to `.` and `..`, a name
+holding the `.` RISC OS keeps out, or a control code — is left out of a
+listing rather than refusing the directory; a lookup of a name RISC OS cannot
+spell finds nothing.
 
 Names match ignoring ASCII case, and the driver declares that rule to the VFS.
 A rename to a case variant of an entry's own name re-spells it where it stands

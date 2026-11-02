@@ -47,10 +47,20 @@ colores, el color n es el color Wimp n; con 2 colores, los colores Wimp 0 y
 disposición de tintes de RISC OS — nunca una paleta de PC. Un sprite cuyos
 píxeles son más altos que anchos, como en el modo 12, se muestra así. Un
 sprite que este editor no puede leer, como uno CMYK, se conserva tal cual y
-se vuelve a escribir sin cambios. El menú Sprites va a sprites, los añade,
-copia, renombra, elimina y reordena. Un TIFF guarda cualquier número de
+se vuelve a escribir sin cambios. Un TIFF guarda cualquier número de
 páginas, y para él el menú Páginas va a páginas, las añade, copia, elimina y
 reordena.
+
+Un archivo de sprites se abre en una ventanita con sus sprites, cada uno
+mostrado como una imagen encima de su nombre. Los sprites se eligen
+pulsándolos, con Ctrl para añadir uno y Mayús para una serie; el menú de la
+ventana los crea, renombra, copia, elimina y reordena, y guarda el archivo.
+Con un doble clic en un sprite, o con Intro, se edita en una ventana propia;
+puede haber cualquier número de sprites abiertos a la vez, de cualquier
+número de archivos. Los cambios de una ventana de sprite son de su archivo
+en cuanto se hacen, y guardar desde ella guarda el archivo. Cerrar una
+ventana de sprite no pregunta nada; cerrar la ventana del archivo pregunta
+si guardar los cambios de cada sprite, y cierra también sus ventanas.
 
 El botón principal (izquierdo) pinta con el color principal y el botón
 central con el color secundario; manteniendo Alt se toma un color en su
@@ -63,8 +73,9 @@ dureza, la opacidad, el flujo y el espaciado de un pincel, la tolerancia de
 un relleno, la forma de un degradado, el tamaño del texto, las esquinas de un
 rectángulo — tecleados o ajustados con las flechas, y los botones que amplían
 y muestran la cuadrícula de píxeles; la tira de paleta bajo la imagen guarda
-la paleta de la imagen, o los colores del escritorio. El aerógrafo sigue
-rociando mientras se mantiene quieto. Manteniendo Mayús se dibuja un
+la paleta de la imagen, o los colores del escritorio, en una sola fila que
+se desplaza lateralmente cuando es más larga que la ventana. El aerógrafo
+sigue rociando mientras se mantiene quieto. Manteniendo Mayús se dibuja un
 cuadrado, un círculo o una línea en un múltiplo de 45 grados.
 
 A ambos lados de la ventana corren paneles: de forma predeterminada el panel
@@ -160,7 +171,7 @@ hostil no puede tocar nada de lo que alcanza el programa.
 Pulsar el botón secundario (derecho) del ratón en cualquier parte de la
 ventana abre su menú: Cortar, Copiar, Pegar, Seleccionar todo y
 Deseleccionar, y después Archivo, Edición, Imagen, Capas, Colores, Ajustes,
-Sprites o Páginas, Ver y Herramientas, cada uno con su propio submenú. La
+Páginas para un TIFF, Ver y Herramientas, cada uno con su propio submenú. La
 ventana no tiene barra de menús. Cerrar una ventana o salir con cambios sin
 guardar pregunta primero. Cerrar una ventana pulsando su botón de cierre con
 el botón secundario (derecho) muestra además su archivo en el gestor de
@@ -190,7 +201,8 @@ archivos, en la carpeta que lo contiene.
 * Pellizcar con dos dedos — acercar o alejar con suavidad; en una pantalla táctil la imagen sigue a los dedos
 * `G` — mostrar u ocultar la cuadrícula entre píxeles
 * `Ctrl+'` — mostrar u ocultar la cuadrícula
-* `Page Up` / `Page Down` — el sprite o la página anterior o siguiente
+* `Page Up` / `Page Down` — la página anterior o siguiente
+* En la ventana de un archivo de sprites: teclas de flecha, `Home` y `End` — elegir un sprite; `Enter` — editar los sprites elegidos; `Delete` — eliminarlos
 * teclas de flecha — mover una selección flotante un píxel; con `Shift`, diez; en la tira de paleta, recorrer sus colores
 
 ## OPTIONS

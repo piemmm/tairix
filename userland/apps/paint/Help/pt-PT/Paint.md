@@ -47,10 +47,20 @@ cores Wimp 0, 2, 4 e 7; com 256 cores, a disposição de tons do RISC OS —
 nunca uma paleta de PC. Um sprite cujos píxeis são mais altos do que largos,
 como no modo 12, é mostrado assim. Um sprite que este editor não consegue
 ler, como um CMYK, é mantido exatamente como estava e escrito de volta sem
-alterações. O menu Sprites vai para sprites, acrescenta-os, copia-os,
-muda-lhes o nome, elimina-os e reordena-os. Um TIFF guarda qualquer número
-de páginas, e para ele o menu Páginas vai para páginas, acrescenta-as,
-copia-as, elimina-as e reordena-as.
+alterações. Um TIFF guarda qualquer número de páginas, e para ele o menu
+Páginas vai para páginas, acrescenta-as, copia-as, elimina-as e reordena-as.
+
+Um ficheiro de sprites abre numa pequena janela com os seus sprites, cada um
+mostrado como uma imagem por cima do seu nome. Escolhem-se sprites
+premindo-os, com Ctrl para acrescentar um e Shift para uma sequência; o menu
+da janela cria-os, muda-lhes o nome, copia-os, elimina-os e reordena-os, e
+guarda o ficheiro. Com um duplo clique num sprite, ou com Enter, edita-se
+numa janela própria; pode haver qualquer número de sprites abertos ao mesmo
+tempo, de qualquer número de ficheiros. As alterações de uma janela de
+sprite são do seu ficheiro logo que são feitas, e guardar aí guarda o
+ficheiro. Fechar uma janela de sprite não pergunta nada; fechar a janela do
+ficheiro pergunta se as alterações de cada sprite devem ser guardadas, e
+fecha também as respetivas janelas.
 
 O botão principal (esquerdo) pinta com a cor principal e o botão do meio
 com a cor secundária; mantendo Alt premido apanha-se antes uma cor, tal como
@@ -63,9 +73,10 @@ o espaçamento de um pincel, a tolerância de um preenchimento, a forma de um
 gradiente, o tamanho do texto, os cantos de um retângulo — escritas ou
 ajustadas com as setas, e os botões que ampliam e mostram a grelha de píxeis;
 a faixa da paleta sob a imagem guarda a paleta da imagem, ou as cores do
-ambiente de trabalho. O aerógrafo continua a pulverizar enquanto é mantido
-parado. Mantendo Shift premido desenha-se um quadrado, um círculo ou uma
-linha num múltiplo de 45 graus.
+ambiente de trabalho, numa só fila que se desloca lateralmente quando é mais
+comprida do que a janela. O aerógrafo continua a pulverizar enquanto é
+mantido parado. Mantendo Shift premido desenha-se um quadrado, um círculo ou
+uma linha num múltiplo de 45 graus.
 
 Ao longo dos dois lados da janela correm painéis: por omissão o painel
 Ferramentas à esquerda e o painel Cor à direita, com o painel Ajuste por baixo
@@ -156,8 +167,8 @@ hostil não consegue tocar em nada do que o programa alcança.
 
 Premir o botão secundário (direito) do rato em qualquer ponto da janela abre
 o seu menu: Cortar, Copiar, Colar, Selecionar tudo e Desselecionar, e depois
-Ficheiro, Editar, Imagem, Camadas, Cores, Ajustes, Sprites ou Páginas, Ver e
-Ferramentas, cada um com o seu próprio submenu. A janela não tem barra de
+Ficheiro, Editar, Imagem, Camadas, Cores, Ajustes, Páginas para um TIFF, Ver
+e Ferramentas, cada um com o seu próprio submenu. A janela não tem barra de
 menus. Fechar uma janela ou sair com alterações por guardar pergunta
 primeiro. Fechar uma janela com o botão secundário (direito) sobre o seu
 botão de fechar também mostra o seu ficheiro no gestor de ficheiros, na
@@ -187,7 +198,8 @@ pasta que o contém.
 * Beliscar com dois dedos — ampliar ou reduzir suavemente; num ecrã tátil a imagem segue os dedos
 * `G` — mostrar ou ocultar a grelha entre píxeis
 * `Ctrl+'` — mostrar ou ocultar a grelha
-* `Page Up` / `Page Down` — o sprite ou a página anterior ou seguinte
+* `Page Up` / `Page Down` — a página anterior ou seguinte
+* Na janela de um ficheiro de sprites: teclas de seta, `Home` e `End` — escolher um sprite; `Enter` — editar os sprites escolhidos; `Delete` — eliminá-los
 * teclas de seta — mover uma seleção flutuante um píxel; com `Shift`, dez; na faixa da paleta, percorrer as suas cores
 
 ## OPTIONS

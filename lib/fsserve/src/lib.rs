@@ -10,9 +10,10 @@
 //! [`ServerState`](tairix_abi::fsserve::ServerState) is read from.
 //!
 //! A format's driver crate supplies only how it opens a volume
-//! ([`ServedFormat`]); the volume reaches it as a [`GrantedVolume`] over the
-//! kernel's calls on its grant, and the `program` feature's `program::run`
-//! is the whole driver process every format shares.
+//! ([`ServedFormat`], or [`ServedArchive`] for an archive attachment); the
+//! volume reaches it as a [`GrantedVolume`] over the kernel's calls on its
+//! grant, and the `program` feature's `program::run` and
+//! `program::run_archive` are the whole driver process every format shares.
 
 #![no_std]
 #![deny(missing_docs)]
@@ -25,7 +26,9 @@ mod host;
 mod server;
 mod volume;
 
-pub use format::{bind_key, Opened, ServedFormat, WritebackBudget, REQUIRED_CAPABILITIES};
+pub use format::{
+    bind_key, Opened, ServedArchive, ServedFormat, WritebackBudget, REQUIRED_CAPABILITIES,
+};
 pub use host::{Clock, ServedHost};
 pub use server::{ServedFilesystem, Server, Window};
 pub use volume::{GrantedVolume, VolumeAccess};
@@ -35,3 +38,8 @@ pub mod program;
 
 #[cfg(test)]
 mod testfs;
+
+#[cfg(any(test, feature = "test-util"))]
+mod attachment;
+#[cfg(any(test, feature = "test-util"))]
+pub use attachment::{Asked, MemoryAccess, MemoryAttachment};

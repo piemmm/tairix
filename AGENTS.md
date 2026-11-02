@@ -589,6 +589,8 @@ tairix/
 │   ├── filesystem/
 │   │   ├── adfs/        # Acorn ADFS / RISC OS FileCore, read/write.
 │   │   ├── affs/        # AmigaDOS OFS and FFS, read/write.
+│   │   ├── archive/     # Archives as volumes: zip, tar, gzip, bzip2, Spark,
+│   │   │                #   ArcFS read/write; RAR read.
 │   │   ├── ext4/
 │   │   ├── fat32/
 │   │   ├── iso9660/     # CD/DVD volumes, read-only: Joliet, Rock Ridge, RISC OS.
@@ -638,6 +640,7 @@ tairix/
 │   ├── controls/        # Shared Reactive Alloy GUI control behaviour.
 │   ├── countryside/     # Countryside layout: holdings, ways, fields, boundaries, plots.
 │   ├── cpuops/          # Self-optimising CPU-dispatch framework.
+│   ├── crc16/           # CRC-16 (reflected 0xA001): the ARC, ext4 and LAME checksum.
 │   ├── crc32/           # CRC-32 (IEEE): the PNG and GPT framing checksum.
 │   ├── crc32c/          # CRC-32C (Castagnoli) block-integrity checksum.
 │   ├── crt0/            # C-callable abi-v1 program startup object (non-Rust progs).
@@ -1668,6 +1671,7 @@ You are not exempt from any rule above. In addition:
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
     | Foreign media and the copy that keeps their metadata: ISO 9660, UDF, USB optical drives and the disc layout, and `lib/fscopy`'s holes, attributes and omission report | `plans/FOREIGN-MEDIA.md`; `plans/ARXFS-METADATA.md` |
     | Disk images: mounting an image file for its owner (`image_attach`), telling Acorn from Amiga and disc from floppy by content, the AmigaDOS driver, the per-user identity, lock and presentation, eject, the session's end, `mount IMAGE` and `unmount` | `plans/DISK-IMAGES.md` |
+    | Archives as volumes: zip, tar (plain, gzip, bzip2), Spark, ArcFS and RAR mounted for their owner, the archive attachment's work files and atomic commit, the shared served-archive tree, the format decoders and encoders, RISC OS attributes through an archive | `plans/ARCHIVES.md`; `plans/DISK-IMAGES.md` |
     | Boot namespace assembly: which volume backs which root, the signed namespace policy on `/System`, volume attachment vs view projection, mount-flag narrowing, and the user-space root-volume unlock | `plans/NEW-NAMESPACE.md` |
     | Open files and names: open file descriptions bound to a pinned node, driver pins and each format's deferred deletion, the descriptor-relative calls and their one resolver, create modes and the umask, setgid and sticky directories, the descriptor limit | `plans/OPENFILE.md` |
     | Advisory file locking: byte-range locks owned by the open file description, the conflict/fairness/deadlock rules, the `file-locks` bound, `fs_lock`/`fs_lock_query`, and the `flock` command | `plans/FILELOCK.md` |

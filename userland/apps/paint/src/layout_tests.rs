@@ -120,30 +120,28 @@ fn a_few_colours_are_one_row_of_broad_wells() {
 }
 
 #[test]
-fn a_full_palette_takes_as_few_rows_as_hold_it() {
+fn a_full_palette_is_one_row_that_scrolls_where_it_overflows() {
     let registry = ThemeRegistry::with_builtins();
     let layout = layout(registry.active(), 900, 640, needs(MOST_WELLS));
-    let swatches = layout.swatches();
-    let columns = u32::try_from(layout.columns()).expect("a count");
-    let side = swatches.width / columns;
-    let rows = swatches.height / side;
+    let (row, shown) = (layout.swatches(), layout.wells_view());
+    let side = row.height;
     assert!(side >= LEAST_WELL, "every well can be aimed at");
-    assert!(columns * rows >= 257, "every entry has a well");
-    assert!(columns * (rows - 1) < 257, "and no row is spare");
-    assert!(swatches.width <= layout.palette().width - 16);
+    assert_eq!(row.width, side * 257, "every entry has a well, in one row");
     assert!(
-        rows > 1,
-        "a 256-colour palette does not fit one row of a 900-wide window"
+        row.width > shown.width,
+        "a 256-colour palette overflows 900 pixels"
     );
+    assert!(!layout.palette_bar().is_empty(), "so the strip scrolls");
+    assert_eq!(layout.palette_bar().top(), shown.bottom());
 }
 
 #[test]
-fn the_rows_follow_the_width() {
+fn a_short_palette_shows_whole_and_needs_no_bar() {
     let registry = ThemeRegistry::with_builtins();
-    let narrow = layout(registry.active(), 700, 900, needs(MOST_WELLS));
-    let wide = layout(registry.active(), 1600, 900, needs(MOST_WELLS));
-    assert!(wide.columns() > narrow.columns());
-    assert!(wide.palette().height < narrow.palette().height);
+    let layout = layout(registry.active(), 900, 640, needs(17));
+    assert!(layout.palette_bar().is_empty());
+    assert_eq!(layout.swatches().width, layout.wells_view().width);
+    assert!(layout.swatches().height <= MOST_WELL);
 }
 
 fn floor() -> Floor {

@@ -1247,6 +1247,13 @@ is the consumer the `mem_map` ABI exists for (§7c).
   on map and on free (§7c), so memory entering or leaving the process is clean;
   a process reusing its own freed bytes within its own heap is not a security
   boundary, so the heap does not re-zero on the hot path.
+- **A zeroed allocation writes only what was handed out before.** The heap
+  keeps a mark above which no arena byte has been handed out since its page was
+  mapped, and `alloc_zeroed` clears only the part of a block below it; releasing
+  the top lowers the mark, since those pages come back mapped afresh. The kernel
+  backs an anonymous page on first touch (§7c), so a large zeroed buffer — a
+  decoder's dictionary or model, sized by what a stranger's stream declares —
+  holds the pages its writer reaches and no more.
 - **Guarded by a futex mutex, never a spin lock.** A process has threads
   (`plans/THREADS.md`), so two of them can be inside the allocator at once, and
   the thread that loses waits for a critical section it cannot shorten: a page

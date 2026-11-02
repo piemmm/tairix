@@ -38,6 +38,10 @@ its address space and everything that grows with the picture off its loop.
 | PT28 | Tool windows: a pane dragged out of its dock floats in a tool window — the window manager's mini-titled transient (`plans/APPWIN.md` AW7, `plans/COMPOSITOR-WORK.md` stage M), the document host's tool windows of a document window — and docks again when dragged over a dock | done |
 | PT29 | Help in every locale, the docs page and the README for all of it | done |
 | PT30 | The document host's secondary press on a close button: the window closes and its file is shown in the file manager (`plans/TEXTEDIT.md` TE17) | done |
+| PT31 | The document host's further windows onto one document: a member window shares its primary's file, is never asked to save, has its engine's changes handed to the application as they land, and closes with its primary | done |
+| PT32 | The sprite file window: a sprite area opens as a window of its sprites, each its thumbnail over its name, where sprites are made, renamed, copied, deleted and reordered | done |
+| PT33 | Sprite windows: a sprite opens in a window of its own, sixteen at most a choice, across sprite files, its edits its file's as they land | done |
+| PT34 | The palette bar: one row of wells, scrolled sideways only when they do not all fit | done |
 
 ## What it is
 
@@ -72,6 +76,45 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
 - **Masks**: a translucent PNG palette written as a sprite moves its
   transparency into the mask, and the mode is moved to an alpha mask when a
   picture needs one.
+- **The sprite file window** (PT32): a sprite area — read as one, made as one,
+  or holding a sprite's name — opens as a window of its sprites, as RISC OS
+  Paint shows one: each sprite's thumbnail, at its pixel shape, over its name,
+  in a grid that reflows to the window's width and scrolls down. A thumbnail is
+  drawn on the queue's worker from the sprite as it stands and kept until the
+  sprite or the side it is drawn at changes, asked for each round the window
+  lacks one; the paint draws what has landed at the side laid out, a plain
+  card meanwhile. A kept sprite is a card with its name, opening nothing. Its
+  open size (`DocumentView::open_size`, in the theme and its faces at the
+  reference scale) holds up to five by three cells and its band; what its
+  band says goes at the next act. New picture as a sprite file, and the
+  untitled window when `new.format` is `sprite`, open the file window with its
+  sprite in a sprite window. Selection is the file
+  manager's: a press, Ctrl to add, Shift for a run, the arrows, Home and End.
+  The window's menu makes, renames, copies, deletes and reorders sprites, and
+  saves the file; those are the file window's history, undone there. Opening
+  a sprite — a double-click, Enter, or *Edit* — gives it its sprite window.
+- **Sprite windows** (PT33): a sprite window is the whole editor over one
+  sprite, a member of its file window's document (PT31), titled with the
+  sprite's name and the file's. One choice opens at most `SPRITES_AT_ONCE`
+  (16), stopping at the first the desktop refuses and saying once what it
+  left; opening a sprite already open raises its window. Each has its own
+  history. Its edits become the file's as they land, so the file window's
+  thumbnail follows and the file is modified; Save there saves the file. A
+  floating selection is the window's own until it is put down, and a save made
+  from another window writes the sprite without it. Closing a sprite window
+  never asks; closing the file window asks for every sprite, its sprite
+  windows closing with it. Deleting a sprite closes its window; a rename, or
+  the file saved, or saved under another name, retitles it, each round bringing
+  the sprite windows of a file that moved into line. Entries are found by an identity the file's document gives each
+  (`EntryId`), so a reorder, insertion or undo never sends an edit to the
+  wrong sprite.
+- **The palette bar** (PT34): a palette picture's wells — every entry of its
+  own palette, or the desktop's colours where it has none, and the clear ink
+  of its mask — stand in one row beneath the canvas, at least `LEAST_WELL`
+  across; a row longer than the window scrolls sideways by the wheel or its
+  bar, which is shown only then, and keeps the well of the ink last changed in
+  view. Every event reaches the wells but a press beside the strip, so a well
+  pressed and let go elsewhere is let go.
 
 ## Files
 
@@ -86,9 +129,10 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   `Density`, and how the file was written (`Written`) seeding the document's
   `SaveSettings`. A pasted file of layers is pasted as they show together.
 - **Kinds of document**: a sprite area where it was read or made as one or
-  holds a sprite's name; a TIFF's pages where it was read or made as a TIFF and
-  holds none; several pictures of any other origin are a sprite area. The menu
-  is Sprites or Pages to match; a page has no name.
+  holds a sprite's name, shown in a sprite file window; a TIFF's pages where it
+  was read or made as a TIFF and holds none, its Pages menu going to, adding,
+  copying, deleting and reordering pages, which have no name; one picture
+  otherwise.
 - **New picture** names the format first (`Origin::New(SaveFormat)`), offering
   the depths it admits (`SaveFormat::admits`) and a clear background where it
   holds one.
@@ -495,6 +539,17 @@ document windows:
   window's close button closes it and, once closed, has the desktop show its
   file in the file manager through a location grant on its descriptor, as
   `plans/TEXTEDIT.md` TE17 sets out; a refusal is stated in an alert.
+- **Member windows** (PT31, `Host::open_member`): further windows onto a
+  document window's document, each with an engine of its own. A member has no
+  file: its Save, Save As and Open act on its primary, the window whose
+  document it shows, and a Save As's new name and access reach every member.
+  A member is never asked whether to save, by its close or by a quit; it
+  closes with its primary — once the primary's own question is answered, so
+  turning that question down closes nothing — and when the primary shows
+  another document. After every outcome the host applies to a window it hands
+  the application that window's index before carrying out what was asked
+  (`DocumentApp::driven`), so what an engine changed reaches its document's
+  other windows before a save of it is frozen.
 
 ## The loop
 
@@ -529,7 +584,8 @@ began.
   one step.
 - A tool's setting writes nothing: it is the window's own, applied as it
   changes.
-- Closing a window or quitting with unsaved changes asks first.
+- Closing a window or quitting with unsaved changes asks first; a sprite
+  window's changes are its file window's, asked about there.
 - No tool, pane, tool window or settings window is modal: only a command's
   own question before it acts — saving, a new picture or page, a resize, the
   canvas size, a depth, a layer's properties — takes the whole window.

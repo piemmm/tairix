@@ -1350,6 +1350,53 @@ where
                 .grant_covers(caller.process(), &HwResource::endpoint(endpoint))
     }
 
+    /// The directory the caller opened as `dir`, acting as the caller's
+    /// identity frozen at this call, as `image_attach` holds it, and the
+    /// `name` the caller says the image has in it.
+    fn image_directory(
+        &self,
+        caller: &CallerContext<'_>,
+        dir: u32,
+        name: &str,
+    ) -> Result<crate::fs::ImageDirectory, Errno> {
+        let entry = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.process(), dir)
+            .ok_or(Errno::NotFound)?;
+        // As for the image: a conferred descriptor acts as another identity.
+        let handle = entry.own_node().ok_or(Errno::PermissionDenied)?;
+        if handle.node.kind() != NodeKind::Directory {
+            return Err(Errno::NotADirectory);
+        }
+        NodeAuthority::of(&entry, caller)
+            .ok_or(Errno::PermissionDenied)?
+            .admit()?;
+        let dir = NodeHandle {
+            authority: Authority::Frozen(crate::fs::FrozenAuthority {
+                uid: caller.caps.owner().0,
+                caps: *caller.caps.effective(),
+                grant: None,
+            }),
+            ..handle.clone()
+        };
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(name.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        owned.push_str(name);
+        let mut directory = crate::fs::ImageDirectory {
+            dir,
+            name: owned,
+            name_key: [0; 32],
+        };
+        self.rng
+            .write()
+            .draw(&mut directory.name_key, true)
+            .map_err(reserve_errno)?;
+        Ok(directory)
+    }
+
     /// Refuse `caller` unless one of its grants names served volume `volume`.
     fn serves_volume(&self, caller: &CallerContext<'_>, volume: u64) -> Result<(), Errno> {
         if self
@@ -9012,6 +9059,62 @@ where
             .map(|()| 0)
     }
 
+    fn archive_read(
+        &self,
+        caller: &CallerContext<'_>,
+        volume: u64,
+        region: u32,
+        offset: u64,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        self.serves_volume(caller, volume)?;
+        if len > tairix_abi::volume::VOLUME_IO_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let region = u8::try_from(region).map_err(|_| Errno::OutOfRange)?;
+        self.volume_service
+            .archive_read(volume, region, offset, len, &mut |at, chunk| {
+                let at = buf.checked_add(at as u64).ok_or(Errno::BadAddress)?;
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_out(space, physmap, VirtAddr::new(at), chunk)
+                }) {
+                    Some(Ok(())) => Ok(()),
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    None => Err(Errno::BadAddress),
+                }
+            })
+            .map(|read| read as u64)
+    }
+
+    fn archive_write(
+        &self,
+        caller: &CallerContext<'_>,
+        volume: u64,
+        region: u32,
+        offset: u64,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        self.serves_volume(caller, volume)?;
+        if len > tairix_abi::volume::VOLUME_IO_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let region = u8::try_from(region).map_err(|_| Errno::OutOfRange)?;
+        self.volume_service
+            .archive_write(volume, region, offset, len, &mut |at, chunk| {
+                let at = buf.checked_add(at as u64).ok_or(Errno::BadAddress)?;
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_in(space, physmap, VirtAddr::new(at), chunk)
+                }) {
+                    Some(Ok(())) => Ok(()),
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    None => Err(Errno::BadAddress),
+                }
+            })
+            .map(|()| 0)
+    }
+
     fn volume_ctl(
         &self,
         caller: &CallerContext<'_>,
@@ -9247,8 +9350,11 @@ where
         frame_len: usize,
         reply: u64,
         reply_cap: usize,
+        dir: u32,
     ) -> SyscallResult {
-        use tairix_abi::imageattach::{ImageAttach, IMAGE_ATTACH_MAX, IMAGE_ATTACH_REPLY_LEN};
+        use tairix_abi::imageattach::{
+            ImageAttach, IMAGE_ATTACH_MAX, IMAGE_ATTACH_REPLY_LEN, IMAGE_NO_DIRECTORY,
+        };
         if frame_len > IMAGE_ATTACH_MAX {
             return Err(Errno::LengthOutOfRange);
         }
@@ -9256,6 +9362,11 @@ where
         let bytes = &mut bytes[..frame_len];
         self.copy_in_user(caller, frame, bytes)?;
         let attach = ImageAttach::decode(bytes)?;
+        // A file name and a directory to find it in come together or not at
+        // all.
+        if (dir == IMAGE_NO_DIRECTORY) != attach.file_name.is_none() {
+            return Err(Errno::OutOfRange);
+        }
         if reply_cap < IMAGE_ATTACH_REPLY_LEN {
             return Err(Errno::BufferTooSmall);
         }
@@ -9290,14 +9401,20 @@ where
             }),
             ..handle.clone()
         };
+        let writable = entry.flags.is_write() && !entry.flags.contains(OpenFlags::APPEND);
+        drop(entry);
+        let directory = match attach.file_name {
+            Some(name) => Some(self.image_directory(caller, dir, name)?),
+            None => None,
+        };
         let source = crate::fs::ImageSource {
             file,
             // An append descriptor writes only at the end, never in place.
-            writable: entry.flags.is_write() && !entry.flags.contains(OpenFlags::APPEND),
+            writable,
+            directory,
             session: caller.caps.login_session(),
             task: caller.task_id.0,
         };
-        drop(entry);
         let who = principal(caller);
         self.volume_service
             .attach_image(&who, source, &attach, &mut |answer| {
@@ -58181,6 +58298,28 @@ mod tests {
             Err(Errno::NotImplemented)
         }
 
+        fn archive_read(
+            &self,
+            _volume: u64,
+            _region: u8,
+            _offset: u64,
+            _len: usize,
+            _deliver: &mut crate::fs::ChunkSink<'_>,
+        ) -> Result<usize, Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn archive_write(
+            &self,
+            _volume: u64,
+            _region: u8,
+            _offset: u64,
+            _len: usize,
+            _fill: &mut crate::fs::ChunkSource<'_>,
+        ) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+
         fn awaiting_server(&self, _volume: u64) -> Result<(), Errno> {
             Err(Errno::NotImplemented)
         }
@@ -58508,6 +58647,7 @@ mod tests {
             target: None,
             expects: None,
             adopt: false,
+            file_name: None,
         };
         let mut frame = [0u8; IMAGE_ATTACH_MAX];
         let len = attach.encode(&mut frame).expect("encodes");
@@ -58553,7 +58693,15 @@ mod tests {
             )
             .expect("installed");
         let call = |fd, frame_len, reply, reply_cap| {
-            h.image_attach(&ctx, fd, 0x1100, frame_len, reply, reply_cap)
+            h.image_attach(
+                &ctx,
+                fd,
+                0x1100,
+                frame_len,
+                reply,
+                reply_cap,
+                tairix_abi::imageattach::IMAGE_NO_DIRECTORY,
+            )
         };
         assert_eq!(
             call(rw, IMAGE_ATTACH_MAX + 1, 0x1800, IMAGE_ATTACH_REPLY_LEN),
@@ -58597,8 +58745,23 @@ mod tests {
         use tairix_abi::imageattach::{ImageAttachReply, IMAGE_ATTACH_REPLY_LEN};
         let (_aspaces, h, ctx, recorder, len) = image_attach_fixture();
         let rw = image_fd(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
-        let call = |fd| h.image_attach(&ctx, fd, 0x1100, len, 0x1800, IMAGE_ATTACH_REPLY_LEN);
+        let call = |fd| {
+            h.image_attach(
+                &ctx,
+                fd,
+                0x1100,
+                len,
+                0x1800,
+                IMAGE_ATTACH_REPLY_LEN,
+                tairix_abi::imageattach::IMAGE_NO_DIRECTORY,
+            )
+        };
         assert_eq!(call(rw), Ok(IMAGE_ATTACH_REPLY_LEN as u64));
+        assert_eq!(
+            h.image_attach(&ctx, rw, 0x1100, len, 0x1800, IMAGE_ATTACH_REPLY_LEN, rw),
+            Err(Errno::OutOfRange),
+            "a directory comes with the file's name in it"
+        );
         assert_eq!(
             recorder.0.lock().image.take(),
             Some(Image {

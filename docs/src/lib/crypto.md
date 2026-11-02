@@ -2,14 +2,16 @@
 
 The single place TAIRiX calls cryptographic code. Per `AGENTS.md` §1 no
 hand-rolled primitives are allowed; this crate exposes thin wrappers
-over vetted RustCrypto and dalek-cryptography implementations so the
-audit footprint never exceeds a handful of crates.
+over vetted RustCrypto and dalek-cryptography implementations, and one
+BLAKE2 implementation, so the audit footprint never exceeds a handful of
+crates.
 
 ## What ships
 
 | Primitive | Module | Upstream |
 |---|---|---|
 | SHA-256 / SHA-384 / SHA-512, one-shot and streaming | `hash` | `sha2` |
+| BLAKE2sp, streaming: a RAR 5 member's integrity hash | `hash` | `blake2s_simd` |
 | HMAC-SHA256 / HMAC-SHA384 / HMAC-SHA512 / HMAC-SHA1 | `mac` | `hmac` + `sha2` / `sha1` |
 | AES-128-CMAC, AES-128-GMAC | `mac` | `cmac` / `aes-gcm` |
 | Poly1305 one-time authenticator | `mac` | `poly1305` |

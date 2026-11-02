@@ -10,7 +10,7 @@ use alloc::vec;
 use tairix_abi::driver::filesystem::MountFlags;
 use tairix_abi::fs::FileId;
 use tairix_abi::time::Time64;
-use tairix_icon::{DocumentStamp, FolderSample, IconKind, Reading, SampleCard, Thumbnail};
+use tairix_icon::{DocumentStamp, FolderSample, IconKind, SampleCard, Thumbnail};
 
 fn view(target: &str, id: u8) -> ViewBindingRecord {
     ViewBindingRecord::new(target.as_bytes(), b"/", MountFlags::default(), [id; 16]).expect("view")
@@ -82,7 +82,6 @@ fn artwork_runs_on_the_lane_of_the_file_it_reads() {
             },
             content_gen: 5,
         },
-        reading: Reading::Signature,
     };
     assert_eq!(
         routes.lane_of_artwork(&ArtworkKey::Thumbnail(thumbnail("/Storage/stick/p.png"))),

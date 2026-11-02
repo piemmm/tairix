@@ -10,6 +10,7 @@
 extern crate alloc;
 
 pub mod adjust;
+pub mod area;
 pub mod brush;
 pub mod canvas;
 pub mod colour;
@@ -18,6 +19,7 @@ pub mod crop;
 pub mod curve_graph;
 pub mod dialog;
 pub mod document;
+pub mod engine;
 pub mod fill;
 pub mod filter;
 pub mod gradient;
@@ -38,6 +40,7 @@ pub mod settings;
 pub mod shape;
 pub mod stroke;
 pub mod text;
+pub mod thumb;
 pub mod tone;
 pub mod tool;
 pub mod tool_controls;

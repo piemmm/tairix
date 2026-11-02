@@ -250,3 +250,81 @@ fn a_layered_document_that_does_not_add_up_is_refused() {
     let short = Assembly::new(layered(2, Some((1, 1))), ROOMY).expect("room");
     assert!(short.finish().is_none(), "fewer");
 }
+
+/// A RISC OS sprite file as RISC OS saved one: an area of one mode 12
+/// sprite, its rows beginning 20 bits into their first word, with a palette
+/// of its own and no mask.
+fn risc_os_sprite_file() -> Vec<u8> {
+    let (words, height) = (6u32, 17u32);
+    let image_at = 44 + 16 * 8;
+    let length = image_at + words * 4 * height;
+    let mut file = Vec::new();
+    for word in [1, 16, 16 + length] {
+        file.extend_from_slice(&u32::to_le_bytes(word));
+    }
+    file.extend_from_slice(&length.to_le_bytes());
+    let mut name = [0u8; 12];
+    name[..6].copy_from_slice(b"!heads");
+    file.extend_from_slice(&name);
+    for word in [words - 1, height - 1, 20, 31, image_at, image_at, 12] {
+        file.extend_from_slice(&word.to_le_bytes());
+    }
+    for entry in 0u32..16 {
+        let colour = (entry * 0x0011_1111) << 8;
+        file.extend_from_slice(&colour.to_le_bytes());
+        file.extend_from_slice(&colour.to_le_bytes());
+    }
+    for row in 0..height {
+        for word in 0..words {
+            file.extend_from_slice(&(row * 0x0101_0101 + word).to_le_bytes());
+        }
+    }
+    file
+}
+
+/// A sprite file named as RISC OS names one — no ending — and typed by the
+/// filetype its volume records is read as a sprite area, through the edit
+/// decode Paint's worker runs, and shown as its sprites.
+#[test]
+fn a_risc_os_sprite_file_opens_as_its_sprites() {
+    use tairix_sandbox::imageedit::{open_edit, read_rows, select_entry, EditEntry};
+    use tairix_sandbox::imagerender::{send_document, ImageRenderService};
+    use tairix_sandbox::loopback::LoopbackLauncher;
+
+    let recorded = tairix_abi::fs::Filetype::new(0xFF9);
+    assert_eq!(
+        crate::save::format_named("!Sprites", recorded),
+        Ok(Some(crate::save::SaveFormat::Sprites))
+    );
+    let file = risc_os_sprite_file();
+    let mut sandbox = tairix_sandbox::ParserSandbox::new(
+        LoopbackLauncher::new(ImageRenderService::default as fn() -> ImageRenderService),
+        tairix_log::DiscardSink,
+    );
+    send_document(&mut sandbox, &file).expect("uploaded");
+    let opened = open_edit(&mut sandbox, Some(ViewFormat::Sprite)).expect("opened");
+    let mut assembly = Assembly::new(opened, file.len()).expect("room");
+    let EditEntry::Picture(picture) = select_entry(&mut sandbox, opened, 0).expect("selected")
+    else {
+        panic!("a picture");
+    };
+    let mut rows = assembly.canvas_for(&picture).expect("a canvas");
+    read_rows(&mut sandbox, &picture, |y, samples, mask| {
+        rows.row(y, samples, mask);
+    })
+    .expect("its rows");
+    assembly.picture(rows, &picture).expect("joined");
+    let document = assembly.finish().expect("the document");
+    assert!(document.is_sprite_area());
+    let Entry::Picture(sprite) = &document.entries()[0] else {
+        panic!("a picture");
+    };
+    assert_eq!(sprite.size(), (43, 17), "the wastage is not a pixel");
+    assert_eq!(sprite.pixel_aspect(), (1, 2), "mode 12's pixels are tall");
+    let info = sprite.sprite.as_ref().expect("a sprite");
+    assert_eq!(info.name.as_bytes(), b"!heads");
+    assert!(
+        matches!(info.palette, SpritePalette::Stored(_)),
+        "its own palette, kept as the file stated it"
+    );
+}

@@ -1,11 +1,13 @@
 //! The `images` fixture of the disk-image QEMU vertical
-//! (`plans/DISK-IMAGES.md` DI7). Run from the scripted root shell, it copies
-//! the images the vertical planted ([`PLANTED`], the system's) into the
-//! user's home, mounts each copy with the real `mount`, reads what it holds,
-//! writes where the volume can be written, ejects it with the real `unmount`,
-//! and mounts the floppies again to read back what it wrote. It also mounts
-//! a planted original, which the user may only read, to see it mounted
-//! read-only.
+//! (`plans/DISK-IMAGES.md` DI7, `plans/ARCHIVES.md` AR11). Run from the
+//! scripted root shell, it copies the images and archives the vertical
+//! planted ([`PLANTED`], the system's) into the user's home, mounts each copy
+//! with the real `mount`, reads what it holds and its RISC OS filetypes,
+//! writes and types a file where the volume can be written, ejects it with
+//! the real `unmount`, and mounts the floppies and the written archives again
+//! to read back what it wrote. It also mounts a planted original, which the
+//! user may only read, to see it mounted read-only, and a RAR archive, which
+//! no one writes.
 //!
 //! A pass prints [`PASS_MARKER`] and exits `0`. A failure prints its reason
 //! and parks rather than exiting: the vertical arms its end on this program's
@@ -78,6 +80,69 @@ pub const WRITTEN: &str = "Written";
 /// What it writes there.
 pub const WRITTEN_TEXT: &[u8] = b"Written through a mounted disk image.";
 
+/// An archive the vertical plants.
+#[derive(Copy, Clone, Debug)]
+pub struct Archive {
+    /// Its file name, which its format's ending is part of.
+    pub file: &'static str,
+    /// The catalog name the fixture mounts it as.
+    pub volume: &'static str,
+}
+
+/// The archives the vertical plants, one of each format the archive driver
+/// writes, each holding [`README`] typed [`TEXT_TYPE`].
+pub const WRITTEN_ARCHIVES: [Archive; 6] = [
+    Archive {
+        file: "archive.zip",
+        volume: "zip",
+    },
+    Archive {
+        file: "archive.tar",
+        volume: "tar",
+    },
+    Archive {
+        file: "archive.tgz",
+        volume: "tgz",
+    },
+    Archive {
+        file: "archive.tbz2",
+        volume: "tbz2",
+    },
+    Archive {
+        file: "archive.spk",
+        volume: "spark",
+    },
+    Archive {
+        file: "archive.arc",
+        volume: "arcfs",
+    },
+];
+
+/// What each written archive's [`README`] holds.
+pub const ARCHIVE_TEXT: &[u8] = b"An archive holds this, typed as RISC OS text.";
+
+/// The RAR archive the vertical plants, which the driver only reads: the RAR
+/// encoder's, holding [`RAR_MEMBERS`].
+pub const RAR: Archive = Archive {
+    file: "archive.rar",
+    volume: "rar",
+};
+
+/// The RAR archive's members: the same text, one stored and one compressed.
+pub const RAR_MEMBERS: [&str; 2] = ["stest1.txt", "stest2.txt"];
+
+/// How long each of [`RAR_MEMBERS`] is.
+pub const RAR_MEMBER_LEN: usize = 2048;
+
+/// The attribute a RISC OS filetype is carried as.
+pub const FILETYPE: &str = "acorn.filetype";
+
+/// The filetype each written archive's [`README`] is planted with: Text.
+pub const TEXT_TYPE: &[u8] = b"fff";
+
+/// The filetype the fixture gives [`WRITTEN`] in each written archive: Data.
+pub const DATA_TYPE: &[u8] = b"ffd";
+
 /// The exit status `mount` and `unmount` give a success.
 const SUCCESS: i32 = 0;
 
@@ -124,6 +189,21 @@ pub trait System {
 
     /// Whether anything is at `path`.
     fn exists(&mut self, path: &str) -> bool;
+
+    /// The value of the attribute `key` of the node at `path`.
+    ///
+    /// # Errors
+    ///
+    /// The open's or the read's refusal: [`Errno::NoData`] where the node
+    /// carries no such attribute.
+    fn attribute(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno>;
+
+    /// Give the node at `path` the attribute `key` holding `value`.
+    ///
+    /// # Errors
+    ///
+    /// The open's or the write's refusal.
+    fn set_attribute(&mut self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno>;
 }
 
 /// Every step, in turn.
@@ -133,14 +213,7 @@ pub trait System {
 /// The first step that did not hold, and why.
 pub fn run_steps(system: &mut dyn System) -> Result<(), String> {
     for image in [ACORN, AMIGA, DISC] {
-        let planted = format!("{PLANTED}/{image}");
-        let bytes = system
-            .read(&planted)
-            .map_err(|err| format!("images: {planted}: unreadable: {err:?}"))?;
-        let copy = format!("{HOME}/{image}");
-        system
-            .write(&copy, &bytes)
-            .map_err(|err| format!("images: {copy}: not written: {err:?}"))?;
+        copy_home(system, image)?;
     }
     let acorn = format!("{HOME}/{ACORN}");
     let amiga = format!("{HOME}/{AMIGA}");
@@ -184,6 +257,102 @@ pub fn run_steps(system: &mut dyn System) -> Result<(), String> {
     }
     for name in ["acorn", AMIGA_NAME] {
         unmount(system, name)?;
+    }
+    archive_steps(system)
+}
+
+/// The archives' steps: each copied into the home and mounted; what it holds
+/// read, with its filetype; a file written and typed where the driver writes
+/// the format, and refused on the RAR; each ejected, and every written one
+/// mounted again to read both files and their types back.
+fn archive_steps(system: &mut dyn System) -> Result<(), String> {
+    for archive in WRITTEN_ARCHIVES.iter().chain([&RAR]) {
+        copy_home(system, archive.file)?;
+        let copy = format!("{HOME}/{}", archive.file);
+        mount(
+            system,
+            &["mount", &copy, &format!("/Storage/{}", archive.volume)],
+        )?;
+    }
+    for archive in &WRITTEN_ARCHIVES {
+        let volume = format!("/Storage/{}", archive.volume);
+        expect_file(system, &volume, README, ARCHIVE_TEXT)?;
+        expect_filetype(system, &volume, README, TEXT_TYPE)?;
+        write_file(system, &volume)?;
+        let written = format!("{volume}/{WRITTEN}");
+        system
+            .set_attribute(&written, FILETYPE, DATA_TYPE)
+            .map_err(|err| format!("images: {written}: not typed: {err:?}"))?;
+    }
+    expect_rar(system, &format!("/Storage/{}", RAR.volume))?;
+    for archive in WRITTEN_ARCHIVES.iter().chain([&RAR]) {
+        unmount(system, archive.volume)?;
+    }
+    for archive in &WRITTEN_ARCHIVES {
+        let copy = format!("{HOME}/{}", archive.file);
+        let volume = format!("/Storage/{}", archive.volume);
+        mount(system, &["mount", &copy, &volume])?;
+        expect_file(system, &volume, README, ARCHIVE_TEXT)?;
+        expect_filetype(system, &volume, README, TEXT_TYPE)?;
+        expect_file(system, &volume, WRITTEN, WRITTEN_TEXT)?;
+        expect_filetype(system, &volume, WRITTEN, DATA_TYPE)?;
+        unmount(system, archive.volume)?;
+    }
+    Ok(())
+}
+
+/// Copy the planted `name` into the home, as the session user.
+fn copy_home(system: &mut dyn System, name: &str) -> Result<(), String> {
+    let planted = format!("{PLANTED}/{name}");
+    let bytes = system
+        .read(&planted)
+        .map_err(|err| format!("images: {planted}: unreadable: {err:?}"))?;
+    let copy = format!("{HOME}/{name}");
+    system
+        .write(&copy, &bytes)
+        .map_err(|err| format!("images: {copy}: not written: {err:?}"))
+}
+
+/// See the RAR archive at `volume` hold its members whole, as the decoder
+/// checked them, and refuse a write.
+fn expect_rar(system: &mut dyn System, volume: &str) -> Result<(), String> {
+    let mut members = Vec::new();
+    for member in RAR_MEMBERS {
+        let path = format!("{volume}/{member}");
+        let bytes = system
+            .read(&path)
+            .map_err(|err| format!("images: {path}: unreadable: {err:?}"))?;
+        if bytes.len() != RAR_MEMBER_LEN {
+            return Err(format!(
+                "images: {path}: {} bytes, not {RAR_MEMBER_LEN}",
+                bytes.len()
+            ));
+        }
+        members.push(bytes);
+    }
+    if members.windows(2).any(|pair| pair[0] != pair[1]) {
+        return Err(format!("images: {volume}: its members differ"));
+    }
+    let path = format!("{volume}/{WRITTEN}");
+    if system.write(&path, WRITTEN_TEXT).is_ok() {
+        return Err(format!("images: {path}: written on a RAR archive"));
+    }
+    Ok(())
+}
+
+/// See `dir`'s `file` typed `filetype`.
+fn expect_filetype(
+    system: &mut dyn System,
+    dir: &str,
+    file: &str,
+    filetype: &[u8],
+) -> Result<(), String> {
+    let path = format!("{dir}/{file}");
+    let value = system
+        .attribute(&path, FILETYPE)
+        .map_err(|err| format!("images: {path}: no {FILETYPE}: {err:?}"))?;
+    if value != filetype {
+        return Err(format!("images: {path}: typed {value:?}, not {filetype:?}"));
     }
     Ok(())
 }
@@ -242,8 +411,10 @@ fn write_file(system: &mut dyn System, dir: &str) -> Result<(), String> {
 #[must_use]
 pub fn pass_line() -> String {
     format!(
-        "{PASS_MARKER}: {ACORN}, {AMIGA} and {DISC} mounted from {HOME}, read, written where \
-         writable, ejected, and read back once mounted again\n"
+        "{PASS_MARKER}: {ACORN}, {AMIGA}, {DISC} and {} archives mounted from {HOME}, read, \
+         written where writable, ejected, and read back with their RISC OS types once mounted \
+         again\n",
+        WRITTEN_ARCHIVES.len() + 1
     )
 }
 
@@ -265,6 +436,8 @@ mod tests {
         mounted: Vec<(String, String, bool)>,
         /// What each image file holds, by path, as a volume.
         volumes: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
+        /// Each volume's files' attributes, by image file, file and key.
+        attributes: BTreeMap<(String, String, String), Vec<u8>>,
         ran: Vec<String>,
         /// Paths the system user owns, which the session user may only read.
         system_owned: BTreeSet<String>,
@@ -278,16 +451,37 @@ mod tests {
                 (AMIGA, README, AMIGA_TEXT),
                 (DISC, RISCOS_FILES[0].name, RISCOS_FILES[0].content),
             ] {
-                let planted = format!("{PLANTED}/{image}");
-                fake.files
-                    .insert(planted.clone(), image.as_bytes().to_vec());
-                fake.system_owned.insert(planted);
-                fake.volumes.insert(
-                    image.to_string(),
-                    BTreeMap::from([(file.to_string(), text.to_vec())]),
+                fake.plant(image, &[(file, text)]);
+            }
+            for archive in WRITTEN_ARCHIVES {
+                fake.plant(archive.file, &[(README, ARCHIVE_TEXT)]);
+                fake.attributes.insert(
+                    (
+                        archive.file.to_string(),
+                        README.to_string(),
+                        FILETYPE.to_string(),
+                    ),
+                    TEXT_TYPE.to_vec(),
                 );
             }
+            let member = vec![7u8; RAR_MEMBER_LEN];
+            fake.plant(RAR.file, &RAR_MEMBERS.map(|name| (name, member.as_slice())));
             fake
+        }
+
+        /// Plant the system's `image`, a volume of `files`.
+        fn plant(&mut self, image: &str, files: &[(&str, &[u8])]) {
+            let planted = format!("{PLANTED}/{image}");
+            self.files
+                .insert(planted.clone(), image.as_bytes().to_vec());
+            self.system_owned.insert(planted);
+            self.volumes.insert(
+                image.to_string(),
+                files
+                    .iter()
+                    .map(|(name, bytes)| (name.to_string(), bytes.to_vec()))
+                    .collect(),
+            );
         }
 
         fn mount(&mut self, args: &[&str]) -> i32 {
@@ -307,7 +501,10 @@ mod tests {
                 None if leaf == AMIGA => AMIGA_NAME.to_string(),
                 None => leaf.to_string(),
             };
-            let writable = !read_only && leaf != DISC && !self.system_owned.contains(image);
+            let writable = !read_only
+                && leaf != DISC
+                && leaf != RAR.file
+                && !self.system_owned.contains(image);
             self.mounted.push((image.to_string(), name, writable));
             0
         }
@@ -367,6 +564,24 @@ mod tests {
             let name = path.trim_start_matches("/Storage/");
             self.mounted.iter().any(|(_, mounted, _)| mounted == name)
         }
+
+        fn attribute(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+            let (image, _, file) = self.on_volume(path).ok_or(Errno::NotFound)?;
+            self.attributes
+                .get(&(image, file, key.to_string()))
+                .cloned()
+                .ok_or(Errno::NoData)
+        }
+
+        fn set_attribute(&mut self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+            let (image, writable, file) = self.on_volume(path).ok_or(Errno::NotFound)?;
+            if !writable {
+                return Err(Errno::ReadOnly);
+            }
+            self.attributes
+                .insert((image, file, key.to_string()), value.to_vec());
+            Ok(())
+        }
     }
 
     #[test]
@@ -420,6 +635,12 @@ mod tests {
             fn exists(&mut self, path: &str) -> bool {
                 self.0.exists(path)
             }
+            fn attribute(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+                self.0.attribute(path, key)
+            }
+            fn set_attribute(&mut self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+                self.0.set_attribute(path, key, value)
+            }
         }
 
         let why = run_steps(&mut Forgetful(Fake::planted())).expect_err("lost");
@@ -427,6 +648,74 @@ mod tests {
             why.contains("/Storage/acorn/Written") && why.contains("NotFound"),
             "{why}"
         );
+    }
+
+    /// A volume that loses its files' types on the way to its archive is
+    /// caught when the archive is mounted again.
+    #[test]
+    fn a_filetype_that_did_not_reach_the_archive_is_caught_on_the_remount() {
+        struct Untyping(Fake);
+
+        impl System for Untyping {
+            fn run(&mut self, path: &str, args: &[&str]) -> Result<i32, String> {
+                if path == UNMOUNT {
+                    self.0.attributes.clear();
+                }
+                self.0.run(path, args)
+            }
+            fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
+                self.0.read(path)
+            }
+            fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
+                self.0.write(path, bytes)
+            }
+            fn exists(&mut self, path: &str) -> bool {
+                self.0.exists(path)
+            }
+            fn attribute(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+                self.0.attribute(path, key)
+            }
+            fn set_attribute(&mut self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+                self.0.set_attribute(path, key, value)
+            }
+        }
+
+        let why = run_steps(&mut Untyping(Fake::planted())).expect_err("untyped");
+        assert!(
+            why.contains("/Storage/zip/ReadMe") && why.contains("NoData"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_rar_archive_that_takes_a_write_fails() {
+        struct Writable(Fake);
+        impl System for Writable {
+            fn run(&mut self, path: &str, args: &[&str]) -> Result<i32, String> {
+                let status = self.0.run(path, args)?;
+                for (image, _, writable) in &mut self.0.mounted {
+                    *writable |= image.ends_with(RAR.file);
+                }
+                Ok(status)
+            }
+            fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
+                self.0.read(path)
+            }
+            fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
+                self.0.write(path, bytes)
+            }
+            fn exists(&mut self, path: &str) -> bool {
+                self.0.exists(path)
+            }
+            fn attribute(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+                self.0.attribute(path, key)
+            }
+            fn set_attribute(&mut self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+                self.0.set_attribute(path, key, value)
+            }
+        }
+        let why = run_steps(&mut Writable(Fake::planted())).expect_err("a RAR took a write");
+        assert!(why.contains("written on a RAR archive"), "{why}");
     }
 
     #[test]
@@ -453,6 +742,17 @@ mod tests {
             }
             fn exists(&mut self, _path: &str) -> bool {
                 false
+            }
+            fn attribute(&mut self, _path: &str, _key: &str) -> Result<Vec<u8>, Errno> {
+                Err(Errno::NoData)
+            }
+            fn set_attribute(
+                &mut self,
+                _path: &str,
+                _key: &str,
+                _value: &[u8],
+            ) -> Result<(), Errno> {
+                Ok(())
             }
         }
 

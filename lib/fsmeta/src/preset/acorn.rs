@@ -11,6 +11,7 @@
 //! ADFS reproduces the native fields byte-for-byte.
 
 use tairix_abi::time::Time64;
+use tairix_abi::DriverError;
 
 use crate::MetadataError;
 
@@ -50,6 +51,68 @@ pub const fn crossed_name_byte(byte: u8) -> u8 {
         b'.' => b'/',
         b'/' => b'.',
         other => other,
+    }
+}
+
+/// The characters RISC OS's Latin-1 gives the bytes `0x80..=0x9F`, which ISO
+/// 8859-1 leaves to control codes; `None` where it gives none.
+const LATIN1_EXTRAS: [Option<char>; 32] = [
+    Some('\u{20AC}'),
+    Some('\u{0174}'),
+    Some('\u{0175}'),
+    None,
+    None,
+    Some('\u{0176}'),
+    Some('\u{0177}'),
+    None,
+    None,
+    None,
+    None,
+    None,
+    Some('\u{2026}'),
+    Some('\u{2122}'),
+    Some('\u{2030}'),
+    Some('\u{2022}'),
+    Some('\u{2018}'),
+    Some('\u{2019}'),
+    Some('\u{2039}'),
+    Some('\u{203A}'),
+    Some('\u{201C}'),
+    Some('\u{201D}'),
+    Some('\u{201E}'),
+    Some('\u{2013}'),
+    Some('\u{2014}'),
+    Some('\u{2212}'),
+    Some('\u{0152}'),
+    Some('\u{0153}'),
+    Some('\u{2020}'),
+    Some('\u{2021}'),
+    Some('\u{FB01}'),
+    Some('\u{FB02}'),
+];
+
+/// The character a RISC OS name spells as `byte` in RISC OS's Latin-1 —
+/// ISO 8859-1 with characters of its own in `0x80..=0x9F` — or `None` for a
+/// byte no name holds: a control code, or one of those it leaves undefined.
+#[must_use]
+pub fn name_char(byte: u8) -> Option<char> {
+    match byte {
+        0..=0x1F | 0x7F => None,
+        0x80..=0x9F => LATIN1_EXTRAS[usize::from(byte - 0x80)],
+        _ => Some(char::from(byte)),
+    }
+}
+
+/// The byte RISC OS's Latin-1 spells `ch` as in a name, or `None` for a
+/// character it has none for.
+#[must_use]
+pub fn name_byte(ch: char) -> Option<u8> {
+    match u8::try_from(u32::from(ch)) {
+        Ok(byte @ (0x20..=0x7E | 0xA0..=0xFF)) => Some(byte),
+        _ => LATIN1_EXTRAS
+            .iter()
+            .position(|&extra| extra == Some(ch))
+            .and_then(|at| u8::try_from(0x80 + at).ok()),
     }
 }
 
@@ -293,6 +356,22 @@ pub fn attr_from_fileswitch(byte: u8) -> u16 {
     map_bits(u16::from(byte), &FILESWITCH_BITS, false)
 }
 
+/// The canonical bits a `FileSwitch` attribute byte can hold.
+pub const FILESWITCH_ATTR_BITS: u16 = ATTR_OWNER_READ
+    | ATTR_OWNER_WRITE
+    | ATTR_EXECUTE_ONLY
+    | ATTR_LOCKED
+    | ATTR_PUBLIC_READ
+    | ATTR_PUBLIC_WRITE;
+
+/// The `FileSwitch` attribute byte for canonical bits `attr`, of which only
+/// [`FILESWITCH_ATTR_BITS`] have a place; a caller that may not drop the
+/// others checks `attr` against that mask first.
+#[must_use]
+pub fn attr_to_fileswitch(attr: u16) -> u8 {
+    map_bits(attr, &FILESWITCH_BITS, true).to_le_bytes()[0]
+}
+
 /// Translate `bits` through `table`, from its native side to the canonical
 /// one, or back when `to_native`.
 fn map_bits(bits: u16, table: &[(u8, u16)], to_native: bool) -> u16 {
@@ -492,6 +571,75 @@ impl Object {
             _ => return Ok(None),
         };
         Ok(Some(len))
+    }
+}
+
+impl Object {
+    /// Set the field `key` names to its canonical `value`, as RISC OS would:
+    /// a filetype keeps the stamp it had, a stamp needs the filetype it lives
+    /// inside, and the attribute bits keep the directory bit the object's
+    /// kind is and stay within `storable`, the bits its format can hold.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] for a value out of shape or bits the
+    /// format cannot store; [`DriverError::Unsupported`] for a stamp on an
+    /// untyped object, or a key no RISC OS object holds.
+    pub fn set(&mut self, key: &[u8], value: &[u8], storable: u16) -> Result<(), DriverError> {
+        let shape = |_| DriverError::OutOfRange;
+        let decoded = decode_load_exec(self.load, self.exec);
+        match key {
+            LOADADDR_KEY => self.load = addr_from_value(value).map_err(shape)?,
+            EXECADDR_KEY => self.exec = addr_from_value(value).map_err(shape)?,
+            ATTR_KEY => {
+                let attr = attr_from_value(value).map_err(shape)?;
+                // The directory bit is the object's kind, not a free bit.
+                if attr & ATTR_DIRECTORY != self.attr & ATTR_DIRECTORY || attr & !storable != 0 {
+                    return Err(DriverError::OutOfRange);
+                }
+                self.attr = attr;
+            }
+            FILETYPE_KEY => {
+                let filetype = filetype_from_value(value).map_err(shape)?;
+                let centiseconds = match decoded {
+                    LoadExec::Typed { centiseconds, .. } => centiseconds,
+                    LoadExec::Untyped { .. } => 0,
+                };
+                (self.load, self.exec) = encode_typed(filetype, centiseconds).map_err(shape)?;
+            }
+            DATESTAMP_KEY => {
+                let centiseconds = datestamp_from_value(value).map_err(shape)?;
+                // The stamp lives inside the filetype encoding.
+                let LoadExec::Typed { filetype, .. } = decoded else {
+                    return Err(DriverError::Unsupported);
+                };
+                (self.load, self.exec) = encode_typed(filetype, centiseconds).map_err(shape)?;
+            }
+            _ => return Err(DriverError::Unsupported),
+        }
+        Ok(())
+    }
+
+    /// Remove the field `key` names: a filetype takes the stamp inside it
+    /// with it, and a stamp leaves the filetype dated zero.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] for a field the object does not carry;
+    /// [`DriverError::Unsupported`] for the addresses and attribute bits,
+    /// which every object carries.
+    pub fn remove(&mut self, key: &[u8]) -> Result<(), DriverError> {
+        let decoded = decode_load_exec(self.load, self.exec);
+        match (key, decoded) {
+            (FILETYPE_KEY, LoadExec::Typed { .. }) => (self.load, self.exec) = (0, 0),
+            (DATESTAMP_KEY, LoadExec::Typed { filetype, .. }) => {
+                (self.load, self.exec) =
+                    encode_typed(filetype, 0).map_err(|_| DriverError::OutOfRange)?;
+            }
+            (LOADADDR_KEY | EXECADDR_KEY | ATTR_KEY, _) => return Err(DriverError::Unsupported),
+            _ => return Err(DriverError::NotFound),
+        }
+        Ok(())
     }
 }
 

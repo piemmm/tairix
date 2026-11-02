@@ -151,6 +151,9 @@ tairix-test-optical = { path = "../../tests/integration/optical_program", versio
 # The disk-image vertical's fixture vocabulary — its command word, its pass,
 # and what each image it plants holds.
 tairix-test-images = { path = "../../tests/integration/images_program", version = "=0.0.0", default-features = false }
+# The archives the disk-image vertical plants: each format's least archive,
+# written back by the archive driver, and the RAR encoder's archive.
+tairix-test-archive-image = { path = "../../tests/integration/archive_image", version = "=0.0.0" }
 tairix-test-iso9660-image = { path = "../../tests/integration/iso9660_image", version = "=0.0.0" }
 tairix-test-amiga-image = { path = "../../tests/integration/amiga_image", version = "=0.0.0" }
 # The SVG-text vertical's fixture vocabulary: the command word its script
@@ -319,6 +322,7 @@ tairix-drv-fs-iso9660 = { path = "../../drivers/filesystem/iso9660", version = "
 tairix-drv-fs-udf = { path = "../../drivers/filesystem/udf", version = "=0.0.0" }
 tairix-drv-fs-adfs = { path = "../../drivers/filesystem/adfs", version = "=0.0.0" }
 tairix-drv-fs-affs = { path = "../../drivers/filesystem/affs", version = "=0.0.0" }
+tairix-drv-fs-archive = { path = "../../drivers/filesystem/archive", version = "=0.0.0" }
 tairix-drv-storage-raid-member = { path = "../../drivers/storage/raid_member", version = "=0.0.0" }
 tairix-drv-storage-raid = { path = "../../drivers/storage/raid", version = "=0.0.0" }
 # The shared desktop theme definition: the display vertical's screendump

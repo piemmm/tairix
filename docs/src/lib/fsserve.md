@@ -17,6 +17,16 @@ compatible of the volume nodes the kernel publishes for that format, and every
 served driver runs with `REQUIRED_CAPABILITIES`: `CAP_FS_SERVE` and
 `CAP_LOG_EMIT`.
 
+An archive's driver implements `ServedArchive` instead: it is handed the
+attachment itself, reads the archive by byte (`VolumeAccess::region_read`),
+and writes only its work files — `region_write`, and `ctl` for the copy
+between regions the kernel makes itself, a truncate, and the commit that
+makes the next archive the archive ([Disk images](../filesystem/images.md)).
+`program::run_archive::<F>()` is its `main`. With the `test-util` feature,
+`MemoryAttachment` is such an attachment in memory, for an archive driver's
+tests: it holds the archive and both work files, refuses what the kernel
+refuses, and counts the copies, writes and commits a driver asked of it.
+
 ## The volume, as a block device
 
 `GrantedVolume` is a `Block` over `VolumeAccess`, the kernel's calls on the

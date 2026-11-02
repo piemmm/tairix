@@ -2,9 +2,9 @@
 //! file, kept across runs in one blob of the file manager's own bulk store
 //! (`plans/FILES-INTERACTION.md` FI25).
 //!
-//! A key is the file's identity and content generation with the way its
-//! format is read, so a changed file is a different key and a stale picture
-//! cannot be served; a file whose volume keeps no generation is never stored.
+//! A key is the file's identity and content generation, so a changed file is
+//! a different key and a stale picture cannot be served; a file whose volume
+//! keeps no generation is never stored.
 //! The blob is a header naming the side, a table of slot headers, and the
 //! slots: a key hashes to a four-way set, a lookup reads that set's headers and
 //! then one payload, and an insert takes an empty way or the set's oldest. A
@@ -18,7 +18,7 @@ use tairix_geometry::Rect;
 use tairix_hash::FastHash;
 
 use crate::picture::Fitted;
-use crate::thumbnail::{ArtworkDocument, DocumentStamp, Reading};
+use crate::thumbnail::{ArtworkDocument, DocumentStamp};
 
 /// Positioned I/O on the blob the store lives in.
 pub trait StoreFile {
@@ -35,42 +35,31 @@ pub trait StoreFile {
     fn byte_len(&mut self) -> Option<u64>;
 }
 
-/// What a stored picture is the picture of: one version of one file, read one
-/// way.
+/// What a stored picture is the picture of: one version of one file.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct StoreKey {
     id: FileId,
     content_gen: u64,
-    reading: Reading,
 }
 
 impl StoreKey {
-    /// The key of the version `stamp` names, read as `reading`, or `None` for
-    /// a file whose volume names no exact version of it.
+    /// The key of the version `stamp` names, or `None` for a file whose
+    /// volume names no exact version of it.
     #[must_use]
-    pub fn of(stamp: DocumentStamp, reading: Reading) -> Option<Self> {
+    pub fn of(stamp: DocumentStamp) -> Option<Self> {
         (stamp.content_gen != 0 && !stamp.id.is_none()).then_some(Self {
             id: stamp.id,
             content_gen: stamp.content_gen,
-            reading,
         })
-    }
-
-    fn reading_byte(self) -> u8 {
-        match self.reading {
-            Reading::Signature => 1,
-            Reading::Sprite => 2,
-        }
     }
 
     /// The set this key lives in, of `sets`. Stable across runs: the seed is
     /// fixed, because a picture stored by one run is found by the next.
     fn set(self, sets: u32) -> u64 {
-        let mut bytes = [0u8; 33];
+        let mut bytes = [0u8; 32];
         bytes[..16].copy_from_slice(&self.id.volume);
         bytes[16..24].copy_from_slice(&self.id.node.to_le_bytes());
-        bytes[24..32].copy_from_slice(&self.content_gen.to_le_bytes());
-        bytes[32] = self.reading_byte();
+        bytes[24..].copy_from_slice(&self.content_gen.to_le_bytes());
         FastHash::hash_bytes(SET_SEED, &bytes) % u64::from(sets.max(1))
     }
 }
@@ -127,7 +116,7 @@ impl<F: StoreFile> StoreAccess for ThumbnailStore<F> {
         header[S_VOLUME..S_VOLUME + 16].copy_from_slice(&key.id.volume);
         header[S_NODE..S_NODE + 8].copy_from_slice(&key.id.node.to_le_bytes());
         header[S_GEN..S_GEN + 8].copy_from_slice(&key.content_gen.to_le_bytes());
-        header[S_READING] = key.reading_byte();
+        header[S_HELD] = HELD;
         let bounds = picture.bounds;
         for (at, value) in [
             bounds.left().unsigned_abs(),
@@ -156,7 +145,7 @@ impl<F: StoreFile> StoreAccess for ThumbnailStore<F> {
 
 /// The store's own constants: the blob layout below is this version's.
 const MAGIC: [u8; 8] = *b"TXTHUMBS";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const WAYS: u32 = 4;
 const SET_SEED: u64 = 0x7468_756d_6273_746f;
 const HEADER_LEN: usize = 64;
@@ -169,8 +158,11 @@ const PAYLOAD_ALIGN: u64 = 4096;
 const S_VOLUME: usize = 0;
 const S_NODE: usize = 16;
 const S_GEN: usize = 24;
-const S_READING: usize = 32;
+const S_HELD: usize = 32;
 const S_BOUNDS: usize = 36;
+
+/// What [`S_HELD`] reads in a way that holds a picture; a zeroed way is empty.
+const HELD: u8 = 1;
 const S_ORDER: usize = 52;
 const S_CRC: usize = 60;
 
@@ -183,22 +175,21 @@ pub trait StoreAccess {
     fn insert(&mut self, key: StoreKey, picture: &Fitted) -> bool;
 }
 
-/// The picture of the open `document`, read as `reading`, through `store`:
-/// the stored one when this version of it is held, else what `decode`
-/// produces — kept only when the document is still the same version once
-/// decoded, so a decode that raced a write is drawn but never stored.
+/// The picture of the open `document` through `store`: the stored one when
+/// this version of it is held, else what `decode` produces — kept only when
+/// the document is still the same version once decoded, so a decode that
+/// raced a write is drawn but never stored.
 ///
 /// The store is reached for one lookup and one insert, never across the
 /// decode, so a store several decoders share is held by none of them while
 /// it reads its document.
 pub fn serve_thumbnail(
     store: &mut impl StoreAccess,
-    reading: Reading,
     document: &mut dyn ArtworkDocument,
     decode: impl FnOnce(&mut dyn ArtworkDocument) -> Option<Fitted>,
 ) -> Option<Fitted> {
     let stamp = document.stamp();
-    let Some(key) = StoreKey::of(stamp, reading) else {
+    let Some(key) = StoreKey::of(stamp) else {
         return decode(document);
     };
     if let Some(found) = store.find(key) {
@@ -327,11 +318,9 @@ fn decode_way(header: &[u8; SLOT_HEADER_LEN], side: u32) -> Way {
         bytes.copy_from_slice(&header[at..at + 8]);
         u64::from_le_bytes(bytes)
     };
-    let reading = match header[S_READING] {
-        1 => Reading::Signature,
-        2 => Reading::Sprite,
-        _ => return empty,
-    };
+    if header[S_HELD] != HELD {
+        return empty;
+    }
     let (Ok(x), Ok(y)) = (
         i32::try_from(u32_at(S_BOUNDS)),
         i32::try_from(u32_at(S_BOUNDS + 4)),
@@ -351,7 +340,6 @@ fn decode_way(header: &[u8; SLOT_HEADER_LEN], side: u32) -> Way {
                 node: u64_at(S_NODE),
             },
             content_gen: u64_at(S_GEN),
-            reading,
         }),
         bounds,
         order: u64_at(S_ORDER),

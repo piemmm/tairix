@@ -453,20 +453,12 @@ impl ImageRenderService {
     /// viewer reads has a thumbnail unless only its decode is too dear.
     fn handle_thumbnail(&mut self, request: &[u8]) -> Result<Vec<u8>, IconRefusal> {
         let mut r = Reader::new(request);
-        let (Ok(OP_THUMBNAIL), Ok(side), Ok(named)) = (r.u8(), r.u32(), r.u8()) else {
+        let (Ok(OP_THUMBNAIL), Ok(side)) = (r.u8(), r.u32()) else {
             return Err(IconRefusal::MalformedRequest);
         };
         if side == 0 || side > MAX_ICON_SIDE || !r.is_exhausted() {
             return Err(IconRefusal::MalformedRequest);
         }
-        let named = match named {
-            0 => None,
-            raw => Some(
-                ViewFormat::from_wire(raw)
-                    .and_then(ViewFormat::raster)
-                    .ok_or(IconRefusal::UnsupportedFormat)?,
-            ),
-        };
         // Taken, so the file does not outlive the one picture it was sent for.
         let bytes = self
             .document
@@ -474,9 +466,7 @@ impl ImageRenderService {
             .filter(Document::is_complete)
             .ok_or(IconRefusal::MalformedRequest)?
             .into_bytes();
-        let format = named
-            .or_else(|| tairix_image::sniff(&bytes))
-            .ok_or(IconRefusal::UnsupportedFormat)?;
+        let format = tairix_image::sniff(&bytes).ok_or(IconRefusal::UnsupportedFormat)?;
         let (limits, fit) = (view_limits(), FitBox::new(side, side));
         let refused = |err: DecodeError| icon_decode_refusal(&err);
         let peak =
@@ -1000,12 +990,12 @@ pub fn rasterise_icon<L: Launcher, S: tairix_log::Sink>(
     })
 }
 
-/// Draw the document already uploaded to the worker as its own content, fitted
-/// inside a `side`-pixel square of straight-alpha RGBA8 and centred on it.
+/// Draw the document already uploaded to the worker as its own content, read
+/// as the format its signature names, fitted inside a `side`-pixel square of
+/// straight-alpha RGBA8 and centred on it.
 ///
-/// `format` names the format to read it as, for one that carries no
-/// signature; `None` reads the document's own. The worker lets the document go
-/// once it is drawn, so each thumbnail uploads its own.
+/// The worker lets the document go once it is drawn, so each thumbnail
+/// uploads its own.
 ///
 /// # Errors
 ///
@@ -1015,7 +1005,6 @@ pub fn rasterise_icon<L: Launcher, S: tairix_log::Sink>(
 pub fn render_thumbnail<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     side: u32,
-    format: Option<ViewFormat>,
 ) -> Result<tairix_icon::Fitted, IconRasterFailure> {
     if side == 0 || side > MAX_ICON_SIDE {
         return Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest));
@@ -1023,7 +1012,6 @@ pub fn render_thumbnail<L: Launcher, S: tairix_log::Sink>(
     let mut w = Writer::new();
     w.u8(OP_THUMBNAIL);
     w.u32(side);
-    w.u8(format.map_or(0, ViewFormat::to_wire));
     let request = w.finish();
     sandbox.ask(|sandbox| {
         let reply = sandbox
@@ -1154,8 +1142,8 @@ pub enum ThumbnailFailure {
 pub const THUMBNAIL_REVISION: u32 = 1;
 
 /// Stream `document` to the worker and draw it as its own content at `side`
-/// pixels, its format read as `reading` says: the whole of what a thumbnail
-/// costs a program, so every program that draws one draws it the same way.
+/// pixels: the whole of what a thumbnail costs a program, so every program
+/// that draws one draws it the same way.
 ///
 /// # Errors
 ///
@@ -1163,7 +1151,6 @@ pub const THUMBNAIL_REVISION: u32 = 1;
 pub fn thumbnail<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     side: u32,
-    reading: tairix_icon::Reading,
     document: &mut dyn tairix_icon::ArtworkDocument,
 ) -> Result<tairix_icon::Fitted, ThumbnailFailure> {
     let length = usize::try_from(document.stamp().size).map_err(|_| {
@@ -1175,11 +1162,7 @@ pub fn thumbnail<L: Launcher, S: tairix_log::Sink>(
         document.read_at(offset, into).ok_or(())
     })
     .map_err(ThumbnailFailure::Upload)?;
-    let format = match reading {
-        tairix_icon::Reading::Signature => None,
-        tairix_icon::Reading::Sprite => Some(ViewFormat::Sprite),
-    };
-    render_thumbnail(sandbox, side, format).map_err(ThumbnailFailure::Render)
+    render_thumbnail(sandbox, side).map_err(ThumbnailFailure::Render)
 }
 
 /// Send `payload` to the worker, supplying glyph geometry once if the

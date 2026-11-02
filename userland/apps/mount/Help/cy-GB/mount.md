@@ -1,6 +1,6 @@
 ## NAME
 
-mount — rhestru'r systemau ffeiliau wedi'u gosod, neu osod delwedd ddisg
+mount — rhestru'r systemau ffeiliau wedi'u gosod, neu osod delwedd ddisg neu archif
 
 ## SYNOPSIS
 
@@ -34,6 +34,18 @@ hwnnw. Mae unrhyw `target` arall, cyfeiriadur gwag sy'n eiddo i chi
 dan `/Users` neu ar gyfrol yn `/Storage`, yn dangos y gyfrol yno
 hefyd; ni all cyfeiriadur ar gyfrol FAT32 neu ADFS ei dangos.
 
+Gosodir archif yn yr un modd, gyda'i haelodau'n ffeiliau a ffolderi'r
+gyfrol: archif zip (`.zip`), archif tar, heb ei chywasgu neu wedi'i
+chywasgu â gzip neu bzip2 (`.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`), ffeil
+unigol wedi'i chywasgu â gzip neu bzip2 (`.gz`, `.bz2`), archif RISC OS
+ar ffurf Spark neu ArcFS (`.spk`, `.arc`), neu archif RAR (`.rar`). Mae
+pob aelod yn cadw ei fath o ffeil a'i briodoleddau RISC OS. Cedwir
+newidiadau drwy ddisodli ffeil yr archif, felly ni osodir archif i'w
+darllen a'i hysgrifennu ond lle cewch ysgrifennu i'r ffeil ac i'r
+ffolder sy'n ei dal. Gosodir archif RAR i'w darllen yn unig bob amser.
+Ni osodir archif wedi'i rhannu'n sawl rhan, nac un y mae ei henwau
+wedi'u hamgryptio, ac ni ellir darllen aelod wedi'i amgryptio.
+
 Mae'r gyfrol yn aros wedi'i gosod nes i chi ei datgysylltu gyda
 `unmount`, neu nes i'ch sesiwn fewngofnodi ddod i ben. Ni osodir
 delwedd sy'n dal disg wedi'i rhannu'n rhaniadau, un ddisg o arae
@@ -52,14 +64,15 @@ pam.
   `-o rw` sy'n penderfynu a yw'r gyfrol i'w darllen yn unig.
 - `-t, --types <list>` — y systemau ffeiliau, wedi'u gwahanu â chomâu,
   y mae'n rhaid i'r ddelwedd ddal un ohonynt, fel y mae'r rhestr
-  osodiadau'n eu henwi (`iso9660`, `udf`, `adfs`, `affs`, `fat32`), neu
-  `auto` ar gyfer beth bynnag y mae'n ei ddal; mae rhestr sy'n dechrau
-  â `no` yn enwi'r rhai na chaiff y ddelwedd eu dal. Adnabyddir yr hyn y
-  mae'r ddelwedd yn ei ddal o'i chynnwys, felly nid yw'r drefn yn dewis
-  dim: fel UDF y gosodir disg sy'n dal UDF yn ogystal ag ISO 9660, oni
-  bai bod yr ISO 9660 arni yn cadw cofnodion Rock Ridge neu RISC OS. Ni
-  osodir delwedd nad yw'n dal yr un ohonynt, na rhestr nad yw'n enwi'r
-  un math y mae delwedd ddisg yn ei ddal.
+  osodiadau'n eu henwi (`iso9660`, `udf`, `adfs`, `affs`, `fat32`,
+  `zip`, `tar`, `tar.gz`, `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`,
+  `rar`), neu `auto` ar gyfer beth bynnag y mae'n ei ddal; mae rhestr
+  sy'n dechrau â `no` yn enwi'r rhai na chaiff y ddelwedd eu dal.
+  Adnabyddir yr hyn y mae'r ddelwedd yn ei ddal o'i chynnwys, felly nid
+  yw'r drefn yn dewis dim: fel UDF y gosodir disg sy'n dal UDF yn
+  ogystal ag ISO 9660, oni bai bod yr ISO 9660 arni yn cadw cofnodion
+  Rock Ridge neu RISC OS. Ni osodir delwedd nad yw'n dal yr un ohonynt,
+  na rhestr nad yw'n enwi'r un math y mae delwedd ddisg yn ei ddal.
 - `-o, --options <list>` — rhestr wedi'i gwahanu â choma o `ro`, `rw`
   (i'w darllen a'i hysgrifennu lle bo modd, y rhagosodiad), `noexec`,
   `loop` a `name=name`, yr enw y mae'r gyfrol i'w gymryd. Fel `noexec`
@@ -78,6 +91,10 @@ pam.
   yn unig fel `disc`.
 - `mount -v -t adfs Elite.adl` — gosod delwedd ddisg hyblyg Acorn, gan
   ddweud ble.
+- `mount Photos.zip` — gosod archif zip, i'w darllen a'i hysgrifennu lle
+  cewch ysgrifennu iddi ac i'w ffolder.
+- `mount -r backup.tar.gz /Storage/backup` — gosod archif tar wedi'i
+  chywasgu i'w darllen yn unig fel `backup`.
 
 ## EXIT STATUS
 

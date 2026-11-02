@@ -113,6 +113,38 @@ block is outside the volume, and a short read is a device fault, never
 zeros. Its medium is virtual, of the form the probe found: a disc image is
 an optical disc, a floppy's layout a floppy.
 
+## Archives
+
+An archive attaches through the same call and holds to every rule above;
+its members are served by the archive driver ([Archive driver](./archive.md)).
+What differs is how it is read and written:
+
+- **Its exact length.** The volume's description carries the file's byte
+  length (`VolumeInfo::byte_len`) and the name it was attached by
+  (`VolumeInfo::archive_name`), so a driver finds a record at the very end
+  and names a lone compressed file from its archive.
+- **Written by replacing it.** A writable archive is attached with a
+  descriptor of the directory its file lies in and the file's name there
+  (`ImageAttach::file_name`), which must name that file; without them, or
+  with a directory reached through a read-only view, it attaches read-only.
+  The driver never writes the archive. Its first change makes two work files
+  beside it, as the attacher and under the name every staged replacement
+  takes: the staging file, unnamed once made, and the next archive, named
+  until the commit. A work file is only ever cut, and written from no further
+  than its end. The kernel copies unchanged ranges between them itself
+  (`VolumeCtl::Copy`).
+- **The commit.** `VolumeCtl::Commit` makes the next archive durable, gives
+  it the file's security record and attributes, and renames it over the
+  file's name in the held directory — only while that name still names the
+  attached file, else the commit fails and the archive is unchanged. A
+  replace the volume stopped partway is settled: finished where the old name
+  is gone, or the next archive kept under its own name, never lost with the
+  old. A directory that cannot be made durable after the rename is the next
+  flush's answer. A crash leaves the old archive whole. Work files never
+  committed are let go, the next archive taken back out of the directory, as
+  the attachment ends or a driver serves it in place of one lost; where the
+  file's volume is gone they go with it.
+
 ## Lifetime
 
 - **Eject.** The owner detaches it without `CAP_FS_MOUNT`: flushed through
@@ -186,3 +218,4 @@ whole ([System Information API](../abi/sysinfo.md)).
 | 4323 | `fs.image.detached` | detached (`cause`, `outcome` `clean` or `forced`, and what a force gave up) |
 | 4324 | `fs.image.detach_refused` | a detach was refused (`cause`) |
 | 4325 | `fs.image.retired` | retired with its file's volume, or its driver lost (`cause`, `outcome`) |
+| 4326 | `fs.image.archive_commit` | an archive commit left work undone (`archive`, `cause`: `next_kept`, the next archive kept under its own name after a replace the medium stopped partway; `record_stale`, a record taken during the commit not carried; `not_durable`, the directory not yet durable; `next_left`, an uncommitted next archive not taken back out) |

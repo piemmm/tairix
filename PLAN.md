@@ -130,6 +130,7 @@ plan's ledger. A `blocked` row names its blocker.
 | DEVICES | `lspci`/`lsusb`, USB mass storage, hotplug automount (`plans/DEVICES.md`) | done |
 | FOREIGN-MEDIA | ISO 9660, UDF, USB optical drives, and copies that keep holes and foreign metadata (`plans/FOREIGN-MEDIA.md`) | in progress |
 | DISK-IMAGES | Disk-image files mounted for their owner: `image_attach`, the AmigaDOS driver, the desktop's and `files.app`'s double-click, `mount IMAGE` and `unmount` (`plans/DISK-IMAGES.md`) | in progress |
+| ARCHIVES | Archives mounted as volumes for their owner: zip, tar (plain, gzip, bzip2), lone gzip and bzip2, Spark and ArcFS read and written, RAR read, RISC OS attributes carried (`plans/ARCHIVES.md`) | done |
 | EXT4-RW | ext2/ext3/ext4 written as Linux leaves them: jbd2 journaling and crash replay, every checksum, lazily initialised groups, extent trees to full depth, indexed directories, POSIX ACLs, over the shared `lib/writeback` core | done |
 | EXFAT | An exFAT driver, for the removable drives other systems format | planned |
 | FS-USERSPACE | `fsserve-v1`, serving a filesystem from user space, and the removable-media drivers moved onto it (`plans/FSSERVE.md` FSS1–FSS5, `plans/OPEN-DEFECTS.md` D1072); network attachments are FSSERVE FSS6, with SMB9a | done |
@@ -268,6 +269,8 @@ holds its glyphs to it: `lib/vt`, `lib/curses`, `lib/util`, `lib/controls`,
 `lib/browse`, `lib/devids`, `lib/font`, `lib/fsmeta`, `lib/log`, `lib/net`,
 `lib/tz`, `lib/window`, `fontd`, the Switchboard, the desktop session's alerts,
 TextEdit, `xtask devids`),
+`lib/crc16` (the one reflected-`0xA001` CRC-16, which ARC, Spark and ArcFS
+members, ext4's group descriptors and LAME's stream tag carry),
 `lib/crc32` (the one IEEE CRC-32, which PNG and GPT framing carry),
 `lib/mix` (the one SplitMix64 and lowbias32 integer finalisers, which seeded
 draws, load slots and the land generator's and ray tracer's lattices key by),
@@ -477,8 +480,10 @@ FileCore format, with RISC OS metadata carried by `lib/fsmeta`'s `acorn.*`
 keys), `affs` (AmigaDOS OFS and FFS, DOS\0–\5 read and DOS\0–\3 written,
 with `amiga.*` metadata; `plans/DISK-IMAGES.md`), `iso9660` (read-only, with
 Joliet, Rock Ridge and the RISC OS, Apple and Amiga records) and `udf`
-(1.02–2.60 read, rewritable media written; `plans/FOREIGN-MEDIA.md`). A
-disk-image file mounts for its owner through `image_attach`
+(1.02–2.60 read, rewritable media written; `plans/FOREIGN-MEDIA.md`) and
+`archive` (zip, tar plain or compressed, a lone gzip or bzip2 stream, Spark
+and ArcFS read and written, RAR read; `plans/ARCHIVES.md`). A disk-image or
+archive file mounts for its owner through `image_attach`
 (`plans/DISK-IMAGES.md`). Each one that writes ships a first-party `format` and fails
 with `NoSpace` on exhaustion. The write-back core ARXFS and ext4 share — the dirty set with
 per-operation undo, the machine-wide bound, the commit window — is

@@ -47,10 +47,21 @@ con 4 colori i colori Wimp 0, 2, 4 e 7; con 256 colori la disposizione delle
 tinte di RISC OS — mai una tavolozza da PC. Uno sprite i cui pixel sono più
 alti che larghi, come nel modo 12, è mostrato così. Uno sprite che questo
 editor non sa leggere, come uno CMYK, è conservato esattamente com'era e
-riscritto senza modifiche. Il menu Sprite va agli sprite, ne aggiunge, ne
-copia, li rinomina, li elimina e li riordina. Un TIFF contiene un numero
-qualsiasi di pagine, e per esso il menu Pagine va alle pagine, ne aggiunge,
-ne copia, le elimina e le riordina.
+riscritto senza modifiche. Un TIFF contiene un numero qualsiasi di pagine, e
+per esso il menu Pagine va alle pagine, ne aggiunge, ne copia, le elimina e
+le riordina.
+
+Un file di sprite si apre in una piccola finestra con i suoi sprite,
+ciascuno mostrato come un'immagine sopra il suo nome. Gli sprite si scelgono
+premendoli, con Ctrl per aggiungerne uno e Maiusc per una serie; il menu
+della finestra li crea, li rinomina, li copia, li elimina e li riordina, e
+salva il file. Con un doppio clic su uno sprite, o con Invio, lo si modifica
+in una finestra sua; si può tenere aperto insieme un numero qualsiasi di
+sprite, da un numero qualsiasi di file. Le modifiche di una finestra di
+sprite sono del suo file non appena vengono fatte, e salvare da lì salva il
+file. Chiudere una finestra di sprite non chiede nulla; chiudere la finestra
+del file chiede se salvare le modifiche di ogni sprite, e chiude anche le
+loro finestre.
 
 Il pulsante principale (sinistro) dipinge con il colore principale e quello
 centrale con il colore secondario; tenendo premuto Alt si preleva invece un
@@ -64,7 +75,8 @@ di un riempimento, la forma di una sfumatura, la dimensione del testo, gli
 angoli di un rettangolo — digitate o regolate con i tasti freccia, e i
 pulsanti che ingrandiscono e mostrano la griglia dei pixel; la striscia della
 tavolozza sotto l'immagine contiene la tavolozza dell'immagine, o i colori del
-desktop. L'aerografo continua a spruzzare finché è tenuto fermo. Tenendo
+desktop, in una sola fila che scorre lateralmente quando è più lunga della
+finestra. L'aerografo continua a spruzzare finché è tenuto fermo. Tenendo
 premuto Maiusc si disegna un quadrato, un cerchio o una linea a un multiplo
 di 45 gradi.
 
@@ -163,7 +175,7 @@ toccare nulla di ciò che il programma può raggiungere.
 Premendo il pulsante secondario (destro) del mouse in qualunque punto della
 finestra si apre il suo menu: Taglia, Copia, Incolla, Seleziona tutto e
 Deseleziona, poi File, Modifica, Immagine, Livelli, Colori, Regolazioni,
-Sprite o Pagine, Visualizza e Strumenti, ciascuno con il proprio sottomenu.
+Pagine per un TIFF, Visualizza e Strumenti, ciascuno con il proprio sottomenu.
 La finestra non ha una barra dei menu. Chiudere una finestra o uscire con
 modifiche non salvate chiede prima conferma. Chiudere una finestra con il
 pulsante secondario (destro) sul suo pulsante di chiusura mostra anche il
@@ -193,7 +205,8 @@ suo file nel gestore dei file, nella cartella che lo contiene.
 * Pizzicare con due dita — ingrandire o ridurre con continuità; su un touchscreen l'immagine segue le dita
 * `G` — mostrare o nascondere la griglia tra i pixel
 * `Ctrl+'` — mostrare o nascondere la griglia
-* `Page Up` / `Page Down` — lo sprite o la pagina precedente o successiva
+* `Page Up` / `Page Down` — la pagina precedente o successiva
+* Nella finestra di un file di sprite: tasti freccia, `Home` e `End` — scegliere uno sprite; `Enter` — modificare gli sprite scelti; `Delete` — eliminarli
 * tasti freccia — spostare una selezione sospesa di un pixel; con `Shift`, di dieci; nella striscia della tavolozza, scorrerne i colori
 
 ## OPTIONS

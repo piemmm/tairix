@@ -13599,7 +13599,6 @@ fn a_desktop_picture_file_asks_for_its_own_content_after_the_icons() {
             id,
             content_gen: 0,
         },
-        reading: tairix_icon::Reading::Signature,
     });
     let mut desk = artwork.borrow_mut();
     while let Some(job) = desk.next_job() {

@@ -11,6 +11,11 @@
 //! leaves when its owner ejects it, when the attacher's login session ends, or
 //! with the volume its file lies on.
 //!
+//! An archive (`plans/ARCHIVES.md`) attaches the same way: the probe finds no
+//! disk format in the file's whole blocks and an archive in its exact bytes,
+//! so the volume is the file's every byte, read only, and a writable one is
+//! written through work files beside it and a commit that replaces it.
+//!
 //! The registry is a spin lock: an image whose file's volume left is retired
 //! from contexts that may not park.
 
@@ -26,7 +31,9 @@ use tairix_abi::fsserve::{ServeOffer, SERVED_IDLE_NS};
 use tairix_abi::imageattach::{ImageAccess, ImageAttach, ImageAttachReply, ImageRefusal};
 use tairix_abi::netattach::AttachReply;
 use tairix_abi::sysinfo::{MountAvailability, VolumeClass};
-use tairix_abi::volume::{DetachMode, FormatName, ViewBindRequest, VolumeFsType, VOLUME_NAME_MAX};
+use tairix_abi::volume::{
+    ArchiveName, DetachMode, FormatName, ViewBindRequest, VolumeFsType, VOLUME_NAME_MAX,
+};
 use tairix_abi::{
     DriverError, DriverHandle, Errno, FileId, FileStat, HwDeviceClass, HwNode, LockRange, ProcId,
     FS_NAME_MAX, HW_NODE_ROOT_ID,
@@ -40,15 +47,17 @@ use tairix_inline::{ArrayString, ArrayVec};
 use tairix_kernel_core::filelock::{self, Held, LockedNode, OwnerId, Request};
 use tairix_kernel_core::fs::served::{shows_life, ServedFs, ServerActivity};
 use tairix_kernel_core::fs::{
-    Acting, AnswerSink, Authority, ImageSource, NodeHandle, Principal, ServeChannel, VolumeNames,
-    VolumeNodes,
+    Access, Acting, AnswerSink, At, Authority, FinalLink, ImageDirectory, ImageSource, Judged,
+    NodeHandle, Principal, ServeChannel, Start, VolumeNames, VolumeNodes,
 };
 use tairix_kernel_core::session_reaper::{self, SessionObserver};
 use tairix_kernel_core::waitq::{
     nearest_timed_deadline, park_calling_task, volume_attach_wake, wait_arch, WaitQueueArch,
     VOLUME_ATTACH_WAITQ,
 };
-use tairix_kernel_core::{Attachment, BindsWithin, DriverLock, FilesystemService, Vfs, VfsError};
+use tairix_kernel_core::{
+    Attachment, BindsWithin, DriverLock, FilesystemService, SleepLock, Vfs, VfsError,
+};
 use tairix_kernel_sec::ProcessId;
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_sync::SpinLock;
@@ -105,15 +114,34 @@ pub(super) const IMAGE_NESTING_MAX: u8 = 4;
 /// call's.
 const IMAGE_DRIVER_START_NS: u64 = 30_000_000_000;
 
+#[path = "image_archive.rs"]
+mod archive;
+
 /// A disk-image file as the block device its volume is served over: whole
-/// blocks of it, read and written as the identity frozen into its hold.
+/// blocks of it, read and written as the identity frozen into its hold; or an
+/// archive file, its every byte, the last block read to the file's end and
+/// then zeros.
 pub(crate) struct ImageBlock {
     file: NodeHandle,
     uid: u32,
     caps: CapabilitySet,
+    /// The file's length.
+    len: u64,
     blocks: u64,
     writable: bool,
     form: BlkForm,
+    shape: Shape,
+    /// The name an archive was attached by.
+    archive_name: Option<ArchiveName>,
+}
+
+/// What an image file is read as.
+enum Shape {
+    /// A disk image: its whole blocks, a trailing part-block outside them.
+    Disk,
+    /// An archive: its exact bytes, never written in place, and for a
+    /// writable one its work files.
+    Archive(Option<alloc::boxed::Box<archive::WorkFiles>>),
 }
 
 impl ImageBlock {
@@ -133,14 +161,24 @@ impl ImageBlock {
             file,
             uid,
             caps,
+            len: 0,
             blocks: 0,
             writable,
             form: BlkForm::Unspecified,
+            shape: Shape::Disk,
+            archive_name: None,
         };
         let stat = FS_SERVICE.stat_node(&block.file, &block.acting())?;
-        // A trailing part-block is outside the volume.
+        block.len = stat.size;
         block.blocks = stat.size / u64::from(IMAGE_BLOCK);
         Ok((block, stat))
+    }
+
+    /// Read the file as an archive: every byte of it, its last block to its
+    /// end then zeros.
+    fn read_as_archive(&mut self) {
+        self.blocks = self.len.div_ceil(u64::from(IMAGE_BLOCK));
+        self.shape = Shape::Archive(None);
     }
 
     fn acting(&self) -> Acting<'_> {
@@ -174,10 +212,15 @@ impl Block for ImageBlock {
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
         let start = self.offset(lba, buf.len())?;
+        // Only an archive's last block runs past the file, and reads as zeros
+        // there.
+        let held = usize::try_from(self.len.saturating_sub(start))
+            .map_or(buf.len(), |left| left.min(buf.len()));
+        let (file, past) = buf.split_at_mut(held);
         let mut filled = 0;
-        while filled < buf.len() {
+        while filled < file.len() {
             let at = start + filled as u64;
-            match FS_SERVICE.read_node(&self.file, &self.acting(), at, &mut buf[filled..]) {
+            match FS_SERVICE.read_node(&self.file, &self.acting(), at, &mut file[filled..]) {
                 // The file shrank under its volume: what it no longer holds is
                 // no block's content, and never reads as zeros.
                 Ok(0) => return Err(DriverError::DeviceFault),
@@ -185,6 +228,7 @@ impl Block for ImageBlock {
                 Err(errno) => return Err(DriverError::from_errno(errno)),
             }
         }
+        past.fill(0);
         Ok(())
     }
 
@@ -206,6 +250,7 @@ impl Block for ImageBlock {
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
+        self.sync_directory().map_err(DriverError::from_errno)?;
         FS_SERVICE
             .sync_node(&self.file, &self.acting())
             .map_err(DriverError::from_errno)
@@ -339,7 +384,9 @@ struct ImageVolume {
     /// How writable its attach asked it to be: a first serve that would mount
     /// a `Writable` one read-only is refused.
     access: ImageAccess,
-    hold: FileHold,
+    /// The lock over its file, which an archive's commit moves to the file
+    /// that replaces it.
+    hold: Arc<SleepLock<FileHold>>,
     stage: Stage,
     custody: Custody,
 }
@@ -1255,6 +1302,23 @@ impl RuntimeVolumeService {
         }
     }
 
+    /// The work files of a writable archive held under `place`, which its
+    /// attachment locks as `hold` for `task`.
+    fn work_files(
+        &self,
+        place: &ImageDirectory,
+        hold: &Arc<SleepLock<FileHold>>,
+        task: u64,
+    ) -> Result<alloc::boxed::Box<archive::WorkFiles>, Unprepared> {
+        let audit = self
+            .wiring()
+            .map_err(|errno| Unprepared::Failed("no_audit", errno))?
+            .audit;
+        archive::WorkFiles::new(place, Arc::clone(hold), task, audit)
+            .and_then(|files| alloc::boxed::Box::try_new(files).map_err(|_| Errno::OutOfMemory))
+            .map_err(|errno| Unprepared::Failed("work_files_unbuilt", errno))
+    }
+
     /// Recognise the file `source` holds, judge it and `caller`'s attach of
     /// it, lock it and build its served volume: the image volume, ready to
     /// enter, or why it goes no further.
@@ -1291,15 +1355,21 @@ impl RuntimeVolumeService {
         if self.images.owned_by(caller.uid) >= IMAGE_VOLUMES_PER_PRINCIPAL {
             return Err(Unprepared::Failed("too_many_images", Errno::LimitExceeded));
         }
-        let writable = match attach.access {
-            ImageAccess::ReadOnly => false,
-            ImageAccess::WritableWherePossible => source.writable,
-            ImageAccess::Writable if source.writable => true,
-            ImageAccess::Writable => {
-                return Err(Unprepared::Failed("write_protected", Errno::ReadOnly));
-            }
-        };
-        block.writable = writable;
+        let archive = probed.fstype.is_archive();
+        if archive {
+            // A format recording no name of its own names its member by it.
+            block.archive_name = ArchiveName::new(file_name.as_bytes());
+        }
+        let (writable, place) = granted_access(
+            attach.access,
+            source.writable,
+            source.directory.as_ref(),
+            &block,
+            &file,
+            archive,
+        )?;
+        // An archive is never written in place.
+        block.writable = writable && !archive;
         if let Some(name) = attach.name {
             let vfs = LATE_FILESYSTEM
                 .vfs()
@@ -1308,11 +1378,7 @@ impl RuntimeVolumeService {
                 return Err(Unprepared::Name(NAME_IN_USE.0, NAME_IN_USE.1));
             }
         }
-        let owned = |text: &str| {
-            concatenated(&[text]).ok_or(Unprepared::Failed("name_unallocated", Errno::OutOfMemory))
-        };
-        let shown_from = owned(file_name)?;
-        let asked = attach.name.map(owned).transpose()?;
+        let (shown_from, asked) = owned_names(file_name, attach.name)?;
         let mut sessions = Vec::new();
         sessions
             .try_reserve_exact(1)
@@ -1324,6 +1390,11 @@ impl RuntimeVolumeService {
         };
         let hold = FileHold::take(&block.file, writable, source.task)
             .map_err(|errno| Unprepared::Failed("file_locked", errno))?;
+        let hold = Arc::try_new(SleepLock::new(hold))
+            .map_err(|_| Unprepared::Failed("lock_unrecorded", Errno::OutOfMemory))?;
+        if let (true, Some(place)) = (writable, place.as_ref()) {
+            block.shape = Shape::Archive(Some(self.work_files(place, &hold, source.task)?));
+        }
         let handle = self
             .images
             .mint_handle()
@@ -1600,6 +1671,11 @@ impl RuntimeVolumeService {
     ) -> Result<(), Errno> {
         let audit = wiring.audit;
         let (claim, target) = self.claim_awaiting_image(volume)?;
+        if target.mounted_as.is_some() {
+            // What a lost driver left is no driver's to commit, and the loss
+            // could not park to let it go.
+            target.served.discard_work();
+        }
         let server = channel.endpoint.id().0;
         let mounted = self.mount_image(&target, offer, channel, wiring);
         // What the attach records its own refusals as.
@@ -1707,7 +1783,9 @@ impl RuntimeVolumeService {
             self.set_stage(claim.volume, Stage::Refused(refusal));
             return;
         }
-        self.retire_claimed(claim, cause, audit);
+        if let Some(left) = self.retire_claimed(claim, cause, audit) {
+            left.served.discard_work();
+        }
         self.retire_images_on(target.handle);
     }
 
@@ -1777,11 +1855,12 @@ impl RuntimeVolumeService {
         let hold = {
             let registry = self.images.registry.lock();
             let volumes = &registry.volumes;
-            position(volumes, volume).map(|at| (volumes[at].hold.owner, volumes[at].hold.file))
+            position(volumes, volume).map(|at| Arc::clone(&volumes[at].hold))
         };
-        if let Some((owner, file)) = hold {
+        if let Some(hold) = hold {
+            let hold = hold.lock();
             // A downgrade conflicts with nothing.
-            let _ = lock_whole(file, owner, Held::Shared, task);
+            let _ = lock_whole(hold.file, hold.owner, Held::Shared, task);
         }
     }
 
@@ -2036,6 +2115,7 @@ impl RuntimeVolumeService {
         let taken = self.images.take(claim.volume);
         drop(claim);
         if let Some(entry) = taken {
+            entry.served.discard_work();
             self.retire_served(Some(&entry.served), image_node(entry.node));
         }
         audit_detached(audit, name.as_str(), cause, force, given_up);
@@ -2177,7 +2257,8 @@ impl RuntimeVolumeService {
                 };
                 (claim, entry.handle)
             };
-            self.retire_claimed(claim, "backing_gone", audit);
+            // Its file's volume is gone, and its work files with it.
+            drop(self.retire_claimed(claim, "backing_gone", audit));
             match gone.binary_search(&handle) {
                 Ok(_) => {}
                 Err(_) if gone.try_reserve(1).is_err() => exhaustive = true,
@@ -2187,24 +2268,23 @@ impl RuntimeVolumeService {
     }
 
     /// Retire the mounted image volume `claim` holds, for `cause`, in place:
-    /// it leaves the namespace, or stays lost while it held writes it had not
-    /// published. Parks on nothing.
+    /// it leaves the namespace, answering it for its caller to let go, or
+    /// stays lost while it held writes it had not published. Parks on
+    /// nothing.
     fn retire_claimed(
         &self,
         claim: ImageClaim<'_>,
         cause: &'static str,
         audit: &'static (dyn Sink + Sync),
-    ) {
+    ) -> Option<ImageVolume> {
         let retiring = {
             let mut registry = self.images.registry.lock();
             let volumes = &mut registry.volumes;
-            let Some(at) = position(volumes, claim.volume) else {
-                return;
-            };
+            let at = position(volumes, claim.volume)?;
             let entry = &mut volumes[at];
             let node = entry.node.take();
             let Stage::Mounted { name, format, .. } = &entry.stage else {
-                return;
+                return None;
             };
             (
                 Arc::clone(&entry.served),
@@ -2248,7 +2328,7 @@ impl RuntimeVolumeService {
                     entry.stage = Stage::Lost { name };
                 }
             }
-            return;
+            return None;
         }
         if let Ok(vfs) = LATE_FILESYSTEM.vfs() {
             let _ = vfs.mounts_write().detach(handle, BindsWithin::Withdraw);
@@ -2265,7 +2345,7 @@ impl RuntimeVolumeService {
         );
         let taken = self.images.take(claim.volume);
         drop(claim);
-        drop(taken);
+        taken
     }
 
     /// The driver serving an image volume over `server` is gone: the
@@ -2398,19 +2478,138 @@ fn recognised(
 }
 
 /// Recognise the volume `block` holds, or say why it holds none the kernel
-/// attaches.
+/// attaches: a disk format in its whole blocks, else an archive in its exact
+/// bytes, which `block` is then read as.
 fn probe(block: &mut ImageBlock) -> Result<ProbedVolume, ImageRefusal> {
-    if block.blocks == 0 {
+    if block.blocks > 0 {
+        let mut device = ByteDevice::new(&mut *block).map_err(|_| ImageRefusal::Unreadable)?;
+        match tairix_fsprobe::recognise(&mut device) {
+            Ok(Some(Recognised::Volume(volume))) => return Ok(volume),
+            Ok(Some(Recognised::RaidMember(_))) => return Err(ImageRefusal::RaidMember),
+            Ok(Some(Recognised::RigidDiskBlock)) => return Err(ImageRefusal::Partitioned),
+            Ok(None) => {}
+            Err(_) => return Err(ImageRefusal::Unreadable),
+        }
+    }
+    if block.len == 0 {
         return Err(ImageRefusal::Unrecognised);
     }
-    let mut device = ByteDevice::new(block).map_err(|_| ImageRefusal::Unreadable)?;
-    match tairix_fsprobe::recognise(&mut device) {
-        Ok(Some(Recognised::Volume(volume))) => Ok(volume),
-        Ok(Some(Recognised::RaidMember(_))) => Err(ImageRefusal::RaidMember),
-        Ok(Some(Recognised::RigidDiskBlock)) => Err(ImageRefusal::Partitioned),
+    block.read_as_archive();
+    let len = block.len;
+    let mut device = ByteDevice::new(&mut *block).map_err(|_| ImageRefusal::Unreadable)?;
+    match tairix_fsprobe::archive::recognise(&mut device, len) {
+        Ok(Some(volume)) => Ok(volume),
         Ok(None) => Err(ImageRefusal::Unrecognised),
         Err(_) => Err(ImageRefusal::Unreadable),
     }
+}
+
+/// The file name an image was attached from and the name its attach asked
+/// for, each held as the volume's own.
+fn owned_names(
+    file_name: &str,
+    asked: Option<&str>,
+) -> Result<(String, Option<String>), Unprepared> {
+    let owned = |text: &str| {
+        concatenated(&[text]).ok_or(Unprepared::Failed("name_unallocated", Errno::OutOfMemory))
+    };
+    Ok((owned(file_name)?, asked.map(owned).transpose()?))
+}
+
+/// Whether an attach asking `access` of an image whose file the caller may
+/// write where `writable` makes it writable, and for an archive the
+/// directory its replacement goes in.
+fn granted_access(
+    access: ImageAccess,
+    writable: bool,
+    directory: Option<&ImageDirectory>,
+    block: &ImageBlock,
+    file: &FileId,
+    archive: bool,
+) -> Result<(bool, Option<ImageDirectory>), Unprepared> {
+    let place = if archive && access != ImageAccess::ReadOnly && writable {
+        archive_place(block, file, directory)?
+    } else {
+        None
+    };
+    let may_write = writable && (!archive || place.is_some());
+    let granted = match access {
+        ImageAccess::ReadOnly => false,
+        ImageAccess::WritableWherePossible => may_write,
+        ImageAccess::Writable if may_write => true,
+        ImageAccess::Writable => {
+            return Err(Unprepared::Failed("write_protected", Errno::ReadOnly));
+        }
+    };
+    Ok((granted, place))
+}
+
+/// Whether the archive `block` reads may be written: its replacement can
+/// keep its security record — the attacher owns it, or its volume presents
+/// every node as one owner's — `directory` names it, and the attacher may
+/// change the directory's entries, the directory then held through its
+/// volume's own projection as the file is. A directory naming another file
+/// refuses the attach.
+fn archive_place(
+    block: &ImageBlock,
+    file: &FileId,
+    directory: Option<&ImageDirectory>,
+) -> Result<Option<ImageDirectory>, Unprepared> {
+    let Some(directory) = directory else {
+        return Ok(None);
+    };
+    let who = block.acting();
+    let owned = FS_SERVICE
+        .stat_node(&block.file, &who)
+        .map_err(|errno| Unprepared::Failed("file_unreadable", errno))?
+        .uid
+        == block.uid
+        || !FS_SERVICE
+            .records_ownership_node(&block.file)
+            .map_err(|errno| Unprepared::Failed("file_unreadable", errno))?;
+    let named = FS_SERVICE
+        .stat(
+            block.uid,
+            &block.caps,
+            At {
+                start: Start::Dir(&directory.dir),
+                path: &directory.name,
+            },
+            FinalLink::Keep,
+        )
+        .map_err(|errno| Unprepared::Failed("file_misnamed", errno))?;
+    if named.id != *file {
+        return Err(Unprepared::Failed("file_misnamed", Errno::Stale));
+    }
+    let changeable = [Access::Write, Access::Execute].into_iter().all(|want| {
+        FS_SERVICE
+            .access_node(&directory.dir, &who, want, Judged::AsQuery)
+            .is_ok()
+    });
+    // A directory reached through a read-only view stays read-only: its
+    // volume's own projection, which the commit holds it through, would
+    // write past the view.
+    if !owned || !changeable || directory.dir.projection.is_read_only() {
+        return Ok(None);
+    }
+    let projection = LATE_FILESYSTEM
+        .vfs()
+        .map_err(|errno| Unprepared::Failed("no_mount_table", errno))?
+        .mounts()
+        .kept_through(&directory.dir.projection)
+        .map_err(|err| Unprepared::Failed("directory_unanchored", err.to_errno()))?;
+    let mut name = String::new();
+    name.try_reserve_exact(directory.name.len())
+        .map_err(|_| Unprepared::Failed("name_unallocated", Errno::OutOfMemory))?;
+    name.push_str(&directory.name);
+    Ok(Some(ImageDirectory {
+        dir: NodeHandle {
+            projection,
+            ..directory.dir.clone()
+        },
+        name,
+        name_key: directory.name_key,
+    }))
 }
 
 /// Why an image is not attached, given its driver's refusal.

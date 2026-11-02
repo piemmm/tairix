@@ -45,10 +45,20 @@ liw, lliwiau Wimp 0 a 7; am 4 lliw, lliwiau Wimp 0, 2, 4 a 7; am 256 o
 liwiau, trefniant arlliwiau RISC OS — byth palet PC. Dangosir corlun y mae
 ei bicseli'n dalach na'u lled, fel ym modd 12, felly. Cedwir corlun na all y
 golygydd hwn ei ddarllen, fel un CMYK, yn union fel yr oedd a'i ysgrifennu'n
-ôl heb newid. Mae'r ddewislen Corluniau'n mynd at gorluniau, yn eu
-hychwanegu, eu copïo, eu hailenwi, eu dileu a'u haildrefnu. Mae TIFF yn dal
-unrhyw nifer o dudalennau, ac iddo ef mae'r ddewislen Tudalennau'n mynd at
-dudalennau, yn eu hychwanegu, eu copïo, eu dileu a'u haildrefnu.
+ôl heb newid. Mae TIFF yn dal unrhyw nifer o dudalennau, ac iddo ef mae'r
+ddewislen Tudalennau'n mynd at dudalennau, yn eu hychwanegu, eu copïo, eu
+dileu a'u haildrefnu.
+
+Mae ffeil corluniau'n agor mewn ffenestr fach o'i chorluniau, pob un wedi'i
+ddangos fel llun uwchben ei enw. Dewisir corluniau drwy bwyso arnynt, gyda
+Ctrl i ychwanegu un a Shift am rediad; mae dewislen y ffenestr yn eu creu,
+eu hailenwi, eu copïo, eu dileu a'u haildrefnu, ac yn cadw'r ffeil. Mae clic
+dwbl ar gorlun, neu Enter, yn ei olygu mewn ffenestr ei hun; gall unrhyw
+nifer o gorluniau fod ar agor ar unwaith, o unrhyw nifer o ffeiliau. Mae'r
+newidiadau mewn ffenestr corlun yn perthyn i'w ffeil cyn gynted ag y'u
+gwneir, ac mae cadw yno'n cadw'r ffeil. Nid yw cau ffenestr corlun yn gofyn
+dim; mae cau ffenestr y ffeil yn gofyn a ddylid cadw newidiadau pob corlun,
+ac yn cau eu ffenestri hefyd.
 
 Mae'r prif fotwm (chwith) yn paentio â'r prif liw a'r botwm canol â'r
 ail liw; o ddal Alt, codir lliw yn lle hynny, fel y mae'r haenau'n ei
@@ -59,9 +69,10 @@ bar ar draws y brig yn enwi'r offeryn sydd ar waith ac yn dal ei osodiadau —
 maint, caledwch, didreiddedd, llif a bylchau brwsh, goddefiant llenwad, siâp
 graddiant, maint y testun, corneli petryal — wedi'u teipio neu eu camu â'r
 bysellau saeth, a'r botymau sy'n chwyddo ac yn dangos grid y picseli; mae'r
-stribed palet o dan y llun yn dal palet y llun, neu liwiau'r bwrdd gwaith.
-Mae'r brwsh aer yn dal i chwistrellu tra caiff ei ddal yn llonydd. O ddal
-Shift, lluniadir sgwâr, cylch neu linell ar luosrif o 45 gradd.
+stribed palet o dan y llun yn dal palet y llun, neu liwiau'r bwrdd gwaith,
+mewn un rhes sy'n sgrolio i'r ochr pan fo'n hirach na'r ffenestr. Mae'r
+brwsh aer yn dal i chwistrellu tra caiff ei ddal yn llonydd. O ddal Shift,
+lluniadir sgwâr, cylch neu linell ar luosrif o 45 gradd.
 
 Mae cwarelau'n rhedeg i lawr dwy ochr y ffenestr: fel arfer y cwarel Offer ar
 y chwith a'r cwarel Lliw ar y dde, gyda'r cwarel Addasiad oddi tano cyn gynted
@@ -154,7 +165,7 @@ gyffwrdd ag unrhyw beth y gall y rhaglen ei gyrraedd.
 
 Mae pwyso ail fotwm (de) y llygoden unrhyw le yn y ffenestr yn agor ei
 dewislen: Torri, Copïo, Gludo, Dewis y cyfan a Dad-ddewis, yna Ffeil,
-Golygu, Llun, Haenau, Lliwiau, Addasu, Corluniau neu Dudalennau, Gweld ac
+Golygu, Llun, Haenau, Lliwiau, Addasu, Tudalennau ar gyfer TIFF, Gweld ac
 Offer, pob un yn agor ei is-ddewislen ei hun. Nid oes bar dewislen gan y
 ffenestr. Mae cau ffenestr neu adael â newidiadau heb eu cadw'n gofyn yn
 gyntaf. Mae cau ffenestr â'r ail fotwm (de) ar ei botwm cau hefyd yn dangos
@@ -184,7 +195,8 @@ ei ffeil yn y rheolwr ffeiliau, yn y ffolder sy'n ei dal.
 * Pinsio â dau fys — chwyddo'n llyfn; ar sgrin gyffwrdd mae'r llun yn dilyn y bysedd
 * `G` — dangos neu guddio'r grid rhwng picseli
 * `Ctrl+'` — dangos neu guddio'r grid
-* `Page Up` / `Page Down` — y corlun neu'r dudalen cynt neu nesaf
+* `Page Up` / `Page Down` — y dudalen cynt neu nesaf
+* Mewn ffenestr ffeil corluniau: bysellau saeth, `Home` ac `End` — dewis corlun; `Enter` — golygu'r corluniau a ddewiswyd; `Delete` — eu dileu
 * bysellau saeth — symud dewis sy'n arnofio un picsel; â `Shift`, deg; yn y stribed palet, camu trwy ei liwiau
 
 ## OPTIONS

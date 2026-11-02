@@ -31,6 +31,8 @@ tairix-fsprobe = { path = "../../../lib/fsprobe", version = "=0.0.0" }
 # CRC-32C's one definition, whose register continuation serves the
 # `metadata_csum` seeds.
 tairix-crc32c = { path = "../../../lib/crc32c", version = "=0.0.0" }
+# The reflected CRC-16 the legacy `gdt_csum` group descriptors carry.
+tairix-crc16 = { path = "../../../lib/crc16", version = "=0.0.0" }
 # The keyed per-boot hash an indexed directory's listing cursors are drawn
 # from, so no name can be chosen to collide with another's.
 tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }

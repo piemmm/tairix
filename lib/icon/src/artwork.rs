@@ -70,7 +70,7 @@ use crate::folder::{
 use crate::glyph::{builtin_icon_at, IconKind};
 use crate::picture::{Artwork, CastShadow, Fitted, IconPicture};
 use crate::riscos::SpriteNames;
-use crate::thumbnail::{render_thumbnail, ArtworkDocument, DocumentStamp, Reading, Thumbnail};
+use crate::thumbnail::{render_thumbnail, ArtworkDocument, DocumentStamp, Thumbnail};
 
 /// Where the OS ships its desktop graphics assets.
 pub const GRAPHICS_DIR: &str = "/System/Graphics";
@@ -195,18 +195,12 @@ pub trait ArtworkRasteriser {
     /// refuse with `None`.
     fn rasterise(&mut self, side: u32, bytes: &[u8]) -> Option<Vec<u8>>;
 
-    /// Decode the picture `document` holds, its format read as `reading`
-    /// says, fitted inside a `side`-pixel square of straight-alpha RGBA8 and
-    /// centred on it, with where in the square the picture lies, or refuse
-    /// with `None`.
+    /// Decode the picture `document` holds, fitted inside a `side`-pixel
+    /// square of straight-alpha RGBA8 and centred on it, with where in the
+    /// square the picture lies, or refuse with `None`.
     ///
     /// The default refuses, which is right for a rasteriser of icons alone.
-    fn thumbnail(
-        &mut self,
-        _side: u32,
-        _reading: Reading,
-        _document: &mut dyn ArtworkDocument,
-    ) -> Option<Fitted> {
+    fn thumbnail(&mut self, _side: u32, _document: &mut dyn ArtworkDocument) -> Option<Fitted> {
         None
     }
 
@@ -260,13 +254,8 @@ impl<T: ArtworkRasteriser + ?Sized> ArtworkRasteriser for &mut T {
         (**self).rasterise(side, bytes)
     }
 
-    fn thumbnail(
-        &mut self,
-        side: u32,
-        reading: Reading,
-        document: &mut dyn ArtworkDocument,
-    ) -> Option<Fitted> {
-        (**self).thumbnail(side, reading, document)
+    fn thumbnail(&mut self, side: u32, document: &mut dyn ArtworkDocument) -> Option<Fitted> {
+        (**self).thumbnail(side, document)
     }
 
     fn application_sprite(
@@ -409,8 +398,6 @@ pub(crate) enum OwnIcon<'a> {
         path: &'a str,
         /// The version of the file the listing named.
         stamp: DocumentStamp,
-        /// How its format is read.
-        reading: Reading,
     },
     /// A RISC OS application directory, drawn by its own sprite.
     RiscOsApplication {
@@ -514,19 +501,10 @@ impl<'a> IconRequest<'a> {
     /// A picture file at `path`, at the version its listing named, drawn as
     /// its own content and falling back to `kind` where that will not serve.
     #[must_use]
-    pub const fn thumbnail(
-        kind: IconKind,
-        path: &'a str,
-        stamp: DocumentStamp,
-        reading: Reading,
-    ) -> Self {
+    pub const fn thumbnail(kind: IconKind, path: &'a str, stamp: DocumentStamp) -> Self {
         Self {
             kind,
-            own: Some(OwnIcon::Thumbnail {
-                path,
-                stamp,
-                reading,
-            }),
+            own: Some(OwnIcon::Thumbnail { path, stamp }),
             folder: None,
         }
     }
@@ -643,15 +621,7 @@ impl<'a> Tier<'a> {
             Self::Own(OwnIcon::Program { name, home }) => ArtView::Program { name, home },
             Self::Own(OwnIcon::Folder(sample)) => ArtView::Folder(sample.drawn()),
             Self::FolderKinds(sample) => ArtView::Folder(sample.drawn_as_kinds()),
-            Self::Own(OwnIcon::Thumbnail {
-                path,
-                stamp,
-                reading,
-            }) => ArtView::Thumbnail {
-                path,
-                stamp,
-                reading,
-            },
+            Self::Own(OwnIcon::Thumbnail { path, stamp }) => ArtView::Thumbnail { path, stamp },
             Self::Own(OwnIcon::RiscOsApplication { dir, stamp }) => {
                 ArtView::RiscOsApplication { dir, stamp }
             }
@@ -971,7 +941,6 @@ impl ArtworkKey {
             Self::Thumbnail(thumbnail) => ArtView::Thumbnail {
                 path: &thumbnail.path,
                 stamp: thumbnail.stamp,
-                reading: thumbnail.reading,
             },
             Self::RiscOsApplication { dir, stamp } => {
                 ArtView::RiscOsApplication { dir, stamp: *stamp }
@@ -1000,7 +969,6 @@ enum ArtView<'a> {
     Thumbnail {
         path: &'a str,
         stamp: DocumentStamp,
-        reading: Reading,
     },
     RiscOsApplication {
         dir: &'a str,
@@ -1030,14 +998,9 @@ impl ArtView<'_> {
             },
             Self::Builtin(kind) => ArtworkKey::Builtin(kind),
             Self::Folder(drawn) => ArtworkKey::Folder(drawn.to_sample()),
-            Self::Thumbnail {
-                path,
-                stamp,
-                reading,
-            } => ArtworkKey::Thumbnail(Thumbnail {
+            Self::Thumbnail { path, stamp } => ArtworkKey::Thumbnail(Thumbnail {
                 path: fallible::concatenated(&[path])?,
                 stamp,
-                reading,
             }),
             Self::RiscOsApplication { dir, stamp } => ArtworkKey::RiscOsApplication {
                 dir: fallible::concatenated(&[dir])?,

@@ -842,10 +842,65 @@ pub fn push_name(path: &mut String, name: &str) {
     path.push_str(name);
 }
 
+/// Random bytes in the tag a [`staging_name`] carries.
+pub const STAGING_TAG_LEN: usize = 8;
+
+/// The name `leaf`'s replacement is built under, beside it in its own
+/// directory, before a rename makes it `leaf`: `<leaf>.<tag>.new`, the tag in
+/// lowercase hex, or `.<tag>.new` where `leaf` is too long to carry the tag,
+/// so a name of any length can be replaced. Every staged replacement on the
+/// system is spelled by this rule.
+///
+/// # Errors
+///
+/// A refused allocation.
+pub fn staging_name(
+    leaf: &[u8],
+    tag: [u8; STAGING_TAG_LEN],
+) -> Result<Vec<u8>, alloc::collections::TryReserveError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    const SUFFIX: &[u8] = b".new";
+    let tagged = 1 + 2 * STAGING_TAG_LEN + SUFFIX.len();
+    let stem = if leaf.len() + tagged <= MAX_COMPONENT_LEN {
+        leaf
+    } else {
+        &[]
+    };
+    let mut staged = Vec::new();
+    staged.try_reserve_exact(stem.len() + tagged)?;
+    staged.extend_from_slice(stem);
+    staged.push(b'.');
+    for byte in tag {
+        staged.push(HEX[usize::from(byte >> 4)]);
+        staged.push(HEX[usize::from(byte & 0x0f)]);
+    }
+    staged.extend_from_slice(SUFFIX);
+    Ok(staged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn a_staging_name_carries_its_tag_unless_too_long_to() {
+        let tag = [0x0f; STAGING_TAG_LEN];
+        assert_eq!(
+            staging_name(b"doc", tag).expect("fits"),
+            b"doc.0f0f0f0f0f0f0f0f.new".to_vec()
+        );
+        let longest = vec![b'n'; MAX_COMPONENT_LEN - ".0f0f0f0f0f0f0f0f.new".len()];
+        let staged = staging_name(&longest, tag).expect("fits");
+        assert_eq!(staged.len(), MAX_COMPONENT_LEN);
+        assert!(staged.starts_with(&longest));
+        let mut long = longest;
+        long.push(b'n');
+        assert_eq!(
+            staging_name(&long, tag).expect("fits"),
+            b".0f0f0f0f0f0f0f0f.new".to_vec()
+        );
+    }
 
     fn components(p: &Path) -> Vec<String> {
         p.components().to_vec()

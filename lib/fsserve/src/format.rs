@@ -8,7 +8,7 @@ use tairix_abi::volume::{FormatName, VolumeFsType};
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, HwMatchKey};
 use tairix_reclaim::PressureGauge;
 
-use crate::ServedFilesystem;
+use crate::{GrantedVolume, ServedFilesystem, VolumeAccess};
 
 /// What every served filesystem driver runs with: the authority to serve the
 /// volume its grant names, and its diagnostics. It reaches nothing else.
@@ -84,6 +84,27 @@ pub trait ServedFormat {
         read_only: bool,
         budget: WritebackBudget,
     ) -> Result<Opened<Self::Fs<B>>, DriverError>;
+}
+
+/// A format served from an archive attachment (`plans/ARCHIVES.md`), which
+/// reads the archive and writes its work files by byte through the kernel's
+/// calls rather than as a block device.
+pub trait ServedArchive {
+    /// The driver, over the attachment it serves.
+    type Fs<A: VolumeAccess>: ServedFilesystem;
+
+    /// Open the archive attachment `volume`, only for reading when
+    /// `read_only`, bounding what it holds unpublished by `budget`.
+    ///
+    /// # Errors
+    ///
+    /// The format's refusal, which the driver gives the kernel as the reason
+    /// the volume is not served.
+    fn open<A: VolumeAccess>(
+        volume: GrantedVolume<A>,
+        read_only: bool,
+        budget: WritebackBudget,
+    ) -> Result<Opened<Self::Fs<A>>, DriverError>;
 }
 
 #[cfg(test)]

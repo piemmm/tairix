@@ -1,0 +1,32 @@
+[package]
+name = "tairix-test-archive-image"
+description = "Archives laid out for tests: the least archive of each format the archive driver writes, the DEFLATE, gzip and bzip2 streams they are packed in, and archives written back by the driver's own writer, shared by the driver's tests, its fuzz harness and the disk-image vertical."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` + `alloc`, so it links into the driver's tests and the host build
+# tool that plants the vertical's archives.
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The archives are written back by the driver itself.
+tairix-drv-fs-archive = { path = "../../../drivers/filesystem/archive", version = "=0.0.0" }
+# The archive attachment in memory an archive is written back through.
+tairix-fsserve = { path = "../../../lib/fsserve", version = "=0.0.0", features = ["test-util"] }
+# The memory gauge the write-back budget reads.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# DEFLATE and bzip2, which the streams are packed with.
+tairix-compress = { path = "../../../lib/compress", version = "=0.0.0" }
+# The CRC-32 a gzip member ends with.
+tairix-crc32 = { path = "../../../lib/crc32", version = "=0.0.0" }
+# The CRC-16 a Spark and an ArcFS member are checked by.
+tairix-crc16 = { path = "../../../lib/crc16", version = "=0.0.0" }

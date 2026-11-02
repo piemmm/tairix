@@ -64,6 +64,7 @@ members = [
     "lib/controls",
     "lib/countryside",
     "lib/cpuops",
+    "lib/crc16",
     "lib/crc32",
     "lib/crc32c",
     "lib/crt0",
@@ -181,6 +182,7 @@ members = [
 
     # Drivers — filesystem
     "drivers/filesystem/adfs",
+    "drivers/filesystem/archive",
     "drivers/filesystem/affs",
     "drivers/filesystem/ext4",
     "drivers/filesystem/fat32",
@@ -546,6 +548,7 @@ members = [
     "tests/integration/fat32_image",
     "tests/integration/iso9660_image",
     "tests/integration/amiga_image",
+    "tests/integration/archive_image",
     "tests/integration/netstack_wire",
     "tests/integration/spawn_supervision",
     "tests/integration/rtc_fixture",

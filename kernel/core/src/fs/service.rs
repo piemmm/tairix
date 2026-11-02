@@ -476,6 +476,29 @@ pub trait FilesystemService: Send + Sync {
         expect: Option<&NodeExpect>,
     ) -> Result<(), Errno>;
 
+    /// Rename the file `src` names over the one `dst` names, only while `src`
+    /// names the node `moving` names and `dst` the node `replacing` names,
+    /// both decided under the volume's lock: a replacement put in place of
+    /// what its maker read, never over whatever has taken that name since.
+    /// Each expectation names its node alone.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::rename`]; [`Errno::Stale`] when either end holds another
+    /// node, which changes nothing. The default fails closed with
+    /// [`Errno::NotImplemented`].
+    fn rename_replacing(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _src: At<'_>,
+        _dst: At<'_>,
+        _moving: &NodeExpect,
+        _replacing: &NodeExpect,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
     /// Set the permission bits of the node `at` names to `mode` (the
     /// `chmod(2)` shape), leaving ownership, ACL, and capability gate
     /// untouched; under [`FinalLink::Keep`] a final link itself.
@@ -876,6 +899,39 @@ pub trait FilesystemService: Send + Sync {
     /// if its lock is free this instant; the write-back flusher reaps
     /// whatever this leaves. A retired registration's releases are dropped.
     fn reap(&self, _volume: &VolumeNodes) {}
+
+    /// Whether the volume of the node `node` holds records an owner, group
+    /// and mode of each node's own, rather than presenting every node as one
+    /// owner's.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::Stale`] for a node whose projection or registration is gone,
+    /// or [`Errno::NotImplemented`] for a service that serves no node.
+    fn records_ownership_node(&self, _node: &NodeHandle) -> Result<bool, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Give the file `node` holds the whole security record of the node
+    /// `standing` holds on the same volume — owner, group, mode, ACL and
+    /// capability gate — as `who`, who must own both and hold any gate either
+    /// carries: what a replacement built to stand in `standing`'s place keeps
+    /// of it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::CrossVolume`] for nodes of two volumes,
+    /// [`Errno::PermissionDenied`], [`Errno::Stale`] for a node whose
+    /// projection or registration is gone, or [`Errno::NotImplemented`] for a
+    /// service that serves no node.
+    fn adopt_security_node(
+        &self,
+        _node: &NodeHandle,
+        _standing: &NodeHandle,
+        _who: &Acting<'_>,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
 
     /// Whether `who` may have `want` access to `node` through its descriptor,
     /// its gate, mode and ACL judged as `judged` says.

@@ -3451,10 +3451,12 @@ pub trait SyscallHandlers {
 
     /// Attach the volume the disk-image file open as `fd` holds, as the
     /// `ImageAttach` at `frame` asks, writing the `ImageAttachReply` to
-    /// `reply`. The handler judges the descriptor's authority and the
-    /// presentation asked for.
+    /// `reply`; `dir` is the directory holding it, or `IMAGE_NO_DIRECTORY`.
+    /// The handler judges the descriptors' authority and the presentation
+    /// asked for.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
+    #[allow(clippy::too_many_arguments)] // The six ABI arguments, decoded.
     fn image_attach(
         &self,
         _caller: &CallerContext<'_>,
@@ -3463,6 +3465,43 @@ pub trait SyscallHandlers {
         _frame_len: usize,
         _reply: u64,
         _reply_cap: usize,
+        _dir: u32,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Read `len` bytes at `offset` of region `region` of served archive
+    /// attachment `volume` into `buf` (`plans/ARCHIVES.md` §2).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_SERVE`] and that `buf` is non-null; the
+    /// implementation holds the caller to the volume its grant names.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn archive_read(
+        &self,
+        _caller: &CallerContext<'_>,
+        _volume: u64,
+        _region: u32,
+        _offset: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Write `len` bytes from `buf` at `offset` of work file `region` of
+    /// served archive attachment `volume`; as [`Self::archive_read`].
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn archive_write(
+        &self,
+        _caller: &CallerContext<'_>,
+        _volume: u64,
+        _region: u32,
+        _offset: u64,
+        _buf: u64,
+        _len: usize,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -4786,6 +4825,29 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                     frame_len,
                     args.0[3],
                     reply_cap,
+                    decode_u32(args.0[5]),
+                )
+            }
+            SyscallNumber::ARCHIVE_READ => {
+                let len = decode_len(args.0[4])?;
+                self.handlers.archive_read(
+                    caller,
+                    args.0[0],
+                    decode_u32(args.0[1]),
+                    args.0[2],
+                    args.0[3],
+                    len,
+                )
+            }
+            SyscallNumber::ARCHIVE_WRITE => {
+                let len = decode_len(args.0[4])?;
+                self.handlers.archive_write(
+                    caller,
+                    args.0[0],
+                    decode_u32(args.0[1]),
+                    args.0[2],
+                    args.0[3],
+                    len,
                 )
             }
             SyscallNumber::FS_CHDIR => {
@@ -6800,6 +6862,7 @@ mod tests {
             Ok(0)
         }
 
+        #[allow(clippy::too_many_arguments)] // Matches the trait declaration's justified count.
         fn image_attach(
             &self,
             _c: &CallerContext<'_>,
@@ -6808,8 +6871,35 @@ mod tests {
             _frame_len: usize,
             _reply: u64,
             _reply_cap: usize,
+            _dir: u32,
         ) -> SyscallResult {
             self.record("image_attach");
+            Ok(0)
+        }
+
+        fn archive_read(
+            &self,
+            _c: &CallerContext<'_>,
+            _volume: u64,
+            _region: u32,
+            _offset: u64,
+            _buf: u64,
+            _len: usize,
+        ) -> SyscallResult {
+            self.record("archive_read");
+            Ok(0)
+        }
+
+        fn archive_write(
+            &self,
+            _c: &CallerContext<'_>,
+            _volume: u64,
+            _region: u32,
+            _offset: u64,
+            _buf: u64,
+            _len: usize,
+        ) -> SyscallResult {
+            self.record("archive_write");
             Ok(0)
         }
 

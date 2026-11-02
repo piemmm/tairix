@@ -228,11 +228,15 @@ RAID. And the completeness test pins a hand-written list, so a new
 every such type in `lib/abi` itself and fail on one without a `typedef`, as
 `errno_table_matches_the_frozen_enum` does for the error table.
 
-**CC1.2.** `tairix_syscall.h` declares the four `volume_*` syscalls a
-served-filesystem driver makes and `tairix_driver.h` the
+**CC1.2.** `tairix_syscall.h` declares the `volume_*` and `archive_*`
+syscalls a served-filesystem driver makes and `tairix_driver.h` the
 `TAIRIX_WRITE_REFUSAL_*` codes its offer carries, but no header mirrors the
-records they exchange (`VolumeCtl`, `VolumeInfo`, `ServeFrame`, `ServeGrant`)
-or the `fsserve-v1` framing on the endpoint (`docs/src/abi/fsserve.md`). A
+records they exchange (`VolumeCtl` with an archive's copy, truncate and
+commit, `VolumeInfo` with an archive's length, work files and name,
+`ServeFrame`, `ServeGrant`), the archive regions (`ARCHIVE_REGION`,
+`ARCHIVE_STAGING`, `ARCHIVE_NEXT`), the transfer bounds (`VOLUME_IO_MAX`,
+`ARCHIVE_COPY_MAX`), or the `fsserve-v1` framing on the endpoint
+(`docs/src/abi/fsserve.md`). A
 filesystem driver written in C needs all of them, so they land together, one
 header per module (`tairix_volume.h`, `tairix_fsserve.h`); the `VolumeInfo`
 flag bits, private to `lib/abi` today, become public so the generator reads

@@ -3177,13 +3177,40 @@ impl SyscallNumber {
     /// Arguments: `fd: u32`, a descriptor the caller opened on the image;
     /// `frame: *const u8` and `frame_len: usize` (an
     /// [`crate::imageattach::ImageAttach`]); `reply: *mut u8` and `reply_cap:
-    /// usize`. Parks until the volume's filesystem driver serves it or
-    /// refuses it, writes the [`crate::imageattach::ImageAttachReply`] and
-    /// returns its length. The descriptor is the authority: it must be
-    /// readable, and the volume is writable only when it is writable too. A
-    /// shared or explicit presentation needs
+    /// usize`; `dir: u32`, a descriptor the caller opened on the directory
+    /// holding the image, which the frame's file name names it in, or
+    /// [`crate::imageattach::IMAGE_NO_DIRECTORY`]. Parks until the volume's
+    /// filesystem driver serves it or refuses it, writes the
+    /// [`crate::imageattach::ImageAttachReply`] and returns its length. The
+    /// descriptors are the authority: the image's must be readable, and the
+    /// volume is writable only when it is writable too — an archive only when
+    /// the caller also owns the file and may write the directory, under whose
+    /// name it is replaced. A shared or explicit presentation needs
     /// [`crate::CapabilityId::FS_MOUNT`]. Ungated at the dispatcher; audited.
     pub const IMAGE_ATTACH: Self = Self(164);
+
+    /// Read bytes of a region of an archive attachment this filesystem driver
+    /// serves (`plans/ARCHIVES.md` §2): the archive, or one of its work files.
+    ///
+    /// Arguments: `volume: u64` (the id its [`crate::HwResourceKind::Volume`]
+    /// grant names), `region: u32` ([`crate::volume::ARCHIVE_REGION`] or a
+    /// work file), `offset: u64`, `buf: *mut u8`, and `len: usize`, at most
+    /// [`crate::volume::VOLUME_IO_MAX`]. Returns how many bytes it read,
+    /// fewer only where the region ends, or `-errno`:
+    /// [`Errno::PermissionDenied`] without a grant covering the volume,
+    /// [`Errno::NotSupported`] for a volume that is no archive,
+    /// [`Errno::OutOfRange`] for a region the attachment does not have,
+    /// [`Errno::LengthOutOfRange`] for a length past the bound,
+    /// [`Errno::DeviceOffline`] once the volume is gone. Gated by
+    /// [`crate::CapabilityId::FS_SERVE`]; not audited, as `volume_read`.
+    pub const ARCHIVE_READ: Self = Self(165);
+
+    /// Write bytes of a work file of an archive attachment this driver serves,
+    /// extending it as needed: the arguments and errors of
+    /// [`Self::ARCHIVE_READ`], with `buf` the source and `region` a work file,
+    /// returning `0`, plus [`Errno::ReadOnly`] once the volume takes no writes.
+    /// Gated by [`crate::CapabilityId::FS_SERVE`]; not audited.
+    pub const ARCHIVE_WRITE: Self = Self(166);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -3500,6 +3527,8 @@ mod tests {
         assert_eq!(SyscallNumber::VIEW_BIND.as_u16(), 162);
         assert_eq!(SyscallNumber::VIEW_UNBIND.as_u16(), 163);
         assert_eq!(SyscallNumber::IMAGE_ATTACH.as_u16(), 164);
+        assert_eq!(SyscallNumber::ARCHIVE_READ.as_u16(), 165);
+        assert_eq!(SyscallNumber::ARCHIVE_WRITE.as_u16(), 166);
     }
 
     #[test]

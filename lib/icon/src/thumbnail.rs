@@ -23,17 +23,8 @@ use crate::picture::Artwork;
 /// picture rather than costing a read and an upload of its whole length.
 pub const MAX_THUMBNAIL_BYTES: u64 = 32 << 20;
 
-/// How a thumbnail's file says what format it is.
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Reading {
-    /// By the signature its bytes open with.
-    Signature,
-    /// As a RISC OS sprite area, which carries no signature and is read as one
-    /// only because its name says it is.
-    Sprite,
-}
-
-/// The file a thumbnail pictures, as its listing described it.
+/// The file a thumbnail pictures, as its listing described it; its format is
+/// the one its bytes' signature names.
 ///
 /// Keyed by the version of the file its listing named as well as its path, so
 /// a changed or replaced file is decoded afresh rather than served the picture
@@ -44,8 +35,6 @@ pub struct Thumbnail {
     pub path: String,
     /// The version of the file the listing named.
     pub stamp: DocumentStamp,
-    /// How its format is read.
-    pub reading: Reading,
 }
 
 /// Which version of which file: what a listing reports of a file, and what an
@@ -103,7 +92,7 @@ where
     if document.stamp() != thumbnail.stamp {
         return None;
     }
-    let fitted = rasteriser.thumbnail(side, thumbnail.reading, &mut *document)?;
+    let fitted = rasteriser.thumbnail(side, &mut *document)?;
     let expected = (side as usize)
         .checked_mul(side as usize)
         .and_then(|area| area.checked_mul(4))?;

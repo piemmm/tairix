@@ -62,6 +62,14 @@
 //! a full 32 KiB window and, on the encode side, a match finder, so they are
 //! tens to hundreds of kilobytes: heap-own one, do not put it on a stack.
 //!
+//! # Archive formats: [`bzip2`] and [`arc`]
+//!
+//! [`bzip2`] and the ARC family's methods ([`arc`]) are the other foreign
+//! formats archives are written in, both directions. They stream through
+//! [`Input`] and [`Output`] over workspace the caller places — a bzip2 block
+//! decodes through four bytes a symbol — and bzip2 reports where each block
+//! begins and resumes there, so a reader can seek into a long stream.
+//!
 //! All of it keeps the same total, `unsafe`-free, fail-closed discipline as
 //! the RLZ codec, and allocates nothing of its own: see the module
 //! documentation of each for its bounds and error taxonomy.
@@ -70,9 +78,23 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod arc;
+pub mod bzip2;
 pub mod deflate;
 pub mod inflate;
 pub mod zlib;
+
+/// Where a streaming decoder reads its input, a byte at a time.
+pub trait Input {
+    /// The next byte, or `None` at the input's end.
+    fn byte(&mut self) -> Option<u8>;
+}
+
+/// Where a streaming encoder writes its output.
+pub trait Output {
+    /// Take `bytes`, answering whether it did.
+    fn put(&mut self, bytes: &[u8]) -> bool;
+}
 
 mod format;
 

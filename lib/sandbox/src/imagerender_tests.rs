@@ -2571,10 +2571,9 @@ fn thumbnailed(
     sandbox: &mut TestSandbox,
     document: &[u8],
     side: u32,
-    format: Option<super::ViewFormat>,
 ) -> Result<Vec<u8>, IconRasterFailure> {
     super::send_document(sandbox, document).expect("uploaded");
-    super::render_thumbnail(sandbox, side, format).map(|fitted| fitted.pixels)
+    super::render_thumbnail(sandbox, side).map(|fitted| fitted.pixels)
 }
 
 #[test]
@@ -2583,7 +2582,7 @@ fn a_thumbnail_is_its_picture_fitted_and_centred() {
     let (red, blue) = ([200, 0, 0, 255], [0, 0, 200, 255]);
     let png = png_with(8, 4, |x, _| if x < 4 { red } else { blue });
     super::send_document(&mut sandbox, &png).expect("uploaded");
-    let fitted = super::render_thumbnail(&mut sandbox, 4, None).expect("drawn");
+    let fitted = super::render_thumbnail(&mut sandbox, 4).expect("drawn");
     assert_eq!(
         fitted.bounds,
         tairix_geometry::Rect::new(0, 1, 4, 2),
@@ -2605,7 +2604,7 @@ fn a_thumbnail_is_its_picture_fitted_and_centred() {
 fn a_picture_smaller_than_its_tile_is_not_enlarged() {
     let mut sandbox = sandbox();
     let colour = [10, 120, 30, 255];
-    let pixels = thumbnailed(&mut sandbox, &png_with(2, 2, |_, _| colour), 6, None).expect("drawn");
+    let pixels = thumbnailed(&mut sandbox, &png_with(2, 2, |_, _| colour), 6).expect("drawn");
     for y in 0..6 {
         for x in 0..6 {
             let inside = (2..4).contains(&x) && (2..4).contains(&y);
@@ -2621,27 +2620,22 @@ fn a_picture_smaller_than_its_tile_is_not_enlarged() {
 fn a_thumbnail_takes_its_document_with_it() {
     let mut sandbox = sandbox();
     let png = png_with(2, 2, |_, _| [1, 2, 3, 255]);
-    assert!(thumbnailed(&mut sandbox, &png, 2, None).is_ok());
+    assert!(thumbnailed(&mut sandbox, &png, 2).is_ok());
     assert_eq!(
-        super::render_thumbnail(&mut sandbox, 2, None),
+        super::render_thumbnail(&mut sandbox, 2),
         Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest))
     );
 }
 
-/// A named format is the format read: a PNG named a sprite area is refused by
-/// the sprite parser rather than sniffed back into a PNG.
+/// A thumbnail is the one picture a signature names: a sprite area, which has
+/// none and holds many pictures, is refused rather than drawn as one of them.
 #[test]
-fn a_named_format_is_the_one_read() {
+fn a_thumbnail_is_read_by_its_signature_alone() {
     let mut sandbox = sandbox();
-    let png = png_with(2, 2, |_, _| [1, 2, 3, 255]);
+    let area = sprite_area(&[sprite(b"one", (1, 1), (2, 2), |_, _| [1, 2, 3, 255])]);
     assert_eq!(
-        thumbnailed(&mut sandbox, &png, 2, Some(super::ViewFormat::Sprite)),
-        Err(IconRasterFailure::Refused(IconRefusal::MalformedImage))
-    );
-    assert_eq!(
-        thumbnailed(&mut sandbox, &png, 2, Some(super::ViewFormat::Svg)),
-        Err(IconRasterFailure::Refused(IconRefusal::UnsupportedFormat)),
-        "a thumbnail is a raster picture"
+        thumbnailed(&mut sandbox, &area, 2),
+        Err(IconRasterFailure::Refused(IconRefusal::UnsupportedFormat))
     );
 }
 
@@ -2654,18 +2648,17 @@ fn a_picture_too_dear_to_decode_is_refused_from_its_header() {
     // picture is well inside what the viewer opens.
     let png = build_png(1 << 24, 1, &[0]);
     assert_eq!(
-        thumbnailed(&mut sandbox, &png, 16, None),
+        thumbnailed(&mut sandbox, &png, 16),
         Err(IconRasterFailure::Refused(IconRefusal::TooLarge))
     );
 }
 
 #[test]
 fn the_worker_refuses_every_malformed_thumbnail_request() {
-    let request = |side: u32, format: u8, trailing: bool| {
+    let request = |side: u32, trailing: bool| {
         let mut w = Writer::new();
         w.u8(super::OP_THUMBNAIL);
         w.u32(side);
-        w.u8(format);
         if trailing {
             w.u8(0);
         }
@@ -2676,24 +2669,20 @@ fn the_worker_refuses_every_malformed_thumbnail_request() {
     };
     let mut worker = ImageRenderService::default();
     refused(
-        worker.handle(&request(4, 0, false)),
+        worker.handle(&request(4, false)),
         IconRefusal::MalformedRequest,
     );
     refused(
-        worker.handle(&request(0, 0, false)),
+        worker.handle(&request(0, false)),
         IconRefusal::MalformedRequest,
     );
     refused(
-        worker.handle(&request(MAX_ICON_SIDE + 1, 0, false)),
+        worker.handle(&request(MAX_ICON_SIDE + 1, false)),
         IconRefusal::MalformedRequest,
     );
     refused(
-        worker.handle(&request(4, 0, true)),
+        worker.handle(&request(4, true)),
         IconRefusal::MalformedRequest,
-    );
-    refused(
-        worker.handle(&request(4, 200, false)),
-        IconRefusal::UnsupportedFormat,
     );
     refused(
         worker.handle(&[super::OP_THUMBNAIL]),
@@ -2718,7 +2707,7 @@ fn fitted_reply(side: u32, placed: [u32; 4], pixels: &[u8]) -> Vec<u8> {
 fn a_thumbnail_reply_of_the_wrong_length_is_refused() {
     let mut sandbox = scripted(fitted_reply(2, [0, 0, 2, 2], &[0u8; 3]));
     assert_eq!(
-        super::render_thumbnail(&mut sandbox, 2, None),
+        super::render_thumbnail(&mut sandbox, 2),
         Err(IconRasterFailure::ReplyMalformed)
     );
 }
@@ -2737,7 +2726,7 @@ fn a_thumbnail_placed_outside_its_square_or_nowhere_is_refused() {
     ] {
         let mut sandbox = scripted(fitted_reply(2, placed, &square));
         assert_eq!(
-            super::render_thumbnail(&mut sandbox, 2, None),
+            super::render_thumbnail(&mut sandbox, 2),
             Err(IconRasterFailure::ReplyMalformed),
             "{placed:?}"
         );
@@ -2749,7 +2738,7 @@ fn a_thumbnail_placed_outside_its_square_or_nowhere_is_refused() {
     w.bytes(&square);
     let mut sandbox = scripted(w.finish());
     assert_eq!(
-        super::render_thumbnail(&mut sandbox, 2, None),
+        super::render_thumbnail(&mut sandbox, 2),
         Err(IconRasterFailure::ReplyMalformed)
     );
 }
@@ -2783,14 +2772,9 @@ fn a_thumbnail_streams_its_document_and_draws_it() {
     let mut sandbox = sandbox();
     let colour = [9, 8, 7, 255];
     let mut document = Held(png_with(4, 4, |_, _| colour));
-    let pixels = super::thumbnail(
-        &mut sandbox,
-        2,
-        tairix_icon::Reading::Signature,
-        &mut document,
-    )
-    .expect("drawn")
-    .pixels;
+    let pixels = super::thumbnail(&mut sandbox, 2, &mut document)
+        .expect("drawn")
+        .pixels;
     assert_eq!(rgba_at(&pixels, 2, 1, 1), colour);
 }
 

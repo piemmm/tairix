@@ -10,7 +10,7 @@ use tairix_geometry::Rect;
 
 use super::{serve_thumbnail, StoreAccess, StoreFile, StoreKey, ThumbnailStore, HEADER_LEN, WAYS};
 use crate::picture::Fitted;
-use crate::thumbnail::{ArtworkDocument, DocumentStamp, Reading};
+use crate::thumbnail::{ArtworkDocument, DocumentStamp};
 
 const SIDE: u32 = 4;
 const REVISION: u32 = 7;
@@ -85,7 +85,7 @@ fn stamp(node: u64, content_gen: u64) -> DocumentStamp {
 }
 
 fn key(node: u64, content_gen: u64) -> StoreKey {
-    StoreKey::of(stamp(node, content_gen), Reading::Signature).expect("an exact version")
+    StoreKey::of(stamp(node, content_gen)).expect("an exact version")
 }
 
 fn picture(fill: u8) -> Fitted {
@@ -118,10 +118,10 @@ fn a_stored_picture_comes_back_across_a_reopen() {
 /// not this store's shape is refused.
 #[test]
 fn only_an_exact_version_of_the_stores_shape_is_kept() {
-    assert_eq!(StoreKey::of(stamp(1, 0), Reading::Signature), None);
+    assert_eq!(StoreKey::of(stamp(1, 0)), None);
     let mut nameless = stamp(1, 3);
     nameless.id = FileId::NONE;
-    assert_eq!(StoreKey::of(nameless, Reading::Signature), None);
+    assert_eq!(StoreKey::of(nameless), None);
     let mut store =
         ThumbnailStore::open(Blob::default(), SIDE, REVISION, ceiling(2)).expect("formats");
     let short = Fitted {
@@ -305,24 +305,24 @@ fn a_serve_decodes_once_per_version_and_keeps_only_one_it_read_whole() {
         now: Some(stamp(1, 4)),
     };
     assert_eq!(
-        serve_thumbnail(&mut store, Reading::Signature, &mut steady, &mut decode),
+        serve_thumbnail(&mut store, &mut steady, &mut decode),
         Some(picture(0x60))
     );
     assert_eq!(
-        serve_thumbnail(&mut store, Reading::Signature, &mut steady, &mut decode),
+        serve_thumbnail(&mut store, &mut steady, &mut decode),
         Some(picture(0x60))
     );
     let mut raced = Document {
         stamp: stamp(2, 4),
         now: Some(stamp(2, 5)),
     };
-    assert!(serve_thumbnail(&mut store, Reading::Signature, &mut raced, &mut decode).is_some());
-    assert!(serve_thumbnail(&mut store, Reading::Signature, &mut raced, &mut decode).is_some());
+    assert!(serve_thumbnail(&mut store, &mut raced, &mut decode).is_some());
+    assert!(serve_thumbnail(&mut store, &mut raced, &mut decode).is_some());
     let mut inexact = Document {
         stamp: stamp(3, 0),
         now: Some(stamp(3, 0)),
     };
-    assert!(serve_thumbnail(&mut store, Reading::Signature, &mut inexact, &mut decode).is_some());
+    assert!(serve_thumbnail(&mut store, &mut inexact, &mut decode).is_some());
     assert_eq!(
         decodes, 4,
         "one for the steady file, two raced, one inexact"
@@ -350,7 +350,7 @@ fn a_shared_store_is_reached_around_the_decode_never_across_it() {
         stamp: stamp(1, 4),
         now: Some(stamp(1, 4)),
     };
-    let drawn = serve_thumbnail(&mut Lent(&calls), Reading::Signature, &mut steady, |_| {
+    let drawn = serve_thumbnail(&mut Lent(&calls), &mut steady, |_| {
         calls.borrow_mut().push("decode");
         Some(picture(0x60))
     });

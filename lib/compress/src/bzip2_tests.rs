@@ -1,0 +1,299 @@
+//! The bzip2 codec: streams the reference implementation wrote decode to
+//! what it was given, and everything the encoder writes decodes back to its
+//! input, across block boundaries and through the format's run coding.
+
+extern crate std;
+
+use std::vec;
+use std::vec::Vec;
+
+use super::{
+    block_symbols, decoder_work, encoder_block, encoder_work, BlockIndex, Decoder, Encoder, Error,
+    Input, Next, Output, MAX_BLOCK,
+};
+
+/// `hello, hello, hello bzip2 world\n`, as `bzip2 -9` 1.0.8 wrote it.
+const HELLO_BZ2: &[u8] = &[
+    0x42, 0x5a, 0x68, 0x39, 0x31, 0x41, 0x59, 0x26, 0x53, 0x59, 0x5e, 0xda, 0xad, 0x33, 0x00, 0x00,
+    0x07, 0xd9, 0x80, 0x00, 0x10, 0x40, 0x04, 0x10, 0x00, 0x16, 0x64, 0xd0, 0x90, 0x20, 0x00, 0x21,
+    0x94, 0xd1, 0x93, 0x4c, 0x8f, 0x50, 0xa6, 0x00, 0x01, 0xeb, 0x41, 0xd8, 0x5c, 0x5d, 0x16, 0x12,
+    0xbd, 0xd3, 0x00, 0xa5, 0x52, 0xbe, 0x2e, 0xe4, 0x8a, 0x70, 0xa1, 0x20, 0xbd, 0xb5, 0x5a, 0x66,
+];
+
+/// Three hundred sevens, `abc` five times, and every byte value three
+/// times over, as `bzip2 -1` 1.0.8 wrote it.
+const RUNS_BZ2: &[u8] = &[
+    0x42, 0x5a, 0x68, 0x31, 0x31, 0x41, 0x59, 0x26, 0x53, 0x59, 0x65, 0xa2, 0xf1, 0x3a, 0x00, 0x00,
+    0x0b, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xb0, 0x01, 0x74, 0x50, 0x12, 0xff, 0xff, 0x55, 0x55, 0x02, 0x60, 0x26, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x68, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x5e,
+    0xaa, 0x80, 0x26, 0x4c, 0x00, 0x99, 0x18, 0x98, 0x86, 0x26, 0x98, 0x4c, 0x46, 0x11, 0x84, 0xc1,
+    0x03, 0x00, 0x4d, 0x0c, 0x46, 0x00, 0x10, 0x62, 0x61, 0x06, 0x00, 0x04, 0xd3, 0x11, 0xa0, 0xc2,
+    0x60, 0x13, 0x21, 0x91, 0xa6, 0x46, 0x08, 0xd0, 0xc8, 0x60, 0x00, 0x8c, 0x02, 0x06, 0x40, 0x61,
+    0x0d, 0x30, 0x00, 0x01, 0x26, 0x00, 0x09, 0x80, 0x00, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xdd, 0xac, 0x42, 0x90, 0x54, 0x0a, 0xc1, 0x60, 0x2d, 0x05,
+    0xc3, 0x4c, 0xb8, 0xc0, 0x84, 0x30, 0x05, 0x00, 0x86, 0x23, 0x62, 0x0c, 0x81, 0x98, 0x34, 0x06,
+    0xa0, 0xd8, 0x1b, 0x83, 0x80, 0x72, 0x0e, 0x81, 0xd8, 0xd9, 0x23, 0x08, 0xca, 0x34, 0x8d, 0xa3,
+    0x88, 0xea, 0x3c, 0x8f, 0xa4, 0x09, 0x0a, 0x44, 0x91, 0xa4, 0x89, 0x2a, 0x4c, 0x93, 0xa5, 0x09,
+    0x4a, 0x54, 0x95, 0xa4, 0x32, 0xc4, 0xb5, 0x2e, 0x4b, 0xd3, 0x04, 0xc5, 0x32, 0x4c, 0xd3, 0x44,
+    0xd5, 0x36, 0x4d, 0xd3, 0x84, 0xe5, 0x3a, 0x4e, 0xd3, 0xc4, 0xf5, 0x3e, 0x7f, 0xc9, 0xfa, 0x80,
+    0xa0, 0xa8, 0x4a, 0x1a, 0x88, 0xa2, 0xa8, 0xca, 0x3a, 0x90, 0xa4, 0xa9, 0x4a, 0x5a, 0x98, 0xa6,
+    0xa9, 0xca, 0x7a, 0xa0, 0xa8, 0xaa, 0x4a, 0x9a, 0xa8, 0xaa, 0xaa, 0xca, 0xba, 0xb0, 0xac, 0xab,
+    0x4a, 0xda, 0xb8, 0xae, 0xab, 0xca, 0xfa, 0xc0, 0x6d, 0x0d, 0xa4, 0x22, 0x83, 0x70, 0x6f, 0x21,
+    0x08, 0xe0, 0x42, 0x10, 0xac, 0x38, 0x87, 0x20, 0xe6, 0x1d, 0x07, 0x30, 0x73, 0x47, 0x38, 0x73,
+    0xc3, 0xa8, 0x76, 0x0e, 0xe3, 0xa0, 0x1e, 0x03, 0xc8, 0x7a, 0x0f, 0x62, 0xea, 0xbb, 0x2e, 0xeb,
+    0xc2, 0xf2, 0xbd, 0x2f, 0x6b, 0xe2, 0xfa, 0xff, 0xd7, 0xe5, 0xfd, 0x80, 0x60, 0x58, 0x26, 0x0d,
+    0x84, 0x61, 0x58, 0x66, 0x1d, 0x88, 0x62, 0x58, 0xa6, 0x2d, 0x8c, 0x63, 0x58, 0xe6, 0x3d, 0x90,
+    0x64, 0x59, 0x26, 0x4d, 0x94, 0x65, 0x59, 0x66, 0x5d, 0x98, 0x66, 0x59, 0xa6, 0x6d, 0x9c, 0x67,
+    0x59, 0xe6, 0x7d, 0xa0, 0x68, 0x5a, 0x26, 0x8d, 0xa4, 0x69, 0x5a, 0x66, 0x9d, 0xa8, 0x6a, 0x5a,
+    0xa6, 0xad, 0xac, 0x6b, 0x5a, 0xe6, 0xbd, 0xb0, 0x6c, 0x5b, 0x26, 0xcd, 0xb4, 0x6d, 0x5b, 0x66,
+    0xdd, 0xb8, 0x6e, 0x5b, 0xa6, 0xed, 0xbc, 0x6f, 0x5b, 0xe6, 0xfd, 0xc0, 0x70, 0x5c, 0x27, 0x0d,
+    0xc4, 0x71, 0x5c, 0x67, 0x1d, 0xc8, 0x72, 0x5c, 0xa7, 0x2d, 0xcc, 0x73, 0x5c, 0xe4, 0x03, 0x9e,
+    0xe8, 0x3a, 0x2e, 0x93, 0xa6, 0xea, 0x3a, 0xae, 0xb3, 0xae, 0xec, 0x3b, 0x2e, 0xd3, 0xb6, 0xee,
+    0x3b, 0xae, 0xf3, 0xbe, 0xf0, 0x3c, 0x2f, 0x13, 0xc6, 0xf2, 0x3c, 0xaf, 0x33, 0xce, 0xf4, 0x3d,
+    0x2f, 0x53, 0xd6, 0xf6, 0x3d, 0xaf, 0x73, 0xde, 0xf8, 0x3e, 0x2f, 0x93, 0xe6, 0xfa, 0x3e, 0xaf,
+    0xb3, 0xee, 0xfc, 0x20, 0x3f, 0x2f, 0x9b, 0xf4, 0xfd, 0xbf, 0x8f, 0xe8, 0xbb, 0x92, 0x29, 0xc2,
+    0x84, 0x83, 0x2d, 0x17, 0x89, 0xd0,
+];
+
+/// A slice, read a byte at a time.
+struct Bytes<'a>(&'a [u8]);
+
+impl Input for Bytes<'_> {
+    fn byte(&mut self) -> Option<u8> {
+        let (&first, rest) = self.0.split_first()?;
+        self.0 = rest;
+        Some(first)
+    }
+}
+
+impl Output for Vec<u8> {
+    fn put(&mut self, bytes: &[u8]) -> bool {
+        self.extend_from_slice(bytes);
+        true
+    }
+}
+
+/// Where each block began.
+#[derive(Default)]
+struct Starts(Vec<(u64, u64)>);
+
+impl BlockIndex for Starts {
+    fn block(&mut self, plain: u64, bit: u64) {
+        self.0.push((plain, bit));
+    }
+}
+
+/// Every stream `stream` holds, decoded.
+fn decode(stream: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut input = Bytes(stream);
+    let mut decoder = Decoder::new(vec![0u32; MAX_BLOCK]);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 777];
+    while !input.0.is_empty() {
+        decoder.begin(&mut input)?;
+        while let Next::Block { .. } = decoder.next_block(&mut input)? {
+            loop {
+                let got = decoder.read(&mut buf)?;
+                if got == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..got]);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `plain`, encoded at `level` in pieces of `piece` bytes.
+fn encode(plain: &[u8], level: u8, piece: usize) -> (Vec<u8>, Starts) {
+    let mut encoder = Encoder::new(
+        vec![0u32; encoder_work(level)],
+        vec![0u8; encoder_block(level)],
+        level,
+    )
+    .expect("an encoder");
+    let mut out = Vec::new();
+    let mut starts = Starts::default();
+    for chunk in plain.chunks(piece.max(1)) {
+        encoder.write(chunk, &mut out, &mut starts).expect("writes");
+    }
+    encoder.finish(&mut out, &mut starts).expect("finishes");
+    (out, starts)
+}
+
+fn pseudo_random(len: usize, mut state: u64) -> Vec<u8> {
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 56) as u8
+        })
+        .collect()
+}
+
+#[test]
+fn the_reference_encoders_streams_decode() {
+    assert_eq!(
+        decode(HELLO_BZ2).unwrap(),
+        b"hello, hello, hello bzip2 world\n"
+    );
+    let mut runs = vec![7u8; 300];
+    runs.extend_from_slice(b"abcabcabcabcabc");
+    for _ in 0..3 {
+        runs.extend(0..=255u8);
+    }
+    assert_eq!(decode(RUNS_BZ2).unwrap(), runs);
+}
+
+#[test]
+fn what_the_encoder_writes_decodes_back() {
+    let text: Vec<u8> = b"It was the best of times, it was the worst of times. ".repeat(900);
+    let cases: Vec<(Vec<u8>, u8)> = vec![
+        (Vec::new(), 9),
+        (vec![b'x'], 9),
+        (vec![0u8; 5000], 1),
+        (vec![9u8; 255], 1),
+        (vec![9u8; 256], 1),
+        ((0..=255u8).cycle().take(70_000).collect(), 1),
+        (text, 1),
+        (pseudo_random(250_000, 0x9E37_79B9_7F4A_7C15), 1),
+    ];
+    for (plain, level) in cases {
+        for piece in [1, 4096, usize::MAX] {
+            let piece = piece.min(plain.len().max(1));
+            let (stream, _) = encode(&plain, level, piece);
+            assert_eq!(
+                decode(&stream).unwrap(),
+                plain,
+                "{} bytes in pieces of {piece}",
+                plain.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_stream_of_several_blocks_names_where_each_began_and_resumes_there() {
+    let plain = pseudo_random(320_000, 7);
+    let (stream, starts) = encode(&plain, 1, 50_000);
+    assert!(starts.0.len() >= 4, "{} blocks", starts.0.len());
+    for &(plain_at, bit) in &starts.0[1..] {
+        let mut input = Bytes(&stream[(bit / 8) as usize..]);
+        let mut decoder = Decoder::new(vec![0u32; MAX_BLOCK]);
+        decoder.resume(1, (bit % 8) as u8).unwrap();
+        assert_eq!(
+            decoder.next_block(&mut input).unwrap(),
+            Next::Block { at: 0 }
+        );
+        let mut out = vec![0u8; 1000];
+        let mut got = 0;
+        while got < out.len() {
+            let read = decoder.read(&mut out[got..]).unwrap();
+            assert_ne!(read, 0);
+            got += read;
+        }
+        let at = usize::try_from(plain_at).unwrap();
+        assert_eq!(out, plain[at..at + 1000]);
+    }
+}
+
+#[test]
+fn a_damaged_stream_is_refused_not_trusted() {
+    let mut crc = HELLO_BZ2.to_vec();
+    crc[10] ^= 0x01;
+    assert!(matches!(
+        decode(&crc),
+        Err(Error::Checksum | Error::Corrupt)
+    ));
+    assert_eq!(
+        decode(&HELLO_BZ2[..HELLO_BZ2.len() - 6]),
+        Err(Error::UnexpectedEof)
+    );
+    assert_eq!(decode(b"BZh0"), Err(Error::Corrupt));
+    let mut magic = HELLO_BZ2.to_vec();
+    magic[4] ^= 0x80;
+    assert_eq!(decode(&magic), Err(Error::Corrupt));
+    // Every byte flipped in turn decodes, or is refused, but never panics.
+    for at in 4..HELLO_BZ2.len() {
+        let mut flipped = HELLO_BZ2.to_vec();
+        flipped[at] ^= 0xA5;
+        let _ = decode(&flipped);
+    }
+}
+
+#[test]
+fn a_block_larger_than_the_workspace_is_refused_and_one_it_holds_decodes() {
+    let plain = b"hello, world\n".repeat(100);
+    let (stream, _) = encode(&plain, 9, 4096);
+    let symbols = usize::try_from(block_symbols(plain.len() as u64)).unwrap();
+    let mut decoder = Decoder::new(vec![0u32; symbols]);
+    let mut input = Bytes(&stream);
+    assert_eq!(decoder.begin(&mut input), Ok(9));
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Next::Block { .. } = decoder.next_block(&mut input).unwrap() {
+        loop {
+            let got = decoder.read(&mut buf).unwrap();
+            if got == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..got]);
+        }
+    }
+    assert_eq!(out, plain);
+    let mut small = Decoder::new(vec![0u32; 10]);
+    let mut input = Bytes(HELLO_BZ2);
+    small.begin(&mut input).unwrap();
+    assert_eq!(small.next_block(&mut input), Err(Error::WorkspaceTooSmall));
+    assert!(Encoder::new(vec![0u32; 10], vec![0u8; 10], 1).is_err());
+}
+
+#[test]
+fn a_block_bound_covers_the_worst_first_coding() {
+    // Runs of exactly four, each spelt in five bytes.
+    let plain: Vec<u8> = (0..2000u32)
+        .flat_map(|n| [u8::try_from(n % 2).unwrap(); 4])
+        .collect();
+    let (stream, _) = encode(&plain, 9, 4096);
+    let symbols = usize::try_from(block_symbols(plain.len() as u64)).unwrap();
+    let mut decoder = Decoder::new(vec![0u32; symbols]);
+    let mut input = Bytes(&stream);
+    decoder.begin(&mut input).unwrap();
+    assert!(matches!(
+        decoder.next_block(&mut input),
+        Ok(Next::Block { .. })
+    ));
+}
+
+#[test]
+fn a_workspace_of_the_streams_own_level_decodes_it() {
+    assert_eq!(decoder_work(9), MAX_BLOCK);
+    let plain = pseudo_random(150_000, 7);
+    let (stream, _) = encode(&plain, 1, 4096);
+    let mut decoder = Decoder::new(vec![0u32; decoder_work(1)]);
+    let mut input = Bytes(&stream);
+    assert_eq!(decoder.begin(&mut input), Ok(1));
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Next::Block { .. } = decoder.next_block(&mut input).unwrap() {
+        loop {
+            let got = decoder.read(&mut buf).unwrap();
+            if got == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..got]);
+        }
+    }
+    assert_eq!(out, plain);
+    // Random bytes fill the first block, which half its level's room cannot
+    // hold.
+    let mut short = Decoder::new(vec![0u32; decoder_work(1) / 2]);
+    let mut input = Bytes(&stream);
+    short.begin(&mut input).unwrap();
+    assert_eq!(short.next_block(&mut input), Err(Error::WorkspaceTooSmall));
+}

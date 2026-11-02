@@ -48,10 +48,22 @@ bei 4 Farben die Wimp-Farben 0, 2, 4 und 7; bei 256 Farben die
 RISC-OS-Tönungsanordnung — niemals eine PC-Palette. Ein Sprite, dessen Pixel
 höher als breit sind, wie im Modus 12, wird so dargestellt. Ein Sprite, das
 dieser Editor nicht lesen kann, etwa ein CMYK-Sprite, bleibt genau so
-erhalten und wird unverändert zurückgeschrieben. Das Menü Sprites springt zu
-Sprites, fügt sie hinzu, kopiert, benennt um, löscht und ordnet sie neu.
-Eine TIFF-Datei enthält beliebig viele Seiten; für sie springt das Menü
-Seiten zu Seiten, fügt sie hinzu, kopiert, löscht und ordnet sie neu.
+erhalten und wird unverändert zurückgeschrieben. Eine TIFF-Datei enthält
+beliebig viele Seiten; für sie springt das Menü Seiten zu Seiten, fügt sie
+hinzu, kopiert, löscht und ordnet sie neu.
+
+Eine Sprite-Datei öffnet sich in einem kleinen Fenster mit ihren Sprites,
+jedes als Bild über seinem Namen. Ein Klick wählt ein Sprite, mit Strg ein
+weiteres, mit der Umschalttaste eine Folge; das Menü des Fensters erstellt
+Sprites, benennt sie um, kopiert, löscht und ordnet sie neu und speichert
+die Datei. Ein Doppelklick auf ein Sprite oder Enter öffnet es zum
+Bearbeiten in einem eigenen Fenster; beliebig viele Sprites können zugleich
+offen sein, aus beliebig vielen Dateien. Die Änderungen eines
+Sprite-Fensters gehören zu seiner Datei, sobald sie vorgenommen werden, und
+Speichern dort speichert die Datei. Das Schließen eines Sprite-Fensters
+fragt nicht nach; das Schließen des Fensters der Datei fragt, ob die
+Änderungen aller Sprites gespeichert werden sollen, und schließt auch deren
+Fenster.
 
 Die primäre (linke) Taste malt mit der Primärfarbe und die mittlere Taste
 mit der Sekundärfarbe; mit gedrückter Alt-Taste wird stattdessen eine Farbe
@@ -64,9 +76,10 @@ Deckkraft, Fluss und Abstand eines Pinsels, die Toleranz einer Füllung, die
 Form eines Verlaufs, die Textgröße, die Ecken eines Rechtecks —, getippt oder
 mit den Pfeiltasten verstellt, und die Schaltflächen zum Zoomen und für das
 Pixelraster; der Palettenstreifen unter dem Bild enthält die Palette des
-Bildes oder die Desktop-Farben. Der Airbrush sprüht weiter, solange er still
-gehalten wird. Mit gedrückter Umschalttaste entsteht ein Quadrat, ein Kreis
-oder eine Linie im Vielfachen von 45 Grad.
+Bildes oder die Desktop-Farben, in einer einzigen Reihe, die seitwärts
+rollt, wenn sie länger als das Fenster ist. Der Airbrush sprüht weiter,
+solange er still gehalten wird. Mit gedrückter Umschalttaste entsteht ein
+Quadrat, ein Kreis oder eine Linie im Vielfachen von 45 Grad.
 
 An beiden Seiten des Fensters laufen Bereiche entlang: standardmäßig links der
 Bereich Werkzeuge und rechts der Bereich Farbe, darunter der Bereich
@@ -167,7 +180,7 @@ Programm erreichen kann.
 
 Die sekundäre (rechte) Maustaste öffnet überall im Fenster dessen Menü:
 Ausschneiden, Kopieren, Einfügen, Alles auswählen und Auswahl aufheben, dann
-Datei, Bearbeiten, Bild, Ebenen, Farben, Korrekturen, Sprites oder Seiten,
+Datei, Bearbeiten, Bild, Ebenen, Farben, Korrekturen, Seiten bei einem TIFF,
 Ansicht und Werkzeuge, jedes mit eigenem Untermenü. Das Fenster hat keine
 Menüleiste. Das Schließen eines Fensters oder Beenden mit ungespeicherten
 Änderungen fragt zuerst nach. Wird ein Fenster mit der sekundären (rechten)
@@ -198,7 +211,8 @@ Dateiverwaltung außerdem seine Datei in dem Ordner, der sie enthält.
 * Zwei Finger spreizen oder zusammenführen — stufenlos vergrößern oder verkleinern; auf einem Touchscreen folgt das Bild den Fingern
 * `G` — das Raster zwischen den Pixeln ein- oder ausblenden
 * `Ctrl+'` — das Raster ein- oder ausblenden
-* `Page Up` / `Page Down` — das vorige oder nächste Sprite, die vorige oder nächste Seite
+* `Page Up` / `Page Down` — die vorige oder nächste Seite
+* Im Fenster einer Sprite-Datei: Pfeiltasten, `Home` und `End` — ein Sprite wählen; `Enter` — die gewählten Sprites bearbeiten; `Delete` — sie löschen
 * Pfeiltasten — eine schwebende Auswahl um ein Pixel verschieben; mit `Shift` um zehn; im Palettenstreifen durch seine Farben gehen
 
 ## OPTIONS

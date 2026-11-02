@@ -19,8 +19,10 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::AllocationClass;
 use tairix_abi::DriverError;
 
+use tairix_crc16::update as crc16;
+
 use crate::bytes::{
-    crc16, crc32c_zeroed, high32, le16, le32, low16, low32, put_le16, put_le32, u32_le_truncate,
+    crc32c_zeroed, high32, le16, le32, low16, low32, put_le16, put_le32, u32_le_truncate,
 };
 use crate::superblock::{self, SB_FREE_INODES};
 use crate::Ext4;

@@ -23,7 +23,7 @@ use crate::artwork::{
 };
 use crate::glyph::IconKind;
 use crate::picture::Fitted;
-use crate::thumbnail::{ArtworkDocument, DocumentStamp, Reading, Thumbnail};
+use crate::thumbnail::{ArtworkDocument, DocumentStamp, Thumbnail};
 
 fn kinds(kinds: &[IconKind]) -> FolderSample {
     FolderSample::new(kinds.iter().map(|kind| SampleCard::Kind(*kind)))
@@ -52,7 +52,6 @@ fn photo() -> SampleCard {
         Thumbnail {
             path: String::from(PHOTO_PATH),
             stamp: PHOTO,
-            reading: Reading::Signature,
         },
     )
 }
@@ -244,12 +243,7 @@ impl ArtworkRasteriser for Svg {
         )
     }
 
-    fn thumbnail(
-        &mut self,
-        side: u32,
-        _reading: Reading,
-        _document: &mut dyn ArtworkDocument,
-    ) -> Option<Fitted> {
+    fn thumbnail(&mut self, side: u32, _document: &mut dyn ArtworkDocument) -> Option<Fitted> {
         let band = side / 2;
         let top = side / 4;
         let mut pixels = vec![0u8; (side * side * 4) as usize];

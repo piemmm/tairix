@@ -634,6 +634,40 @@ pub enum IconKind {
     PrintData,
     /// A colour palette.
     Palette,
+    /// RISC OS data: a file of bytes with no other type.
+    RiscOsData,
+    /// A RISC OS Command (Exec) file: the keystrokes its command line reads.
+    RiscOsCommand,
+    /// A RISC OS Desktop file: the commands that set a desktop up.
+    RiscOsDesktop,
+    /// A file RISC OS's Squash compressed.
+    RiscOsSquash,
+    /// A zip archive.
+    ArchiveZip,
+    /// A tar archive.
+    ArchiveTar,
+    /// A gzip-compressed stream.
+    ArchiveGzip,
+    /// A bzip2-compressed stream.
+    ArchiveBzip2,
+    /// An xz-compressed stream.
+    ArchiveXz,
+    /// A Zstandard-compressed stream.
+    ArchiveZstd,
+    /// A 7-Zip archive.
+    Archive7z,
+    /// A RAR archive.
+    ArchiveRar,
+    /// A Java archive.
+    JavaArchive,
+    /// A RISC OS Spark archive.
+    ArchiveSpark,
+    /// A RISC OS `ArcFS` archive.
+    ArchiveArcFs,
+    /// Comma-separated values: a table kept as text.
+    TextCsv,
+    /// A makefile: the rules a build follows.
+    TextMakefile,
 }
 
 impl IconKind {
@@ -920,6 +954,23 @@ impl IconKind {
             "application-postscript" => Self::PostScript,
             "print-data" => Self::PrintData,
             "palette" => Self::Palette,
+            "application-x-riscos-data" => Self::RiscOsData,
+            "application-x-riscos-command" => Self::RiscOsCommand,
+            "application-x-riscos-desktop" => Self::RiscOsDesktop,
+            "application-x-riscos-squash" => Self::RiscOsSquash,
+            "application-zip" => Self::ArchiveZip,
+            "application-x-tar" => Self::ArchiveTar,
+            "application-gzip" => Self::ArchiveGzip,
+            "application-x-bzip2" => Self::ArchiveBzip2,
+            "application-x-xz" => Self::ArchiveXz,
+            "application-zstd" => Self::ArchiveZstd,
+            "application-x-7z-compressed" => Self::Archive7z,
+            "application-vnd.rar" => Self::ArchiveRar,
+            "application-java-archive" => Self::JavaArchive,
+            "application-x-spark" => Self::ArchiveSpark,
+            "application-x-arcfs" => Self::ArchiveArcFs,
+            "text-csv" => Self::TextCsv,
+            "text-x-makefile" => Self::TextMakefile,
             _ => Self::Generic,
         }
     }
@@ -1212,6 +1263,23 @@ impl IconKind {
             Self::PrintData => 271,
             Self::Palette => 272,
             Self::RiscOsObey => 273,
+            Self::RiscOsData => 274,
+            Self::RiscOsCommand => 275,
+            Self::RiscOsDesktop => 276,
+            Self::RiscOsSquash => 277,
+            Self::ArchiveZip => 278,
+            Self::ArchiveTar => 279,
+            Self::ArchiveGzip => 280,
+            Self::ArchiveBzip2 => 281,
+            Self::ArchiveXz => 282,
+            Self::ArchiveZstd => 283,
+            Self::Archive7z => 284,
+            Self::ArchiveRar => 285,
+            Self::JavaArchive => 286,
+            Self::ArchiveSpark => 287,
+            Self::ArchiveArcFs => 288,
+            Self::TextCsv => 289,
+            Self::TextMakefile => 290,
         }
     }
 
@@ -1503,6 +1571,23 @@ impl IconKind {
             Self::PostScript => "application-postscript",
             Self::PrintData => "print-data",
             Self::Palette => "palette",
+            Self::RiscOsData => "application-x-riscos-data",
+            Self::RiscOsCommand => "application-x-riscos-command",
+            Self::RiscOsDesktop => "application-x-riscos-desktop",
+            Self::RiscOsSquash => "application-x-riscos-squash",
+            Self::ArchiveZip => "application-zip",
+            Self::ArchiveTar => "application-x-tar",
+            Self::ArchiveGzip => "application-gzip",
+            Self::ArchiveBzip2 => "application-x-bzip2",
+            Self::ArchiveXz => "application-x-xz",
+            Self::ArchiveZstd => "application-zstd",
+            Self::Archive7z => "application-x-7z-compressed",
+            Self::ArchiveRar => "application-vnd.rar",
+            Self::JavaArchive => "application-java-archive",
+            Self::ArchiveSpark => "application-x-spark",
+            Self::ArchiveArcFs => "application-x-arcfs",
+            Self::TextCsv => "text-csv",
+            Self::TextMakefile => "text-x-makefile",
         }
     }
 }
@@ -1623,7 +1708,9 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         IconKind::FolderFilled => folder_filled(color),
         IconKind::FolderBack => folder_back(color),
         IconKind::FolderFront => folder_front(color),
-        IconKind::File | IconKind::Manifest | IconKind::WindowTemplate => file(color),
+        IconKind::File | IconKind::Manifest | IconKind::WindowTemplate | IconKind::RiscOsData => {
+            file(color)
+        }
         // The app-bundle, text, and image families each share one built-in
         // glyph: the fine-grained kinds differ only in their shipped raster
         // artwork, so a system without it still shows the broad family glyph.
@@ -1638,7 +1725,11 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::BasicProgram
         | IconKind::Font
         | IconKind::PostScript
-        | IconKind::PrintData => text(color),
+        | IconKind::PrintData
+        | IconKind::RiscOsCommand
+        | IconKind::RiscOsDesktop
+        | IconKind::TextCsv
+        | IconKind::TextMakefile => text(color),
         IconKind::Image
         | IconKind::ImagePng
         | IconKind::ImageJpeg
@@ -1647,7 +1738,19 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::ImageSprite
         | IconKind::Drawing
         | IconKind::Palette => image(color),
-        IconKind::Archive => archive(color),
+        IconKind::Archive
+        | IconKind::RiscOsSquash
+        | IconKind::ArchiveZip
+        | IconKind::ArchiveTar
+        | IconKind::ArchiveGzip
+        | IconKind::ArchiveBzip2
+        | IconKind::ArchiveXz
+        | IconKind::ArchiveZstd
+        | IconKind::Archive7z
+        | IconKind::ArchiveRar
+        | IconKind::JavaArchive
+        | IconKind::ArchiveSpark
+        | IconKind::ArchiveArcFs => archive(color),
         IconKind::Audio => audio(color),
         IconKind::Video => video(color),
         IconKind::SkipPrevious => skip(color, false),

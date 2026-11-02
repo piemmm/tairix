@@ -40,6 +40,7 @@ bounds), and `plans/GUI-CONTROLS-DESIGN.md`.
 | I17 | A RISC OS application is pictured by its own sprite | done |
 | I18 | A file typed by the filetype its volume records is pictured and opened as that type | done |
 | I19 | The file-type masters are drawn by code and held to their drawings | done |
+| I20 | More RISC OS file types pictured in the family's style: Data, Command, Desktop, Squash, the archive formats, sound, video, pictures, tables and makefiles | done |
 
 Each item's section below records what it guarantees or what remains.
 
@@ -695,7 +696,22 @@ to `MASTERS`, never a picture composed by hand, and every drawing is held to
 the build's own check of an icon master. The executable, bundle, disk, folder
 and launcher masters are authored artwork outside it.
 
-## 21. What this plan deliberately does not cover
+## 21. I20 — more file types pictured
+
+A RISC OS type that RISC OS draws with an icon of its own has a content type
+of its own and a master, drawn in the family's style rather than copied:
+Data (&FFD, `application/x-riscos-data`, a page of byte pairs), Command (&FFE
+and TaskExec &FD6, a command prompt), Desktop (&FEA,
+`application/x-riscos-desktop`, a small desktop) and Squash (&FCA, a page
+pressed flat). Only the Acorn programs and Obey carry the Acorn mark. The
+archives share one drawing, a sheet held by a zip, labelled by format — zip,
+tar, gzip, bzip2, xz, zstd, 7z, RAR, JAR, Spark, ArcFS — and unlabelled for
+the RISC OS Archive type (&DDC), whose format only its contents say. Sound,
+video and pictures without a master of their own draw a waveform, a film frame
+and a photograph; CSV draws a table and a makefile its text with a badge. A
+new kind falls back to its family's glyph, and joins `ALL_KINDS` at its end.
+
+## 22. What this plan deliberately does not cover
 
 - **Cursors and window chrome stay vector.** They are tintable silhouettes
   resolved from the theme; a raster master would be the wrong source format
