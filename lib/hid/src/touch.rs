@@ -18,7 +18,7 @@ use crate::usages::{
     CONFIDENCE, CONTACT_COUNT, CONTACT_IDENTIFIER, FINGER, PAD_TYPE_DEPRESSIBLE, PAGE_BUTTON,
     TIP_SWITCH, X, Y,
 };
-use crate::{in_application, try_push, Decoded, SeatSink};
+use crate::{in_application, try_push, Decoded, Reading, SeatSink};
 
 /// One contact slot: a Finger collection's fields.
 #[derive(Clone, Copy, Debug)]
@@ -69,6 +69,14 @@ fn find(model: &ReportDescriptor, index: usize, field: &Field, usage: Usage) -> 
 struct Offered {
     slots: u16,
     touching: [Option<Contact>; TOUCH_CONTACTS_MAX],
+}
+
+/// The frame one report leaves assembled, and how much of it has come.
+#[derive(Clone, Copy)]
+struct TouchRead {
+    frame: TouchFrame,
+    received: u16,
+    expected: Option<u16>,
 }
 
 impl TouchDecoder {
@@ -214,30 +222,50 @@ impl TouchDecoder {
         report: &[u8],
         sink: &mut dyn SeatSink,
     ) -> Result<Decoded, DriverError> {
-        let fields = model.fields();
-        let carried = |slot: &Slot| fields[slot.field].report.matches(report);
-        if !self.fingers.iter().any(|finger| carried(&finger.tip)) {
-            return Ok(Decoded::NotMine);
+        self.read(model, report)
+            .applied(|read| self.apply(read, sink))
+    }
+
+    /// Whether `report` is one this surface reads.
+    pub(crate) fn claims(&self, model: &ReportDescriptor, report: &[u8]) -> bool {
+        self.fingers
+            .iter()
+            .any(|finger| finger.tip.carried(model.fields(), report))
+    }
+
+    /// What decoding `report` would answer, applying none of it.
+    pub(crate) fn outcome(&self, model: &ReportDescriptor, report: &[u8]) -> Decoded {
+        self.read(model, report).outcome()
+    }
+
+    fn read(&self, model: &ReportDescriptor, report: &[u8]) -> Reading<TouchRead> {
+        if !self.claims(model, report) {
+            return Reading::NotMine;
         }
+        let fields = model.fields();
         let read = |slot: &Slot| fields[slot.field].value(report, slot.element);
-        let optional = |slot: &Option<Slot>| slot.as_ref().filter(|slot| carried(slot)).map(read);
+        let optional = |slot: &Option<Slot>| {
+            slot.as_ref()
+                .filter(|slot| slot.carried(fields, report))
+                .map(read)
+        };
         let count = match optional(&self.contact_count) {
             Some(Some(count)) => Some(u16::try_from(count).unwrap_or(u16::MAX)),
-            Some(None) => return Ok(Decoded::Malformed),
+            Some(None) => return Reading::Malformed,
             None => None,
         };
         if count
             .zip(self.contact_max)
             .is_some_and(|(count, max)| count > max)
         {
-            return Ok(Decoded::Malformed);
+            return Reading::Malformed;
         }
         let mut buttons = 0u8;
         for (bit, slot) in self.buttons.iter().enumerate() {
             match optional(slot) {
                 Some(Some(0)) | None => {}
                 Some(Some(_)) => buttons |= 1 << bit,
-                Some(None) => return Ok(Decoded::Malformed),
+                Some(None) => return Reading::Malformed,
             }
         }
         let continuing = count == Some(0) && self.pending.is_some();
@@ -247,7 +275,7 @@ impl TouchDecoder {
             (Some(count), _) => count,
         };
         let Some(offered) = self.offered(fields, report, limit) else {
-            return Ok(Decoded::Malformed);
+            return Reading::Malformed;
         };
         // A frame a new one interrupts is dropped rather than delivered
         // short: contacts missing from a frame read as lifted.
@@ -264,20 +292,28 @@ impl TouchDecoder {
             // already holds, is not followed.
             let _ = frame.push(contact);
         }
-        match expected {
-            Some(expected) if received < expected => {
+        Reading::Read(TouchRead {
+            frame,
+            received,
+            expected,
+        })
+    }
+
+    fn apply(&mut self, read: TouchRead, sink: &mut dyn SeatSink) -> Result<(), DriverError> {
+        match read.expected {
+            Some(expected) if read.received < expected => {
                 self.pending = Some(Pending {
                     expected,
-                    received,
-                    frame,
+                    received: read.received,
+                    frame: read.frame,
                 });
+                Ok(())
             }
             _ => {
                 self.pending = None;
-                self.deliver(&frame, sink)?;
+                self.deliver(&read.frame, sink)
             }
         }
-        Ok(Decoded::Applied)
     }
 
     /// Read up to `limit` of the slots `report` carries, in report order;
@@ -293,7 +329,7 @@ impl TouchDecoder {
             .fingers
             .iter()
             .enumerate()
-            .filter(|(_, finger)| fields[finger.tip.field].report.matches(report))
+            .filter(|(_, finger)| finger.tip.carried(fields, report))
         {
             if offered.slots >= limit {
                 break;

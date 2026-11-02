@@ -9,13 +9,30 @@ use tairix_abi::DriverError;
 
 use crate::descriptor::{CollectionIndex, Field, ReportDescriptor, ReportKind, Usage};
 use crate::usages::{AC_PAN, PAGE_BUTTON, WHEEL, X, Y};
-use crate::{in_application, Decoded, SeatSink};
+use crate::{in_application, Decoded, Reading, SeatSink};
 
 /// Where one value sits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Slot {
     pub(crate) field: usize,
     pub(crate) element: u16,
+}
+
+impl Slot {
+    /// Whether `report` is the one this slot's field lies in.
+    pub(crate) fn carried(self, fields: &[Field], report: &[u8]) -> bool {
+        fields[self.field].report.matches(report)
+    }
+}
+
+/// What one report presses, moves and turns.
+#[derive(Clone, Copy)]
+struct PointerRead {
+    buttons: [bool; 3],
+    dx: i32,
+    dy: i32,
+    wheel: i64,
+    pan: i64,
 }
 
 /// The buttons the seat names: primary, secondary, middle.
@@ -154,43 +171,68 @@ impl MouseDecoder {
         report: &[u8],
         sink: &mut dyn SeatSink,
     ) -> Result<Decoded, DriverError> {
-        let fields = model.fields();
-        let carried = |slot: Slot| fields[slot.field].report.matches(report);
-        let mine = carried(self.x)
+        self.read(model, report)
+            .applied(|read| self.apply(read, sink))
+    }
+
+    /// Whether `report` is one this mouse reads.
+    pub(crate) fn claims(&self, model: &ReportDescriptor, report: &[u8]) -> bool {
+        let carried = |slot: Slot| slot.carried(model.fields(), report);
+        carried(self.x)
             || carried(self.y)
-            || self.buttons.iter().flatten().any(|&slot| carried(slot));
-        if !mine {
-            return Ok(Decoded::NotMine);
+            || self.buttons.iter().flatten().any(|&slot| carried(slot))
+    }
+
+    /// What decoding `report` would answer, applying none of it.
+    pub(crate) fn outcome(&self, model: &ReportDescriptor, report: &[u8]) -> Decoded {
+        self.read(model, report).outcome()
+    }
+
+    fn read(&self, model: &ReportDescriptor, report: &[u8]) -> Reading<PointerRead> {
+        if !self.claims(model, report) {
+            return Reading::NotMine;
         }
+        let fields = model.fields();
         let read = |slot: Slot| fields[slot.field].value(report, slot.element);
         let mandatory = |slot: Slot| {
-            if carried(slot) {
+            if slot.carried(fields, report) {
                 read(slot).map(Some)
             } else {
                 Some(None)
             }
         };
         let (Some(dx), Some(dy)) = (mandatory(self.x), mandatory(self.y)) else {
-            return Ok(Decoded::Malformed);
+            return Reading::Malformed;
         };
         let mut buttons = self.held;
         for (held, slot) in buttons.iter_mut().zip(self.buttons) {
             match slot.map(mandatory) {
                 Some(Some(Some(value))) => *held = value != 0,
-                Some(None) => return Ok(Decoded::Malformed),
+                Some(None) => return Reading::Malformed,
                 Some(Some(None)) | None => {}
             }
         }
         // A wheel past a short report did not turn: a boot mouse sends three
         // bytes or four.
         let optional = |slot: Option<Slot>| {
-            slot.filter(|&slot| carried(slot))
+            slot.filter(|&slot| slot.carried(fields, report))
                 .and_then(read)
                 .unwrap_or(0)
         };
-        let (wheel, pan) = (optional(self.wheel), optional(self.pan));
+        Reading::Read(PointerRead {
+            buttons,
+            dx: clamp(dx.unwrap_or(0)),
+            dy: clamp(dy.unwrap_or(0)),
+            wheel: optional(self.wheel),
+            pan: optional(self.pan),
+        })
+    }
 
-        for (code, (was, is)) in BUTTONS.into_iter().zip(self.held.into_iter().zip(buttons)) {
+    fn apply(&mut self, read: PointerRead, sink: &mut dyn SeatSink) -> Result<(), DriverError> {
+        let edges = BUTTONS
+            .into_iter()
+            .zip(self.held.into_iter().zip(read.buttons));
+        for (code, (was, is)) in edges {
             if was != is {
                 sink.pointer(&if is {
                     PointerInput::Pressed(code)
@@ -199,21 +241,23 @@ impl MouseDecoder {
                 })?;
             }
         }
-        self.held = buttons;
-        let (dx, dy) = (clamp(dx.unwrap_or(0)), clamp(dy.unwrap_or(0)));
-        if dx != 0 || dy != 0 {
-            sink.pointer(&PointerInput::MovedBy { dx, dy })?;
+        self.held = read.buttons;
+        if read.dx != 0 || read.dy != 0 {
+            sink.pointer(&PointerInput::MovedBy {
+                dx: read.dx,
+                dy: read.dy,
+            })?;
         }
         let down =
-            scroll_units(wheel, self.wheel_per_detent, &mut self.wheel_carry).saturating_neg();
-        let right = scroll_units(pan, self.pan_per_detent, &mut self.pan_carry);
+            scroll_units(read.wheel, self.wheel_per_detent, &mut self.wheel_carry).saturating_neg();
+        let right = scroll_units(read.pan, self.pan_per_detent, &mut self.pan_carry);
         if down != 0 || right != 0 {
             sink.pointer(&PointerInput::Scrolled {
                 dx: right,
                 dy: down,
             })?;
         }
-        Ok(Decoded::Applied)
+        Ok(())
     }
 
     /// Release every button held.

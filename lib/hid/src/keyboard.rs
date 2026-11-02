@@ -9,7 +9,7 @@ use tairix_abi::DriverError;
 use crate::console::KeyboardConsole;
 use crate::descriptor::{CollectionIndex, Field, ReportDescriptor, ReportId, ReportKind};
 use crate::usages::{KEY_ERROR_ROLL_OVER, MODIFIER_FIRST, MODIFIER_LAST, PAGE_KEYBOARD};
-use crate::{in_application, try_push, Decoded, SeatSink};
+use crate::{in_application, try_push, Decoded, Reading, SeatSink};
 
 /// Keyboard usages held, one bit per usage `0..=255`; the page defines none
 /// above `0xE7`.
@@ -136,12 +136,29 @@ impl KeyboardDecoder {
         report: &[u8],
         sink: &mut dyn SeatSink,
     ) -> Result<Decoded, DriverError> {
-        let Some(slot) = self
-            .held
+        self.read(model, report)
+            .applied(|read| self.apply(read, sink))
+    }
+
+    /// Whether `report` is one this keyboard reads.
+    pub(crate) fn claims(&self, report: &[u8]) -> bool {
+        self.slot(report).is_some()
+    }
+
+    /// What decoding `report` would answer, applying none of it.
+    pub(crate) fn outcome(&self, model: &ReportDescriptor, report: &[u8]) -> Decoded {
+        self.read(model, report).outcome()
+    }
+
+    fn slot(&self, report: &[u8]) -> Option<usize> {
+        self.held
             .iter()
             .position(|held| held.report.matches(report))
-        else {
-            return Ok(Decoded::NotMine);
+    }
+
+    fn read(&self, model: &ReportDescriptor, report: &[u8]) -> Reading<KeyRead> {
+        let Some(slot) = self.slot(report) else {
+            return Reading::NotMine;
         };
         let id = self.held[slot].report;
         let mut keys = KeySet::default();
@@ -152,16 +169,22 @@ impl KeyboardDecoder {
             }
             match read_keys(model, field, report, self.modifier_bitmap, &mut keys) {
                 Read::Keys => {}
-                Read::Phantom => return Ok(Decoded::Applied),
-                Read::Malformed => return Ok(Decoded::Malformed),
+                Read::Phantom => return Reading::Read(KeyRead::Phantom),
+                Read::Malformed => return Reading::Malformed,
             }
         }
+        Reading::Read(KeyRead::Keys { slot, keys })
+    }
+
+    fn apply(&mut self, read: KeyRead, sink: &mut dyn SeatSink) -> Result<(), DriverError> {
+        let KeyRead::Keys { slot, keys } = read else {
+            return Ok(());
+        };
         let before = self.held_keys();
         self.held[slot].keys = keys;
         let after = self.held_keys();
         self.emit(before.minus(after), false, sink)?;
-        self.emit(after.minus(before), true, sink)?;
-        Ok(Decoded::Applied)
+        self.emit(after.minus(before), true, sink)
     }
 
     /// Release every key held.
@@ -214,6 +237,17 @@ enum Read {
     Keys,
     Phantom,
     Malformed,
+}
+
+/// What one report sets a keyboard holding.
+#[derive(Clone, Copy)]
+enum KeyRead {
+    /// An `ErrorRollOver` report, which changes nothing.
+    Phantom,
+    Keys {
+        slot: usize,
+        keys: KeySet,
+    },
 }
 
 /// The keys `field` holds in `report`. A modifier bitmap must be wholly in

@@ -146,7 +146,8 @@ impl HidDevice {
 
     /// Decode one input report onto `sink`: [`Decoded::Malformed`] when an
     /// application it belongs to finds it cut short, [`Decoded::NotMine`]
-    /// when none does.
+    /// when none does. A report several applications read is applied by
+    /// none of them unless every one reads it whole.
     ///
     /// # Errors
     ///
@@ -156,6 +157,9 @@ impl HidDevice {
         report: &[u8],
         sink: &mut dyn SeatSink,
     ) -> Result<Decoded, DriverError> {
+        if self.shared_and_malformed(report) {
+            return Ok(Decoded::Malformed);
+        }
         let mut outcome = Decoded::NotMine;
         for keyboard in &mut self.keyboards {
             outcome = outcome.and(keyboard.decode(&self.model, report, sink)?);
@@ -167,6 +171,40 @@ impl HidDevice {
             outcome = outcome.and(touch.decode(&self.model, report, sink)?);
         }
         Ok(outcome)
+    }
+
+    /// Whether more than one application reads `report` and one of them
+    /// finds it malformed. One application alone reads a report whole or
+    /// applies none of it, so only a shared report needs reading twice.
+    fn shared_and_malformed(&self, report: &[u8]) -> bool {
+        if self.keyboards.len() + self.mice.len() + self.touches.len() < 2 {
+            return false;
+        }
+        let model = &self.model;
+        let mut readers = self
+            .keyboards
+            .iter()
+            .map(|keyboard| keyboard.claims(report))
+            .chain(self.mice.iter().map(|mouse| mouse.claims(model, report)))
+            .chain(
+                self.touches
+                    .iter()
+                    .map(|(_, touch)| touch.claims(model, report)),
+            )
+            .filter(|&reads| reads);
+        if readers.nth(1).is_none() {
+            return false;
+        }
+        self.keyboards
+            .iter()
+            .map(|keyboard| keyboard.outcome(model, report))
+            .chain(self.mice.iter().map(|mouse| mouse.outcome(model, report)))
+            .chain(
+                self.touches
+                    .iter()
+                    .map(|(_, touch)| touch.outcome(model, report)),
+            )
+            .any(|outcome| outcome == Decoded::Malformed)
     }
 
     /// Release every key, button and contact the device holds: what a

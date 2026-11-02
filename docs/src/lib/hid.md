@@ -76,7 +76,11 @@ device that has gone fails the configuration.
 ## The engine
 
 `HidDevice::new` builds the decoders for a parsed model, or refuses a device
-carrying nothing the seat serves. `input` hands one report to every decoder;
+carrying nothing the seat serves. `input` hands one report to every decoder.
+A report several applications read — one with no report id, or an id two of
+them share — is applied by none of them unless every one reads it whole, so a
+malformed report changes nothing held anywhere on the device; a report one
+application alone reads costs no second reading.
 `release` lets go of every key, button and contact the device held, so a
 device that is unplugged, faults or whose driver ends leaves nothing pressed.
 `boot::keyboard` and `boot::mouse` are the boot-protocol layouts as models, so
@@ -104,13 +108,14 @@ configuration exchange against a mock transport.
 
 `tests/fuzz_hid_report.rs` (`cargo xtask fuzz`) mutates real descriptors — boot
 layouts, report-id keyboards and mice, a wireless receiver's interfaces, a
-high-resolution mouse, a Precision Touchpad, a touchscreen — assembles random
-items, and feeds noise, holding: no input panics; an accepted model places
-every field inside its own report, after its id; a long item or globals a Push
-and Pop enclose change nothing; a malformed report delivers nothing; a button
-is never pressed twice or released unheld; a device let go of holds nothing;
-configuration fails only when the device has gone; and the console producer
-resolves only key edges.
+high-resolution mouse, a Precision Touchpad, a touchscreen — and two pointers
+sharing one report, a soak's find whose reports it replays as a regression. It
+also assembles random items and feeds noise, holding: no input panics; an
+accepted model places every field inside its own report, after its id; a long
+item or globals a Push and Pop enclose change nothing; a malformed report
+delivers nothing; a button is never pressed twice or released unheld; a device
+let go of holds nothing; configuration fails only when the device has gone;
+and the console producer resolves only key edges.
 
 ## Stability
 

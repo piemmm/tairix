@@ -130,8 +130,9 @@ driver ending — has every key, button and contact it held released first.
 ## Invariants
 
 - One report parser and one decoder per application, for every transport.
-- A descriptor or report is validated whole before anything is applied; a
-  malformed report changes no held state.
+- A descriptor or report is validated whole before anything is applied — a
+  report by every application that reads it; a malformed report changes no
+  held state.
 - Fields are read only from their own report; an unknown report ID is ignored.
 - The host controller holds no HID knowledge, and a class driver holds no
   controller authority.

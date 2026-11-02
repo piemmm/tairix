@@ -64,6 +64,36 @@ impl Decoded {
     }
 }
 
+/// What one decoder read of a report, none of it yet applied.
+pub(crate) enum Reading<T> {
+    NotMine,
+    Malformed,
+    /// What applying the report changes.
+    Read(T),
+}
+
+impl<T> Reading<T> {
+    pub(crate) const fn outcome(&self) -> Decoded {
+        match self {
+            Self::NotMine => Decoded::NotMine,
+            Self::Malformed => Decoded::Malformed,
+            Self::Read(_) => Decoded::Applied,
+        }
+    }
+
+    /// Apply what was read with `apply`, answering the outcome.
+    pub(crate) fn applied(
+        self,
+        apply: impl FnOnce(T) -> Result<(), DriverError>,
+    ) -> Result<Decoded, DriverError> {
+        let outcome = self.outcome();
+        if let Self::Read(read) = self {
+            apply(read)?;
+        }
+        Ok(outcome)
+    }
+}
+
 /// Where a decoder delivers what it read: the seat's three channels.
 pub trait SeatSink {
     /// A resolved key edge.

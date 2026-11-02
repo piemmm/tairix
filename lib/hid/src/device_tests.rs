@@ -232,6 +232,130 @@ fn each_report_reaches_its_own_application() {
     assert_eq!(device.input(&[9, 0, 0, 0], &mut sink), Ok(Decoded::NotMine));
 }
 
+/// A keyboard reading a modifier byte and one key: no report ID.
+fn plain_keyboard() -> Vec<u8> {
+    join(&[
+        usage_page(0x01),
+        usage(0x06),
+        collection(1),
+        usage_page(0x07),
+        usage_min(0xE0),
+        usage_max(0xE7),
+        logical_min(0),
+        logical_max(1),
+        report_size(1),
+        report_count(8),
+        input(DATA_VAR),
+        report_size(8),
+        report_count(1),
+        logical_max(0x65),
+        usage_min(0),
+        usage_max(0x65),
+        input(DATA_ARRAY),
+        end_collection(),
+    ])
+}
+
+/// A boot-layout mouse: three buttons, then X and Y; no report ID.
+fn plain_mouse() -> Vec<u8> {
+    join(&[
+        usage_page(0x01),
+        usage(0x02),
+        collection(1),
+        usage_page(0x09),
+        usage_min(1),
+        usage_max(3),
+        logical_min(0),
+        logical_max(1),
+        report_size(1),
+        report_count(3),
+        input(DATA_VAR),
+        report_count(5),
+        input(CONSTANT),
+        usage_page(0x01),
+        usage(0x30),
+        usage(0x31),
+        logical_min(-127),
+        logical_max(127),
+        report_size(8),
+        report_count(2),
+        input(DATA_VAR_REL),
+        end_collection(),
+    ])
+}
+
+/// A one-finger touchpad: tip, X, Y, then the contact count; no report ID.
+fn plain_pad() -> Vec<u8> {
+    join(&[
+        usage_page(0x0D),
+        usage(0x05),
+        collection(1),
+        usage(0x22),
+        collection(2),
+        logical_min(0),
+        logical_max(1),
+        report_size(1),
+        report_count(1),
+        usage(0x42),
+        input(DATA_VAR),
+        report_count(7),
+        input(CONSTANT),
+        usage_page(0x01),
+        logical_max(0xFF),
+        report_size(8),
+        report_count(1),
+        usage(0x30),
+        input(DATA_VAR),
+        usage(0x31),
+        input(DATA_VAR),
+        end_collection(),
+        usage_page(0x0D),
+        logical_max(1),
+        usage(0x54),
+        input(DATA_VAR),
+        end_collection(),
+    ])
+}
+
+#[test]
+fn a_report_two_applications_share_is_applied_by_both_or_neither() {
+    // Three bytes hold the first application's fields and cut the second's
+    // short, whichever of the two the engine decodes first.
+    for (pair, whole) in [
+        (
+            [plain_keyboard(), plain_mouse()],
+            vec![0x02, 0x04, 0b1, 5, 0xFB],
+        ),
+        (
+            [plain_mouse(), plain_keyboard()],
+            vec![0b1, 5, 0xFB, 0x02, 0x04],
+        ),
+        (
+            [plain_mouse(), plain_pad()],
+            vec![0b1, 5, 0xFB, 0b1, 10, 20, 1],
+        ),
+    ] {
+        let mut device = device(&join(&pair));
+        let mut sink = Recorder::default();
+        assert_eq!(device.input(&whole[..3], &mut sink), Ok(Decoded::Malformed));
+        assert!(
+            sink.keys.is_empty() && sink.pointer.is_empty() && sink.touch.is_empty(),
+            "a report one application finds short delivered {sink:?}"
+        );
+        assert_eq!(device.input(&whole, &mut sink), Ok(Decoded::Applied));
+        let channels = [
+            !sink.keys.is_empty(),
+            !sink.pointer.is_empty(),
+            !sink.touch.is_empty(),
+        ];
+        assert_eq!(
+            channels.into_iter().filter(|&delivered| delivered).count(),
+            2,
+            "both applications read the whole report: {sink:?}"
+        );
+    }
+}
+
 #[test]
 fn a_device_going_releases_everything_it_held() {
     let mut device = device(&keyboard_and_pad());

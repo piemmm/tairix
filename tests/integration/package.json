@@ -3,6 +3,6 @@
   "private": true,
   "description": "The headless browser the wasm32 verticals' harnesses drive, pinned with every package beneath it in package-lock.json.",
   "dependencies": {
-    "puppeteer": "25.0.4"
+    "puppeteer": "25.16.0"
   }
 }
