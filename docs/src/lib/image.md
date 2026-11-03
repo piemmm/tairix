@@ -22,26 +22,32 @@ SVG (`plans/ICONS.md`), and the wallpaper catalog only its own extensions.
 ## Formats
 
 `ImageFormat` is a deliberately closed enum: `Png`, `Jpeg`, `Gif`, `Bmp`,
-`Ico`, `Sprite`, `Tiff`, `Webp`, and `OpenRaster`. `sniff(bytes) -> Option<ImageFormat>` identifies a format
-from its leading signature, and `decode`, `decode_fitted`, and
-`Sequence::open` dispatch on it, refusing an unrecognised signature before any
+`Ico`, `Sprite`, `Tiff`, `Webp`, and `OpenRaster`. `sniff(bytes) -> Option<ImageFormat>` identifies a whole
+file's format from its content, and `decode`, `decode_fitted`, and
+`Sequence::open` dispatch on it, refusing an unrecognised file before any
 format-specific parsing runs. A further format is added only when a real
 consumer needs it — never speculatively — exactly as PNG was added for the
 icon pipeline, JPEG for the pinboard's wallpaper masters, and the rest for the
 viewer.
 
-Only a format that carries a signature can be recognised from content, and a
-RISC OS sprite area does not: its first word is the sprite count, and RISC OS
-types a file from its directory entry rather than from its bytes. So `sniff`
-never answers `Sprite`, and never guesses one from a structural coincidence —
-a heuristic there would be a false-positive machine, and one the crate would
-then act on. A caller that already knows the type, from an
-`acorn.filetype` attribute, a `lib/browse` media type, or the name a file was
-picked by, instead **names** the format: `probe_as`, `decode_as`, and
-`Sequence::open_as` take an `ImageFormat` in place of the sniff. The named
-format's own parser still validates the bytes, so naming the wrong one is
-refused rather than misread, and `probe`/`decode`/`Sequence::open` are exactly
-`sniff` plus these.
+Every format but one opens with a signature. A RISC OS sprite area opens with
+its sprite count, since RISC OS types a file from its directory entry rather
+than from its bytes, but a saved area states its own end. So
+`recognise(head, length)` answers `Sprite` only for a file whose header gives
+that end as the file's own length, with at least one sprite, a word-aligned
+first sprite after the header, room for every control block, and a first
+sprite that fits the area and fills it when alone — the format's own identity
+for a whole file, not a plausibility weighed. It reads no more than
+`RECOGNITION_HEAD` bytes — the span of the longest signature, OpenRaster's —
+so an editor holding a file's head and a worker holding all of it agree, and a
+head shorter than that and than the file recognises nothing; `sniff(bytes)` is
+`recognise` over the whole file. A caller that already knows the type, from an `acorn.filetype`
+attribute, a `lib/browse` media type, or the name a file was picked by,
+instead **names** the format: `probe_as`, `decode_as`, and `Sequence::open_as`
+take an `ImageFormat` in place of the sniff, which also reaches a typed sprite
+file whose header recognition turns down. The named format's own parser still
+validates the bytes, so naming the wrong one is refused rather than misread,
+and `probe`/`decode`/`Sequence::open` are exactly `sniff` plus these.
 
 A format this crate claims is decoded **completely** — every bit depth,
 compression, colour handling, and structural variant the format defines, not
@@ -545,8 +551,7 @@ all of them:
   loop count; for a sprite area, one pass over the control-block chain that
   measures every sprite; for a TIFF, one pass over the directory chain that
   measures every page — and decodes no pixels. `Sequence::open_as(format,
-  bytes, limits)` is the same with the format named rather than sniffed,
-  which for a sprite area is the only door.
+  bytes, limits)` is the same with the format named rather than sniffed.
 - `Sequence::info()` answers a `SequenceInfo`: the format, the geometry of the
   picture the container is, the entry count, and a `SequenceKind` of either
   `Animation { loop_count }` or `Pages`.
@@ -627,8 +632,8 @@ non-thumbnail page.
 `decode_fitted(bytes, limits, fit)` returns an image no smaller than it has
 to be to cover the caller's `FitBox` on both axes, and never larger than the
 picture, holding memory the result sets rather than the picture.
-`decode_fitted_as` names the format for one `sniff` cannot recognise — a
-sprite area — and `decode_peak_bytes`/`decode_peak_bytes_as` forecast, from
+`decode_fitted_as` names the format for a typed document `sniff` does not
+recognise — a sprite area whose header does not state the file's length — and `decode_peak_bytes`/`decode_peak_bytes_as` forecast, from
 the headers, what a fitted decode will hold before it allocates. Where a box
 does not reduce the picture, a fitted decode is `decode`.
 
@@ -947,8 +952,12 @@ it.
 
 ## API shape
 
-- `sniff(&[u8]) -> Option<ImageFormat>` — format identification from a
-  byte signature. Never answers `Sprite`, which carries none.
+- `sniff(&[u8]) -> Option<ImageFormat>` — a whole file's format from its
+  content: `recognise` over all of it.
+- `recognise(&[u8], u64) -> Option<ImageFormat>` — the format of a file of the
+  given length from at most `RECOGNITION_HEAD` bytes of its head: a
+  signature, else a sprite area whose header states that length as its
+  end; `None` for a head shorter than `RECOGNITION_HEAD` and the file.
 - `probe(&[u8]) -> Result<ImageInfo, DecodeError>` — the format and natural
   size from the header alone, decoding no pixels and allocating no pixel
   buffer. It is for the caller that cannot state its target size until it
@@ -969,8 +978,7 @@ it.
   DecodeError>` — decode at the smallest covering scale the format offers.
 - `probe_as(ImageFormat, &[u8])` and `decode_as(ImageFormat, &[u8],
   &DecodeLimits)` — the same as `probe` and `decode` with the format named
-  rather than sniffed, which is the only door to a format that carries no
-  signature.
+  rather than sniffed.
 - `FitBox::new(width, height)` with `width()`/`height()` — the caller's
   target output box, a small public copy type.
 - `DecodeLimits::new(max_width, max_height, max_pixels,

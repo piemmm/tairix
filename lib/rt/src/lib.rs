@@ -6696,8 +6696,10 @@ fn fs_set_owner_at(dirfd: u32, path: &[u8], uid: u32, gid: u32, flags: AtFlags) 
 /// count (a value may be empty), or `-errno`: `Errno::NoData` when the node
 /// carries no such attribute, `Errno::BufferTooSmall` when the value does
 /// not fit `value_out` (never truncated), `Errno::NotSupported` on a mount
-/// whose format stores no attributes. The kernel authorises the read as the
-/// caller: read permission on the node, privileged namespaces refused.
+/// whose format stores no attributes. The kernel authorises the read as a
+/// byte read through `fd` is — as the identity the descriptor carries, when it
+/// is open for reading — else as the caller: read permission on the node,
+/// privileged namespaces refused.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding.
 pub fn fs_attr_get(fd: u32, key: &[u8], value_out: &mut [u8]) -> i64 {
@@ -6758,8 +6760,9 @@ pub fn fs_attr_set(fd: u32, key: &[u8], value: &[u8]) -> i64 {
 /// descriptor `fd` holds into `key_out` (`SyscallNumber::FS_ATTR_LIST`).
 ///
 /// Returns the key's byte count, `0` once `index` is past the last visible
-/// attribute (a real key is never empty), or `-errno`. Keys whose namespace
-/// the caller may not read are omitted, never revealed.
+/// attribute (a real key is never empty), or `-errno`. It is authorised as
+/// [`fs_attr_get`] is, and keys whose namespace that identity may not read are
+/// omitted, never revealed.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding.
 pub fn fs_attr_list(fd: u32, index: u64, key_out: &mut [u8]) -> i64 {

@@ -4,14 +4,14 @@ files — browser grafico del filesystem
 
 ## SYNOPSIS
 
-`files [--desktop] [path] [-h | -?]`
+`files --desktop [--mount] [path] [-h | -?]`
 
 ## DESCRIPTION
 
-Apre una finestra del desktop che elenca il file system, a partire dalla
-cartella indicata da `path` sulla riga di comando — o, se indica un file,
-dalla cartella che contiene quel file, con il file selezionato — o, se non
-ne è indicato alcuno, dalla cartella scelta nelle impostazioni: la
+Il gestore di file del desktop stesso, che elenca il file system in
+finestre. Una finestra si apre nella cartella che gli viene chiesta — o, per
+un file, nella cartella che contiene quel file, con il file selezionato — o,
+se non ne è indicata alcuna, nella cartella scelta nelle impostazioni: la
 cartella `Home` dell'utente che lo avvia, a meno che non abbia scelto la
 sua cartella `Desktop` o le unità di archiviazione collegate (la sua
 directory home se quella non può essere elencata). Il titolo della
@@ -21,14 +21,15 @@ lettura di una directory è un normale elenco soggetto ai permessi, con
 l'identità dell'utente che lo avvia: una directory illeggibile viene
 rifiutata, mai indovinata.
 
-Il desktop avvia il browser per voi e lo tiene sulla barra delle icone: il
-menu della sua posizione elenca i vostri luoghi e tutto ciò che è montato, e
-sceglierne uno vi apre una finestra; *Rete* e *Impostazioni…* sono le ultime
-voci. Un clic sulla posizione ne apre una nella cartella scelta nelle
-impostazioni. Chiedere una cartella che ha già una finestra porta quella
-finestra in primo piano anziché aprirne un'altra. Questa istanza non ha la
-voce *Esci*: fa parte del desktop, e chiuderne le finestre semplicemente la
-mette via.
+Il desktop avvia il gestore di file insieme alla sessione e lo tiene sulla
+barra delle icone, e questo non esce mai: il menu della sua posizione elenca
+i vostri luoghi e tutto ciò che è montato, e sceglierne uno vi apre una
+finestra; *Rete* e *Impostazioni…* sono le ultime voci. Un clic sulla
+posizione ne apre una nella cartella scelta nelle impostazioni. Chiedere una
+cartella che ha già una finestra porta quella finestra in primo piano anziché
+aprirne un'altra. Il menu non ha la voce *Esci*: il gestore di file fa parte
+del desktop, chiuderne le finestre semplicemente lo mette via e, se mai
+dovesse fermarsi, il desktop lo riavvia.
 
 *Rete*, nel menu della posizione subito sopra *Impostazioni…*, apre una
 finestra sui computer della rete locale che condividono file. Ognuno è
@@ -44,12 +45,11 @@ computer, quindi un nome non prova mai quale computer state guardando. La
 connessione alle condivisioni di un computer non è disponibile su questo
 sistema, e aprirne uno lo dice.
 
-Avviato da una shell tramite il suo percorso,
-`/System/Components/files.app`, è invece una normale applicazione: una
-finestra, e termina quando la chiudete. In ogni caso richiede una
-sessione grafica attiva: senza, il canale delle finestre è
-irraggiungibile, e il browser segnala il rifiuto sullo standard error e
-termina.
+Funziona solo come lo avvia il desktop: avviato in qualunque altro modo — da
+una shell tramite il suo percorso, `/System/Components/files.app` — rifiuta
+l'avvio, indicandone il motivo sullo standard error. Richiede una sessione
+grafica attiva: senza, il canale delle finestre è irraggiungibile, e segnala
+il rifiuto sullo standard error e termina.
 
 La finestra si comanda da tastiera: `Giù` e `Su` spostano la selezione,
 `Invio` apre la directory selezionata e `Backspace` risale alla directory
@@ -109,10 +109,16 @@ Seguono *Nuovo*, poi *Seleziona tutto* e *Annulla selezione*, e infine
 *Incolla*. Un clic destro su uno spazio vuoto annulla la selezione, quindi
 il sottomenu della voce è in grigio.
 
-Aprire un'immagine disco — un file `.iso`, `.adf`, `.hdf` e simili — la
-monta per voi in `/Storage`, scrivibile dove lo consentono sia il file
-sia il suo formato, e ne apre la finestra; *Monta in sola lettura* la
-monta invece in sola lettura. Resta montata finché non la espellete o non
+Aprire un'immagine disco o un archivio — un file `.iso`, `.adf`, `.hdf`,
+`.zip` e simili — lo monta per voi in `/Storage`, scrivibile dove lo
+consentono sia il file sia il suo formato, e ne apre la finestra;
+*Monta in sola lettura* lo monta invece in sola lettura. Aprirne uno sul
+desktop fa lo stesso. Quando nessuna finestra lo mostra più, viene di nuovo
+smontato, così `/Storage` contiene solo ciò che è in uso; se qualcos'altro
+lo sta ancora usando — per esempio un suo documento aperto in un'altra
+applicazione — resta montato, e lo smontaggio viene ritentato non appena
+quello potrebbe averlo rilasciato. Le impostazioni possono invece tenere
+montato ciò che aprite, finché non lo espellete o non
 termina la vostra sessione di accesso. *Espelli* toglie un volume che
 avete montato, dalla sua icona o dalla sua riga nella barra dei luoghi, il
 cui menu contestuale contiene *Apri* ed *Espelli*; le vostre finestre su
@@ -140,15 +146,16 @@ restano in cima qualunque ordine si scelga, a meno che le impostazioni non
 le mettano tra i file.
 
 *Impostazioni…* nel menu della posizione sulla barra delle icone, o
-`Ctrl+,`, apre le impostazioni del browser: dove si apre una nuova
-finestra, come mostra e ordina le sue voci e se mostra la colonna dei
-luoghi e la barra degli strumenti; se le cartelle restano in cima; quali
-estensioni dei nomi e quali voci sono nascoste; se un'immagine mostra il
-proprio contenuto e una cartella ciò che contiene; e se spostare delle voci
-nel Cestino chiede prima conferma. *Ripristina impostazioni predefinite*
-riporta ogni impostazione al suo valore predefinito. Una modifica si
-applica a tutte le finestre insieme e viene ricordata; una finestra già
-aperta mantiene la visualizzazione e l'ordine che ha.
+`Ctrl+,`, apre le impostazioni del browser nell'applicazione Impostazioni,
+sotto *File*: dove si apre una nuova finestra, come le finestre mostrano e
+ordinano le loro voci e se una nuova mostra la colonna dei luoghi e la
+barra degli strumenti; se le cartelle restano in cima; quali estensioni dei
+nomi e quali voci sono nascoste; se un'immagine mostra il proprio contenuto
+e una cartella ciò che contiene; se spostare delle voci nel Cestino chiede
+prima conferma; e se un'immagine disco o un archivio che avete aperto viene
+smontato una volta chiuse le sue finestre. Una modifica si applica a tutte
+le finestre insieme e viene ricordata; una finestra mantiene una
+visualizzazione o un ordine che voi stessi avete scelto in essa.
 
 `Alt+Enter` apre la finestra delle *informazioni* della voce selezionata, come
 fa *Ottieni informazioni…* nel suo sottomenu del menu contestuale. È una finestra a sé, per cui se ne
@@ -181,18 +188,21 @@ anziché ignorato.
 
 ## OPTIONS
 
-- `--desktop` — eseguire come componente gestore di file del desktop stesso:
-  una posizione permanente sulla barra delle icone che offre i propri luoghi
-  e i volumi montati, nessuna finestra finché non ne viene chiesta una, e
-  nessun modo di uscire. La sessione desktop passa questa opzione all'avvio;
-  indicare un `path` accanto ad essa è rifiutato, perché un componente non
-  apre alcuna finestra in cui metterlo.
+- `--desktop` — eseguire come gestore di file del desktop stesso: una
+  posizione permanente sulla barra delle icone che offre i propri luoghi e i
+  volumi montati, e nessun modo di uscire. La sessione desktop passa questa
+  opzione ogni volta che avvia il gestore di file, che funziona solo con
+  essa; un `path` indicato accanto ad essa vi apre una finestra.
+- `--mount` — aprire `path` come immagine disco o archivio, allo stesso modo
+  dell'apertura in una finestra: viene montato per voi e se ne apre la
+  finestra, e viene smontato di nuovo una volta chiuse le sue finestre,
+  secondo le impostazioni. Questa opzione richiede un `path`.
 - `-h, -?` — mostrare la breve guida di questo comando e uscire.
 
 ## EXIT STATUS
 
-Zero dopo una chiusura pulita, o dopo che è stata mostrata la breve
-guida; `2` quando la riga di comando non è stata compresa; altrimenti
-diverso da zero quando il canale finestra, la regione dei frame
-condivisa o l'elenco iniziale della directory è stato rifiutato (il
-motivo è indicato sul flusso di errore standard).
+Non termina finché il desktop è in esecuzione. Zero dopo che è stata mostrata
+la breve guida; `2` quando la riga di comando non è stata compresa o non
+indicava `--desktop`; altrimenti diverso da zero in caso di rifiuto del
+canale finestra o della regione dei frame condivisa (il motivo è indicato sul
+flusso di errore standard).

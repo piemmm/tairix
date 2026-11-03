@@ -192,7 +192,8 @@ impl IconKind {
             | Self::Ethernet
             | Self::TcpIp
             | Self::AlertInformation
-            | Self::AlertQuestion => BadgeHue::Blue,
+            | Self::AlertQuestion
+            | Self::FileManager => BadgeHue::Blue,
             Self::Wallpaper | Self::WiFi => BadgeHue::Sky,
             Self::Screensaver | Self::DateTime => BadgeHue::Indigo,
             Self::Sharing | Self::Caching => BadgeHue::Purple,

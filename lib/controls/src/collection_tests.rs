@@ -35,6 +35,7 @@ use crate::collection::{
     PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow, TileLayout,
 };
 use crate::damage::sink;
+use crate::paint::{ground_fill, ChromeLayer};
 use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, FocusState, PointerState,
     PressureKind, PressureState, ProgressValue, RecoveryState, SelectionState,
@@ -1661,6 +1662,31 @@ fn degenerate_bounds_omit_the_header_rather_than_clipping_it() {
     assert!(is_blank(&empty));
 }
 
+/// A header is a band of its own: the raised ground under its names, a
+/// hairline under it parting it from the rows, and a divider where each column
+/// after the first begins.
+#[test]
+fn a_header_stands_on_its_own_band_parted_from_its_rows() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let header = three_columns();
+        let surface = header_surface(&header, &theme, Scale::ONE, &COLUMNS);
+        let palette = theme.palette();
+        let at = |x, y| surface.get(x, y).expect("on the surface");
+        assert_eq!(
+            at(0, 1),
+            premul(ground_fill(
+                &theme,
+                palette.surface_raised,
+                ChromeLayer::Inlay
+            )),
+            "the band's ground"
+        );
+        assert_eq!(at(W / 2, H - 1), premul(palette.border), "the hairline");
+        let (second, _) = column_x_range(&header, &theme, &COLUMNS, 1).expect("a second column");
+        assert_eq!(at(second, H / 2), premul(palette.border), "the divider");
+    }
+}
+
 #[test]
 fn measured_height_never_reads_shorter_than_a_control() {
     let theme = Theme::dark();
@@ -2063,13 +2089,18 @@ fn a_tile_sized_for_a_picture_draws_that_picture_above_a_half_inset_gap() {
             height,
             pad + side + pad / 2 + name_font().line_height() + pad / 2
         );
-        let bounds = Rect::new(0, 0, side + pad * 2, height);
+        let width = ONE_LINE.width_for(side, Scale::ONE, &theme);
+        assert_eq!(width, side + pad * 2);
+        let bounds = Rect::new(0, 0, width, height);
         assert_eq!(ONE_LINE.icon_side(bounds, Scale::ONE, &theme), side);
         let band = ONE_LINE
             .label_rect(bounds, Scale::ONE, &theme)
             .expect("a name line");
         assert_eq!(band.top(), xi(pad + side + pad / 2));
         assert_eq!(ONE_LINE.label_lines(bounds, Scale::ONE, &theme), 1);
+        // Any narrower and the picture is what gives.
+        let narrower = Rect::new(0, 0, width - 1, height);
+        assert_eq!(ONE_LINE.icon_side(narrower, Scale::ONE, &theme), side - 1);
     }
 }
 
@@ -4274,6 +4305,51 @@ fn a_tile_beside_its_picture_is_one_line_tall_and_draws_the_picture_it_was_sized
     );
     assert_eq!(layout.icon_side(bounds, Scale::ONE, &theme), 16);
     assert_eq!(layout.label_lines(bounds, Scale::ONE, &theme), 1);
+    let narrowest = Rect::new(
+        0,
+        0,
+        layout.width_for(16, Scale::ONE, &theme),
+        bounds.height,
+    );
+    assert_eq!(narrowest.width, 16 + gap * 2);
+    assert_eq!(layout.icon_side(narrowest, Scale::ONE, &theme), 16);
+}
+
+/// A beside tile narrower than the picture its height seats shrinks the
+/// picture to keep it inside the tile, rather than drawing past its trailing
+/// edge into whatever lies beside it.
+#[test]
+fn a_beside_tile_too_narrow_for_its_picture_keeps_the_picture_inside_it() {
+    let theme = Theme::dark();
+    let (tall, layout) = beside_tile(16, 160, &theme);
+    let bounds = Rect::new(4, 4, 16, tall.height);
+    let side = layout.icon_side(bounds, Scale::ONE, &theme);
+    let gap = Scale::ONE
+        .scale_length(theme.metrics().control_inset)
+        .max(1)
+        / 2;
+    assert_eq!(side, 16 - gap * 2);
+
+    // Rasterised at the side the layout reports, as an owner's cache does.
+    let art = artwork(side, ART);
+    let mut s = Surface::new(40, tall.height + 8).expect("surface");
+    s.fill(BEHIND);
+    IconTile::new("Notes", IconKind::Text)
+        .with_layout(layout)
+        .render(
+            &mut s,
+            bounds,
+            Scale::ONE,
+            &theme,
+            Some(IconPicture::coloured(&art)),
+        );
+    let ground = BEHIND.premultiply();
+    let right = u32::try_from(bounds.right()).expect("on surface");
+    for y in 0..s.height() {
+        for x in right..s.width() {
+            assert_eq!(s.get(x, y), Some(ground), "({x},{y}) is past the tile");
+        }
+    }
 }
 
 #[test]

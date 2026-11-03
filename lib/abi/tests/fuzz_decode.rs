@@ -133,14 +133,14 @@ use tairix_abi::window_ipc::{
     decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
     decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
     decode_open_target_reply, decode_picked_name_reply, decode_wallpapers_reply,
-    encode_drag_spot_reply, encode_drop_target_reply, encode_picked_name_reply, AlertButton,
-    AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBar, AppBarClick, AppMenu,
-    AppMenuAsset, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
-    AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
-    AppMenuSymbol, BundleRunPath, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems,
-    DropOperation, DropSite, HandOverDocument, MenuOutcome, MenuRefusal, PickPurpose,
-    PreviewOutcome, PreviewSubject, SaveEndings, ToolOver, TooltipText, WindowEvent, WindowRegion,
-    WindowRequest, WindowSizing, WindowTitle,
+    encode_drag_spot_reply, encode_drop_target_reply, encode_open_target_reply,
+    encode_picked_name_reply, AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec,
+    AppBar, AppBarClick, AppMenu, AppMenuAsset, AppMenuBundle, AppMenuEntry, AppMenuEntryText,
+    AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
+    AppMenuShortcut, AppMenuSymbol, BundleRunPath, ClipboardKind, CursorShape, DocumentName,
+    DragAt, DragItems, DropOperation, DropSite, HandOverDocument, HandOverTarget, MenuOutcome,
+    MenuRefusal, PaneName, PickPurpose, PreviewOutcome, PreviewSubject, SaveEndings, ToolOver,
+    TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::BUNDLE_ID_MAX;
 use tairix_abi::{
@@ -845,6 +845,42 @@ fn imageattach_frames_with_flipped_bits_round_trip_or_are_refused() {
     }
 }
 
+/// One open-target reply of every kind, the drained queue and a refusal among
+/// them.
+fn open_target_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
+    use tairix_abi::window_ipc::{OpenTarget, WINDOW_OPEN_TARGET_REPLY_MAX};
+    let targets = [
+        Ok(None),
+        Ok(Some(OpenTarget::Path(b"/Users/ada/Home"))),
+        Ok(Some(OpenTarget::Image(b"/Users/ada/Home/wb.adf"))),
+        Ok(Some(OpenTarget::Document {
+            name: b"holiday.png",
+            grant: 9,
+            writable: true,
+        })),
+        Ok(Some(OpenTarget::Pane(b"files"))),
+        Err(tairix_abi::Errno::NotFound),
+    ];
+    targets
+        .into_iter()
+        .map(|target| {
+            let mut frame = [0u8; WINDOW_OPEN_TARGET_REPLY_MAX];
+            let len = encode_open_target_reply(&mut frame, target);
+            frame[..len].to_vec()
+        })
+        .collect()
+}
+
+/// Every open-target reply, each bit flipped in turn: it decodes to its own
+/// encoding or is refused, never panics.
+#[test]
+fn open_target_frames_with_flipped_bits_round_trip_or_are_refused() {
+    for mut frame in open_target_frames() {
+        exercise_window_ipc(&frame);
+        each_bit_flipped(&mut frame, exercise_window_ipc);
+    }
+}
+
 /// Drive every volume-frame decoder on `bytes` (one arm of [`exercise`]): an
 /// accepted attach, detach or control request is its own encoding, and an
 /// accepted description is too, short of a medium record this ABI does not
@@ -908,7 +944,12 @@ fn volume_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
     .encode(&mut attach)
     .expect("an attach in shape");
     frames.push(attach[..len].to_vec());
-    for mode in [DetachMode::Plain, DetachMode::Force, DetachMode::Lost] {
+    for mode in [
+        DetachMode::Plain,
+        DetachMode::Force,
+        DetachMode::Lost,
+        DetachMode::Idle,
+    ] {
         let mut detach = [0u8; VOLUME_DETACH_LEN];
         VolumeDetachRequest {
             volume_id: [0x5A; 16],
@@ -1238,7 +1279,12 @@ fn exercise_window_ipc(bytes: &[u8]) {
         assert!(usize::try_from(held.len)
             .is_ok_and(|len| len <= tairix_abi::window_ipc::CLIPBOARD_MAX_BYTES));
     }
-    let _ = decode_open_target_reply(bytes);
+    // An accepted open target re-encodes to the frame it was read from.
+    if let Ok(target) = decode_open_target_reply(bytes) {
+        let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_OPEN_TARGET_REPLY_MAX];
+        let len = encode_open_target_reply(&mut frame, Ok(target));
+        assert_eq!(Some(&frame[..len]), bytes.get(..len));
+    }
     if let Ok(target) = decode_drop_target_reply(bytes) {
         let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_DROP_TARGET_REPLY_MAX];
         let len = encode_drop_target_reply(&mut frame, Ok(&target));
@@ -3527,6 +3573,21 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
             window_id: 3,
             serial: 9,
         },
+        WindowRequest::SaveOfferAnswer {
+            window_id: 3,
+            serial: 9,
+            accepts: true,
+        },
+        WindowRequest::SaveInto {
+            window_id: 3,
+            serial: 9,
+            location: 0x51,
+        },
+        WindowRequest::SaveInto {
+            window_id: 3,
+            serial: 9,
+            location: 0,
+        },
         WindowRequest::OpenMenu {
             window_id: 3,
             anchor: WindowRegion::new(-12, 40, 96, 20).expect("a representable anchor"),
@@ -3539,21 +3600,26 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
             window_id: 3,
             open_id: 11,
         },
-        // Both hand-over shapes: a bare launch, and one carrying a document,
-        // so a flip lands on the grant handle too.
+        // Every hand-over shape: a bare launch, one carrying a document, so a
+        // flip lands on the grant handle too, and one naming a pane.
         WindowRequest::HandOverLaunch {
             run_path: BundleRunPath::new("/System/Applications/view.app/Run")
                 .expect("a valid bundle path"),
-            document: None,
+            target: HandOverTarget::Bare,
         },
         WindowRequest::HandOverLaunch {
             run_path: BundleRunPath::new("/System/Applications/view.app/Run")
                 .expect("a valid bundle path"),
-            document: Some(HandOverDocument {
+            target: HandOverTarget::Document(HandOverDocument {
                 name: DocumentName::new("holiday.png").expect("a valid name"),
-                grant: 9,
+                grant: core::num::NonZeroU64::new(9).expect("a handle"),
                 writable: true,
             }),
+        },
+        WindowRequest::HandOverLaunch {
+            run_path: BundleRunPath::new("/System/Components/Settings.app/Run")
+                .expect("a valid bundle path"),
+            target: HandOverTarget::Pane(PaneName::new("files").expect("a pane")),
         },
         // Both tooltip shapes: one carrying text, and the empty one that
         // withdraws a declaration.
@@ -3750,34 +3816,9 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
     menu
 }
 
-#[test]
-fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
-    // Walk the accepted/rejected boundary of the icon-bar declaration and
-    // its two outcome events from well-formed frames. A bit-flip lands as
-    // readily on a row's kind, flag byte, parent index, one of its three
-    // text lengths, its item id, the declaration's text length, or the text
-    // block itself as on the header, and every one of them must fail closed.
-    let declare = WindowRequest::SetAppBar(AppBar {
-        event_endpoint: 0xE117_0000_0000_0009,
-        click: AppBarClick::Open,
-        menu: fuzz_menu(AppMenu::EMPTY),
-    });
-    // The seed is the frame a client actually sends — exactly the
-    // declaration's own length. Feeding a padded buffer instead would be
-    // refused on length alone and would never reach the row decoder these
-    // flips exist to exercise.
-    let mut base = std::vec![0u8; WindowRequest::MAX_WIRE_LEN + 1];
-    let len = declare
-        .encode(&mut base)
-        .expect("the max frame holds any request");
-    each_bit_flipped(&mut base[..=len], |frame| {
-        exercise(&frame[..len]);
-        // A truncated and an over-long spelling of the same flipped frame
-        // must both fail closed rather than be read short.
-        exercise(&frame[..len - 1]);
-        exercise(frame);
-    });
-    let events = [
+/// Well-formed window events, each a frame for a bit-flip to land on.
+fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
+    std::vec![
         WindowEvent::AppBarDefault.to_le_bytes(),
         WindowEvent::AppBarMenu {
             item: AppMenuItemId::new(7).expect("a valid id"),
@@ -3836,6 +3877,25 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
             },
         }
         .to_le_bytes(),
+        WindowEvent::SaveOffered {
+            window_id: 3,
+            serial: 6,
+            x: 10,
+            y: 20,
+        }
+        .to_le_bytes(),
+        WindowEvent::SaveOfferEnded {
+            window_id: 3,
+            serial: 6,
+            dropped: Some((10, 20)),
+        }
+        .to_le_bytes(),
+        WindowEvent::SaveOfferEnded {
+            window_id: 3,
+            serial: 6,
+            dropped: None,
+        }
+        .to_le_bytes(),
         WindowEvent::PreviewRendered {
             window_id: 3,
             subject: PreviewSubject::Screensaver(3),
@@ -3844,8 +3904,37 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
             outcome: PreviewOutcome::Unavailable,
         }
         .to_le_bytes(),
-    ];
-    for mut base in events {
+    ]
+}
+
+#[test]
+fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
+    // Walk the accepted/rejected boundary of the icon-bar declaration and
+    // its two outcome events from well-formed frames. A bit-flip lands as
+    // readily on a row's kind, flag byte, parent index, one of its three
+    // text lengths, its item id, the declaration's text length, or the text
+    // block itself as on the header, and every one of them must fail closed.
+    let declare = WindowRequest::SetAppBar(AppBar {
+        event_endpoint: 0xE117_0000_0000_0009,
+        click: AppBarClick::Open,
+        menu: fuzz_menu(AppMenu::EMPTY),
+    });
+    // The seed is the frame a client actually sends — exactly the
+    // declaration's own length. Feeding a padded buffer instead would be
+    // refused on length alone and would never reach the row decoder these
+    // flips exist to exercise.
+    let mut base = std::vec![0u8; WindowRequest::MAX_WIRE_LEN + 1];
+    let len = declare
+        .encode(&mut base)
+        .expect("the max frame holds any request");
+    each_bit_flipped(&mut base[..=len], |frame| {
+        exercise(&frame[..len]);
+        // A truncated and an over-long spelling of the same flipped frame
+        // must both fail closed rather than be read short.
+        exercise(&frame[..len - 1]);
+        exercise(frame);
+    });
+    for mut base in seeded_window_events() {
         each_bit_flipped(&mut base, exercise);
     }
 }
@@ -3972,6 +4061,7 @@ fn structured_pinboard_inputs_with_corrupted_fields_never_panic() {
         encoded(PinboardRequest::SoundUseTheme {
             event: SoundEvent::Bell,
         }),
+        encoded(PinboardRequest::ApplyFiles { document }),
         reading[..reading_len].to_vec(),
         themes[..themes_len].to_vec(),
     ];

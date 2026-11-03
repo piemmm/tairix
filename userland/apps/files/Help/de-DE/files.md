@@ -4,31 +4,32 @@ files — grafischer Dateisystem-Browser
 
 ## SYNOPSIS
 
-`files [--desktop] [pfad] [-h | -?]`
+`files --desktop [--mount] [pfad] [-h | -?]`
 
 ## DESCRIPTION
 
-Öffnet ein Desktop-Fenster, das das Dateisystem auflistet, beginnend mit dem
-Ordner, den `pfad` auf der Befehlszeile nennt — oder, wenn er eine Datei
-nennt, mit dem Ordner, der diese Datei enthält, wobei die Datei ausgewählt
-ist — oder, wenn keiner genannt ist, mit dem Ordner, den die Einstellungen
-wählen: dem Ordner `Home` des startenden Benutzers, sofern er nicht seinen
-Ordner `Desktop` oder die angeschlossenen Datenträger wählt (seinem
-Heimatverzeichnis, wenn dieser nicht aufgelistet werden kann). Der
+Der eigene Dateimanager des Desktops, der das Dateisystem in Fenstern
+auflistet. Ein Fenster öffnet sich in dem Ordner, der verlangt wird — oder,
+bei einer Datei, in dem Ordner, der diese Datei enthält, wobei die Datei
+ausgewählt ist — oder, wenn keiner genannt ist, in dem Ordner, den die
+Einstellungen wählen: im Ordner `Home` des startenden Benutzers, sofern er
+nicht seinen Ordner `Desktop` oder die angeschlossenen Datenträger wählt
+(in seinem Heimatverzeichnis, wenn dieser nicht aufgelistet werden kann). Der
 Fenstertitel nennt das aktuelle Verzeichnis; das Fenster listet
 seine Einträge, jeder ausgewählte Eintrag mit der Akzentfarbe des aktiven
 Themas hervorgehoben. Jedes Lesen eines Verzeichnisses ist eine gewöhnliche,
 berechtigungsgeprüfte Auflistung unter der Identität des startenden
 Benutzers: ein nicht lesbares Verzeichnis wird abgelehnt, niemals erraten.
 
-Der Desktop startet den Browser für Sie und hält ihn auf der Symbolleiste:
-das Menü seines Platzes listet Ihre eigenen Orte und alles Eingebundene, und
-die Wahl eines Eintrags öffnet dort ein Fenster; *Netzwerk* und
-*Einstellungen…* stehen zuletzt. Ein Klick auf den Platz öffnet eines dort,
-wo die Einstellungen es bestimmen. Wer einen Ordner verlangt, für den schon
-ein Fenster offen ist, holt dieses Fenster nach vorn, statt ein weiteres zu
-öffnen. Diese Instanz hat keine Zeile *Beenden* — sie ist Teil des Desktops,
-und das Schließen ihrer Fenster räumt sie einfach weg.
+Der Desktop startet den Dateimanager mit der Sitzung und hält ihn auf der
+Symbolleiste, und dieser beendet sich nie: das Menü seines Platzes listet
+Ihre eigenen Orte und alles Eingebundene, und die Wahl eines Eintrags öffnet
+dort ein Fenster; *Netzwerk* und *Einstellungen…* stehen zuletzt. Ein Klick
+auf den Platz öffnet eines dort, wo die Einstellungen es bestimmen. Wer einen
+Ordner verlangt, für den schon ein Fenster offen ist, holt dieses Fenster
+nach vorn, statt ein weiteres zu öffnen. Das Menü hat keine Zeile *Beenden* —
+der Dateimanager ist Teil des Desktops, das Schließen seiner Fenster räumt
+ihn einfach weg, und hört er je auf zu laufen, startet ihn der Desktop neu.
 
 *Netzwerk* im Menü des Platzes, direkt über *Einstellungen…*, öffnet ein
 Fenster mit den Computern im lokalen Netzwerk, die Dateien freigeben. Jeder
@@ -45,11 +46,11 @@ daher beweist ein Name nie, welchen Computer Sie vor sich haben. Die
 Verbindung zu den Freigaben eines Computers ist auf diesem System nicht
 verfügbar, und das Öffnen eines Computers sagt dies.
 
-Aus einer Shell über seinen Pfad `/System/Components/files.app` gestartet,
-ist er stattdessen eine gewöhnliche Anwendung: ein Fenster, und
-sie endet, wenn Sie es schließen. In beiden Fällen benötigt er eine laufende
-grafische Sitzung: ohne sie ist der Fensterkanal unerreichbar, und der
-Browser meldet die Ablehnung auf dem Standardfehlerstrom und beendet sich.
+Er läuft nur so, wie der Desktop ihn startet: auf andere Weise gestartet —
+aus einer Shell über seinen Pfad `/System/Components/files.app` — lehnt er
+den Start ab und nennt den Grund auf dem Standardfehlerstrom. Er benötigt
+eine laufende grafische Sitzung: ohne sie ist der Fensterkanal unerreichbar,
+und er meldet die Ablehnung auf dem Standardfehlerstrom und beendet sich.
 
 Das Fenster wird mit der Tastatur bedient: `Runter` und `Hoch` bewegen die
 Auswahl, `Eingabe` öffnet das ausgewählte Verzeichnis, und `Rücktaste`
@@ -115,11 +116,17 @@ auswählen* und *Auswahl aufheben* und zuletzt *Einfügen*. Ein Rechtsklick
 auf eine freie Stelle hebt die Auswahl auf, sodass das Untermenü des
 Eintrags ausgegraut ist.
 
-Das Öffnen eines Datenträgerabbilds — einer `.iso`-, `.adf`- oder
-`.hdf`-Datei und dergleichen — hängt es für Sie unter `/Storage` ein,
-beschreibbar, wo sowohl die Datei als auch ihr Format es zulassen, und
+Das Öffnen eines Datenträgerabbilds oder Archivs — einer `.iso`-, `.adf`-,
+`.hdf`- oder `.zip`-Datei und dergleichen — hängt es für Sie unter `/Storage`
+ein, beschreibbar, wo sowohl die Datei als auch ihr Format es zulassen, und
 öffnet sein Fenster; *Schreibgeschützt einhängen* hängt es stattdessen
-schreibgeschützt ein. Es bleibt eingehängt, bis Sie es auswerfen oder Ihre
+schreibgeschützt ein. Dasselbe geschieht, wenn Sie eines auf dem Desktop
+öffnen. Sobald kein Fenster es mehr zeigt, wird es wieder ausgehängt, sodass
+`/Storage` nur enthält, was in Gebrauch ist; wird es noch von etwas anderem
+benutzt — etwa von einem Dokument daraus, das in einer anderen Anwendung
+geöffnet ist —, bleibt es eingehängt, und das Aushängen wird erneut versucht,
+sobald dieses es freigegeben haben könnte. Die Einstellungen können das, was
+Sie öffnen, stattdessen eingehängt lassen, bis Sie es auswerfen oder Ihre
 Anmeldesitzung endet. *Auswerfen* nimmt einen Datenträger heraus, den Sie
 eingehängt haben, von seinem Symbol oder von seiner Zeile in der
 Orte-Leiste aus, deren eigenes Rechtsklickmenü *Öffnen* und *Auswerfen*
@@ -148,15 +155,16 @@ Reihenfolge um. Ordner bleiben bei jeder gewählten Reihenfolge oben, sofern
 die Einstellungen sie nicht zwischen die Dateien stellen.
 
 *Einstellungen…* im Menü des Platzes auf der Symbolleiste oder `Ctrl+,`
-öffnet die Einstellungen des Browsers: wo sich ein neues Fenster öffnet, wie
-es seine Einträge zeigt und ordnet und ob es die Orte-Leiste und die
-Werkzeugleiste zeigt; ob Ordner oben bleiben; welche Namensendungen und
-welche Einträge ausgeblendet sind; ob ein Bild seinen eigenen Inhalt zeigt
-und ein Ordner, was er enthält; und ob vor dem Verschieben von Einträgen in
-den Papierkorb nachgefragt wird. *Standardwerte wiederherstellen* setzt jede
-Einstellung zurück. Eine Änderung gilt sofort für alle Fenster und wird
-gespeichert; ein bereits geöffnetes Fenster behält seine Anzeige und
-Reihenfolge.
+öffnet die Einstellungen des Browsers in der Anwendung Einstellungen, unter
+*Dateien*: wo sich ein neues Fenster öffnet, wie Fenster ihre Einträge zeigen
+und ordnen und ob ein neues die Orte-Leiste und die Werkzeugleiste zeigt;
+ob Ordner oben bleiben; welche Namensendungen und welche Einträge
+ausgeblendet sind; ob ein Bild seinen eigenen Inhalt zeigt und ein Ordner,
+was er enthält; ob vor dem Verschieben von Einträgen in den Papierkorb
+nachgefragt wird; und ob ein Datenträgerabbild oder Archiv, das Sie geöffnet
+haben, ausgehängt wird, sobald seine Fenster geschlossen sind. Eine Änderung
+gilt sofort für alle Fenster und wird gespeichert; ein Fenster behält eine
+Anzeige oder eine Reihenfolge, die Sie selbst darin gewählt haben.
 
 `Alt+Enter` öffnet das Fenster *Informationen* des ausgewählten Eintrags,
 ebenso *Informationen…* in dessen Untermenü des Rechtsklickmenüs. Es ist ein eigenes
@@ -189,18 +197,22 @@ Fenster lässt. Ein zweiter Operand wird rundweg abgelehnt statt ignoriert.
 
 ## OPTIONS
 
-- `--desktop` — als eigene Dateimanager-Komponente des Desktops laufen: ein
-  dauerhafter Platz auf der Symbolleiste, der Ihre Orte und die eingebundenen
-  Datenträger anbietet, kein Fenster, bis eines verlangt wird, und keine
-  Möglichkeit zu beenden. Die Desktop-Sitzung übergibt dies beim Start; ein
-  zusätzlich genannter `pfad` wird abgewiesen, denn eine Komponente öffnet
-  kein Fenster, in das er gehören könnte.
+- `--desktop` — als eigener Dateimanager des Desktops laufen: ein dauerhafter
+  Platz auf der Symbolleiste, der Ihre Orte und die eingebundenen Datenträger
+  anbietet, und keine Möglichkeit zu beenden. Die Desktop-Sitzung übergibt
+  dies immer, wenn sie den Dateimanager startet, der nur damit läuft; ein
+  zusätzlich genannter `pfad` öffnet dort ein Fenster.
+- `--mount` — `pfad` als Datenträgerabbild oder Archiv öffnen, wie beim
+  Öffnen in einem Fenster: es wird für Sie eingehängt und sein Fenster
+  öffnet sich, und es wird wieder ausgehängt, sobald seine Fenster
+  geschlossen sind, wie es die Einstellungen vorsehen. Die Option benötigt
+  einen `pfad`.
 - `-h, -?` — die kurze Hilfe dieses Befehls anzeigen und beenden.
 
 ## EXIT STATUS
 
-Null nach sauberem Schließen oder nachdem die kurze Hilfe angezeigt
-wurde; `2`, wenn die Befehlszeile nicht verstanden wurde; sonst
-ungleich null, wenn der Fensterkanal, die gemeinsame Frame-Region oder
-die erste Verzeichnisauflistung abgelehnt wurde (der Grund wird auf dem
+Er beendet sich nicht, solange der Desktop läuft. Null, nachdem die kurze
+Hilfe angezeigt wurde; `2`, wenn die Befehlszeile nicht verstanden wurde oder
+kein `--desktop` nannte; sonst ungleich null, wenn der Fensterkanal oder die
+gemeinsame Frame-Region abgelehnt wurde (der Grund wird auf dem
 Standardfehlerstrom genannt).

@@ -13,23 +13,21 @@
 //!
 //! # The grammar
 //!
-//! `files [--desktop] [path]`, with the argument conventions every other
-//! command app follows: `-h`/`-?`/`--help` win immediately, `--` ends option
-//! parsing, and at most one operand is accepted.
+//! `files --desktop [--mount] [path]`, with the argument conventions every
+//! other command app follows: `-h`/`-?`/`--help` win immediately, `--` ends
+//! option parsing, and at most one operand is accepted. With `--mount` the
+//! operand is a disk image or archive to attach and show rather than a place
+//! to open at.
 //!
-//! # The two roles
+//! # The desktop's own file manager
 //!
-//! The switch selects which of two things this program is ([`Role`]). Without
-//! it — from a shell, or when the desktop opens a folder — it is the ordinary
-//! file manager: a window at the starting location and the shared icon-bar
-//! menu convention, whose *Quit* ends it; closing its last window does not.
-//! With it, the desktop session is starting the program as a **component of
-//! itself**: a permanent icon-bar slot offering the user's places and whatever
-//! is mounted, no window until one is asked for, and no way to quit. Only the
-//! session passes the switch, so a second component can never appear; and
-//! because a component opens no window at start, naming a starting location
-//! alongside it is a command line this program cannot act on rather than an
-//! argument silently ignored.
+//! This program is a **component of the desktop**: it starts with the
+//! session, holds a permanent icon-bar slot offering the user's places and
+//! whatever is mounted, and never quits. `--desktop` is the session saying so,
+//! and a command line without it is refused, so it never runs as an ordinary
+//! application; the session hands what it opens to the instance it started. At bring-up the session names
+//! nothing and no window opens; when it starts the file manager again to show
+//! a folder or an image, the operand names it.
 //!
 //! # Untrusted input, and the two different refusals
 //!
@@ -60,31 +58,17 @@ use core::fmt;
 
 use tairix_abi::fs::FS_PATH_MAX;
 use tairix_abi::Errno;
-use tairix_browse::vfs::{components_from_absolute_path, spell_shown_path};
+use tairix_browse::vfs::{components_from_absolute_path, spell_absolute_path, spell_shown_path};
 use tairix_browse::{BrowseError, Unnamable};
 use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
 use crate::operation::device_refusal;
+use tairix_browse::mount::MOUNT_SWITCH;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `files`'s own Help tree is unavailable.
-pub const USAGE: &str = "usage: files [--desktop] [path] [-h | -?]";
-
-/// Which of the two things a `files` process is.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum Role {
-    /// The ordinary file manager: a window at the starting location, and the
-    /// shared icon-bar menu convention on its slot, whose *Quit* ends the
-    /// process; closing its last window does not.
-    #[default]
-    Window,
-    /// A component of the desktop, as the session's own bring-up asks for
-    /// with [`tairix_window::DESKTOP_ROLE_SWITCH`]: a permanent icon-bar slot
-    /// whose menu is the user's places and the mounted volumes, no window
-    /// until one is asked for, and no *Quit*.
-    Desktop,
-}
+pub const USAGE: &str = "usage: files --desktop [--mount] [path] [-h | -?]";
 
 /// What a `files` command line asks the program to do.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -97,18 +81,17 @@ pub enum Command {
     Help,
 }
 
-/// What the program is, where its window opens, and what the command line
-/// asked for that could not be honoured.
+/// What the file manager shows as it starts, and what the command line asked
+/// for that could not be honoured.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Start {
-    /// Which of the two things this process is.
-    pub role: Role,
-    /// The accepted starting location as root-first path components, or
-    /// `None` to open among the launching user's own files — either because the
-    /// command line named no location, or because the one it named was
-    /// refused. Always `None` in the [`Role::Desktop`] role, which opens no
-    /// window until one is asked for.
+    /// The accepted place to show as root-first path components, or `None`
+    /// when the command line named none or the one it named was refused.
     pub location: Option<Vec<String>>,
+    /// The disk image or archive to attach and show, as an absolute path,
+    /// where `--mount` named one that was accepted: the window opens on its
+    /// volume once it is attached, and on none before.
+    pub image: Option<String>,
     /// The reason a named location was turned down, ready to be stated on the
     /// error stream, or `None` when nothing was refused.
     ///
@@ -126,10 +109,11 @@ pub enum UsageError {
     /// A second operand; carries it. The window shows one directory, so two
     /// locations have no meaning and the second is never silently dropped.
     ExtraOperand(String),
-    /// A starting location alongside the desktop-role switch; carries it. A
-    /// component opens no window until one is asked for, so there is nothing
-    /// for the location to name — refused rather than quietly dropped.
-    LocationInDesktopRole(String),
+    /// No desktop-role switch: the file manager is the desktop's own and runs
+    /// only as the session starts it.
+    NotByDesktop,
+    /// `--mount` naming no image.
+    NoImage,
     /// The argument vector was not valid UTF-8 and so could not be read at
     /// all.
     NotUtf8,
@@ -140,12 +124,10 @@ impl fmt::Display for UsageError {
         match self {
             UsageError::Option(refusal) => write!(f, "{refusal}"),
             UsageError::ExtraOperand(arg) => write!(f, "extra operand {}", quote(arg)),
-            UsageError::LocationInDesktopRole(arg) => write!(
-                f,
-                "starting location {} has no meaning with {}",
-                quote(arg),
-                tairix_window::DESKTOP_ROLE_SWITCH
-            ),
+            UsageError::NotByDesktop => {
+                f.write_str("the file manager starts with the desktop and does not run on its own")
+            }
+            UsageError::NoImage => write!(f, "{MOUNT_SWITCH} names no disk image"),
             UsageError::NotUtf8 => f.write_str("argument vector is not valid UTF-8"),
         }
     }
@@ -156,15 +138,20 @@ impl fmt::Display for UsageError {
 enum Flag {
     Desktop,
     Help,
+    Mount,
 }
 
 /// [`tairix_window::DESKTOP_ROLE_SWITCH`] as a long option's name, its `--`
 /// taken off.
 const DESKTOP_ROLE: &str = tairix_window::DESKTOP_ROLE_SWITCH.split_at(2).1;
 
-/// `files`'s option, and the reserved help switches.
+/// [`MOUNT_SWITCH`] as a long option's name, its `--` taken off.
+const MOUNT: &str = MOUNT_SWITCH.split_at(2).1;
+
+/// `files`'s options, and the reserved help switches.
 const OPTIONS: &[Opt<Flag>] = &[
     Opt::long(&[DESKTOP_ROLE], Takes::Nothing, Flag::Desktop),
+    Opt::long(&[MOUNT], Takes::Nothing, Flag::Mount),
     Opt::flag('h', &["help"], Flag::Help),
     Opt::letter('?', Takes::Nothing, Flag::Help),
 ];
@@ -172,28 +159,31 @@ const OPTIONS: &[Opt<Flag>] = &[
 /// Parse `args` (the program's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `files [--desktop] [path]`, read as GNU's `getopt_long`
-/// reads it ([`Scan`]): options anywhere among the operands, a long one by any
-/// unambiguous prefix, `--` ending them. The help switches (`-h`, `-?`,
-/// `--help`) answer at once; `--desktop` is the desktop session asking for
-/// [`Role::Desktop`]. The one optional operand is the folder to open at, or a
-/// file to show selected in the folder holding it. It is validated here and,
-/// when it does not survive, reported through [`Start::refused`] with the
-/// window still opening among the launching user's own files.
+/// The grammar is `files --desktop [--mount] [path]`, read as GNU's
+/// `getopt_long` reads it ([`Scan`]): options anywhere among the operands, a
+/// long one by any unambiguous prefix, `--` ending them. The help switches
+/// (`-h`, `-?`, `--help`) answer at once; `--desktop` is the session starting
+/// its file manager. The one optional operand is the folder to show, or a file
+/// to show selected in the folder holding it — or, with `--mount`, the disk
+/// image or archive to attach and show. It is validated here and, when it does
+/// not survive, reported through [`Start::refused`] with a window still
+/// opening among the launching user's own files.
 ///
 /// # Errors
 ///
 /// * [`UsageError::Option`] — an option `getopt` refuses, in its words.
 /// * [`UsageError::ExtraOperand`] — a second operand.
-/// * [`UsageError::LocationInDesktopRole`] — a location named alongside the
-///   desktop-role switch.
+/// * [`UsageError::NotByDesktop`] — no `--desktop`.
+/// * [`UsageError::NoImage`] — `--mount` with no operand.
 pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
     let mut operand: Option<&str> = None;
-    let mut role = Role::Window;
+    let mut desktop = false;
+    let mut mount = false;
     for arg in Scan::new(OPTIONS, args, Order::Permute) {
         match arg.map_err(UsageError::Option)? {
             Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
-            Arg::Opt(Flag::Desktop, _) => role = Role::Desktop,
+            Arg::Opt(Flag::Desktop, _) => desktop = true,
+            Arg::Opt(Flag::Mount, _) => mount = true,
             Arg::Operand(spelling) => {
                 if operand.is_some() {
                     return Err(UsageError::ExtraOperand(String::from(spelling)));
@@ -202,16 +192,33 @@ pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
             }
         }
     }
-    if role == Role::Desktop {
-        if let Some(spelling) = operand {
-            return Err(UsageError::LocationInDesktopRole(String::from(spelling)));
-        }
-        return Ok(Command::Open(Start {
-            role,
-            ..Start::default()
+    if !desktop {
+        return Err(UsageError::NotByDesktop);
+    }
+    if mount {
+        let spelling = operand.ok_or(UsageError::NoImage)?;
+        return Ok(Command::Open(match image_path(spelling) {
+            Ok(image) => Start {
+                image: Some(image),
+                ..Start::default()
+            },
+            Err(refused) => Start {
+                refused: Some(format!("{refused}; {FALLBACK}")),
+                ..Start::default()
+            },
         }));
     }
     Ok(Command::Open(start_at(operand)))
+}
+
+impl Start {
+    /// Whether a window opens as the file manager starts: the command line
+    /// named a place to show, or one that was refused, which opens among the
+    /// user's own files instead. An image opens its window once attached.
+    #[must_use]
+    pub const fn shows_at_start(&self) -> bool {
+        self.image.is_none() && (self.location.is_some() || self.refused.is_some())
+    }
 }
 
 /// The starting location `operand` names, or none with the reason it was
@@ -225,14 +232,12 @@ fn start_at(operand: Option<&str>) -> Start {
     };
     match location_components(spelling) {
         Ok(location) => Start {
-            role: Role::Window,
             location: Some(location),
-            refused: None,
+            ..Start::default()
         },
         Err(refused) => Start {
-            role: Role::Window,
-            location: None,
             refused: Some(refused),
+            ..Start::default()
         },
     }
 }
@@ -267,6 +272,37 @@ pub fn location_components(spelling: &str) -> Result<Vec<String>, String> {
         Errno::LengthOutOfRange => refused(spelling, "path exceeds the maximum length"),
         _ => refused(spelling, &malformed_detail(spelling)),
     })
+}
+
+/// Validate one disk image's or archive's spelling into the absolute path an
+/// attach names: [`location_components`]'s rule, for an image this program is
+/// given — by `--mount`, or as an open target the desktop hands a running
+/// instance.
+///
+/// # Errors
+///
+/// The reason to state on the error stream.
+pub fn image_path(spelling: &str) -> Result<String, String> {
+    if spelling.len() > FS_PATH_MAX {
+        return Err(format!(
+            "disk image refused (longer than {FS_PATH_MAX} bytes)"
+        ));
+    }
+    if !spelling.starts_with('/') {
+        return Err(image_refused(spelling, "not an absolute path"));
+    }
+    components_from_absolute_path(spelling)
+        .map(|components| spell_absolute_path(&components))
+        .map_err(|errno| match errno {
+            Errno::LengthOutOfRange => image_refused(spelling, "path exceeds the maximum length"),
+            _ => image_refused(spelling, &malformed_detail(spelling)),
+        })
+}
+
+/// One refusal of an image named `spelling`, for `detail`, escaped as a
+/// location's is.
+fn image_refused(spelling: &str, detail: &str) -> String {
+    format!("disk image {spelling:?} refused ({detail})")
 }
 
 /// Which rule the spelling broke, taken from the one shared filename rule so

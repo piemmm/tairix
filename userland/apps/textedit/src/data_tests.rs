@@ -28,17 +28,19 @@ fn report(lines: usize) -> Vec<ReportLine> {
 }
 
 #[test]
-fn a_picture_is_offered_as_data_by_its_signature_or_a_sprite_by_its_name() {
-    let png = DataDisplay::of(PNG_HEAD, "anything", None).expect("a picture");
+fn a_picture_is_offered_as_data_by_its_content_or_a_sprite_by_its_type() {
+    let png =
+        DataDisplay::of(PNG_HEAD, PNG_HEAD.len() as u64, "anything", None).expect("a picture");
     assert!(png.showing(), "a picture opens as data");
     assert_eq!(png.structure(), PICTURE, "its content says what it is");
-    let sprite = DataDisplay::of(b"\x01\0\0\0", "Sprites,ff9", None).expect("named");
+    let sprite = DataDisplay::of(b"\x01\0\0\0", 4, "Sprites,ff9", None).expect("named");
     assert_eq!(
         sprite.structure(),
         Structure::Picture(Some(ViewFormat::Sprite))
     );
     let typed = DataDisplay::of(
         b"\x01\0\0\0",
+        4,
         "Sprites",
         tairix_abi::fs::Filetype::new(0xFF9),
     )
@@ -48,16 +50,31 @@ fn a_picture_is_offered_as_data_by_its_signature_or_a_sprite_by_its_name() {
         Structure::Picture(Some(ViewFormat::Sprite)),
         "a sprite area its volume records as one"
     );
-    assert!(DataDisplay::of(b"plain text", "notes.txt", None).is_none());
+    let mut area = [0u8; 60];
+    for (at, word) in [(0, 1u32), (4, 16), (8, 64), (12, 48)] {
+        area[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    let recognised = DataDisplay::of(&area[..54], 60, "Sprites", None).expect("recognised");
+    assert_eq!(
+        recognised.structure(),
+        PICTURE,
+        "a sprite area named nothing is recognised by the length it states"
+    );
     assert!(
-        DataDisplay::of(b"", "photo.jpg", None).is_none(),
+        DataDisplay::of(&area[..54], 64, "Sprites", None).is_none(),
+        "the same head on a longer file is no area"
+    );
+    assert!(DataDisplay::of(b"plain text", 10, "notes.txt", None).is_none());
+    assert!(
+        DataDisplay::of(b"", 0, "photo.jpg", None).is_none(),
         "a name alone names no JPEG"
     );
 }
 
 #[test]
 fn the_rows_are_the_report_a_heading_then_a_row_a_sixteen_of_bytes() {
-    let mut display = DataDisplay::of(PNG_HEAD, "a.png", None).expect("a picture");
+    let mut display =
+        DataDisplay::of(PNG_HEAD, PNG_HEAD.len() as u64, "a.png", None).expect("a picture");
     let len = 40;
     assert_eq!(display.row(0, len), Some(DataRow::Note(PICTURE.reading())));
     assert_eq!(display.row(1, len), Some(DataRow::Bytes));
@@ -76,7 +93,8 @@ fn the_rows_are_the_report_a_heading_then_a_row_a_sixteen_of_bytes() {
 
 #[test]
 fn a_report_is_asked_once_a_generation_and_only_its_own_answer_is_taken() {
-    let mut display = DataDisplay::of(PNG_HEAD, "a.png", None).expect("a picture");
+    let mut display =
+        DataDisplay::of(PNG_HEAD, PNG_HEAD.len() as u64, "a.png", None).expect("a picture");
     let first = display.want(1).expect("asked");
     assert_eq!(display.want(1), None, "asked once");
     let second = display.want(2).expect("the document changed");
@@ -90,7 +108,8 @@ fn a_report_is_asked_once_a_generation_and_only_its_own_answer_is_taken() {
 
 #[test]
 fn a_passing_refusal_is_asked_again_when_shown_afresh_and_a_lasting_one_stands() {
-    let mut display = DataDisplay::of(PNG_HEAD, "a.png", None).expect("a picture");
+    let mut display =
+        DataDisplay::of(PNG_HEAD, PNG_HEAD.len() as u64, "a.png", None).expect("a picture");
     let id = display.want(1).expect("asked");
     assert!(display.reported(id, Err(PICTURE.no_memory()), 0));
     assert_eq!(
@@ -108,7 +127,8 @@ fn a_passing_refusal_is_asked_again_when_shown_afresh_and_a_lasting_one_stands()
 
 #[test]
 fn scrolling_stays_within_the_rows_there_are() {
-    let mut display = DataDisplay::of(PNG_HEAD, "a.png", None).expect("a picture");
+    let mut display =
+        DataDisplay::of(PNG_HEAD, PNG_HEAD.len() as u64, "a.png", None).expect("a picture");
     let len = 16 * 10;
     assert!(display.set_top(usize::MAX, len));
     assert_eq!(display.top(), display.row_count(len) - 1);
@@ -152,14 +172,14 @@ fn manifest() -> Vec<u8> {
 #[test]
 fn a_manifest_is_offered_as_data_and_its_report_is_read_in_the_decode_worker() {
     let file = manifest();
-    let display = DataDisplay::of(&file, "AppInfo", None).expect("a manifest");
+    let display = DataDisplay::of(&file, file.len() as u64, "AppInfo", None).expect("a manifest");
     assert_eq!(display.structure(), Structure::Manifest);
     assert_eq!(
         Structure::Manifest.reading(),
         "Reading the manifest\u{2026}"
     );
     assert!(
-        DataDisplay::of(b"RXEL\x01\0\0\0", "Run", None).is_none(),
+        DataDisplay::of(b"RXEL\x01\0\0\0", 8, "Run", None).is_none(),
         "code is not data"
     );
 

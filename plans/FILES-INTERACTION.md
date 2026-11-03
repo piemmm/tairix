@@ -62,6 +62,7 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 | FI36 | The List view pictures each entry as the icon views do: an application's own icon, a folder's contents, a picture's thumbnail | done |
 | FI37 | The Home place is the full-colour Home folder wherever a place is pictured, the icon-bar menu included | done |
 | FI38 | A name may be shown without the ending the settings hide — an application's `.app` by default — and renames with it restored; items whose names begin with a dot are listed only when asked | done |
+| FI39 | An untyped file typed by its content, read lazily for entries in view (a sprite area by the length its header states, as `tairix_image::recognise` does), so it shows its type's icon, opens in, and drops onto the application that claims that type | planned |
 
 ## FI1 — item names one point smaller
 
@@ -100,7 +101,7 @@ The greeter states three lines, which keeps its disc and its three-line band.
 
 The fallback ladder for a bare open is `<home>/Home`, then `<home>`, then
 the root view (`tairix_browse::bare_open_places`). It applies to the icon-bar
-default action, the desktop role's bare open, and `files` with no operand; a
+default action and to a place the desktop names that is refused; a
 named location keeps its own ladder (the folder, then the same three), and each
 refusal names the place tried next. The trusted picker starts at the same place
 and climbs to the nearest listable folder above a start that is refused.
@@ -691,7 +692,7 @@ account tiles and every other control draw none.
 
 ## FI26 — the places
 
-The rail and the desktop role's icon-bar menu list one model
+The rail and the icon-bar menu list one model
 (`tairix_browse::Places`): the user's own `Home` and `Desktop` folders, a rule,
 then the attached storage — the `Storage` catalog and every volume attached
 beneath it, sorted by label. The Home place opens `<home>/Home`, never the home
@@ -713,7 +714,9 @@ New ▸, in the group above Properties: Large icons, Small icons and List, one
 radio group. The display in force is the group's chosen member and is disabled
 with its reason, as the desktop's own sort and arrangement rows are. A choice
 applies to its window (`Browser::set_view_mode`) and holds while the window
-navigates; a new window opens on Large icons. The toolbar's view command steps
+navigates, whatever the settings come to say; a new window opens on the
+settings' view, Large icons unless the user chose another, and follows it
+until the user chooses one in the window (`plans/NEW-FILEMANAGER.md` FM23). The toolbar's view command steps
 through the same three in that order. The trusted picker opens on List and
 cycles the same three.
 
@@ -822,7 +825,8 @@ drives alone Name, Free, Filesystem and Health — then Ascending and
 Descending, the order in force marked and refused with its reason. Each
 applies to its window (`Browser::set_sort_mode`) through the one shared sort,
 keeping the selection on its entry, and a column header's press is the same
-choice. Where folders stand is the settings' choice (FM23), kept whichever the
+choice; a window ordered so keeps it whatever the settings' order comes to
+be. Where folders stand is the settings' choice (FM23), kept whichever the
 key and direction: first, or among the files ordered by the key like any
 entry (`Folders::Among`). Every row names its picture
 (`AppMenuSymbol::SortAscending`, `SortDescending` and `SortByHealth` among

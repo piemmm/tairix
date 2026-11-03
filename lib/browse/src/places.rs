@@ -33,6 +33,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkMedium;
+use tairix_abi::driver::filesystem::MountFlags;
 use tairix_abi::fs::STORAGE_CATALOG;
 use tairix_abi::home::{HOME_DESKTOP_DIR, HOME_FILES_DIR};
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, VOLUME_ID_LEN, VOLUME_ID_UNPUBLISHED};
@@ -173,6 +174,8 @@ pub struct VolumeFacts {
     /// The identity a detach names it by, the reserved unpublished identity
     /// for one it cannot name.
     pub volume_id: [u8; VOLUME_ID_LEN],
+    /// Whether it is mounted read-only, so nothing can be made on it.
+    pub read_only: bool,
 }
 
 impl VolumeFacts {
@@ -243,6 +246,7 @@ impl Volume {
                 availability,
                 owner: record.owner(),
                 volume_id: record.volume_id(),
+                read_only: record.flags().bits() & MountFlags::READ_ONLY.bits() != 0,
             },
         })
     }
@@ -362,6 +366,35 @@ impl Places {
     /// The storage volumes listed but not offered as rows.
     pub(crate) fn unoffered(&self) -> &[Place] {
         &self.unoffered
+    }
+
+    /// What the volume published as `volume_id` is and how it is doing, from
+    /// its row or, for one the rail does not offer, its listing; `None` for
+    /// one the mount table did not list.
+    #[must_use]
+    pub fn volume_facts(&self, volume_id: [u8; VOLUME_ID_LEN]) -> Option<&VolumeFacts> {
+        self.rows
+            .iter()
+            .chain(&self.unoffered)
+            .filter_map(Place::facts)
+            .find(|facts| facts.volume_id == volume_id)
+    }
+
+    /// Whether a file can be made in the folder `components` name: anywhere
+    /// [`stores_files`](crate::vfs::stores_files) allows but on a volume the
+    /// mount table lists read-only, the deepest listed volume holding the
+    /// folder deciding.
+    #[must_use]
+    pub fn writable_at(&self, components: &[String]) -> bool {
+        crate::vfs::stores_files(components)
+            && !self
+                .rows
+                .iter()
+                .chain(&self.unoffered)
+                .filter(|place| place.facts.is_some() && components.starts_with(&place.components))
+                .max_by_key(|place| place.components.len())
+                .and_then(Place::facts)
+                .is_some_and(|facts| facts.read_only)
     }
 
     /// How many rows the rail has.

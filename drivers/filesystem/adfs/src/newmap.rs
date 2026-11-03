@@ -9,13 +9,16 @@
 //! a per-zone linked list: the header link and each free fragment's id
 //! field hold the bit distance to the next free fragment.
 //!
+//! The map is held twice, the second copy straight after the first. The
+//! engine reads the first copy whose every zone checks and writes both.
+//!
 //! Reference: the RISC OS PRM `FileCore` formats chapter.
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
 use tairix_fsprobe::adfs::{
-    link_bits, seal_boot_block, zone_check, zone_start_bit, DiscRecord, BOOT_BLOCK_OFFSET,
+    link_bits, seal_boot_block, zone_check, zone_start_bit, DiscRecord, MapCopy, BOOT_BLOCK_OFFSET,
     BOOT_BLOCK_SIZE, CROSS_CHECK_BYTE, CROSS_CHECK_SUM, DISC_RECORD_SIZE, FRAG_ROOT, FREELINK_BIT,
     ZONE_CHECK_BYTE, ZONE_HEADER_SIZE,
 };
@@ -36,6 +39,12 @@ pub const MAX_ZONES: usize = 512;
 pub struct NewMap {
     /// The validated disc record (from zone 0 or the boot block).
     pub record: DiscRecord,
+    /// The copy the engine reads: the first whose every zone checks.
+    reads: MapCopy,
+    /// The other copy, when it checks too but records something else: an
+    /// object the copy read lacks is looked for there, and the volume is
+    /// never written, which could allocate over what only it records.
+    recovers: Option<MapCopy>,
 }
 
 /// One zone staged in memory.
@@ -206,44 +215,91 @@ impl Walker {
 }
 
 impl NewMap {
-    /// Attach to a volume whose validated disc record is `record`,
-    /// verifying every zone's check byte and the map-wide cross-check.
+    /// Attach to a volume whose validated disc record is `record`, reading
+    /// the first map copy whose every zone checks and whose cross-check holds,
+    /// as `FileCore` does.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::BadMagic`] if the record is inconsistent with
-    ///   the device, a zone check fails, or the cross-check bytes do
-    ///   not XOR to [`CROSS_CHECK_SUM`].
+    /// * [`DriverError::BadMagic`] if the record is inconsistent or leaves
+    ///   no room for both copies, or neither copy checks.
+    /// * [`DriverError::LengthOutOfRange`] for a zone of the copy read past
+    ///   the end of a short device.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
     pub fn open<B: Block>(
         volume: &mut ByteDevice<B>,
         record: DiscRecord,
     ) -> Result<Self, DriverError> {
         record.validate()?;
-        if usize::from(record.nzones) > MAX_ZONES
-            || record.sector_size() > MAX_ZONE_BYTES as u64
-            || record.disc_size > volume.capacity()
-        {
+        if usize::from(record.nzones) > MAX_ZONES || record.sector_size() > MAX_ZONE_BYTES as u64 {
             return Err(DriverError::BadMagic);
         }
-        let map = Self { record };
-        let map_end = map
-            .record
-            .map_offset()
-            .checked_add(map.record.map_size())
+        let maps_end = record
+            .map_size()
+            .checked_mul(2)
+            .and_then(|both| both.checked_add(record.map_offset()))
             .ok_or(DriverError::BadMagic)?;
-        if map_end > record.disc_size {
+        if maps_end > record.disc_size {
             return Err(DriverError::BadMagic);
         }
+        let mut map = Self {
+            record,
+            reads: MapCopy::First,
+            recovers: None,
+        };
+        match map.copy_checks(volume, MapCopy::First) {
+            Ok(()) => {
+                if map.copy_checks(volume, MapCopy::Second).is_ok() && !map.copies_agree(volume)? {
+                    map.recovers = Some(MapCopy::Second);
+                }
+            }
+            Err(DriverError::BadMagic) => {
+                map.copy_checks(volume, MapCopy::Second)?;
+                map.reads = MapCopy::Second;
+            }
+            Err(err) => return Err(err),
+        }
+        Ok(map)
+    }
+
+    /// Whether both copies check yet record different maps, which leaves
+    /// the volume read-only.
+    #[must_use]
+    pub fn copies_disagree(&self) -> bool {
+        self.recovers.is_some()
+    }
+
+    /// Check every zone of `copy` and its map-wide cross-check.
+    fn copy_checks<B: Block>(
+        &self,
+        volume: &mut ByteDevice<B>,
+        copy: MapCopy,
+    ) -> Result<(), DriverError> {
         let mut crosscheck = 0u8;
-        for zone in 0..u32::from(record.nzones) {
-            let staged = map.load_zone(volume, zone)?;
-            crosscheck ^= staged.bytes[CROSS_CHECK_BYTE];
+        for zone in 0..u32::from(self.record.nzones) {
+            crosscheck ^= self.load_zone_of(volume, copy, zone)?.bytes[CROSS_CHECK_BYTE];
         }
         if crosscheck != CROSS_CHECK_SUM {
             return Err(DriverError::BadMagic);
         }
-        Ok(map)
+        Ok(())
+    }
+
+    /// Whether the two copies, both of which check, hold the same bytes.
+    fn copies_agree<B: Block>(&self, volume: &mut ByteDevice<B>) -> Result<bool, DriverError> {
+        for zone in 0..u32::from(self.record.nzones) {
+            let first = self.load_zone_of(volume, MapCopy::First, zone)?;
+            let second = self.load_zone_of(volume, MapCopy::Second, zone)?;
+            if first.bytes[..first.len] != second.bytes[..second.len] {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// The copy read, then the one recovered from.
+    fn copies(&self) -> impl Iterator<Item = MapCopy> {
+        core::iter::once(self.reads).chain(self.recovers)
     }
 
     /// Width of a free-space link field.
@@ -272,33 +328,45 @@ impl NewMap {
         &self,
         volume: &mut ByteDevice<B>,
         frag_id: u32,
-        mut map_offset: u64,
+        map_offset: u64,
     ) -> Result<FragmentRun, DriverError> {
         let nzones = u32::from(self.record.nzones);
-        let mut zone = self.home_zone(frag_id)?;
-        for _ in 0..nzones {
-            let staged = self.load_zone(volume, zone)?;
-            if let Some(run) = self.scan_zone(&staged, frag_id, &mut map_offset)? {
-                return Ok(run);
+        for copy in self.copies() {
+            let mut offset = map_offset;
+            let mut seen = false;
+            let mut zone = self.home_zone(frag_id)?;
+            for _ in 0..nzones {
+                let staged = self.load_zone_of(volume, copy, zone)?;
+                if let Some(run) = self.scan_zone(&staged, frag_id, &mut offset, &mut seen)? {
+                    return Ok(run);
+                }
+                zone = (zone + 1) % nzones;
             }
-            zone = (zone + 1) % nzones;
+            // A copy recording the object at all is the whole truth about
+            // it; stitching another copy's fragments onto it would not be.
+            if seen {
+                break;
+            }
         }
         Err(DriverError::BadMagic)
     }
 
     /// Scan one zone for `frag_id`, consuming `map_offset` bits of the
-    /// object as earlier fragments are passed.
+    /// object as earlier fragments are passed and noting in `seen` that the
+    /// zone holds one.
     fn scan_zone(
         &self,
         staged: &Zone,
         frag_id: u32,
         map_offset: &mut u64,
+        seen: &mut bool,
     ) -> Result<Option<FragmentRun>, DriverError> {
         let mut walker = self.walker(staged);
         while let Some(frag) = walker.next(staged)? {
             if frag.is_free || frag.id != frag_id {
                 continue;
             }
+            *seen = true;
             let length = u64::from(frag.end + 1 - frag.bit);
             if *map_offset < length {
                 let block =
@@ -362,23 +430,29 @@ impl NewMap {
         Ok((run.disc_byte + sub, run.len - sub))
     }
 
-    /// Total bytes of map allocation carried by fragment id `frag_id`.
+    /// Total bytes of map allocation carried by fragment id `frag_id`, in
+    /// the first copy that records it.
     pub fn object_allocated_bytes<B: Block>(
         &self,
         volume: &mut ByteDevice<B>,
         frag_id: u32,
     ) -> Result<u64, DriverError> {
-        let mut bits = 0u64;
-        for zone in 0..u32::from(self.record.nzones) {
-            let staged = self.load_zone(volume, zone)?;
-            let mut walker = self.walker(&staged);
-            while let Some(frag) = walker.next(&staged)? {
-                if !frag.is_free && frag.id == frag_id {
-                    bits += u64::from(frag.end + 1 - frag.bit);
+        for copy in self.copies() {
+            let mut bits = 0u64;
+            for zone in 0..u32::from(self.record.nzones) {
+                let staged = self.load_zone_of(volume, copy, zone)?;
+                let mut walker = self.walker(&staged);
+                while let Some(frag) = walker.next(&staged)? {
+                    if !frag.is_free && frag.id == frag_id {
+                        bits += u64::from(frag.end + 1 - frag.bit);
+                    }
                 }
             }
+            if bits != 0 {
+                return Ok(bits * self.record.bytes_per_map_bit());
+            }
         }
-        Ok(bits * self.record.bytes_per_map_bit())
+        Ok(0)
     }
 
     /// Total free bytes on the volume.
@@ -916,17 +990,26 @@ impl NewMap {
         (start_bit, start_bit + stream, start_block)
     }
 
-    /// Load and verify zone `zone` from the map area of `volume`.
+    /// Load and verify zone `zone` of the copy the engine reads.
     fn load_zone<B: Block>(
         &self,
         volume: &mut ByteDevice<B>,
         zone: u32,
     ) -> Result<Zone, DriverError> {
+        self.load_zone_of(volume, self.reads, zone)
+    }
+
+    /// Load and verify zone `zone` of `copy`.
+    fn load_zone_of<B: Block>(
+        &self,
+        volume: &mut ByteDevice<B>,
+        copy: MapCopy,
+        zone: u32,
+    ) -> Result<Zone, DriverError> {
         // The sector size was validated against `MAX_ZONE_BYTES`.
         let sector = usize::try_from(self.record.sector_size()).unwrap_or(MAX_ZONE_BYTES);
         let mut bytes = [0u8; MAX_ZONE_BYTES];
-        let offset = self.record.map_offset() + u64::from(zone) * self.record.sector_size();
-        volume.read(offset, &mut bytes[..sector])?;
+        volume.read(self.record.zone_offset(copy, zone), &mut bytes[..sector])?;
         let (start_bit, end_bit, start_block) = self.zone_geometry(zone);
         let staged = Zone {
             bytes,
@@ -935,13 +1018,18 @@ impl NewMap {
             end_bit,
             start_block,
         };
-        if zone_check(staged.bits()) != staged.bytes[ZONE_CHECK_BYTE] {
+        // A zeroed sector checks, yet every genuine zone holds a fragment's
+        // stop bit: a blanked copy is no copy.
+        if zone_check(staged.bits()) != staged.bytes[ZONE_CHECK_BYTE]
+            || staged.bits().iter().all(|&byte| byte == 0)
+        {
             return Err(DriverError::BadMagic);
         }
         Ok(staged)
     }
 
-    /// Write zone `zone` back, refreshing its check byte.
+    /// Write zone `zone` back to both copies, refreshing its check byte, so
+    /// either stands for the map as `FileCore` expects.
     fn store_zone<B: Block>(
         &self,
         volume: &mut ByteDevice<B>,
@@ -949,7 +1037,12 @@ impl NewMap {
         staged: &mut Zone,
     ) -> Result<(), DriverError> {
         staged.bytes[ZONE_CHECK_BYTE] = zone_check(&staged.bytes[..staged.len]);
-        let offset = self.record.map_offset() + u64::from(zone) * self.record.sector_size();
-        volume.write(offset, &staged.bytes[..staged.len])
+        for copy in [MapCopy::First, MapCopy::Second] {
+            volume.write(
+                self.record.zone_offset(copy, zone),
+                &staged.bytes[..staged.len],
+            )?;
+        }
+        Ok(())
     }
 }

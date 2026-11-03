@@ -73,6 +73,19 @@ control —montar y desmontar corresponden al gestor de archivos y al comando
 lugar de mostrar una barra. `df` informa de las mismas cifras en un intérprete
 de órdenes.
 
+**Files** establece cómo funciona el gestor de archivos: dónde se abre una
+ventana nueva y cómo muestra y ordena lo que enumera, si muestra la columna de
+lugares y la barra de herramientas, si las carpetas quedan arriba, qué sufijos
+de nombre y qué elementos se ocultan, si una imagen muestra su propio contenido
+y una carpeta lo que contiene, si mover elementos a la Papelera pide
+confirmación antes y si una imagen de disco o un archivo comprimido que usted
+abrió se desmonta una vez cerradas sus ventanas. Una fila surte efecto en cuanto
+se elige: dónde se abre una ventana nueva y si muestra la columna de lugares y
+la barra de herramientas se aplican a la próxima ventana que usted abra, y todo
+lo demás llega a todas las ventanas del gestor de archivos a la vez, aunque una
+ventana conserva una vista o un orden que usted mismo haya elegido en ella.
+*Settings…* en el propio menú del gestor de archivos abre este panel.
+
 ## EXIT STATUS
 
 Cero tras un cierre limpio; distinto de cero cuando se rechazó el canal de

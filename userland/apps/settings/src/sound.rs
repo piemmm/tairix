@@ -69,7 +69,7 @@ pub(crate) fn groups(reading: Option<&SoundReading>) -> (Vec<FieldGroup>, Vec<Ve
                 "SOUND",
                 alloc::vec![FieldRow::new(
                     "Devices",
-                    FieldControl::Unmeasured(String::from("not read yet")),
+                    FieldControl::Unmeasured(String::from(crate::machine::UNREAD)),
                 )],
             )],
             alloc::vec![Vec::new()],

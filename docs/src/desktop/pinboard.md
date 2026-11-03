@@ -61,7 +61,10 @@ Three properties matter more than the format:
   defaults apply silently. A value this build's registry does not accept
   leaves *that one setting* at its default **plus** a warning on `stderr` —
   the desktop comes up and says why, rather than guessing at a half-parsed
-  intent or refusing to start.
+  intent or refusing to start. A store that cannot be read leaves every
+  setting at its default, says so, and nothing is published over them until a
+  read succeeds: a publish replaces the whole document, so one made over the
+  defaults would erase the user's settings.
 - **The session is the only writer, by construction.** An application
   publishes only its *own* scope, so no other program the user launches —
   including Settings — can write the desktop's document at all. The
@@ -113,6 +116,16 @@ wrong:
 
 Reading is not brokered at all: a surface reads the user's own published
 document directly, because a reader needs no coordination.
+
+### The file manager's settings
+
+`ApplyFiles { document }` is the desktop apply's twin for the file manager's
+own registry (`tairix_browse::FilerPreferences`, every key under `files.`),
+which the session keeps in the same document and publishes with its own: it is
+merged over what the session holds, refused whole for a key outside that
+registry or a value it does not accept, and answered once the publish has
+landed. A publish that changes them moves `DesktopInfo::settings_generation`,
+which is how the file manager learns to read the document again.
 
 ### The sound requests
 

@@ -65,6 +65,19 @@ rheolydd — gwaith y rheolwr ffeiliau a'r gorchymyn `mount` yw gosod a dad-osod
 ac mae cyfrol nad yw ei fformat yn cadw capasiti sefydlog yn dweud hynny yn
 hytrach na dangos bar. Mae `df` yn adrodd yr un ffigurau mewn cragen.
 
+Mae **Files** yn gosod sut mae'r rheolwr ffeiliau'n gweithio: ble mae
+ffenestr newydd yn agor a sut mae'n dangos ac yn trefnu'r hyn y mae'n ei
+restru, a yw'n dangos colofn y lleoedd a'r bar offer, a yw ffolderi'n aros ar y
+brig, pa ôl-ddodiaid enwau a pha eitemau a guddir, a yw llun yn dangos ei
+gynnwys ei hun a ffolder yr hyn sydd ynddi, a yw symud eitemau i'r Sbwriel yn
+gofyn yn gyntaf, ac a gaiff delwedd ddisg neu archif a agorwyd gennych ei
+dad-osod unwaith y caiff ei ffenestri eu cau. Mae rhes yn dod i rym cyn gynted
+ag y caiff ei dewis: mae ble mae ffenestr newydd yn agor ac a yw'n dangos colofn
+y lleoedd a'r bar offer yn berthnasol i'r ffenestr nesaf a agorwch, ac mae
+popeth arall yn cyrraedd pob ffenestr rheolwr ffeiliau ar unwaith, er bod
+ffenestr yn cadw dull dangos neu drefn a ddewisoch chi ynddi eich hun. Mae
+*Settings…* ar ddewislen y rheolwr ffeiliau ei hun yn agor y cwarel hwn.
+
 ## EXIT STATUS
 
 Sero ar ôl cau glân; nid sero pan wrthodwyd sianel y ffenestr neu'r rhanbarth

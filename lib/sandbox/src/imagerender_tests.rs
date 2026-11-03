@@ -1614,10 +1614,8 @@ fn an_animations_frames_composite_and_can_be_replayed_from_the_start() {
 }
 
 #[test]
-fn a_format_with_no_signature_is_reached_by_being_named() {
+fn a_document_named_as_the_wrong_format_is_refused_by_that_formats_parser() {
     let mut sandbox = sandbox();
-    // A one-sprite area: count, first, end, then the control block. Not
-    // sniffable by construction, which is the point.
     let png = png_with(2, 2, |_, _| [1, 1, 1, 255]);
     super::send_document(&mut sandbox, &png).expect("the document uploads");
     assert_eq!(

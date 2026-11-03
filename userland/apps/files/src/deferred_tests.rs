@@ -195,9 +195,28 @@ fn a_committed_write_goes_before_an_eject_and_an_eject_before_an_open() {
     assert!(at(ReadKind::Write) < at(ReadKind::Locate));
     assert!(at(ReadKind::Locate) < at(ReadKind::Settle));
     assert!(at(ReadKind::Settle) < at(ReadKind::Open));
+    assert!(
+        at(ReadKind::Save) < at(ReadKind::List),
+        "the folder a save panel waits on goes before a listing"
+    );
+    assert!(at(ReadKind::Drain) < at(ReadKind::Settings));
     for (index, kind) in READ_ORDER.iter().enumerate() {
         assert_eq!(at(*kind), index, "{kind:?} is ordered once");
     }
+}
+
+/// An eject given up once located frees its room, so a withdrawn one never
+/// keeps a later eject out.
+#[test]
+fn a_withdrawn_eject_frees_its_room() {
+    let mut desk = EjectDesk::<u32, (), &str>::new(1);
+    assert_eq!(desk.admit(1), Ok(()));
+    let located = desk.next_locate().expect("the one");
+    desk.located(located, ());
+    assert_eq!(desk.admit(2), Err(2), "one is held");
+    let (taken, ()) = desk.take_located().expect("located");
+    desk.withdraw(taken);
+    assert_eq!(desk.admit(3), Ok(()), "its room is free again");
 }
 
 /// An eject keeps its room from its admission until its outcome lands, while

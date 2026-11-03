@@ -1,5 +1,5 @@
 //! The file manager's icon-bar declaration: what its slot on the desktop's
-//! bar offers in each of its two roles.
+//! bar offers.
 //!
 //! # Why this is its own module
 //!
@@ -11,20 +11,13 @@
 //! function of the [`Places`] model, so it lives here, compiles on the host,
 //! and is covered by the tests beside it.
 //!
-//! # Two roles, two declarations
+//! # A component's declaration
 //!
-//! In the ordinary [`Role::Window`](crate::command::Role::Window) role the app
-//! is an application like any other and makes the shared declaration — the
-//! information row, *Network*, *Settings…* and *Quit*, with the session
-//! raising a window it has and asking for one when it has none
-//! ([`WINDOW_SLOT_CLICK`]).
-//!
-//! In the [`Role::Desktop`](crate::command::Role::Desktop) role it is a
-//! component of the desktop, and the slot is the user's way *into* the
-//! filesystem rather than a handle on one window. So it offers neither of the
-//! convention's rows — a component states no identity panel of its own and is
-//! not the user's to quit — and instead lists the places the browser's own
-//! rail lists: the user's `Home` and `Desktop` folders, then the storage
+//! The file manager is a component of the desktop, and its slot is the user's
+//! way *into* the filesystem rather than a handle on one window. So it offers
+//! neither of the shared convention's rows — a component states no identity
+//! panel of its own, and the desktop's file manager never quits — and instead
+//! lists the places the browser's own rail lists: the user's `Home` and `Desktop` folders, then the storage
 //! attached right now, each beside the picture the rail draws it with — the
 //! house, a folder, or the drive a volume is on. Choosing one opens a window
 //! there, and a primary click on the slot opens one among the user's own files
@@ -45,7 +38,6 @@ use tairix_abi::window_ipc::{
 };
 use tairix_abi::Errno;
 use tairix_browse::{PlaceKind, Places};
-use tairix_window::QUIT_ROW;
 
 /// What a primary click on the component's slot does.
 ///
@@ -55,23 +47,15 @@ use tairix_window::QUIT_ROW;
 /// files, it is the one brought forward.
 pub const DESKTOP_SLOT_CLICK: AppBarClick = AppBarClick::Open;
 
-/// What a primary click on an ordinary file manager's slot does.
-///
-/// It fronts the windows it opened, so a click raises the most recent one.
-/// Closing them all leaves the app on the bar rather than ending it, and
-/// then the same click asks it for a window instead.
-pub const WINDOW_SLOT_CLICK: AppBarClick = AppBarClick::RaiseOrOpen;
-
-/// The id the *Settings…* row answers with in either role: past every place a
-/// component's menu can number, and clear of the convention's *Quit*.
+/// The id the *Settings…* row answers with: past every place the menu can
+/// number.
 pub const SETTINGS_ROW: u16 = u16::MAX;
 
-/// The id the *Network* row answers with in either role, clear of every place,
-/// *Settings…* and *Quit*.
+/// The id the *Network* row answers with, clear of every place and
+/// *Settings…*.
 pub const NETWORK_ROW: u16 = u16::MAX - 1;
 
-const _: () = assert!(SETTINGS_ROW as usize > APP_MENU_MAX_ROWS && SETTINGS_ROW != QUIT_ROW);
-const _: () = assert!(NETWORK_ROW as usize > APP_MENU_MAX_ROWS && NETWORK_ROW != QUIT_ROW);
+const _: () = assert!(NETWORK_ROW as usize > APP_MENU_MAX_ROWS);
 
 /// The *Settings…* row's label.
 const SETTINGS_LABEL: &str = "Settings\u{2026}";
@@ -107,21 +91,6 @@ fn settings_row() -> Result<AppMenuRow, Errno> {
         AppMenuLabel::new(SETTINGS_LABEL)?,
         AppMenuSymbol::Settings,
     )))
-}
-
-/// The ordinary file manager's declaration, addressed to its own `endpoint`:
-/// the shared convention with *Network* and *Settings…* between its ends.
-///
-/// # Errors
-///
-/// Any [`Errno`] the bounded menu builder refuses; the rows are fixed, so a
-/// refusal can only mean the shared bounds changed under this declaration.
-pub fn window_declaration(endpoint: u64) -> Result<AppBar, Errno> {
-    tairix_window::declaration(
-        endpoint,
-        WINDOW_SLOT_CLICK,
-        &[network_row()?, settings_row()?],
-    )
 }
 
 /// The component's declaration for `places`, addressed to its own `endpoint`,

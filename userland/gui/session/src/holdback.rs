@@ -41,7 +41,12 @@
 //! * A **position sample** (`Pointer`/`Moved`) is level-triggered: the
 //!   newest supersedes an unbroken run of its predecessors. So is a pinch's
 //!   `Update`, whose scale is relative to where the pinch began, while the
-//!   modifiers stay the same, and a tool window's move sample (`ToolMoved`).
+//!   modifiers stay the same, a tool window's move sample (`ToolMoved`), and
+//!   a report of where a carried drag or save is (`DragOver`, `SaveOffered`):
+//!   each is numbered, and only the newest is worth an answer.
+//! * The **end of a save offer** (`SaveOfferEnded`) carries where it was
+//!   dropped, so it withdraws every offer still held, and an earlier end that
+//!   only left; it is never shed.
 //! * The **end of a tool window's move** is where it was let go, which is
 //!   all its owner still needs of every move before it: it withdraws the
 //!   window's earlier move reports and is never shed.
@@ -66,16 +71,18 @@
 //! which costs a mapped frame region orders of magnitude larger than its
 //! queue.
 //!
-//! Overflow evicts the oldest *input* event, never a state edge, a pick
-//! conclusion, a move's end or a press's end — and that is total, not a
-//! preference. A held press is shed together with its end, so the app learns
+//! Overflow evicts the oldest *input* event — a drag's report and a save's
+//! offer among them, each superseded by the next — never a state edge, a pick
+//! conclusion, a move's or an offer's end or a press's end — and that is
+//! total, not a preference. A held press is shed together with its end, so the app learns
 //! of neither rather than holding a press it is never told is over. A window
 //! holds one press at a time, so the only end left without its press is the
 //! one ending a press already delivered. Folding therefore leaves a window
 //! owing at most six state edges, at most one pick conclusion and one
 //! authorisation's (a second of either is refused before it reaches the
-//! sink), at most one move's end and at most one such press's end, and a
-//! queue at capacity always holds an input event to shed.
+//! sink), at most one move's end, at most one such press's end, and at most
+//! one save offer's end, each superseding the one before — and a queue at
+//! capacity always holds an input event to shed.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -92,7 +99,7 @@ use crate::shell::continues;
 ///
 /// A security bound rather than a scalable capacity: it is the ceiling on
 /// what a client that stops draining can make the session hold. Comfortably
-/// above the ten slots folding can leave un-shed, and above the input a
+/// above the eleven slots folding can leave un-shed, and above the input a
 /// user produces in the seconds before the owner is declared unresponsive.
 pub const HOLD_BACK_CAPACITY: usize = 64;
 
@@ -335,8 +342,7 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
         *held = *next;
         return true;
     }
-    if matches!(next, WindowEvent::ToolMoved { ended: true, .. }) {
-        queue.retain(|held| !matches!(held, WindowEvent::ToolMoved { .. }));
+    if withdraw_superseded(queue, next) {
         return false;
     }
     // A sample or a delta folds only into an unbroken run at the tail:
@@ -387,6 +393,11 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
             *y = newest_y;
             true
         }
+        (Some(held @ WindowEvent::DragOver { .. }), WindowEvent::DragOver { .. })
+        | (Some(held @ WindowEvent::SaveOffered { .. }), WindowEvent::SaveOffered { .. }) => {
+            *held = *next;
+            true
+        }
         (
             Some(WindowEvent::ToolMoved {
                 over, ended: false, ..
@@ -425,6 +436,27 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
         }
         _ => false,
     }
+}
+
+/// Withdraw what an ending `next` supersedes, answering whether it was one:
+/// a tool window's move end takes every move held before it, and a save
+/// offer's end every offer and every end held. One pick runs at a time and one
+/// awaiting a drop's answer starts no drag, so an end held before a later one
+/// is of a pick that is over, which nothing would take an answer to.
+fn withdraw_superseded(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
+    match next {
+        WindowEvent::ToolMoved { ended: true, .. } => {
+            queue.retain(|held| !matches!(held, WindowEvent::ToolMoved { .. }));
+        }
+        WindowEvent::SaveOfferEnded { .. } => queue.retain(|held| {
+            !matches!(
+                held,
+                WindowEvent::SaveOffered { .. } | WindowEvent::SaveOfferEnded { .. }
+            )
+        }),
+        _ => return false,
+    }
+    true
 }
 
 /// The held event `next` replaces outright, if `next` is a state edge and
@@ -472,6 +504,8 @@ const fn is_input(event: &WindowEvent) -> bool {
             | WindowEvent::Scrolled { .. }
             | WindowEvent::Pinch { .. }
             | WindowEvent::ToolMoved { ended: false, .. }
+            | WindowEvent::DragOver { .. }
+            | WindowEvent::SaveOffered { .. }
     )
 }
 

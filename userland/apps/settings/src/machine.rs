@@ -20,8 +20,8 @@ use tairix_sysconfig::{CacheMode, Key, LoginType, NetToggle, Switch, SynCookies,
 
 use crate::pi::{self, Cooling};
 
-/// What a row states while the machine's configuration has not been read.
-const UNREAD: &str = "not read yet";
+/// What a row states while the store it shows has not been read.
+pub(crate) const UNREAD: &str = "not read yet";
 
 /// One settable of the machine's boot-time configuration store.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

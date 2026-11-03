@@ -93,8 +93,8 @@ pub use corner::Corners;
 pub use frost::{frost_cache, FrostEpoch, FrostField};
 pub use geometry::{Point, Rect, Region, Scale};
 pub use input::{
-    Abandoned, ClickKind, DoubleClickTracker, InputEvent, InputResponse, InputRouter, Key,
-    Modifiers, NamedKey, PinchPhase, PointerButton, PointerFocus,
+    past_drag_slop, Abandoned, ClickKind, DoubleClickTracker, InputEvent, InputResponse,
+    InputRouter, Key, Modifiers, NamedKey, PinchPhase, PointerButton, PointerFocus,
 };
 pub use pointer::{Ghost, Halo, HaloRing, MAX_GHOSTS};
 pub use select::{

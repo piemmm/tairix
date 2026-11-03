@@ -81,6 +81,18 @@ unmounting are the file manager's and the `mount` command's — and a volume
 whose format keeps no fixed capacity says so rather than showing a bar. `df`
 reports the same figures at a shell.
 
+**Files** sets how the file manager works: where a new window opens and how
+it shows and orders what it lists, whether it shows the places rail and the
+toolbar, whether folders stay on top, which name endings and which items are
+hidden, whether a picture shows its own content and a folder what it holds,
+whether moving items to the Trash asks first, and whether a disk image or
+archive you opened is unmounted once its windows close. A row takes effect as
+soon as it is chosen: where a new window opens and whether it shows the places
+rail and the toolbar apply to the next window you open, and everything else
+reaches every file manager window at once, though a window keeps a display or
+an order you chose in it yourself. *Settings…* on the file manager's own menu
+opens this pane.
+
 **Users & Groups** shows your own account, every account's name and user id,
 and the machine's groups without asking for anything: a principal may read its
 own record and the public name-to-number directories. Everything else — another

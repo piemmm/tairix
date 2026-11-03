@@ -44,8 +44,9 @@ use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest};
 use tairix_abi::sound_cue::SoundEvent;
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
-use tairix_appconf::Registry;
+use tairix_appconf::{merge_admitting, Refusal, Registry};
 use tairix_appdata::{AppDataHost, Settings as SettingsStore};
+use tairix_browse::{FilerKey, FilerPreferences};
 use tairix_geometry::Scale;
 use tairix_log::{Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_touch::TouchSettings;
@@ -63,11 +64,17 @@ use crate::keyboard::KeyRepeat;
 pub struct LoadedPinboard {
     /// The settings to apply before the desktop's first listing.
     pub settings: DesktopSettings,
+    /// The file manager's settings, kept in the same document.
+    pub files: FilerPreferences,
     /// One line per reason the stored settings were not fully used, ready for
     /// `stderr` (newline-terminated, in the session's `desktop:` diagnosis
     /// convention). Empty when the store answered and every value was one the
     /// registry accepts.
     pub warnings: Vec<String>,
+    /// Whether the store answered. When it did not, these are the defaults
+    /// standing in for the user's settings, and nothing made over them may
+    /// replace the document the store still holds.
+    pub read: bool,
 }
 
 /// Event id of a pinboard request the kernel attests as another user's than
@@ -91,6 +98,8 @@ pub enum PinboardRefusal {
     Malformed(Errno),
     /// The carried document is not a settings document this registry accepts.
     Undecodable(DocumentRefusal),
+    /// The carried document is not one of the file manager's settings.
+    FilesUndecodable(Refusal<FilerKey>),
     /// The document changes the region or the zone to one the zone store
     /// does not hold.
     NotInStore(SettingsKey),
@@ -103,7 +112,9 @@ impl PinboardRefusal {
         match self {
             Self::Unattested => Errno::PermissionDenied,
             Self::Malformed(err) => *err,
-            Self::Undecodable(_) | Self::NotInStore(_) => Errno::OutOfRange,
+            Self::Undecodable(_) | Self::FilesUndecodable(_) | Self::NotInStore(_) => {
+                Errno::OutOfRange
+            }
         }
     }
 
@@ -116,6 +127,9 @@ impl PinboardRefusal {
             Self::Malformed(err) => format!("malformed pinboard request refused ({err:?})"),
             Self::Undecodable(refusal) => {
                 format!("pinboard apply carries an unusable settings document: {refusal}")
+            }
+            Self::FilesUndecodable(refusal) => {
+                format!("file manager apply carries an unusable settings document: {refusal}")
             }
             Self::NotInStore(key) => {
                 format!("pinboard apply sets {key} to one the zone store does not hold")
@@ -177,11 +191,13 @@ impl InputPolicy {
 /// defaults *and* contribute a warning line — the desktop always comes up on a
 /// fully-specified backdrop rather than a guessed one, and always says why
 /// when it is not the one the user chose. A store that is simply empty is the
-/// ordinary fresh-account state and warns about nothing.
+/// ordinary fresh-account state and warns about nothing; one that could not
+/// be read is left unread ([`LoadedPinboard::read`]).
 pub fn load_pinboard(host: &mut dyn AppDataHost) -> LoadedPinboard {
     let store = SettingsStore::open_published(host);
     let mut loaded = read_pinboard(&store);
     if let Some(err) = store.store_refusal() {
+        loaded.read = false;
         loaded.warnings.insert(
             0,
             warning(&format!("could not be read ({err:?}); using the defaults")),
@@ -194,43 +210,111 @@ pub fn load_pinboard(host: &mut dyn AppDataHost) -> LoadedPinboard {
 /// build's registry does not accept and saying so.
 fn read_pinboard(store: &SettingsStore<'_>) -> LoadedPinboard {
     let (settings, refused) = DesktopSettings::load(store);
-    let warnings = refused
+    let (files, files_refused) = FilerPreferences::load(store);
+    let refused_names = refused
         .into_iter()
+        .map(SettingsKey::name)
+        .chain(files_refused.into_iter().map(FilerKey::name));
+    let warnings = refused_names
         .map(|key| {
             warning(&format!(
                 "`{key}` is not a value that setting accepts; using its default"
             ))
         })
         .collect();
-    LoadedPinboard { settings, warnings }
+    LoadedPinboard {
+        settings,
+        files,
+        warnings,
+        read: true,
+    }
 }
 
-/// Publish `settings` to this application's published scope, replacing what it
-/// says about its own desktop, and answer with what the store then holds.
+/// What the settings worker's round trip came to.
+#[derive(Debug)]
+pub enum Publication {
+    /// The document was replaced, and the store now holds these.
+    Published(LoadedPinboard),
+    /// The ask was made over the defaults that stood in for a store that could
+    /// not be read, so nothing was published: the store was read in its place,
+    /// and holds these.
+    Read(LoadedPinboard),
+}
+
+impl Publication {
+    /// What the call that asked for the publish is answered: an ask made over
+    /// the defaults was made for a publication the one read has replaced.
+    pub const fn answer(&self) -> Result<(), Errno> {
+        match self {
+            Self::Published(_) => Ok(()),
+            Self::Read(_) => Err(Errno::Stale),
+        }
+    }
+}
+
+/// Publish `settings` and the file manager's `files`, made `over_stored`
+/// settings or over the defaults standing in for a store not yet read, and
+/// answer with what the store then holds.
 ///
-/// This is the settings worker's whole body: it performs the store round trip,
-/// so it never runs on the serve loop. The desktop adopts the settings this
-/// answers with — not the ones that were asked for — which is what keeps the
-/// adopted state and the published document identical: a refused publish
-/// answers `Err`, and the desktop is left exactly as it was rather than showing
-/// a backdrop the next login would not restore.
+/// This is the settings worker's whole body: the store round trip a change
+/// costs. A publish replaces the whole document, so one made over the defaults
+/// would erase every setting the store still holds; the store is read in its
+/// place instead, and nothing is published until a read has succeeded.
+///
+/// # Errors
+///
+/// The app-data service's refusal to publish, or the store's refusal to be
+/// read. Nothing was published.
+pub fn publish_asked(
+    host: &mut dyn AppDataHost,
+    settings: &DesktopSettings,
+    files: &FilerPreferences,
+    over_stored: bool,
+) -> Result<Publication, Errno> {
+    if over_stored {
+        return publish_pinboard(host, settings, files).map(Publication::Published);
+    }
+    let store = SettingsStore::open_published(host);
+    if let Some(err) = store.store_refusal() {
+        return Err(err);
+    }
+    Ok(Publication::Read(read_pinboard(&store)))
+}
+
+/// Publish `settings` and the file manager's `files` to this application's
+/// published scope, replacing what it says, and answer with what the store
+/// then holds.
+///
+/// The desktop adopts the settings this answers with — not the ones that were
+/// asked for — which is what keeps the adopted state and the published
+/// document identical: a refused publish answers `Err`, and the desktop is
+/// left exactly as it was rather than showing a backdrop the next login would
+/// not restore.
 ///
 /// # Errors
 ///
 /// The app-data service's own typed refusal — no service bound, no store for a
 /// caller running no signed bundle, or an unreachable volume. Nothing was
 /// published.
-pub fn publish_pinboard(
+fn publish_pinboard(
     host: &mut dyn AppDataHost,
     settings: &DesktopSettings,
+    files: &FilerPreferences,
 ) -> Result<LoadedPinboard, Errno> {
+    let mut document = settings.document();
+    for setting in files.document_of(FilerPreferences::KEYS).settings() {
+        document
+            .set(setting.key, setting.value)
+            .map_err(|_| Errno::OutOfRange)?;
+    }
     let mut store = SettingsStore::open_published(host);
-    store.replace(&settings.document())?;
+    store.replace(&document)?;
     Ok(read_pinboard(&store))
 }
 
 /// Attest a pinboard request against the session's own identity, laying the
-/// settings an apply carries over `in_effect`.
+/// settings an apply carries over `in_effect`, and the file manager's settings
+/// a files apply carries over `files`.
 ///
 /// `caller_uid` is the **kernel-attested** origin uid of the calling task,
 /// read off the endpoint by the embedder — never anything the caller said
@@ -265,7 +349,7 @@ pub fn publish_pinboard(
 pub fn serve_pinboard(
     audit: &dyn Sink,
     (session_uid, caller_uid): (u32, u32),
-    (in_effect, zones): (&DesktopSettings, Option<&ZoneInfo<'_>>),
+    (in_effect, files, zones): (&DesktopSettings, &FilerPreferences, Option<&ZoneInfo<'_>>),
     request: &[u8],
 ) -> Result<PinboardCall, PinboardRefusal> {
     if caller_uid != session_uid {
@@ -297,6 +381,11 @@ pub fn serve_pinboard(
                 return Err(PinboardRefusal::NotInStore(key));
             }
             return Ok(PinboardCall::Apply(PinboardApplied { settings, document }));
+        }
+        PinboardRequest::ApplyFiles { document } => {
+            return merge_admitting(files, document.as_str(), |_| true)
+                .map(PinboardCall::ApplyFiles)
+                .map_err(PinboardRefusal::FilesUndecodable);
         }
         PinboardRequest::SoundRead => SoundCall::Read,
         PinboardRequest::SoundThemes { from } => SoundCall::Themes { from },
@@ -340,8 +429,20 @@ fn unheld_civil(
 pub enum PinboardCall {
     /// Adopt the desktop settings an apply makes.
     Apply(PinboardApplied),
+    /// Adopt the file manager's settings a files apply makes over the ones
+    /// in effect.
+    ApplyFiles(FilerPreferences),
     /// Read or change the user's sound choices.
     Sound(SoundCall),
+}
+
+impl PinboardCall {
+    /// Whether the call changes the settings, as either apply does, and so
+    /// waits while a change is already in hand.
+    #[must_use]
+    pub const fn changes_settings(&self) -> bool {
+        matches!(self, Self::Apply(_) | Self::ApplyFiles(_))
+    }
 }
 
 /// A request about the user's sound choices ([`crate::effects`]).
@@ -383,25 +484,51 @@ pub struct PinboardApplied {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AskedSettings {
     numbered: u64,
-    newest: Option<(u64, DesktopSettings)>,
+    newest: Option<(u64, DesktopSettings, FilerPreferences)>,
+    /// Whether the settings adopted are the store's, rather than the defaults
+    /// standing in for a store not yet read.
+    read: bool,
+}
+
+/// One ask to publish, as [`AskedSettings::ask`] numbers it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SettingsAsk {
+    /// Which ask it is, in the order asked.
+    pub number: u64,
+    /// Whether it was made over the settings the store holds. One that was
+    /// not is made over defaults, and publishing it would replace the user's
+    /// document with them.
+    pub over_stored: bool,
 }
 
 impl AskedSettings {
-    /// Nothing asked.
+    /// Nothing asked, and the store not yet read.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             numbered: 0,
             newest: None,
+            read: false,
         }
     }
 
-    /// Note that `settings` have been asked to be published, answering the
-    /// ask's number for [`landed`](Self::landed).
-    pub fn ask(&mut self, settings: &DesktopSettings) -> u64 {
+    /// Note that `settings` and `files` have been asked to be published,
+    /// answering the ask, whose number [`landed`](Self::landed) takes.
+    pub fn ask(&mut self, settings: &DesktopSettings, files: &FilerPreferences) -> SettingsAsk {
         self.numbered = self.numbered.wrapping_add(1);
-        self.newest = Some((self.numbered, settings.clone()));
-        self.numbered
+        self.newest = Some((self.numbered, settings.clone(), *files));
+        SettingsAsk {
+            number: self.numbered,
+            over_stored: self.read,
+        }
+    }
+
+    /// Note that the settings adopted are now the ones the store holds. Every
+    /// ask still on its way was made over the defaults that stood in for
+    /// them, so none is a base any more.
+    pub fn read_store(&mut self) {
+        self.read = true;
+        self.newest = None;
     }
 
     /// Note that ask `number` has landed, adopted or refused. Only the newest
@@ -410,7 +537,7 @@ impl AskedSettings {
         if self
             .newest
             .as_ref()
-            .is_some_and(|(newest, _)| *newest == number)
+            .is_some_and(|(newest, ..)| *newest == number)
         {
             self.newest = None;
         }
@@ -422,7 +549,14 @@ impl AskedSettings {
     pub fn base(&self, adopted: &DesktopSettings) -> DesktopSettings {
         self.newest
             .as_ref()
-            .map_or_else(|| adopted.clone(), |(_, settings)| settings.clone())
+            .map_or_else(|| adopted.clone(), |(_, settings, _)| settings.clone())
+    }
+
+    /// The file manager's settings a change is made over, as
+    /// [`base`](Self::base) is for the desktop's.
+    #[must_use]
+    pub fn files_base(&self, adopted: &FilerPreferences) -> FilerPreferences {
+        self.newest.as_ref().map_or(*adopted, |(.., files)| *files)
     }
 
     /// Whether an ask has yet to land.
@@ -453,9 +587,12 @@ mod tests {
 
     use tairix_log::DiscardSink;
 
+    use tairix_browse::{FilerKey, FilerPreferences, ViewMode};
+
     use super::{
-        load_pinboard, publish_pinboard, serve_pinboard, AskedSettings, PinboardCall,
-        PinboardRefusal, SoundCall, PINBOARD_UNATTESTED,
+        load_pinboard, publish_asked, publish_pinboard, serve_pinboard, AskedSettings,
+        PinboardApplied, PinboardCall, PinboardRefusal, Publication, SoundCall,
+        PINBOARD_UNATTESTED,
     };
 
     /// A change made while an earlier one is still being written is made over
@@ -471,21 +608,50 @@ mod tests {
             sort: IconSort::Size,
             ..adopted.clone()
         };
-        let first = asked.ask(&sorted);
+        let files = FilerPreferences::default();
+        let first = asked.ask(&sorted, &files);
         assert_eq!(asked.base(&adopted), sorted, "the sort is still on its way");
         let flowed = DesktopSettings {
             icons: IconFlow::Trailing,
             ..asked.base(&adopted)
         };
-        let second = asked.ask(&flowed);
+        let mut listed = files;
+        listed.view = ViewMode::List;
+        let second = asked.ask(&flowed, &listed);
+        assert_eq!(
+            asked.files_base(&files),
+            listed,
+            "a files change is made over it too"
+        );
         assert_eq!(flowed.sort, IconSort::Size, "made over the sort in flight");
 
-        asked.landed(first);
+        asked.landed(first.number);
         assert!(asked.outstanding(), "an older ask landing settles nothing");
         assert_eq!(asked.base(&adopted), flowed);
-        asked.landed(second);
+        asked.landed(second.number);
         assert!(!asked.outstanding());
         assert_eq!(asked.base(&adopted), adopted, "back to what was adopted");
+        assert_eq!(asked.files_base(&files), files);
+    }
+
+    /// An ask made before the store is read was made over the defaults
+    /// standing in for it, and once it is read no such ask is a base: the
+    /// next change is made over what was read.
+    #[test]
+    fn an_ask_made_before_the_store_is_read_is_no_base_once_it_is() {
+        let files = FilerPreferences::default();
+        let mut asked = AskedSettings::new();
+        let sorted = DesktopSettings {
+            sort: IconSort::Size,
+            ..DesktopSettings::default()
+        };
+        let early = asked.ask(&sorted, &files);
+        assert!(!early.over_stored, "made over the defaults");
+        asked.read_store();
+        assert!(!asked.outstanding());
+        assert_eq!(asked.base(&edited()), edited());
+        asked.landed(early.number);
+        assert!(asked.ask(&sorted, &files).over_stored);
     }
 
     /// The uid the session under test runs as.
@@ -540,8 +706,15 @@ mod tests {
         in_effect: &DesktopSettings,
         request: &[u8],
     ) -> Result<DesktopSettings, PinboardRefusal> {
-        match serve_pinboard(&DiscardSink, (session, caller), (in_effect, None), request)? {
+        let files = FilerPreferences::default();
+        match serve_pinboard(
+            &DiscardSink,
+            (session, caller),
+            (in_effect, &files, None),
+            request,
+        )? {
             PinboardCall::Apply(applied) => Ok(applied.settings),
+            PinboardCall::ApplyFiles(files) => panic!("not a desktop apply: {files:?}"),
             PinboardCall::Sound(call) => panic!("not an apply: {call:?}"),
         }
     }
@@ -569,12 +742,14 @@ mod tests {
         let loaded = load_pinboard(&mut host);
         assert_eq!(loaded.settings, DesktopSettings::default());
         assert!(loaded.warnings.is_empty());
+        assert!(loaded.read, "an empty store is one that was read");
     }
 
     #[test]
     fn published_settings_are_read_back_verbatim() {
         let mut host = service();
-        let published = publish_pinboard(&mut host, &edited()).expect("publishes");
+        let published = publish_pinboard(&mut host, &edited(), &FilerPreferences::default())
+            .expect("publishes");
         assert_eq!(
             published.settings,
             edited(),
@@ -591,7 +766,7 @@ mod tests {
         // The private scope is not what other applications read, so a
         // desktop that published into it would be publishing nothing.
         let mut host = service();
-        assert!(publish_pinboard(&mut host, &edited()).is_ok());
+        assert!(publish_pinboard(&mut host, &edited(), &FilerPreferences::default()).is_ok());
         assert_eq!(
             host.published().get("fit"),
             Some(WallpaperFit::Centre.as_str())
@@ -619,6 +794,7 @@ mod tests {
         assert_eq!(loaded.warnings.len(), 1);
         assert!(loaded.warnings[0].starts_with("desktop: pinboard settings"));
         assert!(loaded.warnings[0].contains("DeviceOffline"));
+        assert!(!loaded.read, "nothing may be published over these defaults");
     }
 
     #[test]
@@ -626,7 +802,7 @@ mod tests {
         let mut host = service();
         host.refusal().set(Some(Errno::NoSpace));
         assert_eq!(
-            publish_pinboard(&mut host, &edited()).err(),
+            publish_pinboard(&mut host, &edited(), &FilerPreferences::default()).err(),
             Some(Errno::NoSpace)
         );
         assert_eq!(host.published().settings().count(), 0);
@@ -637,8 +813,47 @@ mod tests {
     #[test]
     fn a_publish_replaces_the_whole_document() {
         let mut host = service().with_published("fit = centre\nleftover = yes\n");
-        assert!(publish_pinboard(&mut host, &edited()).is_ok());
+        assert!(publish_pinboard(&mut host, &edited(), &FilerPreferences::default()).is_ok());
         assert_eq!(host.published().get("leftover"), None);
+    }
+
+    /// A login that could not read the store publishes nothing over the
+    /// defaults: the worker reads the store in their place, so the user's
+    /// document — the file manager's settings in it among them — survives.
+    #[test]
+    fn an_ask_over_an_unread_store_reads_it_and_publishes_nothing() {
+        let mut host = service().with_published("fit = centre\nfiles.view = list\n");
+        host.refusal().set(Some(Errno::DeviceOffline));
+        let loaded = load_pinboard(&mut host);
+        assert!(!loaded.read);
+        assert_eq!(
+            publish_asked(&mut host, &loaded.settings, &loaded.files, false).err(),
+            Some(Errno::DeviceOffline),
+            "while the store cannot be read, nothing is published"
+        );
+        host.refusal().set(None);
+        let Ok(publication) = publish_asked(&mut host, &loaded.settings, &loaded.files, false)
+        else {
+            panic!("the store reads once it can");
+        };
+        assert_eq!(publication.answer(), Err(Errno::Stale));
+        let Publication::Read(read) = publication else {
+            panic!("an ask made over the defaults publishes nothing");
+        };
+        assert!(read.read);
+        assert_eq!(read.files.view, ViewMode::List);
+        assert_eq!(read.settings.fit, WallpaperFit::Centre);
+        assert_eq!(host.published().get("files.view"), Some("list"));
+
+        assert!(matches!(
+            publish_asked(&mut host, &edited(), &read.files, true),
+            Ok(Publication::Published(_))
+        ));
+        assert_eq!(
+            host.published().get("files.view"),
+            Some("list"),
+            "a change made over what was read keeps it"
+        );
     }
 
     #[test]
@@ -779,10 +994,11 @@ mod tests {
         let served = |in_effect: &DesktopSettings, text: &str, zones| match serve_pinboard(
             &DiscardSink,
             (SESSION_UID, SESSION_UID),
-            (in_effect, zones),
+            (in_effect, &FilerPreferences::default(), zones),
             &apply(text),
         ) {
             Ok(PinboardCall::Apply(applied)) => Ok(applied.settings),
+            Ok(PinboardCall::ApplyFiles(files)) => panic!("not a desktop apply: {files:?}"),
             Ok(PinboardCall::Sound(call)) => panic!("not an apply: {call:?}"),
             Err(refusal) => Err(refusal),
         };
@@ -858,8 +1074,14 @@ mod tests {
     fn a_request_from_another_user_is_recorded() {
         let audit = Unattested(core::sync::atomic::AtomicUsize::new(0));
         let in_effect = DesktopSettings::default();
+        let files = FilerPreferences::default();
         let served = |caller, request: &[u8]| {
-            serve_pinboard(&audit, (SESSION_UID, caller), (&in_effect, None), request)
+            serve_pinboard(
+                &audit,
+                (SESSION_UID, caller),
+                (&in_effect, &files, None),
+                request,
+            )
         };
         let count = || audit.0.load(core::sync::atomic::Ordering::Relaxed);
         assert!(served(SESSION_UID, &apply_frame(&edited())).is_ok());
@@ -926,7 +1148,7 @@ mod tests {
                 serve_pinboard(
                     &DiscardSink,
                     (SESSION_UID, SESSION_UID),
-                    (&in_effect, None),
+                    (&in_effect, &FilerPreferences::default(), None),
                     &frame
                 ),
                 Ok(PinboardCall::Sound(call))
@@ -935,11 +1157,109 @@ mod tests {
                 serve_pinboard(
                     &DiscardSink,
                     (SESSION_UID, SESSION_UID + 1),
-                    (&in_effect, None),
+                    (&in_effect, &FilerPreferences::default(), None),
                     &frame
                 ),
                 Err(PinboardRefusal::Unattested)
             );
         }
+    }
+
+    /// The file manager's settings are published in the one document beside
+    /// the desktop's, and read back with it.
+    #[test]
+    fn the_file_managers_settings_are_published_and_read_back_with_the_desktops() {
+        let mut host = service();
+        let files = FilerPreferences {
+            view: ViewMode::List,
+            unmount_when_closed: false,
+            ..FilerPreferences::default()
+        };
+        let published = publish_pinboard(&mut host, &edited(), &files).expect("publishes");
+        assert_eq!((published.settings, published.files), (edited(), files));
+        assert_eq!(host.published().get("files.view"), Some("list"));
+        assert_eq!(
+            host.published().get("fit"),
+            Some(WallpaperFit::Centre.as_str())
+        );
+        let loaded = load_pinboard(&mut host);
+        assert_eq!((loaded.settings, loaded.files), (edited(), files));
+        assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_stored_file_manager_value_the_registry_refuses_warns_and_keeps_that_default() {
+        let mut host = service().with_published(
+            "files.view = huge
+files.places = true
+",
+        );
+        let loaded = load_pinboard(&mut host);
+        assert_eq!(loaded.files.view, FilerPreferences::default().view);
+        assert!(loaded.files.places);
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(loaded.warnings[0].contains("files.view"));
+    }
+
+    /// A files apply from the session's own user is merged over the file
+    /// manager's settings in effect; each apply admits only its own
+    /// registry's keys, so neither channel can write the other's settings.
+    #[test]
+    fn a_files_apply_is_attested_and_merged_and_admits_only_the_file_managers_keys() {
+        let in_effect = DesktopSettings::default();
+        let files = FilerPreferences::default();
+        let serve = |caller, request: &PinboardRequest| {
+            serve_pinboard(
+                &DiscardSink,
+                (SESSION_UID, caller),
+                (&in_effect, &files, None),
+                &frame(request),
+            )
+        };
+        let files_apply = |text: &str| PinboardRequest::ApplyFiles {
+            document: PinboardDocument::new(text).expect("a bounded document"),
+        };
+        let mut listed = files;
+        listed.view = ViewMode::List;
+        assert_eq!(
+            serve(SESSION_UID, &files_apply("files.view = list\n")),
+            Ok(PinboardCall::ApplyFiles(listed))
+        );
+        assert_eq!(
+            serve(SESSION_UID + 1, &files_apply("files.view = list\n")),
+            Err(PinboardRefusal::Unattested)
+        );
+        assert!(matches!(
+            serve(SESSION_UID, &files_apply("fit = centre\n")),
+            Err(PinboardRefusal::FilesUndecodable(
+                tairix_appconf::Refusal::UnknownKey(_)
+            ))
+        ));
+        assert!(matches!(
+            serve(SESSION_UID, &files_apply("files.view = huge\n")),
+            Err(PinboardRefusal::FilesUndecodable(
+                tairix_appconf::Refusal::InvalidValue(FilerKey::View)
+            ))
+        ));
+        let desktop_apply = PinboardRequest::Apply {
+            document: PinboardDocument::new("files.view = list\n").expect("bounded"),
+        };
+        assert!(matches!(
+            serve(SESSION_UID, &desktop_apply),
+            Err(PinboardRefusal::Undecodable(_))
+        ));
+    }
+
+    /// Either apply changes the settings, so either waits while a change is
+    /// in hand; a sound request is not one.
+    #[test]
+    fn a_files_apply_changes_the_settings_as_a_desktop_apply_does() {
+        let applied = PinboardApplied {
+            settings: DesktopSettings::default(),
+            document: PinboardDocument::new("sort = size\n").expect("a bounded document"),
+        };
+        assert!(PinboardCall::Apply(applied).changes_settings());
+        assert!(PinboardCall::ApplyFiles(FilerPreferences::default()).changes_settings());
+        assert!(!PinboardCall::Sound(SoundCall::Read).changes_settings());
     }
 }

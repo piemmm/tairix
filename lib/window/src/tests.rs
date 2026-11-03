@@ -24,9 +24,9 @@ use tairix_abi::window_ipc::{
     AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuReason, AppMenuRow, AppMenuRowView,
     AppMenuSymbol, AuthorisedOutcome, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape,
     DialogModality, DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget,
-    HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, PickPurpose,
-    PointerAction, PreviewOutcome, PreviewSubject, SaveEndings, SystemTask, TerrainPlate,
-    TooltipText, WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX,
+    HandOverDocument, HandOverOutcome, HandOverTarget, LayerDepth, MenuOutcome, MenuRefusal,
+    PaneName, PickPurpose, PointerAction, PreviewOutcome, PreviewSubject, SaveEndings, SystemTask,
+    TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX,
     DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX, WINDOW_FOLDER_PICK_MAX,
     WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
@@ -289,6 +289,10 @@ struct RecordingHost {
     drags: Vec<(u64, String)>,
     refuse_drag: Option<Errno>,
     verdicts: Vec<(u64, u32, Option<DropOperation>)>,
+    /// Every save offer answered, and every folder a dropped save was given,
+    /// with the attested caller that gave it.
+    save_answers: Vec<(u64, u32, bool)>,
+    save_folders: Vec<(ProcId, u64, u32, u64)>,
     refuse_menu_open: Option<Errno>,
     /// Every alert put up, whether it earned the keyboard, and every one
     /// taken down, by id.
@@ -296,7 +300,9 @@ struct RecordingHost {
     alert_focus: Vec<bool>,
     alerts_withdrawn: Vec<u64>,
     refuse_alert: Option<Errno>,
-    hand_overs: Vec<(ProcId, String, Option<HandOverDocument>)>,
+    hand_overs: Vec<(ProcId, String, HandOverTarget)>,
+    /// Whether each hand-over found an activation its caller could spend.
+    spent: Vec<bool>,
     /// What the host answers a hand-over with: `NotRunning` unless a test
     /// says otherwise, so the default is "nothing to reach".
     hand_over: Result<HandOverOutcome, Errno>,
@@ -386,12 +392,15 @@ impl Default for RecordingHost {
             drags: Vec::new(),
             refuse_drag: None,
             verdicts: Vec::new(),
+            save_answers: Vec::new(),
+            save_folders: Vec::new(),
             refuse_menu_open: None,
             alerts: Vec::new(),
             alert_focus: Vec::new(),
             alerts_withdrawn: Vec::new(),
             refuse_alert: None,
             hand_overs: Vec::new(),
+            spent: Vec::new(),
             hand_over: Ok(HandOverOutcome::NotRunning),
             reveals: Vec::new(),
             reveal: Ok(()),
@@ -592,25 +601,49 @@ impl WindowHost for RecordingHost {
         Ok(())
     }
 
+    fn save_offer_answered(
+        &mut self,
+        window_id: u64,
+        serial: u32,
+        accepts: bool,
+    ) -> Result<(), Errno> {
+        self.save_answers.push((window_id, serial, accepts));
+        Ok(())
+    }
+
+    fn save_into(
+        &mut self,
+        caller: ProcId,
+        window_id: u64,
+        serial: u32,
+        location: u64,
+    ) -> Result<(), Errno> {
+        self.save_folders
+            .push((caller, window_id, serial, location));
+        Ok(())
+    }
+
     fn hand_over_requested(
         &mut self,
         desk: &mut dyn HandOverDesk,
         caller: ProcId,
         run_path: &str,
-        document: Option<&HandOverDocument>,
+        target: &HandOverTarget,
     ) -> Result<HandOverOutcome, Errno> {
+        self.spent.push(desk.spend_activation(caller, self.focused));
         self.hand_overs
-            .push((caller, String::from(run_path), document.copied()));
+            .push((caller, String::from(run_path), *target));
         // A host that says it reached an instance really queues something,
         // so the engine's own half of the hand-over is exercised too.
         if self.hand_over == Ok(HandOverOutcome::Reached) {
-            let entry = match document {
-                Some(doc) => OpenEntry::Document {
+            let entry = match target {
+                HandOverTarget::Document(doc) => OpenEntry::Document {
                     name: doc.name,
-                    grant: doc.grant,
+                    grant: doc.grant.get(),
                     writable: doc.writable,
                 },
-                None => OpenEntry::Path(String::from(run_path)),
+                HandOverTarget::Pane(pane) => OpenEntry::Pane(String::from(pane.as_str())),
+                HandOverTarget::Bare => OpenEntry::Path(String::from(run_path)),
             };
             if !desk.hand_over(caller, GRANTED, &mut || Ok(entry.clone())) {
                 return Ok(HandOverOutcome::NotRunning);
@@ -1275,6 +1308,27 @@ fn adopting_a_published_desktop_is_news_only_once() {
     // it may return to the appearance it started in.
     assert_eq!(desktop.adopt(sample_desktop()), Ok(true));
     assert_eq!(desktop.appearance(), Appearance::Dark);
+}
+
+/// A publication of the desktop's settings document changes no pixel a window
+/// draws: the generation is taken for an application keeping settings there to
+/// read them again, and no repaint is owed for it.
+#[test]
+fn a_new_settings_generation_alone_is_taken_without_a_redraw() {
+    let mut desktop = Desktop::new(sample_desktop()).expect("the sample scale is in range");
+    assert_eq!(
+        desktop.adopt(sample_desktop().with_settings_generation(3)),
+        Ok(false)
+    );
+    assert_eq!(desktop.settings_generation(), 3);
+    let relit = DesktopInfo::new(1024, 768, 100, Appearance::Light)
+        .expect("a 1024x768 screen at 100% is in range")
+        .with_settings_generation(4);
+    assert_eq!(
+        desktop.adopt(relit),
+        Ok(true),
+        "anything else still redraws"
+    );
 }
 
 /// A display retimed at the same resolution changes no pixel the window
@@ -4081,6 +4135,77 @@ fn a_drag_is_reported_to_its_owner_about_its_own_windows_alone() {
     );
 }
 
+/// A save offer is answered by the offered window's owner alone; a dropped
+/// save's folder reaches the host with the attested caller whoever sent it,
+/// so the host consumes every location; and an offer outside its window is
+/// never delivered.
+#[test]
+fn a_save_offer_is_answered_by_its_windows_owner_and_its_folder_reaches_the_host() {
+    let (loopback, mut client, [source, _, stranger]) = carried_drag();
+    loopback.borrow_mut().ticket = TICKET_B;
+    client.answer_save_offer(source, 3, true).expect("posted");
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(
+            source,
+            PostedRequest::SaveOfferAnswer,
+            Errno::NotFound
+        )),
+        "only the owner answers"
+    );
+    client
+        .answer_save_offer(stranger, 3, true)
+        .expect("answered");
+    assert_eq!(loopback.borrow().host.save_answers, [(stranger, 3, true)]);
+    client.save_into(source, 4, 41).expect("passed on");
+    assert_eq!(
+        loopback.borrow().host.save_folders,
+        [(proc_id(0xB2), source, 4, 41)],
+        "the host decides, knowing who sent it"
+    );
+
+    let mut sink = QueueSink::default();
+    let offer = |x| WindowEvent::SaveOffered {
+        window_id: stranger,
+        serial: 5,
+        x,
+        y: 0,
+    };
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_event(&mut sink, &offer(u32::MAX)),
+        Err(Errno::OutOfRange)
+    );
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_event(&mut sink, &offer(0))
+        .expect("inside the window");
+    assert_eq!(WindowEvent::from_bytes(&sink.delivered[0].1), Ok(offer(0)));
+    let ended = |dropped| WindowEvent::SaveOfferEnded {
+        window_id: stranger,
+        serial: 5,
+        dropped,
+    };
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_event(&mut sink, &ended(Some((0, u32::MAX)))),
+        Err(Errno::OutOfRange),
+        "a drop outside the window is never delivered"
+    );
+    for dropped in [None, Some((1, 1))] {
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_event(&mut sink, &ended(dropped))
+            .expect("left, or dropped inside");
+    }
+}
+
 /// A drag is answered by its owner alone while it is carried, and a desktop
 /// drop names a folder some report held, which outlives the drop.
 #[test]
@@ -5556,6 +5681,37 @@ fn an_open_target_is_queued_by_the_session_and_pulled_once_by_its_owner() {
     );
 }
 
+/// An image the user opened is pulled as an image, never as the folder path
+/// of the same spelling, and is bounded as a path is.
+#[test]
+fn an_image_hand_over_is_pulled_as_an_image_to_attach() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut sink = QueueSink::default();
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback
+        .borrow_mut()
+        .server
+        .hand_over_open_target(&mut sink, app_a(), GRANTED, || {
+            Ok(OpenEntry::Image(String::from("/Users/ada/Home/wb.adf")))
+        })
+        .expect("the application takes it");
+    assert_eq!(
+        client.take_open_target(),
+        Ok(Some(Target::Image(String::from("/Users/ada/Home/wb.adf"))))
+    );
+    let long = "p".repeat(tairix_abi::FS_PATH_MAX + 1);
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, app_a(), GRANTED, || {
+                Ok(OpenEntry::Image(long.clone()))
+            }),
+        Err(Errno::LengthOutOfRange)
+    );
+}
+
 #[test]
 fn a_document_hand_over_carries_its_delegation_and_its_name() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
@@ -5939,45 +6095,11 @@ fn a_reveal_reaches_the_host_with_the_callers_attested_identity_and_its_answer_r
     );
 }
 
+/// An instance the desk cannot reach is answered `NotRunning`, whatever the
+/// host believed: a launch that reached nothing must fall back to starting a
+/// process rather than being reported as delivered.
 #[test]
-fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
-    let loopback = Loopback::with_regions(&[]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-
-    // The host answers "nothing to reach" by default, which is the caller's
-    // cue to launch the bundle itself rather than a refusal.
-    assert_eq!(
-        client.hand_over_launch("/System/Applications/view.app/Run", None),
-        Ok(HandOverOutcome::NotRunning)
-    );
-    let document = HandOverDocument {
-        name: DocumentName::new("holiday.png").expect("a valid name"),
-        grant: 31,
-        writable: false,
-    };
-    // A host that reaches an instance queues through the desk the engine
-    // lends it, so the instance needs a route for the wake to reach.
-    client
-        .set_app_bar(&sample_app_bar(EVENTS_A))
-        .expect("the bar declaration is accepted");
-    loopback.borrow_mut().host.hand_over = Ok(HandOverOutcome::Reached);
-    assert_eq!(
-        client.hand_over_launch("/System/Applications/view.app/Run", Some(document)),
-        Ok(HandOverOutcome::Reached)
-    );
-    assert_eq!(
-        client.take_open_target(),
-        Ok(Some(Target::Document {
-            name: String::from("holiday.png"),
-            grant: 31,
-            writable: false,
-        })),
-        "the engine's half of the hand-over really queued it"
-    );
-
-    // An instance the desk cannot reach is answered `NotRunning`, whatever
-    // the host believed: a launch that reached nothing must fall back to
-    // starting a process rather than being reported as delivered.
+fn an_instance_the_desk_cannot_reach_is_answered_not_running() {
     let mut host = RecordingHost {
         hand_over: Ok(HandOverOutcome::Reached),
         ..RecordingHost::default()
@@ -5987,7 +6109,7 @@ fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
     let frame = request_frame(&WindowRequest::HandOverLaunch {
         run_path: tairix_abi::window_ipc::BundleRunPath::new("/System/Applications/view.app/Run")
             .expect("a valid bundle path"),
-        document: None,
+        target: HandOverTarget::Bare,
     });
     let len = server.serve(
         &mut host,
@@ -6002,18 +6124,74 @@ fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
         Ok(HandOverOutcome::NotRunning),
         "an unreachable instance is not a reached one"
     );
+}
+
+#[test]
+fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
+    let loopback = Loopback::with_regions(&[]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    // The host answers "nothing to reach" by default, which is the caller's
+    // cue to launch the bundle itself rather than a refusal.
+    assert_eq!(
+        client.hand_over_launch("/System/Applications/view.app/Run", HandOverTarget::Bare),
+        Ok(HandOverOutcome::NotRunning)
+    );
+    let document = HandOverDocument {
+        name: DocumentName::new("holiday.png").expect("a valid name"),
+        grant: core::num::NonZeroU64::new(31).expect("a handle"),
+        writable: false,
+    };
+    // A host that reaches an instance queues through the desk the engine
+    // lends it, so the instance needs a route for the wake to reach.
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("the bar declaration is accepted");
+    loopback.borrow_mut().host.hand_over = Ok(HandOverOutcome::Reached);
+    assert_eq!(
+        client.hand_over_launch(
+            "/System/Applications/view.app/Run",
+            HandOverTarget::Document(document)
+        ),
+        Ok(HandOverOutcome::Reached)
+    );
+    assert_eq!(
+        client.take_open_target(),
+        Ok(Some(Target::Document {
+            name: String::from("holiday.png"),
+            grant: 31,
+            writable: false,
+        })),
+        "the engine's half of the hand-over really queued it"
+    );
+    let pane = PaneName::new("files").expect("a pane");
+    assert_eq!(
+        client.hand_over_launch(tairix_abi::SETTINGS_RUN_PATH, HandOverTarget::Pane(pane)),
+        Ok(HandOverOutcome::Reached)
+    );
+    assert_eq!(
+        client.take_open_target(),
+        Ok(Some(Target::Pane(String::from("files")))),
+        "a pane reaches the instance as the place to show"
+    );
+
     assert_eq!(
         loopback.borrow().host.hand_overs,
         alloc::vec![
             (
                 proc_id(0xA1),
                 String::from("/System/Applications/view.app/Run"),
-                None
+                HandOverTarget::Bare
             ),
             (
                 proc_id(0xA1),
                 String::from("/System/Applications/view.app/Run"),
-                Some(document)
+                HandOverTarget::Document(document)
+            ),
+            (
+                proc_id(0xA1),
+                String::from(tairix_abi::SETTINGS_RUN_PATH),
+                HandOverTarget::Pane(pane)
             ),
         ],
         "the host sees who asked, from the kernel and not from the wire"
@@ -6023,17 +6201,17 @@ fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
     // name never reaches the channel at all.
     loopback.borrow_mut().host.hand_over = Err(Errno::NoSpace);
     assert_eq!(
-        client.hand_over_launch("/System/Applications/view.app/Run", None),
+        client.hand_over_launch("/System/Applications/view.app/Run", HandOverTarget::Bare),
         Err(Errno::NoSpace)
     );
     let long = "p".repeat(HAND_OVER_RUN_PATH_MAX + 1);
     assert_eq!(
-        client.hand_over_launch(&long, None),
+        client.hand_over_launch(&long, HandOverTarget::Bare),
         Err(Errno::LengthOutOfRange)
     );
     assert_eq!(
         loopback.borrow().host.hand_overs.len(),
-        3,
+        4,
         "an over-long path is refused before the session is asked"
     );
 }
@@ -6317,6 +6495,61 @@ fn an_activation_raises_nothing_once_the_keyboard_has_moved_or_when_withheld() {
     let host = &loopback.borrow().host;
     assert!(host.raised.is_empty());
     assert_eq!(host.raises_refused, alloc::vec![(proc_id(0xA1), window); 3]);
+}
+
+/// A hand-over spends the activation a gesture at its caller minted: once,
+/// and only where the keyboard still is, so the host can lend that one raise
+/// to what the caller hands over to instead.
+#[test]
+fn a_hand_over_spends_the_activation_a_gesture_at_its_caller_minted() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+    let deliver_app = |activation| {
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_app_event(
+                &mut QueueSink::default(),
+                proc_id(0xA1),
+                &WindowEvent::AppBarDefault,
+                activation,
+            )
+            .expect("delivered");
+    };
+    let settings = tairix_abi::SETTINGS_RUN_PATH;
+
+    assert_eq!(
+        client.hand_over_launch(settings, HandOverTarget::Bare),
+        Ok(HandOverOutcome::NotRunning)
+    );
+    deliver_app(GRANTED);
+    for _ in 0..2 {
+        assert_eq!(
+            client.hand_over_launch(settings, HandOverTarget::Bare),
+            Ok(HandOverOutcome::NotRunning)
+        );
+    }
+    deliver_app(Activation::Granted {
+        focus: Some(window),
+    });
+    assert_eq!(
+        client.hand_over_launch(settings, HandOverTarget::Bare),
+        Ok(HandOverOutcome::NotRunning)
+    );
+    assert_eq!(
+        loopback.borrow().host.spent,
+        alloc::vec![false, true, false, false],
+        "nothing to spend, the gesture's one raise, nothing left, one the keyboard has left"
+    );
+    assert_eq!(
+        client.activate_window(window),
+        Err(Errno::PermissionDenied),
+        "a spent activation raises nothing"
+    );
 }
 
 #[test]

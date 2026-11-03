@@ -28,8 +28,9 @@ use alloc::vec::Vec;
 use tairix_abi::window_ipc::{AppMenuItemId, MenuRefusal, APP_MENU_ENTRY_MAX};
 use tairix_controls::damage::{self, Repaint};
 use tairix_controls::{
-    plate_rect, AboutSheet, ChainChild, ChainModel, ClipboardChord, Menu, MenuAction,
-    PlatePlacement, RowIcon, TextAction, TextField, TitleBar, TitleBarEvent, ABOUT_ICON_SIDE,
+    plate_rect, AboutSheet, ChainChild, ChainModel, ClipboardChord, ControlState, Menu, MenuAction,
+    MenuItem, MenuMark, PlatePlacement, RowIcon, TextAction, TextField, TitleBar, TitleBarEvent,
+    ABOUT_ICON_SIDE,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_taskbar::MenuSubject;
@@ -40,6 +41,17 @@ use crate::clipboard::TextClipboard;
 use crate::windows::seat_menu_refusal;
 use tairix_theme::Theme;
 use tairix_wm::{ChromeEpoch, InputEvent, Key, Modifiers, NamedKey};
+
+/// `item`, marked as the one in force where `chosen`: a choice of one shows
+/// which holds, and choosing it again does nothing.
+pub(crate) fn marked(item: MenuItem, chosen: bool) -> MenuItem {
+    if chosen {
+        item.with_mark(MenuMark::Radio)
+            .with_state(ControlState::disabled())
+    } else {
+        item
+    }
+}
 
 /// Who asked for the chain, and therefore where its one answer goes.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -62,6 +74,13 @@ pub enum ChainOwner {
     /// the next open displaces cannot have its answer read against the next
     /// chain's subject.
     Bar(MenuSubject),
+    /// The trusted picker's save panel: *Where* or *Format*, resolved in
+    /// process against the panel.
+    Picker {
+        /// The window the pick is for, whose going takes the chain down with
+        /// the pick; `None` for a pick the session made for itself.
+        for_window: Option<u64>,
+    },
 }
 
 /// How a chain ended.
@@ -416,7 +435,7 @@ impl MenuChain {
     pub fn owner_window(&self) -> Option<u64> {
         match self.owner()? {
             ChainOwner::Window { window_id, .. } => Some(*window_id),
-            ChainOwner::Backdrop | ChainOwner::Bar(_) => None,
+            ChainOwner::Backdrop | ChainOwner::Bar(_) | ChainOwner::Picker { .. } => None,
         }
     }
 
@@ -972,7 +991,13 @@ pub fn resolve_chain_icons(
 
 /// Whether `owner` is the window-channel window `window_id`.
 fn owned_by(owner: Option<&ChainOwner>, window_id: u64) -> bool {
-    matches!(owner, Some(ChainOwner::Window { window_id: id, .. }) if *id == window_id)
+    matches!(
+        owner,
+        Some(
+            ChainOwner::Window { window_id: id, .. }
+                | ChainOwner::Picker { for_window: Some(id) }
+        ) if *id == window_id
+    )
 }
 
 /// Why a model cannot be shown as a chain.

@@ -130,6 +130,15 @@ const OLD_NAME_BYTES: [usize; 10] = [
 /// The longest disc name either map flavour records.
 pub const NAME_LEN: usize = 10;
 
+/// One of a new map's two copies.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MapCopy {
+    /// The copy `FileCore` reads while every one of its zones checks.
+    First,
+    /// The copy after it, which `FileCore` falls back to.
+    Second,
+}
+
 /// A decoded new-map disc record.
 ///
 /// Field names follow the RISC OS PRM. Multi-byte fields are little-endian
@@ -355,6 +364,17 @@ impl DiscRecord {
         u64::from(self.nzones) * self.sector_size()
     }
 
+    /// Disc byte address of zone `zone` in the map's `copy`: `FileCore`
+    /// keeps the map twice, the second copy straight after the first.
+    #[must_use]
+    pub fn zone_offset(&self, copy: MapCopy, zone: u32) -> u64 {
+        let copy_start = match copy {
+            MapCopy::First => 0,
+            MapCopy::Second => self.map_size(),
+        };
+        self.map_offset() + copy_start + u64::from(zone) * self.sector_size()
+    }
+
     /// Whether the record's reserved tail is clear, as every genuine record's
     /// is: an all-zero block checksums, but no real record is all zero.
     fn tail_clear(raw: &[u8; DISC_RECORD_SIZE]) -> bool {
@@ -435,22 +455,21 @@ pub fn old_map_u24(map: &[u8; OLD_MAP_SIZE], at: usize) -> u32 {
 }
 
 /// Validate a raw old map image: both sector checksums, the recorded disc
-/// size against the device's `device_bytes`, the end pointer, and every free
-/// area entry.
+/// size, the end pointer, and every free area entry.
+///
+/// A disc larger than its device is not refused here: an image short of its
+/// final, free tracks is common, and its driver serves it read-only.
 ///
 /// # Errors
 ///
 /// [`DriverError::BadMagic`] on any structural violation.
-pub fn validate_old_map(map: &[u8; OLD_MAP_SIZE], device_bytes: u64) -> Result<(), DriverError> {
+pub fn validate_old_map(map: &[u8; OLD_MAP_SIZE]) -> Result<(), DriverError> {
     let (sector0, sector1) = map.split_at(256);
     if old_map_checksum(sector0) != sector0[255] || old_map_checksum(sector1) != sector1[255] {
         return Err(DriverError::BadMagic);
     }
     let disc_sectors = old_map_u24(map, DISC_SECTORS);
-    if disc_sectors == 0
-        || u64::from(disc_sectors) * OLD_SECTOR_SIZE > device_bytes
-        || disc_sectors >= ENTRY_LIMIT
-    {
+    if disc_sectors == 0 || disc_sectors >= ENTRY_LIMIT {
         return Err(DriverError::BadMagic);
     }
     let end = usize::from(map[END_POINTER]);
@@ -612,7 +631,7 @@ fn bare_record<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<DiscRecord>, 
 /// A checksummed old map whose root directory carries a marker.
 fn old_map<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<Layout>, DriverError> {
     let mut map = [0u8; OLD_MAP_SIZE];
-    if !read_present(dev, 0, &mut map)? || validate_old_map(&map, dev.capacity()).is_err() {
+    if !read_present(dev, 0, &mut map)? || validate_old_map(&map).is_err() {
         return Ok(None);
     }
     // Five zero bytes at sector 2 mark a large-sector (D) volume, whose root

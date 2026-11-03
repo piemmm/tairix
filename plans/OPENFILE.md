@@ -77,16 +77,17 @@ pollute another system's view, and the alternatives are non-standard.
 | Moment | Identity | Checked |
 |---|---|---|
 | Resolution (open, every descriptor-relative lookup, chdir) | the caller | `CAP_FS_ACCESS` at dispatch; search on every directory looked up in, the start included; mount flags; on open, the access the descriptor will carry; for a name mutation, write and search on the directory, the occupant's gate, the sticky rule, a writable mount |
-| Byte operations (read, write, truncate, punch, seek_region, stat, readdir, sync, lock, `file_map` faults) | the description's authority | the descriptor's access; projection live, volume not retired (else `Stale`); `CAP_FS_ACCESS` on the authority's set; the node's gate, and its mode and ACL unless the authority owns the node through a descriptor that is not a grant, re-checked every call except by stat and sync, which like POSIX's `fstat` and `fsync` check neither; a grant's extent ceiling |
-| Metadata operations (mode, owner, attributes) | the caller | today's owner-only and `CAP_FS_CHOWN` rules, the gate, a writable mount |
+| Byte operations (read, write, truncate, punch, seek_region, stat, readdir, sync, lock, `file_map` faults), and attribute reads through a descriptor open for reading | the description's authority | the descriptor's access; projection live, volume not retired (else `Stale`); `CAP_FS_ACCESS` on the authority's set; the node's gate, and its mode and ACL unless the authority owns the node through a descriptor that is not a grant, re-checked every call except by stat and sync, which like POSIX's `fstat` and `fsync` check neither; a grant's extent ceiling |
+| Metadata changes (mode, owner, attributes), and attribute reads through a descriptor not open for reading | the caller | today's owner-only and `CAP_FS_CHOWN` rules, the gate, a writable mount |
 | Never | | search permission above a held node — a descriptor is not a name |
 
 The per-call re-check keeps today's revocation by mode, ACL, group and gate,
 so no principal gains anything. The owner exemption is what POSIX requires of
 `open(O_CREAT, 0444)` then `write`, and removes nothing: an owner may restore
 any bit. A grant never has it, so an owner's chmod still revokes a grant.
-Metadata calls run as the caller, so a child handed a system-owned descriptor
-cannot chmod it with the opener's rights. Removing search permission on a
+Metadata changes run as the caller, so a child handed a system-owned
+descriptor cannot chmod it with the opener's rights; an attribute is read as
+the bytes are, so a holder of a delegated document can read what type it is. Removing search permission on a
 parent no longer cuts off descriptors below it; that is POSIX behaviour.
 
 The filesystem service keeps each principal's groups as the identity table of

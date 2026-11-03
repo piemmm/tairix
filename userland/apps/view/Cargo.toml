@@ -39,8 +39,8 @@ tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
 # Checked conversions and fallible allocation.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
-# The one media registry a document's name is typed by: a sprite area, which
-# carries no signature, is known only by its name.
+# The one media registry a document's name is typed by: a typed sprite area
+# whose header does not state its own length is known only by its name.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 
 # The package is both the host-tested viewer engine (the document model, the

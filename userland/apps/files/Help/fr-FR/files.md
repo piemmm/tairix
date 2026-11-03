@@ -4,14 +4,14 @@ files — navigateur de fichiers graphique
 
 ## SYNOPSIS
 
-`files [--desktop] [chemin] [-h | -?]`
+`files --desktop [--mount] [chemin] [-h | -?]`
 
 ## DESCRIPTION
 
-Ouvre une fenêtre de bureau listant le système de fichiers, en partant du
-dossier que `chemin` nomme sur la ligne de commande — ou, s'il nomme un
-fichier, du dossier qui contient ce fichier, avec le fichier
-sélectionné — ou, à défaut, du dossier que choisissent les paramètres : le
+Le gestionnaire de fichiers du bureau lui-même, qui liste le système de
+fichiers dans des fenêtres. Une fenêtre s'ouvre sur le dossier demandé — ou,
+pour un fichier, sur le dossier qui contient ce fichier, avec le fichier
+sélectionné — ou, à défaut, sur celui que choisissent les paramètres : le
 dossier `Home` de l'utilisateur qui le lance, à moins qu'il ne choisisse son
 dossier `Desktop` ou les volumes branchés (son répertoire personnel si ce
 dossier ne peut être listé). Le titre de la fenêtre nomme le répertoire
@@ -21,14 +21,15 @@ répertoire est un listage ordinaire, soumis aux permissions, sous l'identité
 de l'utilisateur qui le lance : un répertoire illisible est refusé, jamais
 deviné.
 
-Le bureau démarre le navigateur pour vous et le garde dans la barre d'icônes
-: le menu de son emplacement liste vos propres lieux et tout ce qui est
-monté, et choisir l'un d'eux y ouvre une fenêtre ; *Réseau* et *Paramètres…*
-viennent en dernier. Un clic sur l'emplacement en ouvre une à l'endroit que
-choisissent les paramètres. Demander un dossier qui a déjà une fenêtre amène
-cette fenêtre au premier plan au lieu d'en ouvrir une autre. Cette instance
-n'a pas de ligne *Quitter* — elle fait partie du bureau, et fermer ses
-fenêtres la range simplement.
+Le bureau démarre le gestionnaire de fichiers avec la session et le garde
+dans la barre d'icônes, et celui-ci ne se termine jamais : le menu de son
+emplacement liste vos propres lieux et tout ce qui est monté, et choisir l'un
+d'eux y ouvre une fenêtre ; *Réseau* et *Paramètres…* viennent en dernier. Un
+clic sur l'emplacement en ouvre une à l'endroit que choisissent les
+paramètres. Demander un dossier qui a déjà une fenêtre amène cette fenêtre au
+premier plan au lieu d'en ouvrir une autre. Le menu n'a pas de ligne
+*Quitter* — le gestionnaire de fichiers fait partie du bureau, fermer ses
+fenêtres le range simplement, et si jamais il s'arrête, le bureau le relance.
 
 *Réseau*, dans le menu de l'emplacement juste au-dessus de *Paramètres…*,
 ouvre une fenêtre sur les ordinateurs du réseau local qui partagent des
@@ -45,12 +46,12 @@ ordinateur : un nom ne prouve donc jamais quel ordinateur vous regardez. La
 connexion aux partages d'un ordinateur n'est pas disponible sur ce système,
 et en ouvrir un le dit.
 
-Lancé depuis un shell par son chemin, `/System/Components/files.app`,
-c'est au contraire une application ordinaire : une seule fenêtre,
-et elle se termine quand vous la fermez. Dans tous les cas, il exige une
+Il ne s'exécute que lancé par le bureau : lancé de toute autre manière —
+depuis un shell par son chemin, `/System/Components/files.app` — il refuse de
+démarrer et indique pourquoi sur le flux d'erreur standard. Il exige une
 session graphique en cours : sans elle, le canal des fenêtres est
-injoignable, et le navigateur signale le refus sur le flux d'erreur standard
-puis se termine.
+injoignable, et il signale le refus sur le flux d'erreur standard puis se
+termine.
 
 La fenêtre se pilote au clavier : `Bas` et `Haut` déplacent la sélection,
 `Entrée` ouvre le répertoire sélectionné, et `Retour arrière` remonte au
@@ -113,19 +114,25 @@ sélectionner* et *Effacer la sélection*, et enfin *Coller*. Un clic droit
 sur un espace vide efface la sélection, si bien que le sous-menu de l'entrée
 est grisé.
 
-Ouvrir une image disque — un fichier `.iso`, `.adf`, `.hdf` et autres — la
-monte pour vous sous `/Storage`, en écriture là où le fichier et son format
-le permettent tous deux, et ouvre sa fenêtre ; *Monter en lecture seule* la
-monte plutôt en lecture seule. Elle reste montée jusqu'à ce que vous
-l'éjectiez ou que votre session de connexion se termine. *Éjecter* retire un
-volume que vous avez monté, depuis son icône ou depuis sa ligne dans la
-colonne des lieux, dont le menu contextuel propre contient *Ouvrir* et
-*Éjecter* ; vos fenêtres qui s'y trouvent passent d'abord à `/Storage`. Si
-un volume disparaît — son disque retiré, ou son serveur perdu — avant que
-tout ce que vous y avez écrit soit enregistré, il quitte la colonne des
-lieux mais garde son icône dans `/Storage`, et ce qui n'a pas été enregistré
-est perdu ; *Éjecter* depuis cette icône demande confirmation avant de le
-laisser partir.
+Ouvrir une image disque ou une archive — un fichier `.iso`, `.adf`, `.hdf`,
+`.zip` et autres — la monte pour vous sous `/Storage`, en écriture là où le
+fichier et son format le permettent tous deux, et ouvre sa fenêtre ;
+*Monter en lecture seule* la monte plutôt en lecture seule. En ouvrir une
+sur le bureau fait de même. Dès qu'aucune fenêtre ne l'affiche plus, elle
+est de nouveau démontée, de sorte que `/Storage` ne contient que ce qui est
+en cours d'utilisation ; si autre chose l'utilise encore — par exemple un
+document qui en provient, ouvert dans une autre application —, elle reste
+montée, et le démontage est retenté dès que cette autre chose a pu la
+libérer. Les paramètres peuvent plutôt garder monté ce que vous ouvrez,
+jusqu'à ce que vous l'éjectiez ou que votre session de connexion se termine.
+*Éjecter* retire un volume que vous avez monté, depuis son icône ou depuis
+sa ligne dans la colonne des lieux, dont le menu contextuel propre contient
+*Ouvrir* et *Éjecter* ; vos fenêtres qui s'y trouvent passent d'abord à
+`/Storage`. Si un volume disparaît — son disque retiré, ou son serveur
+perdu — avant que tout ce que vous y avez écrit soit enregistré, il quitte
+la colonne des lieux mais garde son icône dans `/Storage`, et ce qui n'a pas
+été enregistré est perdu ; *Éjecter* depuis cette icône demande confirmation
+avant de le laisser partir.
 
 Le sous-menu *Nouveau* du menu contextuel crée un dossier, ou un document
 vide de chaque sorte qu'un éditeur installé sait écrire, et ouvre son nom
@@ -145,15 +152,17 @@ dossiers restent en tête quel que soit l'ordre choisi, à moins que les
 paramètres ne les placent parmi les fichiers.
 
 *Paramètres…* dans le menu de l'emplacement de la barre d'icônes, ou
-`Ctrl+,`, ouvre les paramètres du navigateur : où s'ouvre une nouvelle
-fenêtre, comment elle affiche et trie ses entrées, et si elle montre la
-colonne des lieux et la barre d'outils ; si les dossiers restent en tête ;
-quels suffixes de nom et quelles entrées sont masqués ; si une image montre
-son propre contenu et un dossier ce qu'il contient ; et si le déplacement
-d'entrées vers la Corbeille demande d'abord confirmation. *Restaurer les
-valeurs par défaut* rétablit chaque paramètre. Une modification s'applique
-aussitôt à toutes les fenêtres et est mémorisée ; une fenêtre déjà ouverte
-garde l'affichage et l'ordre qu'elle a.
+`Ctrl+,`, ouvre les paramètres du navigateur dans l'application Paramètres,
+sous *Fichiers* : où s'ouvre une nouvelle fenêtre, comment les fenêtres
+affichent et trient leurs entrées, et si une nouvelle montre la colonne des
+lieux et la barre d'outils ; si les dossiers restent en tête ; quels suffixes
+de nom et quelles entrées sont masqués ; si une image montre son propre
+contenu et un dossier ce qu'il contient ; si le déplacement d'entrées vers
+la Corbeille demande d'abord confirmation ; et si une image disque ou une
+archive que vous avez ouverte est démontée une fois ses fenêtres fermées.
+Une modification s'applique aussitôt à toutes les fenêtres et est
+mémorisée ; une fenêtre garde un affichage ou un ordre que vous y avez
+choisi vous-même.
 
 `Alt+Enter` ouvre la fenêtre d'*informations* de l'entrée sélectionnée, tout
 comme *Lire les informations…* dans son sous-menu du menu contextuel. C'est une fenêtre à part
@@ -187,18 +196,21 @@ qu'ignoré.
 
 ## OPTIONS
 
-- `--desktop` — s'exécuter comme le composant gestionnaire de fichiers du
-  bureau lui-même : un emplacement permanent sur la barre d'icônes offrant
-  vos lieux et les volumes montés, aucune fenêtre jusqu'à ce qu'on en demande
-  une, et aucun moyen de quitter. La session de bureau passe cette option au
-  démarrage ; nommer un `chemin` avec elle est refusé, car un composant
-  n'ouvre aucune fenêtre où le mettre.
+- `--desktop` — s'exécuter comme le gestionnaire de fichiers du bureau
+  lui-même : un emplacement permanent sur la barre d'icônes offrant vos lieux
+  et les volumes montés, et aucun moyen de quitter. La session de bureau
+  passe cette option à chaque lancement du gestionnaire de fichiers, qui ne
+  s'exécute qu'avec elle ; un `chemin` donné en plus y ouvre une fenêtre.
+- `--mount` — ouvrir `chemin` en tant qu'image disque ou archive, comme
+  lorsqu'on l'ouvre dans une fenêtre : elle est montée pour vous et sa
+  fenêtre s'ouvre, et elle est de nouveau démontée une fois ses fenêtres
+  fermées, selon les paramètres. Cette option exige un `chemin`.
 - `-h, -?` — afficher la courte aide de cette commande et quitter.
 
 ## EXIT STATUS
 
-Zéro après une fermeture propre, ou après l'affichage de la courte
-aide ; `2` lorsque la ligne de commande n'a pas été comprise ; sinon non
-nul lorsque le canal de fenêtre, la région de trames partagée ou le
-listage initial du répertoire a été refusé (la raison est indiquée sur
-le flux d'erreur standard).
+Il ne se termine pas tant que le bureau fonctionne. Zéro après l'affichage de
+la courte aide ; `2` lorsque la ligne de commande n'a pas été comprise ou ne
+nommait pas `--desktop` ; sinon non nul en cas de refus du canal de fenêtre
+ou de la région de trames partagée (la raison est indiquée sur le flux
+d'erreur standard).

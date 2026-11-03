@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use super::{opens_settings, Accelerator, Chrome, SelectionVerb};
 use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode};
-use tairix_browse::{ManagerTool, Places, ToolbarBand, ToolbarCommand};
+use tairix_browse::{FilerPreferences, ManagerTool, Places, ToolbarBand, ToolbarCommand};
 
 /// One rail model, so `rail` has something to hand back.
 fn places() -> Places {
@@ -15,10 +15,15 @@ fn places() -> Places {
     Places::new(&home, &[])
 }
 
+/// What a window opens with on the default settings: the listing alone.
+fn listing_alone() -> Chrome {
+    Chrome::of(&FilerPreferences::default())
+}
+
 #[test]
-fn a_window_opens_showing_the_listing_alone() {
+fn a_window_opens_with_the_bands_the_settings_name() {
     assert_eq!(
-        Chrome::HIDDEN,
+        listing_alone(),
         Chrome {
             rail: false,
             toolbar: ToolbarBand::Hidden,
@@ -26,8 +31,20 @@ fn a_window_opens_showing_the_listing_alone() {
     );
     let places = places();
     assert!(
-        Chrome::HIDDEN.rail(&places).is_none(),
+        listing_alone().rail(&places).is_none(),
         "a hidden rail is not hit-testable"
+    );
+    let both = FilerPreferences {
+        places: true,
+        toolbar: ToolbarBand::Shown,
+        ..FilerPreferences::default()
+    };
+    assert_eq!(
+        Chrome::of(&both),
+        Chrome {
+            rail: true,
+            toolbar: ToolbarBand::Shown,
+        }
     );
 }
 
@@ -40,21 +57,21 @@ fn f9_toggles_the_rail_and_ctrl_f9_the_toolbar() {
         ..Modifiers::default()
     };
 
-    let shown = Chrome::HIDDEN.toggled_by(f9, plain).expect("F9 toggles");
+    let shown = listing_alone().toggled_by(f9, plain).expect("F9 toggles");
     assert!(shown.rail);
     assert_eq!(shown.toolbar, ToolbarBand::Hidden, "only the rail moved");
     let places = places();
     assert!(shown.rail(&places).is_some());
 
-    let banded = Chrome::HIDDEN
+    let banded = listing_alone()
         .toggled_by(f9, ctrl)
         .expect("Ctrl+F9 toggles");
     assert_eq!(banded.toolbar, ToolbarBand::Shown);
     assert!(!banded.rail, "only the toolbar moved");
 
     // Both toggles are reversible from wherever they are.
-    assert_eq!(shown.toggled_by(f9, plain), Some(Chrome::HIDDEN));
-    assert_eq!(banded.toggled_by(f9, ctrl), Some(Chrome::HIDDEN));
+    assert_eq!(shown.toggled_by(f9, plain), Some(listing_alone()));
+    assert_eq!(banded.toggled_by(f9, ctrl), Some(listing_alone()));
 }
 
 #[test]
@@ -65,7 +82,7 @@ fn any_other_key_names_neither_band() {
         KeyValue::Named(NamedKeyCode::Escape),
         KeyValue::Char('9'),
     ] {
-        assert_eq!(Chrome::HIDDEN.toggled_by(key, plain), None, "{key:?}");
+        assert_eq!(listing_alone().toggled_by(key, plain), None, "{key:?}");
     }
 }
 

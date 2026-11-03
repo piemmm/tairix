@@ -4,13 +4,13 @@ files — porwr graffigol y system ffeiliau
 
 ## SYNOPSIS
 
-`files [--desktop] [path] [-h | -?]`
+`files --desktop [--mount] [path] [-h | -?]`
 
 ## DESCRIPTION
 
-Yn agor ffenestr bwrdd gwaith sy'n rhestru'r system ffeiliau, gan ddechrau
-yn y ffolder y mae `path` yn ei henwi ar y llinell orchymyn — neu, pan
-fo'n enwi ffeil, yn y ffolder sy'n dal y ffeil honno, gyda'r ffeil wedi'i
+Rheolwr ffeiliau'r bwrdd gwaith ei hun, sy'n rhestru'r system ffeiliau mewn
+ffenestri. Mae ffenestr yn agor yn y ffolder y gofynnir amdani — neu, yn
+achos ffeil, yn y ffolder sy'n dal y ffeil honno, gyda'r ffeil wedi'i
 dewis — neu, os nad enwir un, yn y ffolder y mae'r gosodiadau'n ei dewis:
 ffolder `Home` y defnyddiwr sy'n ei lansio, oni bai ei fod yn dewis ei
 ffolder `Desktop` neu'r cyfrolau sydd wedi'u cysylltu (ei gyfeiriadur
@@ -21,14 +21,15 @@ cyffredin wedi'i wirio yn erbyn caniatâd, dan hunaniaeth y defnyddiwr sy'n
 ei lansio, yw pob darlleniad cyfeiriadur: gwrthodir cyfeiriadur na ellir ei
 ddarllen, ac ni ddyfelir byth.
 
-Mae'r bwrdd gwaith yn cychwyn y porwr i chi ac yn ei gadw ar y bar eiconau:
-mae dewislen ei slot yn rhestru eich lleoedd eich hun a phopeth sydd wedi'i
-osod, ac mae dewis un yn agor ffenestr yno; daw *Rhwydwaith* a *Gosodiadau…*
-yn olaf. Mae clic ar y slot yn agor un yn y man y mae'r gosodiadau'n ei
-ddewis. Mae gofyn am ffolder sydd eisoes â ffenestr yn dod â'r ffenestr
-honno i'r blaen yn hytrach nag agor un arall. Nid oes rhes *Gadael* gan y
-copi hwnnw — mae'n rhan o'r bwrdd gwaith, ac mae cau ei ffenestri yn ei gadw
-o'r neilltu.
+Mae'r bwrdd gwaith yn cychwyn y rheolwr ffeiliau gyda'r sesiwn ac yn ei gadw
+ar y bar eiconau, ac nid yw byth yn gadael: mae dewislen ei slot yn rhestru
+eich lleoedd eich hun a phopeth sydd wedi'i osod, ac mae dewis un yn agor
+ffenestr yno; daw *Rhwydwaith* a *Gosodiadau…* yn olaf. Mae clic ar y slot yn
+agor un yn y man y mae'r gosodiadau'n ei ddewis. Mae gofyn am ffolder sydd
+eisoes â ffenestr yn dod â'r ffenestr honno i'r blaen yn hytrach nag agor un
+arall. Nid oes rhes *Gadael* ar y ddewislen — mae'r rheolwr ffeiliau'n rhan
+o'r bwrdd gwaith, mae cau ei ffenestri yn ei gadw o'r neilltu, ac os daw i
+ben rywbryd, mae'r bwrdd gwaith yn ei gychwyn eto.
 
 Mae *Rhwydwaith*, ar ddewislen y slot yn union uwchben *Gosodiadau…*, yn
 agor ffenestr ar y cyfrifiaduron ar y rhwydwaith lleol sy'n rhannu ffeiliau.
@@ -44,11 +45,12 @@ cyfrifiadur sy'n dewis ei enw ar y rhwydwaith, felly nid yw enw byth yn
 profi pa gyfrifiadur rydych chi'n edrych arno. Nid yw cysylltu â chyfrannau
 cyfrifiadur ar gael ar y system hon, ac mae agor un yn dweud hynny.
 
-O'i gychwyn o gragen wrth ei lwybr, `/System/Components/files.app`,
-mae'n rhaglen gyffredin yn lle hynny: un ffenestr, ac mae'n dod i ben pan
-fyddwch yn ei chau. Y naill ffordd neu'r llall, mae angen sesiwn graffigol
-sy'n rhedeg: hebddi, ni ellir cyrraedd sianel y ffenestri, ac mae'r porwr yn
-adrodd y gwrthodiad ar y ffrwd gwallau safonol ac yn gadael.
+Mae'n rhedeg dim ond pan fo'r bwrdd gwaith yn ei gychwyn: o'i gychwyn mewn
+unrhyw ffordd arall — o gragen wrth ei lwybr,
+`/System/Components/files.app` — mae'n gwrthod rhedeg, gan nodi pam ar y
+ffrwd gwallau safonol. Mae angen sesiwn graffigol sy'n rhedeg: hebddi, ni
+ellir cyrraedd sianel y ffenestri, ac mae'n adrodd y gwrthodiad ar y ffrwd
+gwallau safonol ac yn gadael.
 
 Caiff y ffenestr ei gyrru â'r bysellfwrdd: mae `I lawr` ac `I fyny` yn symud
 y dewisiad, mae `Enter` yn agor y cyfeiriadur a ddewiswyd, ac mae
@@ -109,11 +111,18 @@ llwydo ac yn dweud pam. Wedyn daw *Newydd*, yna *Dewis y cyfan* a *Clirio'r
 dewis*, ac yn olaf *Gludo*. Mae clic de ar le gwag yn clirio'r dewis, felly
 mae is-ddewislen yr eitem wedi'i llwydo.
 
-Mae agor delwedd ddisg — ffeil `.iso`, `.adf`, `.hdf` ac ati — yn ei gosod i
-chi yn `/Storage`, yn ysgrifenadwy lle mae'r ffeil a'i fformat ill dau'n
-caniatáu hynny, ac yn agor ei ffenestr; mae *Mowntio darllen-yn-unig* yn ei
-gosod yn ddarllen-yn-unig yn lle hynny. Mae'n aros wedi'i gosod nes i chi ei
-thaflu allan neu i'ch sesiwn fewngofnodi ddod i ben. Mae *Taflu allan* yn
+Mae agor delwedd ddisg neu archif — ffeil `.iso`, `.adf`, `.hdf`, `.zip` ac
+ati — yn ei gosod i chi yn `/Storage`, yn ysgrifenadwy lle mae'r ffeil a'i
+fformat ill dau'n caniatáu hynny, ac yn agor ei ffenestr; mae
+*Mowntio darllen-yn-unig* yn ei gosod yn ddarllen-yn-unig yn lle hynny.
+Mae agor un ar y bwrdd gwaith yn gwneud yr un peth. Unwaith na fydd unrhyw
+ffenestr yn ei dangos mwyach, caiff ei dad-osod eto, fel mai dim ond yr hyn
+sy'n cael ei ddefnyddio sydd yn `/Storage`; os oes rhywbeth arall yn dal
+i'w defnyddio — dogfen ohoni ar agor mewn rhaglen arall, dyweder — mae'n
+aros wedi'i gosod, a rhoddir cynnig arall ar ei dad-osod unwaith y gallai
+hwnnw fod wedi'i gollwng. Gall y gosodiadau gadw'r hyn rydych chi'n ei agor
+wedi'i osod yn lle hynny, nes i chi ei daflu allan neu i'ch sesiwn
+fewngofnodi ddod i ben. Mae *Taflu allan* yn
 tynnu cyfrol a osodwyd gennych, o'i heicon neu o'i rhes yn y bar lleoedd, y
 mae ei dewislen clic de ei hun yn dal *Agor* a *Taflu allan*; mae'ch
 ffenestri arni'n symud i `/Storage` yn gyntaf. Mae cyfrol a ddiflannodd —
@@ -140,14 +149,15 @@ ffolderi'n aros ar y brig pa drefn bynnag a ddewisir, oni bai bod y
 gosodiadau'n eu gosod ymhlith y ffeiliau.
 
 Mae *Gosodiadau…* ar ddewislen slot y bar eiconau, neu `Ctrl+,`, yn agor
-gosodiadau'r porwr: ble mae ffenestr newydd yn agor, sut mae'n dangos ac yn
-trefnu ei heitemau, ac a yw'n dangos colofn y lleoedd a'r bar offer; a yw
-ffolderi'n aros ar y brig; pa ôl-ddodiaid enwau a pha eitemau a guddir; a yw
-llun yn dangos ei gynnwys ei hun a ffolder yr hyn sydd ynddi; ac a yw symud
-eitemau i'r Sbwriel yn gofyn yn gyntaf. Mae *Adfer rhagosodiadau* yn rhoi
-pob gosodiad yn ôl. Mae newid yn berthnasol i bob ffenestr ar unwaith ac yn
-cael ei gofio; mae ffenestr sydd eisoes ar agor yn cadw'r dull dangos a'r
-drefn sydd ganddi.
+gosodiadau'r porwr yn y rhaglen Gosodiadau, dan *Ffeiliau*: ble mae ffenestr
+newydd yn agor, sut mae ffenestri'n dangos ac yn trefnu eu heitemau, ac a
+yw un newydd yn dangos colofn y lleoedd a'r bar offer; a yw ffolderi'n aros
+ar y brig; pa ôl-ddodiaid enwau a pha eitemau a guddir; a yw llun yn dangos
+ei gynnwys ei hun a ffolder yr hyn sydd ynddi; a yw symud eitemau i'r
+Sbwriel yn gofyn yn gyntaf; ac a gaiff delwedd ddisg neu archif a agorwyd
+gennych ei dad-osod unwaith y caiff ei ffenestri eu cau. Mae newid yn
+berthnasol i bob ffenestr ar unwaith ac yn cael ei gofio; mae ffenestr yn
+cadw dull dangos neu drefn a ddewisoch chi ynddi eich hun.
 
 Mae `Alt+Enter` yn agor ffenestr *Gwybodaeth* yr eitem a ddewiswyd, fel y
 mae *Cael gwybodaeth…* yn ei his-ddewislen yn y ddewislen clic de. Ffenestr ar ei phen ei hun yw
@@ -178,17 +188,20 @@ Gwrthodir ail operand yn llwyr yn hytrach na'i anwybyddu.
 
 ## OPTIONS
 
-- `--desktop` — rhedeg fel cydran rheolwr ffeiliau'r bwrdd gwaith ei hun:
-  slot parhaol ar y bar eiconau sy'n cynnig eich lleoedd a'r cyfrolau sydd
-  wedi'u mowntio, dim ffenestr hyd nes y gofynnir am un, a dim ffordd i
-  adael. Mae sesiwn y bwrdd gwaith yn pasio hyn wrth gychwyn; mae enwi
-  `path` gydag ef yn cael ei wrthod, am nad yw cydran yn agor ffenestr
-  i'w roi ynddi.
+- `--desktop` — rhedeg fel rheolwr ffeiliau'r bwrdd gwaith ei hun: slot
+  parhaol ar y bar eiconau sy'n cynnig eich lleoedd a'r cyfrolau sydd wedi'u
+  mowntio, a dim ffordd i adael. Mae sesiwn y bwrdd gwaith yn pasio hyn bob
+  tro y bydd yn cychwyn y rheolwr ffeiliau, nad yw'n rhedeg hebddo; mae
+  `path` gydag ef yn agor ffenestr yno.
+- `--mount` — agor `path` fel delwedd ddisg neu archif, yn union fel ei
+  hagor mewn ffenestr: caiff ei gosod i chi ac mae ei ffenestr yn agor, a
+  chaiff ei dad-osod eto unwaith y caiff ei ffenestri eu cau, fel y dywed y
+  gosodiadau. Mae angen `path` arno.
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn ei hun a gadael.
 
 ## EXIT STATUS
 
-Sero ar ôl cau glân, neu ar ôl dangos y cymorth byr; `2` pan na
-ddeallwyd y llinell orchymyn; fel arall heb fod yn sero pan wrthodwyd y
-sianel ffenestr, y rhanbarth fframiau a rennir, neu restriad cychwynnol
-y cyfeiriadur (nodir y rheswm ar y ffrwd gwall safonol).
+Nid yw'n gadael tra bo'r bwrdd gwaith yn rhedeg. Sero ar ôl dangos y cymorth
+byr; `2` pan na ddeallwyd y llinell orchymyn neu pan nad oedd yn enwi
+`--desktop`; fel arall heb fod yn sero pan wrthodwyd y sianel ffenestr neu'r
+rhanbarth fframiau a rennir (nodir y rheswm ar y ffrwd gwall safonol).

@@ -2192,7 +2192,12 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // `U64` carries the value byte count (or a negated errno; an
         // absent attribute is `-NoData`, never an empty read).
         ret: AbiType::U64,
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Ungated at the dispatcher, like `fs_stat`: through a descriptor
+        // open for reading the read acts as a byte read does, so a holder of
+        // a delegated document with no filesystem capability can read what
+        // type it is. `CAP_FS_ACCESS` is applied in the handler against that
+        // identity, and against the caller's own for any other descriptor.
+        required_capability: None,
         // A pure read, high-volume like fs_stat; not audited per call.
         audit: false,
     },
@@ -2233,7 +2238,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // `U64` carries the key byte count, `0` for end-of-list (a real
         // key is never empty), or a negated errno.
         ret: AbiType::U64,
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Ungated at the dispatcher and gated in the handler, as
+        // `fs_attr_get` is.
+        required_capability: None,
         // A pure read, high-volume like fs_readdir; not audited per call.
         audit: false,
     },
@@ -4383,8 +4390,9 @@ mod tests {
         // check rather than a blanket gate — a descriptor its holder opened
         // still requires CAP_FS_ACCESS there. fs_readdir keeps the blanket gate
         // because fd_grant refuses a directory, so it has no delegated form,
-        // and the attribute calls keep it because they act as the caller
-        // whatever descriptor names the node.
+        // and the attribute changes keep it because they act as the caller
+        // whatever descriptor names the node; the attribute reads act as a
+        // byte read through the descriptor does, so they are ungated here.
         // State-mutating calls (open — which may create — write, truncate,
         // mkdir, unlink, rename) are audited; the pure reads (read, readdir,
         // stat, access) and the own-handle lifecycle calls (close, sync) are
@@ -4401,9 +4409,7 @@ mod tests {
             SyscallNumber::FS_CHDIR,
             SyscallNumber::FS_SET_MODE,
             SyscallNumber::FS_SET_OWNER,
-            SyscallNumber::FS_ATTR_GET,
             SyscallNumber::FS_ATTR_SET,
-            SyscallNumber::FS_ATTR_LIST,
             SyscallNumber::FS_ATTR_REMOVE,
             SyscallNumber::FS_SYMLINK,
             SyscallNumber::FS_READLINK,
@@ -4434,6 +4440,8 @@ mod tests {
             SyscallNumber::FS_PUNCH,
             SyscallNumber::FS_LOCK,
             SyscallNumber::FS_LOCK_QUERY,
+            SyscallNumber::FS_ATTR_GET,
+            SyscallNumber::FS_ATTR_LIST,
         ] {
             assert_eq!(
                 spec_for(n).unwrap().required_capability,

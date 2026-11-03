@@ -183,9 +183,11 @@ an **activation**:
   and the first activation request spends it;
 - an activation is void once the keyboard is anywhere else, however it moved,
   so a gesture long past cannot be cashed in over the user's work;
-- a hand-over lends one only while the user is working in one of the caller's
-  windows and nothing holds the seat; otherwise its target still arrives but
-  is `Activation::Withheld` and brings nothing forward;
+- a hand-over lends one while nothing holds the seat and either the user is
+  working in one of the caller's windows or the caller holds an activation of
+  its own, which the hand-over spends — so a row chosen on the caller's
+  icon-bar menu brings forward what it hands over to; otherwise its target
+  still arrives but is `Activation::Withheld` and brings nothing forward;
 - a caller one of whose windows already holds the keyboard may restack its own
   windows without one, since the user is working in it.
 
@@ -921,6 +923,17 @@ was.
   `launch_viewer` path "Open With" uses, so the application receives the same
   authority whichever gesture chose it.
 
+**A document being saved is taken into a folder** (`plans/SAVE-DIALOG.md`
+SD5). The save panel's picture dragged over a window is offered to it
+(`SaveOffered`): the manager answers through the same `drop_folder_at` the
+item drags use, lighting the folder tile under the pointer, and declines the
+network view, the root view and the storage catalog
+(`tairix_browse::vfs::stores_files`). Dropped, the folder is opened on the
+reader serving its volume (`ReadKind::Save`), its location minted to the
+desktop (`fd_grant_location`) and handed over with `SaveInto`; the desktop
+saves there itself, so no authority crosses, and a folder that will not open
+declines.
+
 **"Open With…" is two things, and the row is both.** Arriving on it opens a
 **submenu** of the applications that claim the file — the highest-ranked few
 (`OPEN_WITH_QUICK_MAX`), each drawing its own application icon, so the common
@@ -1585,9 +1598,10 @@ those entry points are hit-tested against, so a click resolves to the control
 the user saw. With no rail it returns the window unchanged, so the trusted
 picker's pixels and hit-tests are exactly as they were.
 
-**Both bands are off when a window opens, and are the user's to turn on.** A
-file manager window is the listing: `chrome::Chrome::HIDDEN` is what every
-window starts on, so neither the rail nor the command strip reserves any of it.
+**Both bands are off when a window opens, unless the file manager's settings
+name them.** A file manager window is the listing: every window starts on
+`chrome::Chrome::of` those settings, which name neither band by default, so
+neither the rail nor the command strip reserves any of it.
 `chrome::ToolbarBand` (`Shown` / `Hidden`) travels beside the
 `Option<&Places>` that already said whether a rail is drawn, through every
 measurement of the listing and every hit-test that inverts one — so
@@ -1662,27 +1676,37 @@ pick beyond what was asked for.
 
 ### Settings
 
-The file manager keeps its own settings in its private app-data store
-(`userland/apps/files/src/preferences.rs`, a closed `tairix_appconf`
-registry, `plans/APPDATA.md`): where a window asked for no folder opens — the
-user's `Home`, their `Desktop`, or the attached storage — the view, order,
-places rail and toolbar a new window opens with, whether folders stand first
-in every window, which endings a name is shown without (an application's
-`.app` by default, a known type's extension when asked), whether items whose
-names begin with a dot are listed (not by default, as `ls`), whether a picture
-is drawn as its content and a folder as what it holds, and whether a move to
-the Trash asks first. *Settings…* on the icon-bar menu, in either role, and
-`Ctrl+,` open the settings window (`settings.rs`): one page of the shared form
-controls in groups — New windows, Listings, Icons, Trash — with *Restore
-defaults* last, scrolled when it outgrows its window and walked by `Tab`,
-`Shift+Tab` and the arrows.
+The file manager's settings are the user's desktop settings:
+`tairix_browse::FilerPreferences`, a closed `tairix_appconf` registry of
+`files.*` keys the desktop session keeps in its own document beside its
+others and publishes with them ([desktop session](session.md)). They say where
+a window asked for no folder opens — the user's `Home`, their `Desktop`, or the
+attached storage — the view, order, places rail and toolbar a new window opens
+with, whether folders stand first in every window, which endings a name is
+shown without (an application's `.app` by default, a known type's extension
+when asked), whether items whose names begin with a dot are listed (not by
+default, as `ls`), whether a picture is drawn as its content and a folder as
+what it holds, whether a move to the Trash asks first, and whether a disk
+image or archive the user opened is unmounted once its windows close (on by
+default, [disk images](../filesystem/images.md)).
 
-A change applies to every window at once and is written off the loop through
-the publication desk (`tairix_appdata`): the page shows what it asked for and
-adopts what the store then says, a refusal stated beneath *Restore defaults*.
-A window already open keeps its own view and order and takes only where
-folders stand; a change arriving while its listing is held by a menu, a rename
-or a drag waits for the hold to end. The presentation is the browser's
+The Settings application's *Files* pane edits them
+([Settings](settings.md)); *Settings…* on the icon-bar menu and `Ctrl+,`
+hand that pane to the running Settings or start it on it
+(`tairix_browse::SETTINGS_PANE`). The file manager reads the published
+document before its first window and again, on a reader rather than the
+loop, each time `DesktopInfo::settings_generation` moves — one read a
+publication. A refused one is stated, the settings in force stand, and it is
+read again after a wait that doubles from a second to five minutes; until a
+read has succeeded nothing is unmounted for its window closing, since the
+defaults standing in are not the user's choice.
+
+A change applies to every window at once, but for where a new window opens and
+whether it shows the places rail and the toolbar, which the next window opened
+takes. A window takes the view and the order unless the user chose one in it — through *Display* ▸, the toolbar or a
+column's title — and where folders stand always; a change arriving while its
+listing is held by a menu, a rename or a drag waits for the hold to end, and a
+window still opening takes it too. The presentation is the browser's
 (`Browser::set_presentation`, `tairix_browse::Presentation`): a hidden ending
 is display only — an entry keeps its exact name, which every operation acts
 on — and a hidden item is left out of the listing, so nothing in the window
@@ -1719,7 +1743,7 @@ that asked may have moved on, and on `stderr` where the desktop draws none. The 
 application strip and opens a window on demand (`plans/NEW-TASKBAR.md` T4).
 
 The slot menu's **Network** row (`AppMenuSymbol::Network`, directly above
-*Settings…* in both roles) brings forward the window showing the network,
+*Settings…*) brings forward the window showing the network,
 or opens one. The browse is a reader's: a `netbrowse::Browse` on the
 loop decides each turn whether a window wants the network, submits a collect
 or a close to the readers' latest-wins `network` desk, and takes the answer
@@ -3248,6 +3272,7 @@ as transparent rather than as the colour behind it.
 `WindowEvent::FilePicked` carries the authority; the viewer then pulls the
 chosen file's leaf name once with `TakePickedName`, so the title and the
 information panel name a picked document, and a RISC OS sprite area — which
-carries no signature and is reached only by its name or the filetype its
+carries no signature, and is recognised from its content only where its
+header states the file's own length, else by its name or the filetype its
 volume records — opens from the picker as it does from the file manager. A name the session no longer holds leaves
 the document unnamed rather than refusing it.

@@ -25,8 +25,7 @@
 //! desktop's own parts are not the user's to close. The session asks for that
 //! role with [`DESKTOP_ROLE_SWITCH`] on the command line, which is why the
 //! switch is named here beside the declaration it selects: the session that
-//! passes it and the bundle that parses it must agree on it exactly, and it is
-//! the one thing that tells them apart.
+//! passes it and the bundle that parses it must agree on it exactly.
 
 use core::fmt;
 
@@ -56,9 +55,8 @@ pub const QUIT_LABEL: &str = "Quit";
 ///
 /// A component holds a permanent icon-bar slot from bring-up, offers its own
 /// rows there instead of the convention's two, and is not the user's to quit.
-/// Only the session's own bring-up passes it, so a bundle launched from
-/// anywhere else — a shell, a folder activation, a library row — is the
-/// ordinary application and can never become a second component.
+/// The session passes it at bring-up, and to start a component that has ended
+/// again, and hands what it opens to the instance it started.
 pub const DESKTOP_ROLE_SWITCH: &str = "--desktop";
 
 /// An icon-bar declaration carrying `rows` — the application's own top-level

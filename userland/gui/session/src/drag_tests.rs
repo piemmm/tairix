@@ -8,7 +8,10 @@ use tairix_wm::{Compositor, InputEvent, Point, WindowId};
 
 use alloc::string::String;
 
-use crate::drag::{DragEnd, DragStep, DragSurface, DropRefusal, OwedReport, SlotAnswer};
+use crate::drag::{
+    DragEnd, DragStep, DragSurface, DropRefusal, ItemsEnd, ItemsReport, OfferEnd, OwedReport,
+    SaveDrop, SaveEnd, SaveOffer, SaveReport, SavedDocument, SlotAnswer,
+};
 use crate::shell::DesktopShell;
 use crate::tests::{
     app_slot_point, compositor, moved, opaque_window, shell, PRIMARY_PRESS, SECONDARY_PRESS,
@@ -54,6 +57,14 @@ fn several() -> DragItems {
 const RELEASE: InputEvent = InputEvent::PointerReleased {
     button: tairix_wm::PointerButton::Primary,
 };
+
+/// The report an application's drag owes, which `why` says it does.
+fn owed_report(shell: &mut DesktopShell, why: &str) -> ItemsReport {
+    match shell.take_drag_report() {
+        Some(OwedReport::Items(report)) => report,
+        other => panic!("{why}: {other:?}"),
+    }
+}
 
 /// Move the carried drag to `to`, over `surface`.
 fn over(shell: &mut DesktopShell, comp: &mut Compositor, to: Point, surface: DragSurface) {
@@ -109,11 +120,11 @@ fn the_plate_follows_and_a_slot_that_takes_the_file_is_dropped_on() {
     assert_eq!(shell.take_drag_report(), None, "a slot is not reported");
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
-        DragStep::Ended(DragEnd {
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Application(alloc::boxed::Box::new(editor())),
             refused: None,
-        })
+        }))
     );
 }
 
@@ -127,11 +138,11 @@ fn another_press_cancels_and_an_abort_is_scoped_to_the_source() {
         .expect("carried");
     assert_eq!(
         shell.drag_pointer(&mut comp, &SECONDARY_PRESS),
-        DragStep::Ended(DragEnd {
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: None,
-        })
+        }))
     );
 
     let (mut shell, mut comp, window) = pressed();
@@ -209,11 +220,11 @@ fn a_slot_that_refuses_the_file_is_never_lit() {
     );
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
-        DragStep::Ended(DragEnd {
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: Some(alloc::boxed::Box::new(refusal)),
-        }),
+        })),
         "nothing is dropped on an application that never took the file, and \
          the drop is answered with why"
     );
@@ -247,11 +258,11 @@ fn a_strip_replaced_mid_drag_forgets_its_slot() {
     );
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
-        DragStep::Ended(DragEnd {
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: None,
-        })
+        }))
     );
 }
 
@@ -274,12 +285,12 @@ fn a_burst_over_a_window_owes_one_report_and_leaving_owes_another() {
     }
     assert_eq!(
         shell.take_drag_report(),
-        Some(OwedReport {
+        Some(OwedReport::Items(ItemsReport {
             source: 7,
             serial: 1,
             at: window_at(4, 13, 20),
             shift: false,
-        })
+        }))
     );
     assert_eq!(shell.take_drag_report(), None, "taken once");
     over(
@@ -290,12 +301,12 @@ fn a_burst_over_a_window_owes_one_report_and_leaving_owes_another() {
     );
     assert_eq!(
         shell.take_drag_report(),
-        Some(OwedReport {
+        Some(OwedReport::Items(ItemsReport {
             source: 7,
             serial: 2,
             at: DragSurface::Nothing,
             shift: false,
-        })
+        }))
     );
     over(
         &mut shell,
@@ -320,7 +331,7 @@ fn the_pointer_shows_the_current_answer_and_the_drop_does_what_it_showed() {
         Point::new(120, 120),
         window_at(4, 10, 20),
     );
-    let first = shell.take_drag_report().expect("owed");
+    let first = owed_report(&mut shell, "owed");
     assert!(
         !shell.drag_verdict(&mut comp, 9, first.serial, Some(DropOperation::Copy)),
         "another window's drag answers nothing here"
@@ -335,7 +346,7 @@ fn the_pointer_shows_the_current_answer_and_the_drop_does_what_it_showed() {
         Point::new(125, 120),
         window_at(4, 15, 20),
     );
-    let second = shell.take_drag_report().expect("owed");
+    let second = owed_report(&mut shell, "owed");
     assert_eq!(shell.cursor().kind(), CursorKind::DragCopy);
     assert!(shell.drag_verdict(&mut comp, 7, second.serial, Some(DropOperation::Move)));
     assert_eq!(shell.cursor().kind(), CursorKind::DragMove);
@@ -350,19 +361,19 @@ fn the_pointer_shows_the_current_answer_and_the_drop_does_what_it_showed() {
     );
     assert_eq!(shell.cursor().kind(), CursorKind::Arrow);
     assert!(!shell.drag_verdict(&mut comp, 7, second.serial, Some(DropOperation::Move)));
-    let third = shell.take_drag_report().expect("owed");
+    let third = owed_report(&mut shell, "owed");
     assert_eq!(third.at, desktop("/Users/ann/Desktop", None));
     assert!(shell.drag_verdict(&mut comp, 7, third.serial, Some(DropOperation::Copy)));
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
-        DragStep::Ended(DragEnd {
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Desktop {
                 serial: third.serial,
                 operation: DropOperation::Copy,
             },
             refused: None,
-        })
+        }))
     );
     assert_eq!(
         shell.cursor().kind(),
@@ -386,11 +397,11 @@ fn an_unanswered_or_refused_place_drops_nothing() {
     );
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
-        DragStep::Ended(DragEnd {
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: None,
-        }),
+        })),
         "no answer yet"
     );
 
@@ -404,15 +415,15 @@ fn an_unanswered_or_refused_place_drops_nothing() {
         Point::new(120, 120),
         window_at(4, 10, 20),
     );
-    let report = shell.take_drag_report().expect("owed");
+    let report = owed_report(&mut shell, "owed");
     assert!(shell.drag_verdict(&mut comp, 7, report.serial, None));
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
-        DragStep::Ended(DragEnd {
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: None,
-        }),
+        })),
         "refused"
     );
 }
@@ -431,7 +442,7 @@ fn shift_asks_again_and_an_accepted_desktop_folder_is_lit() {
         Point::new(500, 300),
         desktop("/Users/ann/Desktop/Work", Some(2)),
     );
-    let first = shell.take_drag_report().expect("owed");
+    let first = owed_report(&mut shell, "owed");
     assert_eq!(shell.drag_drop_icon(), None, "not lit until accepted");
     assert!(shell.drag_verdict(&mut comp, 7, first.serial, Some(DropOperation::Copy)));
     assert_eq!(shell.drag_drop_icon(), Some(2));
@@ -443,7 +454,7 @@ fn shift_asks_again_and_an_accepted_desktop_folder_is_lit() {
         },
     };
     assert_eq!(shell.drag_key(&mut comp, &shift), None);
-    let again = shell.take_drag_report().expect("Shift asks again");
+    let again = owed_report(&mut shell, "Shift asks again");
     assert!(again.shift);
     assert_eq!(again.at, first.at);
     assert_eq!(shell.drag_key(&mut comp, &shift), None);
@@ -456,11 +467,11 @@ fn shift_asks_again_and_an_accepted_desktop_folder_is_lit() {
     assert_eq!(shell.drag_drop_icon(), None);
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
-        DragStep::Ended(DragEnd {
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: None,
-        })
+        }))
     );
 }
 
@@ -478,7 +489,7 @@ fn the_answer_after_shift_changed_decides_the_drop() {
         Point::new(500, 300),
         desktop("/Users/ann/Desktop/Work", Some(2)),
     );
-    let first = shell.take_drag_report().expect("owed");
+    let first = owed_report(&mut shell, "owed");
     assert!(shell.drag_verdict(&mut comp, 7, first.serial, Some(DropOperation::Copy)));
     let shift = InputEvent::ModifiersChanged {
         modifiers: tairix_wm::Modifiers {
@@ -487,19 +498,19 @@ fn the_answer_after_shift_changed_decides_the_drop() {
         },
     };
     assert_eq!(shell.drag_key(&mut comp, &shift), None);
-    let again = shell.take_drag_report().expect("Shift asks again");
+    let again = owed_report(&mut shell, "Shift asks again");
     assert!(shell.drag_verdict(&mut comp, 7, again.serial, Some(DropOperation::Move)));
     assert_eq!(shell.drag_drop_icon(), Some(2));
     assert!(matches!(
         shell.drag_pointer(&mut comp, &RELEASE),
-        DragStep::Ended(DragEnd {
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Desktop {
                 operation: DropOperation::Move,
                 ..
             },
             refused: None,
-        })
+        }))
     ));
 }
 
@@ -612,11 +623,11 @@ fn another_applications_window_takes_a_drop_as_its_slot_does() {
     );
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
-        DragStep::Ended(DragEnd {
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Application(alloc::boxed::Box::new(editor())),
             refused: None,
-        })
+        }))
     );
 
     let (mut shell, mut comp, window) = pressed();
@@ -635,11 +646,11 @@ fn another_applications_window_takes_a_drop_as_its_slot_does() {
     );
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
-        DragStep::Ended(DragEnd {
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: Some(alloc::boxed::Box::new(refusal)),
-        })
+        }))
     );
 }
 
@@ -669,4 +680,352 @@ fn a_window_an_alert_holds_takes_no_drop() {
         DragPlace::Nothing,
         "an application the strip does not show takes nothing"
     );
+}
+
+/// The document a save drag carries in these tests.
+fn report_doc() -> SavedDocument {
+    SavedDocument {
+        name: String::from("Report.txt"),
+        icon: tairix_icon::IconKind::File,
+    }
+}
+
+/// A save carried out of the panel window `panel` for the window 7 asked
+/// in.
+fn saving() -> (DesktopShell, Compositor) {
+    let (mut shell, mut comp, panel) = pressed();
+    shell
+        .begin_save_drag(&mut comp, (panel, 7), report_doc())
+        .expect("carried");
+    (shell, comp)
+}
+
+fn offer_at(window_id: u64, x: u32, y: u32) -> DragSurface {
+    DragSurface::Offer { window_id, x, y }
+}
+
+/// The offers the carried save owes.
+fn save_report(shell: &mut DesktopShell) -> Option<SaveReport> {
+    match shell.take_drag_report()? {
+        OwedReport::Save(report) => Some(report),
+        other @ OwedReport::Items(_) => panic!("a save owes save reports: {other:?}"),
+    }
+}
+
+/// A drag numbers its offers on from the last drag's, so a late answer to an
+/// offer of a save the user gave up on is never taken for the next one's.
+#[test]
+fn an_answer_to_an_earlier_drag_is_never_taken_for_the_next_ones() {
+    let (mut shell, mut comp, panel) = pressed();
+    let offered = |shell: &mut DesktopShell, comp: &mut Compositor| {
+        shell
+            .begin_save_drag(comp, (panel, 7), report_doc())
+            .expect("carried");
+        over(shell, comp, Point::new(110, 110), offer_at(9, 10, 10));
+        save_report(shell)
+            .and_then(|report| report.over)
+            .expect("offered")
+            .serial
+    };
+    let first = offered(&mut shell, &mut comp);
+    let _ = shell.drag_pointer(&mut comp, &RELEASE);
+    let _ = shell.handle(moved(150, 140), &mut comp, 0);
+    let _ = shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    let second = offered(&mut shell, &mut comp);
+    assert_ne!(first, second);
+    assert!(
+        !shell.save_offer_answered(&mut comp, 9, first, true),
+        "the earlier drag's answer"
+    );
+    assert!(shell.save_offer_answered(&mut comp, 9, second, true));
+}
+
+/// A save is a press carried on from the panel, and is carried alone.
+#[test]
+fn a_save_begins_only_from_the_press_on_its_panel() {
+    let (mut shell, mut comp, panel) = pressed();
+    let elsewhere = opaque_window(&mut comp, Point::new(300, 300), 40, 40);
+    assert_eq!(
+        shell.begin_save_drag(&mut comp, (elsewhere, 7), report_doc()),
+        Err(Errno::PermissionDenied),
+        "no press is held there"
+    );
+    shell
+        .begin_save_drag(&mut comp, (panel, 7), report_doc())
+        .expect("carried");
+    assert_eq!(shell.save_source(), Some(7));
+    assert_eq!(
+        shell.drag_items(),
+        None,
+        "a save carries no application's items"
+    );
+    assert_eq!(
+        shell.begin_drag(&mut comp, 7, panel, file("notes.txt")),
+        Err(Errno::AlreadyExists),
+        "one drag at a time"
+    );
+}
+
+/// The desktop takes a save at once and lights its folder, and a drop there
+/// saves into that folder.
+#[test]
+fn the_desktop_takes_a_save_into_the_folder_under_the_pointer() {
+    let (mut shell, mut comp) = saving();
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(30, 30),
+        desktop("/Users/ann/Desktop/Projects", Some(2)),
+    );
+    assert_eq!(shell.drag_drop_icon(), Some(2), "accepted, so lit");
+    assert_eq!(
+        save_report(&mut shell),
+        Some(SaveReport {
+            left: None,
+            over: None
+        }),
+        "owed only to relight the folder"
+    );
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &RELEASE),
+        DragStep::Ended(DragEnd::Save(SaveEnd {
+            dropped: SaveDrop::Folder(String::from("/Users/ann/Desktop/Projects")),
+            offer: None,
+        }))
+    );
+}
+
+/// Over a window the save is offered, numbered, at each point; the pointer
+/// shows only an answer to an offer standing there; and leaving the window
+/// tells it the offer ended.
+#[test]
+fn a_window_is_offered_the_save_and_told_when_it_leaves() {
+    let (mut shell, mut comp) = saving();
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(110, 110),
+        offer_at(9, 10, 10),
+    );
+    assert_eq!(
+        save_report(&mut shell),
+        Some(SaveReport {
+            left: None,
+            over: Some(SaveOffer {
+                window_id: 9,
+                serial: 1,
+                x: 10,
+                y: 10
+            }),
+        })
+    );
+    assert!(
+        !shell.save_offer_answered(&mut comp, 4, 1, true),
+        "not over that window"
+    );
+    assert!(
+        !shell.save_offer_answered(&mut comp, 9, 2, true),
+        "no such offer yet"
+    );
+    assert!(shell.save_offer_answered(&mut comp, 9, 1, true));
+    assert_eq!(shell.cursor().kind(), CursorKind::DragCopy);
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(112, 110),
+        offer_at(9, 12, 10),
+    );
+    assert_eq!(
+        save_report(&mut shell).and_then(|report| report.over),
+        Some(SaveOffer {
+            window_id: 9,
+            serial: 2,
+            x: 12,
+            y: 10
+        }),
+        "each point is offered afresh"
+    );
+    assert_eq!(
+        shell.cursor().kind(),
+        CursorKind::DragCopy,
+        "the answer stands until the next arrives"
+    );
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(500, 20),
+        DragSurface::Nothing,
+    );
+    assert_eq!(
+        save_report(&mut shell),
+        Some(SaveReport {
+            left: Some(OfferEnd {
+                window_id: 9,
+                serial: 2,
+                dropped: None
+            }),
+            over: None,
+        })
+    );
+    assert!(
+        !shell.save_offer_answered(&mut comp, 9, 2, true),
+        "an answer for a window left is not shown"
+    );
+    assert_eq!(shell.cursor().kind(), CursorKind::Arrow);
+}
+
+/// A drop on a window whose application accepted the standing offer is
+/// that window's to name a folder for; anywhere else it saves nothing, and
+/// the window offered last still hears the offer end.
+#[test]
+fn a_drop_saves_only_where_the_standing_offer_was_accepted() {
+    let (mut shell, mut comp) = saving();
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(110, 110),
+        offer_at(9, 10, 10),
+    );
+    let _ = save_report(&mut shell);
+    assert!(shell.save_offer_answered(&mut comp, 9, 1, true));
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &RELEASE),
+        DragStep::Ended(DragEnd::Save(SaveEnd {
+            dropped: SaveDrop::Offer {
+                window_id: 9,
+                serial: 1
+            },
+            offer: Some(OfferEnd {
+                window_id: 9,
+                serial: 1,
+                dropped: Some((10, 10))
+            }),
+        }))
+    );
+
+    let (mut shell, mut comp) = saving();
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(110, 110),
+        offer_at(9, 10, 10),
+    );
+    let _ = save_report(&mut shell);
+    assert!(shell.save_offer_answered(&mut comp, 9, 1, false));
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &RELEASE),
+        DragStep::Ended(DragEnd::Save(SaveEnd {
+            dropped: SaveDrop::Nothing,
+            offer: Some(OfferEnd {
+                window_id: 9,
+                serial: 1,
+                dropped: None
+            }),
+        })),
+        "declined"
+    );
+
+    let (mut shell, mut comp) = saving();
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(110, 110),
+        offer_at(9, 10, 10),
+    );
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &RELEASE),
+        DragStep::Ended(DragEnd::Save(SaveEnd {
+            dropped: SaveDrop::Unanswered,
+            offer: None,
+        })),
+        "dropped before the window could answer, which the panel says"
+    );
+}
+
+/// `Shift` changes nothing about a save, and `Escape` ends it unsaved,
+/// telling the window it was offered to.
+#[test]
+fn shift_asks_nothing_again_and_escape_drops_nothing() {
+    let (mut shell, mut comp) = saving();
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(110, 110),
+        offer_at(9, 10, 10),
+    );
+    let _ = save_report(&mut shell);
+    assert!(shell.save_offer_answered(&mut comp, 9, 1, true));
+    let shift = tairix_wm::Modifiers {
+        shift: true,
+        ..tairix_wm::Modifiers::default()
+    };
+    assert_eq!(
+        shell.drag_key(
+            &mut comp,
+            &InputEvent::ModifiersChanged { modifiers: shift }
+        ),
+        None
+    );
+    assert_eq!(shell.take_drag_report(), None, "nothing to ask again");
+    assert_eq!(shell.cursor().kind(), CursorKind::DragCopy);
+    let escape = InputEvent::KeyPressed {
+        key: tairix_wm::Key::Named(tairix_wm::NamedKey::Escape),
+        modifiers: tairix_wm::Modifiers::default(),
+    };
+    assert_eq!(
+        shell.drag_key(&mut comp, &escape),
+        Some(DragEnd::Save(SaveEnd {
+            dropped: SaveDrop::Nothing,
+            offer: Some(OfferEnd {
+                window_id: 9,
+                serial: 1,
+                dropped: None
+            }),
+        }))
+    );
+}
+
+/// The window the save is for going ends the save, owing the window it was
+/// offered to the end; the window offered going is forgotten, and the save
+/// carries on.
+#[test]
+fn windows_going_end_or_forget_a_save_as_they_concern_it() {
+    let (mut shell, mut comp) = saving();
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(110, 110),
+        offer_at(9, 10, 10),
+    );
+    let _ = save_report(&mut shell);
+    assert!(shell.save_offer_answered(&mut comp, 9, 1, true));
+    assert_eq!(shell.abort_drag_for(&mut comp, 9), None);
+    assert!(shell.drag_active(), "the save carries on");
+    assert_eq!(shell.cursor().kind(), CursorKind::Arrow);
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &RELEASE),
+        DragStep::Ended(DragEnd::Save(SaveEnd {
+            dropped: SaveDrop::Nothing,
+            offer: None,
+        })),
+        "the window gone hears nothing"
+    );
+
+    let (mut shell, mut comp) = saving();
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(110, 110),
+        offer_at(9, 10, 10),
+    );
+    let _ = save_report(&mut shell);
+    assert_eq!(
+        shell.abort_drag_for(&mut comp, 7),
+        Some(OfferEnd {
+            window_id: 9,
+            serial: 1,
+            dropped: None
+        })
+    );
+    assert!(!shell.drag_active());
 }

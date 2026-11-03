@@ -1049,6 +1049,12 @@ impl<S: DirectorySource> Desktop<S> {
         self.revision
     }
 
+    /// The icon lit as where a carried drag would drop.
+    #[must_use]
+    pub const fn drop_target(&self) -> Option<usize> {
+        self.drop_target
+    }
+
     /// Light `icon` as where a carried drag would drop, or none, adding the
     /// cells that changed to `damage`.
     pub fn set_drop_target(&mut self, icon: Option<usize>, layout: &GridView, damage: &mut Region) {

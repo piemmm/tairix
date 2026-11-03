@@ -94,6 +94,18 @@ pub enum Folders {
     Among,
 }
 
+impl Folders {
+    /// Where folders stand for a switch at `first`.
+    #[must_use]
+    pub const fn first_if(first: bool) -> Self {
+        if first {
+            Self::First
+        } else {
+            Self::Among
+        }
+    }
+}
+
 /// How a listing is ordered: a [`SortKey`], a [`SortDirection`], and where
 /// [`Folders`] stand.
 ///

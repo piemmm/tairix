@@ -1,10 +1,9 @@
 //! Asking the desktop session to adopt a settings document.
 //!
-//! The one client of the pinboard rendezvous, shared by every surface that
-//! edits the desktop's own settings — the backdrop menu's pinboard keys
-//! and the Settings application's panes. A second copy of this
-//! round trip would be two places for "what did the session say" to drift
-//! apart.
+//! The one client of the pinboard rendezvous's applies, shared by every
+//! surface that edits a settings registry the session keeps — its own and
+//! the file manager's. A second copy of this round trip would be two places
+//! for "what did the session say" to drift apart.
 //!
 //! Nothing here holds authority. An application publishes only its own
 //! app-data scope, so no surface can write the desktop's document at all: it
@@ -24,12 +23,6 @@ use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
 /// document.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApplyOutcome {
-    /// The request is with the session and no answer has come back yet.
-    ///
-    /// A surface shows this rather than the previous attempt's answer, so a
-    /// footer can never report a result the store has not given: the apply
-    /// is carried out on a worker and the window keeps drawing meanwhile.
-    Applying,
     /// The session adopted and persisted the change.
     Applied,
     /// The session refused the request, with the reason it gave.
@@ -39,7 +32,17 @@ pub enum ApplyOutcome {
     NoDesktop,
 }
 
-/// Ask the desktop session to adopt `document` and report what it said.
+/// Which of the registries the session keeps an applied document is for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ApplyTo {
+    /// The desktop's own settings (`crate::DesktopSettings`).
+    Desktop,
+    /// The file manager's (`tairix_browse::FilerPreferences`).
+    Files,
+}
+
+/// Ask the desktop session to adopt `document` as `to`'s settings and report
+/// what it said.
 ///
 /// Nothing is reported as applied that the session did not accept: a
 /// rendezvous that does not answer and a typed refusal are distinct
@@ -47,13 +50,17 @@ pub enum ApplyOutcome {
 /// document was actually written.
 #[cfg(feature = "rt")]
 #[must_use]
-pub fn apply(document: PinboardDocument) -> ApplyOutcome {
-    let mut request = [0u8; PINBOARD_MAX_REQUEST];
-    let Ok(sent) = PinboardRequest::Apply { document }.encode(&mut request) else {
+pub fn apply(to: ApplyTo, document: PinboardDocument) -> ApplyOutcome {
+    let request = match to {
+        ApplyTo::Desktop => PinboardRequest::Apply { document },
+        ApplyTo::Files => PinboardRequest::ApplyFiles { document },
+    };
+    let mut frame = [0u8; PINBOARD_MAX_REQUEST];
+    let Ok(sent) = request.encode(&mut frame) else {
         return ApplyOutcome::Refused(alloc::format!("{:?}", tairix_abi::Errno::LengthOutOfRange));
     };
     let mut reply = [0u8; STATUS_REPLY_LEN];
-    let Ok(len) = tairix_rt::ipc_call(PINBOARD_ENDPOINT, &request[..sent], &mut reply) else {
+    let Ok(len) = tairix_rt::ipc_call(PINBOARD_ENDPOINT, &frame[..sent], &mut reply) else {
         return ApplyOutcome::NoDesktop;
     };
     match decode_status_reply(&reply[..len.min(reply.len())]) {

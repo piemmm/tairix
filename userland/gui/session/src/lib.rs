@@ -213,6 +213,7 @@ pub mod picker;
 pub mod pinboard;
 pub mod presenter;
 pub mod resolution;
+mod savepanel;
 pub mod saver;
 pub mod seat;
 pub mod session;
@@ -268,7 +269,8 @@ pub use desktop::{
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use drag::{
-    DragEnd, DragPlace, DragStep, DragSurface, DropRefusal, OwedReport, SlotAnswer, WindowUnder,
+    DragEnd, DragPlace, DragStep, DragSurface, DropRefusal, ItemsEnd, ItemsReport, OfferEnd,
+    OwedReport, SaveDrop, SaveEnd, SaveOffer, SaveReport, SavedDocument, SlotAnswer, WindowUnder,
 };
 pub use drain::{
     adopt_unlocks, drain_authorising, drain_away, drain_locked, Routed, Seat, SeatDrain,
@@ -290,8 +292,9 @@ pub use idle::{IdleAction, IdleClock, IdlePolicy};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource, ModifierTap, TapKey};
 pub use launch::{
-    admitted_pid, launch_argv, launch_failure_report, open_entry, reap_launched, resolve_launch,
-    DocumentAuthority, DocumentRelay, Handover, Launch, LaunchHost, LaunchTable, LaunchTarget,
+    admitted_pid, hand_file_manager, launch_argv, launch_failure_report, open_entry, reap_launched,
+    resolve_launch, DocumentAuthority, DocumentRelay, FileManagerFound, FileManagerHand,
+    FileManagerKeeper, Handover, HeldTarget, Launch, LaunchHost, LaunchTable, LaunchTarget,
     LaunchedApp, APP_ATTACH,
 };
 pub use layer::{
@@ -323,8 +326,8 @@ pub use saver::{
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use settings::{
-    load_pinboard, publish_pinboard, serve_pinboard, AskedSettings, InputPolicy, LoadedPinboard,
-    PinboardApplied, PinboardCall, PinboardRefusal, SoundCall, PINBOARD_UNATTESTED,
+    load_pinboard, publish_asked, serve_pinboard, AskedSettings, InputPolicy, LoadedPinboard,
+    PinboardApplied, PinboardCall, PinboardRefusal, Publication, SoundCall, PINBOARD_UNATTESTED,
     PINBOARD_UNATTESTED_MESSAGE,
 };
 pub use shell::{

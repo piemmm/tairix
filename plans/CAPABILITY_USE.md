@@ -846,7 +846,9 @@ what it wants first is recorded in `plans/VIEW.md`.**
   session creates a name no entry shows with `CREATE|EXCLUSIVE|NO_FOLLOW`, so
   an unconfirmed save can never overwrite a file or be redirected through a
   planted link, and opens a file the user agreed to replace with
-  `CREATE|TRUNCATE|NO_FOLLOW`. The app cannot read what a save replaces, and
+  `CREATE|NO_FOLLOW`, never truncating it: the app writes from the start and
+  cuts the file to what it wrote, so a save abandoned first leaves the old
+  contents whole. The app cannot read what a save replaces, and
   the grant states `GRANT_EXTENT_INHERIT` — the session's own reach, bounded
   by the user's quota and the volume. A *folder* pick delegates, read-only and
   one descriptor each, the chosen folder's regular files whose content type

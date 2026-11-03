@@ -281,6 +281,16 @@ pub enum ToolbarBand {
 }
 
 impl ToolbarBand {
+    /// The band a switch at `shown` stands for.
+    #[must_use]
+    pub const fn shown_if(shown: bool) -> Self {
+        if shown {
+            Self::Shown
+        } else {
+            Self::Hidden
+        }
+    }
+
     /// Whether the strip is drawn and reserves its band.
     #[must_use]
     pub const fn is_shown(self) -> bool {
@@ -670,6 +680,22 @@ impl ViewMode {
 }
 
 impl SortKey {
+    /// What this key orders by, as a choice among keys names it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Kind => "Type",
+            Self::Size => "Size",
+            Self::Modified => "Date modified",
+            Self::Free => "Free space",
+            Self::Filesystem => "Filesystem",
+            Self::Health => "Health",
+            Self::Address => "Address",
+            Self::Workgroup => "Workgroup",
+        }
+    }
+
     /// The label Display ▸ offers ordering by this key under.
     #[must_use]
     pub const fn label(self) -> &'static str {

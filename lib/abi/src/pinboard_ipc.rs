@@ -7,8 +7,8 @@
 //! **decides, applies, and persists** (`plans/PINBOARD.md` §6). A
 //! caller renders its intended settings into the `key value` document
 //! `lib/wallpaper` owns and posts it here; the session is the one engine
-//! that parses that grammar, applies the result, and rewrites the user's
-//! own settings file. This module never parses the document's grammar
+//! that parses that grammar, applies the result, and publishes the user's
+//! settings document. This module never parses the document's grammar
 //! itself — it validates only that the bytes are a well-formed, bounded,
 //! multi-line transportable UTF-8 text, exactly as `lib/wallpaper`'s own
 //! parser re-validates on arrival.
@@ -25,7 +25,9 @@
 //! itself: the worst a hostile or buggy caller can do is ask the session to
 //! adopt a document the session's own read access already bounds.
 //!
-//! [`PinboardRequest::Apply`] carries the desktop's own document. The sound
+//! [`PinboardRequest::Apply`] carries the desktop's own document, and
+//! [`PinboardRequest::ApplyFiles`] the file manager's settings, which the
+//! session keeps and publishes in that document beside its own. The sound
 //! requests read and edit the user's sound choices, which the session keeps
 //! privately and hands the cue authority while it holds the seat
 //! (`plans/SOUND.md`): a caller reads them ([`encode_sound_reading`]) and the
@@ -146,6 +148,13 @@ pub enum PinboardRequest {
         /// The event.
         event: SoundEvent,
     },
+    /// Ask the session to adopt `document` as the caller's file manager
+    /// settings, kept in the session's document beside its own.
+    ApplyFiles {
+        /// The rendered file manager settings; parsed and validated by the
+        /// one engine `lib/browse` owns, never by this module.
+        document: PinboardDocument,
+    },
 }
 
 /// Wire operation discriminants.
@@ -156,6 +165,7 @@ mod op {
     pub const SOUND_APPLY: u16 = 4;
     pub const SOUND_PICK: u16 = 5;
     pub const SOUND_USE_THEME: u16 = 6;
+    pub const APPLY_FILES: u16 = 7;
 }
 
 /// Magic (4), version (2) and operation (2).
@@ -179,9 +189,9 @@ impl PinboardRequest {
     /// [`Errno::LengthOutOfRange`] for an `out` shorter than the frame.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
         let len = match self {
-            Self::Apply { document } | Self::SoundApply { document } => {
-                DOCUMENT_OFFSET + usize::from(document.len_u16())
-            }
+            Self::Apply { document }
+            | Self::SoundApply { document }
+            | Self::ApplyFiles { document } => DOCUMENT_OFFSET + usize::from(document.len_u16()),
             Self::SoundRead => HEADER_LEN,
             Self::SoundThemes { .. } | Self::SoundPick { .. } | Self::SoundUseTheme { .. } => {
                 FIELD_FRAME_LEN
@@ -192,16 +202,9 @@ impl PinboardRequest {
         put_u32(out, 0, PINBOARD_REQUEST_MAGIC);
         put_u16(out, 4, PINBOARD_VERSION_V1);
         let op = match *self {
-            Self::Apply { document } | Self::SoundApply { document } => {
-                let text = document.len_u16();
-                put_u16(out, DOCUMENT_LEN_OFFSET, text);
-                out[DOCUMENT_OFFSET..].copy_from_slice(document.as_str().as_bytes());
-                if matches!(self, Self::Apply { .. }) {
-                    op::APPLY
-                } else {
-                    op::SOUND_APPLY
-                }
-            }
+            Self::Apply { ref document } => put_document(out, document, op::APPLY),
+            Self::SoundApply { ref document } => put_document(out, document, op::SOUND_APPLY),
+            Self::ApplyFiles { ref document } => put_document(out, document, op::APPLY_FILES),
             Self::SoundRead => op::SOUND_READ,
             Self::SoundThemes { from } => {
                 put_u16(out, HEADER_LEN, from);
@@ -249,6 +252,9 @@ impl PinboardRequest {
             op::SOUND_APPLY => Ok(Self::SoundApply {
                 document: document_of(bytes)?,
             }),
+            op::APPLY_FILES => Ok(Self::ApplyFiles {
+                document: document_of(bytes)?,
+            }),
             op::SOUND_READ => exact_len(bytes, HEADER_LEN).map(|()| Self::SoundRead),
             op::SOUND_THEMES => {
                 field_frame(bytes, 2)?;
@@ -271,6 +277,13 @@ impl PinboardRequest {
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Write `document` into a document-carrying frame `out`, answering `op`.
+fn put_document(out: &mut [u8], document: &PinboardDocument, op: u16) -> u16 {
+    put_u16(out, DOCUMENT_LEN_OFFSET, document.len_u16());
+    out[DOCUMENT_OFFSET..].copy_from_slice(document.as_str().as_bytes());
+    op
 }
 
 /// The document a document-carrying frame holds, which must be exactly as
@@ -604,9 +617,10 @@ mod tests {
         out[..len].to_vec()
     }
 
-    fn requests() -> [PinboardRequest; 6] {
+    fn requests() -> [PinboardRequest; 7] {
         let sound =
             PinboardDocument::new("sound.bell.enabled = false\n").expect("a valid document");
+        let files = PinboardDocument::new("files.view = list\n").expect("a valid document");
         [
             apply(),
             PinboardRequest::SoundRead,
@@ -618,6 +632,7 @@ mod tests {
             PinboardRequest::SoundUseTheme {
                 event: SoundEvent::Bell,
             },
+            PinboardRequest::ApplyFiles { document: files },
         ]
     }
 

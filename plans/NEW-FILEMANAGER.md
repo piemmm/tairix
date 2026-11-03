@@ -63,9 +63,10 @@ which the drift guard enforces.
 | FM21 | A `/Storage` volume is drawn as its drive, and the rail keeps a degraded or recovering volume | done |
 | FM22 | A drive's Properties: kind, filesystem, options, capacity as a ring, activity as a live trace, health, read off the loop | done |
 | FM20 | Nothing touches a disk on the window's loop: long operations on operations workers, every one-shot write on a reader by ticket, the opening ladder and the mount list on the readers, and every refusal stated in the window | done |
-| FM23 | The file manager's own settings, kept in its app-data store and edited in a settings window of its own | done |
+| FM23 | The file manager's settings, kept in the desktop's document and edited in the Settings application's *Files* pane | done |
 | FM24 | Disk images: activating one mounts it and opens its volume, *Mount Read-Only* and *Eject* in the context menu, *Eject* on the rail's own menu (`plans/DISK-IMAGES.md` DI5) | done |
 | FM25 | A slow or failing device holds up only its own work: every read, write and operation on its volume's lane, one worker to a lane, with a spare whenever every worker is busy | done |
+| FM26 | A disk image or archive the user opened is unmounted once no window shows it and nothing else uses it, as the settings choose (`plans/DISK-IMAGES.md` DI21) | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
@@ -190,24 +191,32 @@ that check and the removal). A machine that grants no thread carries each of
 these out on the loop — an operation in half-frame slices, still cancellable —
 slower, never wrong; on exit the desks are stopped and the worker joined.
 
-**FM23 — the manager's settings.** The file manager keeps its own settings in
-its private app-data store (`preferences::Preferences`, a closed
-`tairix_appconf` registry): where a window asked for no folder opens (Home,
-Desktop or Storage), the view, order and bands a new window opens with, whether
-folders stand first in every window, which endings are hidden (an
-application's `.app` ending by default, a known type's extension when asked),
-whether hidden items are listed (not by default, as `ls`), whether a picture
-is its content and a folder shows what it holds, and whether a move to the
-Trash asks first. The settings window (`settings::SettingsWindow`, reached by
-*Settings…* on the icon-bar menu in either role and by `Ctrl+,`) is one
-scrolled page of the shared form controls; a change applies to every window
-at once — a window open keeps its own view and order, taking only where
-folders stand — and is written off the loop through the publication desk
-(`tairix_appdata`), the page adopting what the store then says. A settings
-change arriving while a window's listing is held by a menu, a rename or a drag
-waits for the hold to end. A name's shown form is display only: a rename edits
-it and restores the ending it hid, and the desktop and the trusted picker keep
-the exact names.
+**FM23 — the manager's settings.** The file manager's settings are the user's
+desktop settings: `tairix_browse::FilerPreferences`, a closed `tairix_appconf`
+registry of `files.*` keys the desktop session keeps in its own document beside
+its others and publishes with them. They say where a window asked for no folder
+opens (Home, Desktop or Storage), the view, order and bands a new window opens
+with, whether folders stand first in every window, which endings are hidden
+(an application's `.app` ending by default, a known type's extension when
+asked), whether hidden items are listed (not by default, as `ls`), whether a
+picture is its content and a folder shows what it holds, whether a move to the
+Trash asks first, and whether an image the user opened is unmounted once
+closed (FM26). The Settings application's *Files* pane edits them and asks the
+session to adopt a change (`PinboardRequest::ApplyFiles`, merged over what the
+document holds as the desktop's own apply is); *Settings…* on the icon-bar
+menu and `Ctrl+,` hand that pane to the running Settings
+(`HandOverTarget::Pane` naming `tairix_browse::SETTINGS_PANE`) or start it on
+it. The file manager reads the document once before its first window and again,
+on a reader, whenever the desktop's `DesktopInfo::settings_generation` moves;
+one read is asked per publication and a refused one is stated, the settings in
+force standing. A change applies to every window at once: a window takes the
+view and the order unless the user chose one in that window
+(`Chosen`, noted wherever an input changed it), and where folders stand
+always. A change arriving while a window's listing is held by a menu, a rename
+or a drag waits for the hold to end, and one landing while a window is still
+opening is taken by it. A name's shown form is display only: a rename edits it
+and restores the ending it hid, and the desktop and the trusted picker keep the
+exact names.
 
 **FM-dialogs — the two popup surfaces.** Three defects, one of them shared
 with every other surface on the desktop.
@@ -321,8 +330,9 @@ of the window, and `toolbar_bounds` yields *no* rectangle rather than a flat
 one (the shared `Toolbar` lays its buttons out from whatever origin it is
 given, so a zero-height band would have resolved a press on the window's top
 row against a strip nothing painted — fail closed). `userland/apps/files`
-holds the pair per window as `chrome::Chrome`, defaulting to `Chrome::HIDDEN`,
-and a window showing no rail routes nothing to one.
+holds the pair per window as `chrome::Chrome`, opening on `Chrome::of` the
+settings (both bands off by default), and a window showing no rail routes
+nothing to one.
 
 `F9` shows or hides the rail and `Ctrl+F9` the toolbar. These are what keep
 every command the toolbar carries reachable while it is hidden — the view
@@ -456,8 +466,8 @@ created path — the first mutation record any guest run in the tree has ever
 produced. Two parts remain blocked on `plans/OPEN-DEFECTS.md` D98 (the harness
 cannot order a typed key after a pointer click): the **rename** commit, which
 needs typing sequenced after the click that opens the editor, and the
-**toolbar** gesture itself, because a files window opens with
-`Chrome::HIDDEN` and the New Folder tool is reachable only after `Ctrl+F9`
+**toolbar** gesture itself, because a files window opens with the band hidden
+by default and the New Folder tool is reachable only after `Ctrl+F9`
 reveals the band (or via `Ctrl+Shift+N`) — neither key being expressible by a
 harness that injects characters. `manager_tool_rect` therefore has no caller
 yet, tracked as D99.
@@ -1800,7 +1810,7 @@ the click-through that keys on them is written.
     `plans/OPEN-DEFECTS.md` D98: the rename needs typing sequenced after the
     click that opens the editor, which the harness's independent typed-key
     cursor cannot express, and the toolbar tool is not even drawn until
-    `Ctrl+F9` reveals the band (`Chrome::HIDDEN` is what a window opens with) —
+    `Ctrl+F9` reveals the band (hidden in a window opened on the defaults) —
     a key the character-based injection has no spelling for.
   - **FM9-b — open a file into the viewer via CU6 delegation.**
     The trusted picker now opens at the user's home (`Browser::open_at` over

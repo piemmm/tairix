@@ -54,7 +54,7 @@ use tairix_abi::window_ipc::{
     encode_open_target_reply, encode_picked_file_reply, encode_picked_name_reply,
     encode_terrain_reply, encode_wallpapers_reply, AlertOutcome, AlertSpec, AppBar, AppMenu,
     ClipboardHeld, ClipboardKind, CursorShape, DialogModality, DocumentName, DragAt, DragItems,
-    DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget,
+    DropOperation, DropSite, DropTarget, HandOverOutcome, HandOverTarget, LayerDepth, OpenTarget,
     PickPurpose, PreviewSubject, TerrainPlate, WallpaperEntry, WindowEvent, WindowRegion,
     WindowRequest, WindowTitle, ALERT_MAX_OPEN, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
     DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES, WINDOW_CLIPBOARD_REPLY_LEN,
@@ -611,20 +611,62 @@ pub trait WindowHost {
         Err(Errno::NotSupported)
     }
 
+    /// A validated `SaveOfferAnswer`: the owner of window `window_id`
+    /// answered the save offer numbered `serial` with whether a drop there
+    /// saves. The host decides whether the answer is still current.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host refuses the answer with; nothing changes.
+    fn save_offer_answered(
+        &mut self,
+        _window_id: u64,
+        _serial: u32,
+        _accepts: bool,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    /// A decoded `SaveInto`: attested `caller` answered the drop numbered
+    /// `serial` on window `window_id` with `location`, a `fd_grant_location`
+    /// handle it minted to the session, or zero to decline.
+    ///
+    /// The window is not yet known to be `caller`'s: the host acts only on
+    /// the drop it awaits from that window's owner, learns the folder by
+    /// redeeming `location` bound to `caller`, and consumes a non-zero
+    /// `location` whatever it answers, so a refused one leaves nothing
+    /// pending for the caller's life.
+    ///
+    /// The default refuses: a host that offers no saves awaits none.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host refuses the answer with.
+    fn save_into(
+        &mut self,
+        caller: ProcId,
+        window_id: u64,
+        serial: u32,
+        location: u64,
+    ) -> Result<(), Errno> {
+        let _ = (caller, window_id, serial, location);
+        Err(Errno::NotSupported)
+    }
+
     /// A validated `HandOverLaunch`: attested `caller` asked the session to
     /// reach the live instance of the bundle whose entry binary is
-    /// `run_path`, handing it `document` if one is named.
+    /// `run_path`, handing it `target`.
     ///
     /// The host owns the decision, because only it knows which bundles are
     /// running and what their manifests attest: it resolves the launch
     /// through its own funnel and answers [`HandOverOutcome::NotRunning`]
     /// when there was no instance to reach, which is what tells the caller to
     /// launch the bundle itself. `desk` is the one capability the *engine*
-    /// owns and lends for the occasion — queueing a target and waking its
-    /// owner — so the launch rule stays in one place rather than being
-    /// re-derived here.
+    /// owns and lends for the occasion — queueing a target, waking its owner,
+    /// and spending the activation a gesture lent the caller — so the launch
+    /// rule stays in one place rather than being re-derived here.
     ///
-    /// `document`'s grant is one `caller` minted **to the session**, from a
+    /// A document's grant is one `caller` minted **to the session**, from a
     /// descriptor the caller opened under its own authority. The host redeems
     /// it only as `caller`'s own — bound to its attested instance, so a caller
     /// naming a delegation somebody else minted to the session gets nothing —
@@ -645,9 +687,9 @@ pub trait WindowHost {
         desk: &mut dyn HandOverDesk,
         caller: ProcId,
         run_path: &str,
-        document: Option<&HandOverDocument>,
+        target: &HandOverTarget,
     ) -> Result<HandOverOutcome, Errno> {
-        let _ = (desk, caller, run_path, document);
+        let _ = (desk, caller, run_path, target);
         Err(Errno::NotSupported)
     }
 
@@ -1287,6 +1329,10 @@ impl<M: ShmMapper> HandOverDesk for EngineDesk<'_, M> {
             .find(|(_, record)| record.owner == app)
             .map(|(&id, _)| id)
     }
+
+    fn spend_activation(&mut self, app: ProcId, focus: Option<u64>) -> bool {
+        self.server.activations.remove(&app) == Some(focus)
+    }
 }
 
 /// Whether an application event lets its receiver raise one of its own
@@ -1309,9 +1355,9 @@ pub enum Activation {
 /// Whether to reach an instance is the host's decision — only it knows what
 /// is running and what a manifest attests — while every *way* of reaching
 /// one is a fact or an action the engine owns: the target queue and its
-/// bound, the application's event route, and which window it most recently
-/// opened. So the engine hands these over rather than either party
-/// re-deriving the other's half.
+/// bound, the application's event route, which window it most recently
+/// opened, and the activation a gesture lent the caller. So the engine hands
+/// these over rather than either party re-deriving the other's half.
 pub trait HandOverDesk {
     /// Queue the entry `make` produces for `app` and wake it, with what
     /// `activation` lets it bring forward, answering whether it was taken.
@@ -1335,6 +1381,11 @@ pub trait HandOverDesk {
     /// The window `app` most recently opened, as its channel id, for a host
     /// that means to raise it. `None` when it owns none.
     fn recent_window(&self, app: ProcId) -> Option<u64>;
+
+    /// Spend `app`'s unspent activation, answering whether it was minted while
+    /// the keyboard was at `focus`: the one raise a gesture at `app` lent it,
+    /// for a host to lend what `app` hands over to instead.
+    fn spend_activation(&mut self, app: ProcId, focus: Option<u64>) -> bool;
 }
 
 /// A shared-memory region a request named: the handle it was delegated under,
@@ -1383,6 +1434,9 @@ pub struct PickedFile<'a> {
 pub enum OpenEntry {
     /// A path the user named. Confers no access.
     Path(String),
+    /// A disk image or archive the user opened, to be attached and shown.
+    /// Confers no access.
+    Image(String),
     /// A document already opened, reachable through a one-shot delegation the
     /// session minted to the application this is queued for.
     Document {
@@ -1430,6 +1484,7 @@ impl OpenEntry {
     fn as_wire(&self) -> OpenTarget<'_> {
         match self {
             Self::Path(path) => OpenTarget::Path(path.as_bytes()),
+            Self::Image(path) => OpenTarget::Image(path.as_bytes()),
             Self::Document {
                 name,
                 grant,
@@ -1592,8 +1647,9 @@ pub struct WindowServer<M: ShmMapper> {
     open_targets: BTreeMap<ProcId, VecDeque<OpenEntry>>,
     /// Applications holding an unspent activation, each with the window the
     /// keyboard was at when it was minted: one raise of the application's own
-    /// windows ([`WindowRequest::ActivateWindow`]), void once the keyboard has
-    /// moved, so a gesture long past cannot be cashed in over the user's work.
+    /// windows ([`WindowRequest::ActivateWindow`]) or of what it hands over to,
+    /// void once the keyboard has moved, so a gesture long past cannot be
+    /// cashed in over the user's work.
     activations: BTreeMap<ProcId, Option<u64>>,
     /// The next menu-open id to mint. Its own sequence rather than the
     /// window ids': an open names a gesture, not a window, and the two are
@@ -1877,7 +1933,9 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::BeginDrag { .. }
             | WindowRequest::TakeDropTarget { .. }
             | WindowRequest::DragVerdict { .. }
-            | WindowRequest::QueryDragSpot { .. } => {
+            | WindowRequest::QueryDragSpot { .. }
+            | WindowRequest::SaveOfferAnswer { .. }
+            | WindowRequest::SaveInto { .. } => {
                 self.dispatch_transfer(host, caller, decoded, reply)
             }
             ref other => self.dispatch_status_op(host, caller, other, reply),
@@ -1899,14 +1957,10 @@ impl<M: ShmMapper> WindowServer<M> {
         match *request {
             WindowRequest::HandOverLaunch {
                 ref run_path,
-                ref document,
+                ref target,
             } => {
-                let outcome = host.hand_over_requested(
-                    &mut desk,
-                    caller,
-                    run_path.as_str(),
-                    document.as_ref(),
-                );
+                let outcome =
+                    host.hand_over_requested(&mut desk, caller, run_path.as_str(), target);
                 hand_over_reply(reply, outcome)
             }
             WindowRequest::RevealDocument {
@@ -1965,6 +2019,23 @@ impl<M: ShmMapper> WindowServer<M> {
                     .and_then(|()| host.drag_verdict(window_id, serial, verdict));
                 status(reply, answered)
             }
+            WindowRequest::SaveOfferAnswer {
+                window_id,
+                serial,
+                accepts,
+            } => {
+                let answered = owned_window_mut(&mut self.windows, caller, window_id)
+                    .and_then(|_| host.save_offer_answered(window_id, serial, accepts));
+                status(reply, answered)
+            }
+            // Not checked against the window here: the host consumes the
+            // location whatever it answers, and checks the window is the
+            // caller's before acting on it.
+            WindowRequest::SaveInto {
+                window_id,
+                serial,
+                location,
+            } => status(reply, host.save_into(caller, window_id, serial, location)),
             WindowRequest::QueryDragSpot { window_id, serial } => {
                 let read =
                     owned_window_mut(&mut self.windows, caller, window_id).and_then(|record| {
@@ -2190,6 +2261,8 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::TakeDropTarget { .. }
             | WindowRequest::DragVerdict { .. }
             | WindowRequest::QueryDragSpot { .. }
+            | WindowRequest::SaveOfferAnswer { .. }
+            | WindowRequest::SaveInto { .. }
             | WindowRequest::RevealDocument { .. } => status(reply, Err(Errno::NotSupported)),
             // ...and a committed-text pull, likewise.
             WindowRequest::TakeMenuText { .. } => menu_text_reply(reply, Err(Errno::NotSupported)),
@@ -2880,7 +2953,7 @@ impl<M: ShmMapper> WindowServer<M> {
         sink.deliver(endpoint, &WindowEvent::OpenRequested)?;
         let entry = make()?;
         match &entry {
-            OpenEntry::Path(path) => {
+            OpenEntry::Path(path) | OpenEntry::Image(path) => {
                 if path.is_empty() || path.len() > tairix_abi::FS_PATH_MAX {
                     return Err(Errno::LengthOutOfRange);
                 }
@@ -3669,11 +3742,13 @@ impl<M: ShmMapper> WindowServer<M> {
     ///
     /// * [`Errno::NotFound`] — no such window (it was closed, or never
     ///   existed); the session drops the event.
-    /// * [`Errno::OutOfRange`] — a pointer event outside the window's
-    ///   surface, a pick conclusion, an event naming anything but the
-    ///   window's unanswered open (routing bugs, refused rather than
-    ///   delivered), or an application-scoped event (those go through
-    ///   [`Self::deliver_app_event`]).
+    /// * [`Errno::OutOfRange`] — a pointer event, a save offer, or a save
+    ///   offer's drop point outside the window's surface; a pick or an
+    ///   authorisation conclusion, or a drag report, each of which has its
+    ///   own route; a preview no render of the window's awaits; an event
+    ///   naming anything but the window's unanswered open (routing bugs,
+    ///   refused rather than delivered); or an application-scoped event
+    ///   (those go through [`Self::deliver_app_event`]).
     /// * Any [`Errno`] the sink surfaces; a refused delivery leaves an open
     ///   still owed (the session decides whether to retry or tear the client
     ///   down). A sink that *accepts* it is answering for it, whether it goes
@@ -3685,7 +3760,13 @@ impl<M: ShmMapper> WindowServer<M> {
     ) -> Result<(), Errno> {
         let window_id = event.window_id().ok_or(Errno::OutOfRange)?;
         let record = self.windows.get(&window_id).ok_or(Errno::NotFound)?;
-        if let WindowEvent::Pointer { x, y, .. } = *event {
+        if let WindowEvent::Pointer { x, y, .. }
+        | WindowEvent::SaveOffered { x, y, .. }
+        | WindowEvent::SaveOfferEnded {
+            dropped: Some((x, y)),
+            ..
+        } = *event
+        {
             if x >= record.surface.width_px || y >= record.surface.height_px {
                 return Err(Errno::OutOfRange);
             }

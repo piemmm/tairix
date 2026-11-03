@@ -441,9 +441,12 @@ pub enum Errno {
     /// path now. A block request, a display buffer and a volume attach answer
     /// it when the generation or publication they were made for has been
     /// replaced, and a removal or a move whose [`crate::NodeExpect`] the name
-    /// no longer meets answers it with nothing changed. Distinct from
-    /// [`NotFound`](Self::NotFound): something may well be at the path, it is
-    /// just not what the handle reached or the caller expected.
+    /// no longer meets answers it with nothing changed. The desktop session
+    /// answers a pinboard apply with it, publishing nothing, when the apply
+    /// was made over defaults standing in for settings it had not yet read.
+    /// Distinct from [`NotFound`](Self::NotFound): something may well be at
+    /// the path, it is just not what the handle reached or the caller
+    /// expected.
     Stale = 47,
     /// The bus has no periodic bandwidth left for what was asked of it.
     ///

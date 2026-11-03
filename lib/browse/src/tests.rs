@@ -125,6 +125,7 @@ fn volume(label: &str, target: &str, medium: Option<BlkMedium>) -> Volume {
             availability: tairix_abi::sysinfo::MountAvailability::Available,
             owner: None,
             volume_id: [0; 16],
+            read_only: false,
         },
         offered: true,
     }
@@ -175,6 +176,28 @@ fn the_rail_lists_the_users_places_then_the_volumes_in_one_order() {
     // Without a home there is nothing for the home rows to hang off, and the
     // system's own tree is no place — never a row navigating nowhere.
     assert!(Places::new(&[], &[]).is_empty());
+}
+
+/// A file can be made anywhere that stores files but on a volume mounted
+/// read-only, the deepest volume holding the folder deciding.
+#[test]
+fn a_folder_is_writable_unless_its_volume_is_mounted_read_only() {
+    let mut disc = volume("Disc", "/Storage/Disc", None);
+    disc.facts.read_only = true;
+    let places = Places::new(&home(), &[disc, volume("Stick", "/Storage/Stick", None)]);
+    let at = |path: &[&str]| {
+        places.writable_at(&path.iter().copied().map(String::from).collect::<Vec<_>>())
+    };
+    assert!(at(&["Users", "ann", "Home"]), "on no listed volume");
+    assert!(at(&["Storage", "Stick", "Notes"]));
+    assert!(!at(&["Storage", "Disc"]), "the read-only volume's root");
+    assert!(!at(&["Storage", "Disc", "Sub"]), "and what it holds");
+    assert!(!at(&[]), "the root view stores nothing");
+    assert!(!at(&["Storage"]), "nor the storage catalog");
+    assert!(
+        !at(&["System", "Applications"]),
+        "nor the system's own tree"
+    );
 }
 
 /// Only the storage catalog and the volumes directly beneath it are places:
@@ -374,6 +397,29 @@ fn an_unoffered_volume_never_marks_a_target_an_offered_one_holds() {
             .map(|facts| facts.availability),
         Some(MountAvailability::Available)
     );
+}
+
+/// A volume's facts are found by its identity whether or not the rail offers
+/// it, and one the mount table did not list has none.
+#[test]
+fn a_volume_is_found_by_its_identity_offered_or_not() {
+    use tairix_abi::sysinfo::MountAvailability;
+    let mut gone = volume("Game", "/Storage/Game", None);
+    gone.offered = false;
+    gone.facts.availability = MountAvailability::UnavailableLost;
+    gone.facts.volume_id = [4; 16];
+    let mut backup = volume("Backup", "/Storage/Backup", Some(HARD_DISK));
+    backup.facts.volume_id = [5; 16];
+    let places = Places::new(&home(), &[gone, backup]);
+    assert_eq!(
+        places.volume_facts([4; 16]).map(|facts| facts.availability),
+        Some(MountAvailability::UnavailableLost)
+    );
+    assert_eq!(
+        places.volume_facts([5; 16]).map(|facts| facts.availability),
+        Some(MountAvailability::Available)
+    );
+    assert!(places.volume_facts([6; 16]).is_none());
 }
 
 /// One row per target, whatever the order the mount table pages the volumes
@@ -7291,6 +7337,7 @@ fn the_chosen_lost_volume_is_ejected_letting_its_loss_go() {
                 availability: MountAvailability::UnavailableLost,
                 owner: Some(1000),
                 volume_id: [5; 16],
+                read_only: false,
             },
             offered: false,
         }],
@@ -7306,7 +7353,7 @@ fn the_chosen_lost_volume_is_ejected_letting_its_loss_go() {
         Some(MountAct::Eject {
             volume_id: [5; 16],
             name: String::from("game"),
-            lost: true,
+            asked: crate::mount::EjectAsked::LettingGo,
         })
     );
     assert_eq!(
@@ -7350,6 +7397,7 @@ fn a_disk_image_mounts_read_only_and_only_its_attachers_volume_ejects() {
             availability: MountAvailability::Available,
             owner,
             volume_id: [5; 16],
+            read_only: false,
         },
         offered: true,
     };
@@ -13874,6 +13922,7 @@ fn a_rail_menu_ejects_only_a_volume_its_viewer_attached() {
             availability: MountAvailability::Available,
             owner,
             volume_id: [3; 16],
+            read_only: false,
         },
         offered: true,
     };
@@ -13925,4 +13974,16 @@ fn a_rail_menu_ejects_only_a_volume_its_viewer_attached() {
         rows("Home", Some(1000))[1],
         (eject, false, String::from("only a volume ejects"))
     );
+}
+
+/// A file can be made in every folder but the root view and the catalog of
+/// attached volumes; a volume in the catalog stores files.
+#[test]
+fn files_are_stored_in_every_folder_but_the_root_view_and_the_catalog() {
+    let folder = |path: &str| crate::vfs::components_from_absolute_path(path).expect("valid path");
+    assert!(!crate::vfs::stores_files(&folder("/")));
+    assert!(!crate::vfs::stores_files(&folder("/Storage")));
+    assert!(crate::vfs::stores_files(&folder("/Storage/Backup")));
+    assert!(crate::vfs::stores_files(&folder("/Users")));
+    assert!(crate::vfs::stores_files(&folder("/Users/ann/Home")));
 }

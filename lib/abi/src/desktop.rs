@@ -432,6 +432,7 @@ pub struct DesktopInfo {
     text: Option<DesktopText>,
     machine_zone: Option<ZoneName>,
     refresh: RefreshRate,
+    settings_generation: u32,
 }
 
 /// Byte offset of the double-click interval in an encoded [`DesktopInfo`].
@@ -452,6 +453,9 @@ const ZONE_OFFSET: usize = OUTPUT_OFFSET + 8;
 /// Byte offset of the frame rate in an encoded [`DesktopInfo`].
 const REFRESH_OFFSET: usize = ZONE_OFFSET + 1 + ZONE_NAME_MAX;
 
+/// Byte offset of the settings generation in an encoded [`DesktopInfo`].
+const SETTINGS_OFFSET: usize = REFRESH_OFFSET + 4;
+
 impl DesktopInfo {
     /// Encoded size on the wire: screen width (4), screen height (4),
     /// scale percentage (2), appearance (1), one reserved byte that must be
@@ -460,9 +464,9 @@ impl DesktopInfo {
     /// and the text family (16) — a zero size and an all-zero family where
     /// the user chose none — then the output's width (4) and height (4),
     /// the machine zone's name: its length (1) and [`ZONE_NAME_MAX`] bytes,
-    /// zero past it, and all zero where the machine keeps none, and the frame
-    /// rate in millihertz (4).
-    pub const WIRE_LEN: usize = REFRESH_OFFSET + 4;
+    /// zero past it, and all zero where the machine keeps none, the frame
+    /// rate in millihertz (4), and the settings generation (4).
+    pub const WIRE_LEN: usize = SETTINGS_OFFSET + 4;
 
     /// The desktop with a `screen_width_px` × `screen_height_px` screen at
     /// its output's own size, drawn at `scale_percent` of the reference
@@ -502,6 +506,7 @@ impl DesktopInfo {
             text: None,
             machine_zone: None,
             refresh: RefreshRate::ASSUMED,
+            settings_generation: 0,
         })
     }
 
@@ -547,6 +552,15 @@ impl DesktopInfo {
     #[must_use]
     pub const fn with_refresh(self, refresh: RefreshRate) -> Self {
         Self { refresh, ..self }
+    }
+
+    /// The same desktop whose settings document is at `generation`.
+    #[must_use]
+    pub const fn with_settings_generation(self, generation: u32) -> Self {
+        Self {
+            settings_generation: generation,
+            ..self
+        }
     }
 
     /// The same desktop pairing presses under `interval`.
@@ -659,6 +673,14 @@ impl DesktopInfo {
         self.refresh
     }
 
+    /// Which publication of the settings an application keeps in the
+    /// desktop's document is in effect: it moves when the session publishes a
+    /// change to them, so that application reads them again.
+    #[must_use]
+    pub const fn settings_generation(&self) -> u32 {
+        self.settings_generation
+    }
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -704,6 +726,7 @@ impl DesktopInfo {
             out[ZONE_OFFSET + 1..REFRESH_OFFSET].copy_from_slice(name);
         }
         put_u32(out, REFRESH_OFFSET, self.refresh.mhz());
+        put_u32(out, SETTINGS_OFFSET, self.settings_generation);
     }
 
     /// Decode the record occupying the `WIRE_LEN` bytes of `bytes` from
@@ -759,7 +782,8 @@ impl DesktopInfo {
                 record[ZONE_OFFSET],
                 &record[ZONE_OFFSET + 1..REFRESH_OFFSET],
             )?)
-            .with_refresh(refresh))
+            .with_refresh(refresh)
+            .with_settings_generation(read_u32(record, SETTINGS_OFFSET)))
     }
 
     /// Decode a record that occupies the whole of `bytes`.
@@ -805,7 +829,7 @@ mod tests {
     use super::{
         Appearance, Contrast, Density, DesktopInfo, DesktopText, Motion, DOUBLE_CLICK_DEFAULT,
         DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET, OUTPUT_OFFSET, REFRESH_OFFSET,
-        TEXT_OFFSET, ZONE_OFFSET,
+        SETTINGS_OFFSET, TEXT_OFFSET, ZONE_OFFSET,
     };
     use crate::driver::display::RefreshRate;
     use crate::font_ipc::FamilyKey;
@@ -992,12 +1016,22 @@ mod tests {
             u32::MAX,
         ] {
             let mut bytes = desktop().to_le_bytes();
-            bytes[REFRESH_OFFSET..].copy_from_slice(&mhz.to_le_bytes());
+            bytes[REFRESH_OFFSET..SETTINGS_OFFSET].copy_from_slice(&mhz.to_le_bytes());
             assert_eq!(
                 DesktopInfo::from_bytes(&bytes),
                 Err(Errno::OutOfRange),
                 "{mhz}"
             );
+        }
+    }
+
+    #[test]
+    fn the_settings_generation_round_trips_and_starts_at_zero() {
+        assert_eq!(desktop().settings_generation(), 0);
+        for generation in [1, 7, u32::MAX] {
+            let info = desktop().with_settings_generation(generation);
+            assert_eq!(info.settings_generation(), generation);
+            assert_eq!(DesktopInfo::from_bytes(&info.to_le_bytes()), Ok(info));
         }
     }
 

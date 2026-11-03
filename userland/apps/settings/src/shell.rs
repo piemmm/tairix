@@ -21,6 +21,7 @@ use tairix_abi::net_ipc::NetServerAddr;
 use tairix_abi::window_ipc::{PreviewSubject, SystemTask};
 use tairix_abi::zone::ZoneName;
 use tairix_abi::BundleId;
+use tairix_browse::FilerPreferences;
 use tairix_controls::{
     ground_fill, plate_rect, Breadcrumb, BreadcrumbAction, ChromeLayer, Crumb, DisclosureSet,
     FieldGroup, Keystroke, Menu, MenuAction, MenuItem, PlatePlacement, PlateSide, ScrollAction,
@@ -35,7 +36,7 @@ use tairix_sysconfig::SystemConfig;
 use tairix_theme::{CursorSetId, Fonts, Grounds, Theme};
 use tairix_tz::ZoneInfo;
 use tairix_users::Salt;
-use tairix_wallpaper::{CatalogItem, DesktopSettings, ScreensaverChoice};
+use tairix_wallpaper::{ApplyOutcome, CatalogItem, DesktopSettings, ScreensaverChoice};
 
 use crate::accounts::{AccountFacts, AccountTool, Roster};
 use crate::body::{self, Body};
@@ -88,6 +89,8 @@ enum Reading {
     Savers,
     /// What the cooling service reads.
     Cooling,
+    /// The file manager's settings, for rows that hold none.
+    Files,
 }
 
 impl Reading {
@@ -260,6 +263,10 @@ pub enum ShellOutcome {
     /// The shell holds no capability and performs no I/O: it never writes
     /// the desktop's settings, it says what was asked for.
     Apply(String),
+    /// The reader chose one of the file manager's settings: the rendered
+    /// document of its keys, which the caller posts to the desktop session as
+    /// it does [`Apply`](Self::Apply)'s.
+    ApplyFiles(String),
     /// The reader asked for a change this application may not make: the
     /// system task to ask the desktop for, which asks for an account that may
     /// in its own prompt.
@@ -319,6 +326,7 @@ impl ShellOutcome {
             Self::Apply(document) => Some(document),
             Self::Idle
             | Self::Changed
+            | Self::ApplyFiles(_)
             | Self::Authorise(_)
             | Self::LockScreen
             | Self::ChooseZone
@@ -361,6 +369,10 @@ pub struct Shell {
     layouts: u64,
     /// The desktop settings every composed pane's rows are built from.
     settings: DesktopSettings,
+    /// The file manager's settings the Files pane's rows are built from: the
+    /// newest the rows asked the session for, else what the store answered,
+    /// and `None` while nothing has been read.
+    files: Option<FilerPreferences>,
     /// What the pane on show draws.
     body: Body,
     /// The shipped pictures the desktop answered, empty until it has.
@@ -477,6 +489,7 @@ impl Shell {
             under: None,
             layouts: 0,
             settings,
+            files: None,
             body: Body::Statement,
             catalog: Vec::new(),
             savers: Vec::new(),
@@ -1347,6 +1360,72 @@ impl Shell {
         self.adopt_settings(self.settings.clone());
     }
 
+    /// Adopt what the store holds of the file manager's settings, or `None`
+    /// where it could not be read, answering whether the Files rows were
+    /// rebuilt.
+    ///
+    /// Measured against the newest the rows asked for, so a reading that
+    /// confirms it rebuilds nothing. With nothing read the rows offer no
+    /// choice, so no apply is built from values nobody read.
+    pub fn adopt_files(&mut self, files: Option<FilerPreferences>) -> bool {
+        self.wanted.landed(Reading::Files);
+        let shown = self
+            .body
+            .form()
+            .map_or(self.files, |form| form.files().copied());
+        self.files = files;
+        if shown == files {
+            return false;
+        }
+        self.body.adopt_files(files.as_ref());
+        self.states_files()
+    }
+
+    /// Adopt what an apply of the Files rows came to, answering whether the
+    /// rows were rebuilt.
+    ///
+    /// One with a newer apply `behind` it predates the rows and changes
+    /// nothing. One the session took posted every key, so with the store
+    /// then unread the rows already show what it holds.
+    pub fn adopt_files_answer(
+        &mut self,
+        behind: bool,
+        outcome: &ApplyOutcome,
+        files: Option<FilerPreferences>,
+    ) -> bool {
+        let taken_unread = files.is_none() && matches!(outcome, ApplyOutcome::Applied);
+        if behind || taken_unread {
+            return false;
+        }
+        self.adopt_files(files)
+    }
+
+    /// Whether the caller should read the file manager's settings: their
+    /// pane came on show holding none, so no apply of them is on its way.
+    #[must_use]
+    pub const fn files_wanted(&self) -> bool {
+        self.files.is_none() && self.wanted.holds(Reading::Files)
+    }
+
+    /// Whether the pane on show is the Files pane.
+    fn states_files(&self) -> bool {
+        self.body
+            .composition()
+            .is_some_and(Composition::reads_files)
+    }
+
+    /// The shell outcome `acted` implies, holding a Files choice as the
+    /// newest the rows asked for, which a pane built again before its answer
+    /// lands shows.
+    fn form_concluded(&mut self, acted: FormOutcome) -> ShellOutcome {
+        if let (FormOutcome::ApplyFiles(_), Some(asked)) =
+            (&acted, self.body.form().and_then(Form::files))
+        {
+            self.files = Some(*asked);
+        }
+        outcome_of(acted)
+    }
+
     /// Build what the pane on show draws.
     fn restate_body(&mut self) {
         let listed = matches!(self.body, Body::Volumes(_));
@@ -1377,6 +1456,7 @@ impl Shell {
         let staged_accounts = self.body.staged_accounts().to_vec();
         let answered = body::Answered {
             settings: &self.settings,
+            files: self.files.as_ref(),
             cursor_sets: &self.cursor_sets,
             catalog: &self.catalog,
             savers: &self.savers,
@@ -1450,15 +1530,18 @@ impl Shell {
         if !saved && self.states_savers() {
             self.wanted.arm(Reading::Savers);
         }
-        // Rebuilt rather than kept: a band belongs to the pane that offers
-        // it, and one carried across a navigation would state the last
-        // pane's standing under this pane's rows.
         // Asked for when a pane that stages a machine setting comes on
         // show, for the same reason the mount table is: the store moves,
         // and a stale reading is a value the reader cannot account for.
         if self.body.stages_machine_settings() && self.config.is_none() {
             self.wanted.arm(Reading::Config);
         }
+        if self.states_files() && self.files.is_none() {
+            self.wanted.arm(Reading::Files);
+        }
+        // Rebuilt rather than kept: a band belongs to the pane that offers
+        // it, and one carried across a navigation would state the last
+        // pane's standing under this pane's rows.
         self.footer = self.band();
         self.pictures_moved();
     }
@@ -2196,7 +2279,7 @@ impl Shell {
             self.restate_staged(frame, viewport, scale, theme, damage);
         }
         self.refit(viewport, scale, theme, damage);
-        outcome_of(acted)
+        self.form_concluded(acted)
     }
 
     /// Lay the pane out again where a choice rebuilt its form — another
@@ -2440,7 +2523,7 @@ impl Shell {
                     // to.
                     let frame = self.frame(viewport, scale, theme);
                     self.reveal_cursor(&frame, viewport, scale, theme, damage);
-                    return outcome_of(acted);
+                    return self.form_concluded(acted);
                 }
                 let Some(rect) = frame.scrollbar else {
                     return ShellOutcome::Idle;
@@ -3512,6 +3595,7 @@ fn outcome_of(acted: FormOutcome) -> ShellOutcome {
             ShellOutcome::Changed
         }
         FormOutcome::Apply(document) => ShellOutcome::Apply(document),
+        FormOutcome::ApplyFiles(document) => ShellOutcome::ApplyFiles(document),
         FormOutcome::LockScreen => ShellOutcome::LockScreen,
         FormOutcome::ChooseZone => ShellOutcome::ChooseZone,
         FormOutcome::PreviewScreensaver(document) => ShellOutcome::PreviewScreensaver(document),

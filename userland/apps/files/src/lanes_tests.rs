@@ -117,7 +117,7 @@ fn an_eject_runs_on_its_volumes_lane_and_a_mount_on_its_images() {
     let eject = MountAct::Eject {
         volume_id: [3; 16],
         name: String::from("stick"),
-        lost: false,
+        asked: tairix_browse::mount::EjectAsked::ByUser,
     };
     assert_eq!(routes.lane_of_act(&eject), Lane::Volume([3; 16]));
     let attach = MountAct::Attach {

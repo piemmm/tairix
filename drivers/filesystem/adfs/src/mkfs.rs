@@ -13,7 +13,7 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
 use tairix_fsprobe::adfs::{
-    link_bits, seal_boot_block, zone_check, zone_start_bit, DiscRecord, BOOT_BLOCK_OFFSET,
+    link_bits, seal_boot_block, zone_check, zone_start_bit, DiscRecord, MapCopy, BOOT_BLOCK_OFFSET,
     BOOT_BLOCK_SIZE, CROSS_CHECK_BYTE, CROSS_CHECK_SUM, DISC_RECORD_SIZE, FRAG_BAD, FRAG_ROOT,
     FREELINK_BIT, LINK_BITS_MAX, ZONE_CHECK_BYTE, ZONE_HEADER_SIZE,
 };
@@ -292,8 +292,6 @@ fn format_new_map<B: Block>(
         root_blocks: if variant.is_big_dir() { root_blocks } else { 0 },
     };
     write_fresh_map(volume, &record, &layout)?;
-    // Zero the reserved second map copy area.
-    volume.zero(map_offset + map_bytes, map_bytes)?;
     if record.nzones > 1 {
         write_boot_block(volume, &record)?;
     }
@@ -324,9 +322,9 @@ struct MapLayout {
     root_blocks: u64,
 }
 
-/// Write every map zone of a fresh volume: the allocated system
-/// extents, one free fragment per gap, and the trailing defect
-/// fragment covering map bits past the end of the disc.
+/// Write every map zone of a fresh volume to both map copies: the
+/// allocated system extents, one free fragment per gap, and the trailing
+/// defect fragment covering map bits past the end of the disc.
 fn write_fresh_map<B: Block>(
     volume: &mut ByteDevice<B>,
     record: &DiscRecord,
@@ -441,8 +439,9 @@ fn write_fresh_map<B: Block>(
             bits_set(&mut buf, physical_end - 1, true);
         }
         buf[ZONE_CHECK_BYTE] = zone_check(&buf[..sector]);
-        let at = record.map_offset() + u64::from(zone) * record.sector_size();
-        volume.write(at, &buf[..sector])?;
+        for copy in [MapCopy::First, MapCopy::Second] {
+            volume.write(record.zone_offset(copy, zone), &buf[..sector])?;
+        }
     }
     Ok(())
 }

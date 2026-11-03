@@ -577,10 +577,13 @@ where
             if fitted.pixels.len() != expected {
                 return None;
             }
-            return Artwork::framed(
-                Surface::from_rgba8(side, side, &fitted.pixels)?,
-                fitted.bounds,
-            );
+            // An icon, not a thumbnail of a picture: its transparent margin
+            // is the background's, so it is never framed.
+            return Some(Artwork::new(Surface::from_rgba8(
+                side,
+                side,
+                &fitted.pixels,
+            )?));
         }
     }
     None

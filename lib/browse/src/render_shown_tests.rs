@@ -113,6 +113,7 @@ fn places() -> Places {
                 availability: MountAvailability::Available,
                 owner: None,
                 volume_id: [0; 16],
+                read_only: false,
             },
             offered: true,
         }],

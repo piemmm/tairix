@@ -1673,6 +1673,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1641 | `ci` ran none of the six wasm32 verticals, its test step passing no `--wasm`, and nothing provisioned the headless browser two of them drive — closed: `ci` passes `--wasm` and `ci-long`'s hunt repeats every vertical; `tests/integration/package-lock.json` pins puppeteer, both workflows install it with `npm ci`, the stage refuses a run whose browser cannot be launched and names the remedy, and the browser harnesses run puppeteer's own pinned Chrome |
 | D1642 | nothing held a test target the workspace builds to being run by some stage: a QEMU vertical, a wasm32 vertical, a loom harness or a target behind required features no host pass turns on could fall outside every stage — closed: `every_vertical_binary_in_the_workspace_is_enrolled`, `every_program_crate_is_planted`, `every_wasm32_vertical_in_the_workspace_is_enrolled`, `every_loom_harness_in_the_workspace_is_enrolled` (every loom-gated harness, by file) and `a_target_no_host_pass_builds_holds_no_test` read the workspace and fail on any such target; a test a `cfg` compiles out of an always-built target is D1645 |
 | D1644 | MLFQ's run queue hands each task between CPUs as a raw `Arc` pointer under no UB oracle, though the scheduler page said miri interpreted its hand-off test, and a scheduler test leaked the scheduler through a task body holding it — closed: `tairix-kernel-sched-mlfq` is enrolled in `miri::TARGETS` and runs leak-free, the fixture holding the scheduler weakly |
+| D1646 | `docs-check` has no stale-symbol check: the charter has it fail on a `docs/src` page naming a symbol that no longer exists, but `linkcheck.rs` reads only link targets and lost characters, so a removed item's name (as `Chrome::HIDDEN` was) survives in the book unflagged | open |
+| D1647 | an activation a gesture mints lasts while the keyboard stays where it was, with no age limit, so an application holding an icon-bar gesture's can spend it long after (`lib/window` `server.rs` activations) | open |
 
 ## Scope
 
@@ -8341,7 +8343,7 @@ infrastructure touching every enrolment's `typed_keys`, which is why it is its
 own piece of work rather than a step inside a vertical.
 
 **What it unblocks.** FM9-a's rename half; FM9-a's *toolbar* gesture (a files
-window opens with `Chrome::HIDDEN`, so the New Folder tool is only reachable
+window opens with the band hidden by default, so the New Folder tool is only reachable
 after `Ctrl+F9` reveals the band, or via `Ctrl+Shift+N`); FM9-c's delete
 click-through; and any later click-through needing a function key. The
 regression test requirement rides with it: each unblocked click-through lands

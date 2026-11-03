@@ -70,6 +70,9 @@ pub enum Handover {
 pub enum LaunchTarget<'a> {
     /// A path the application opens itself.
     Path(&'a str),
+    /// A disk image or archive the user opened, which the file manager
+    /// attaches and shows.
+    Image(&'a str),
     /// A document already opened for it: what to call it, and the authority
     /// to read it.
     Document {
@@ -206,6 +209,7 @@ pub fn open_entry(
 ) -> Result<OpenEntry, Errno> {
     Ok(match target {
         LaunchTarget::Path(path) => OpenEntry::Path(String::from(path)),
+        LaunchTarget::Image(path) => OpenEntry::Image(String::from(path)),
         LaunchTarget::Document {
             name,
             authority,
@@ -268,6 +272,86 @@ pub fn resolve_launch<H: LaunchHost>(
     Launch::Spawn
 }
 
+/// The desktop's file manager as a launch finds it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FileManagerFound {
+    /// None runs.
+    Gone,
+    /// One runs and has not yet reached the window channel, so nothing can
+    /// be handed to it.
+    Starting,
+    /// One runs, by its attested identity.
+    Live(ProcId),
+}
+
+/// What handing the desktop's file manager a target comes to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FileManagerHand {
+    /// None runs: start it to show the target.
+    Start,
+    /// It took the target.
+    Handed,
+    /// One is starting: hold the target until it can take it.
+    Wait,
+    /// One runs but did not take it: a second is never started beside it.
+    Refused,
+}
+
+/// A target opened while the desktop's file manager was starting, held to be
+/// handed to it once it can take one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HeldTarget {
+    /// A folder to show.
+    Folder(String),
+    /// A disk image to mount and show.
+    Image(String),
+}
+
+impl HeldTarget {
+    /// `target` held, or `None` for a target the file manager is never handed.
+    #[must_use]
+    pub fn of(target: LaunchTarget<'_>) -> Option<Self> {
+        match target {
+            LaunchTarget::Path(path) => Some(Self::Folder(String::from(path))),
+            LaunchTarget::Image(path) => Some(Self::Image(String::from(path))),
+            LaunchTarget::Document { .. } | LaunchTarget::Pane(_) => None,
+        }
+    }
+
+    /// The target to hand over.
+    #[must_use]
+    pub fn target(&self) -> LaunchTarget<'_> {
+        match self {
+            Self::Folder(path) => LaunchTarget::Path(path),
+            Self::Image(path) => LaunchTarget::Image(path),
+        }
+    }
+}
+
+/// The most targets held for a starting file manager: what a user can open in
+/// the moment it takes to start, past which one is refused rather than held.
+pub const MAX_HELD_FOR_FILE_MANAGER: usize = 4;
+
+/// Hand the desktop's file manager, as `found`, `target` through `host`.
+///
+/// Unlike [`resolve_launch`] this never answers a spawn beside a running
+/// instance: the file manager is the desktop's own and never quits, so a
+/// second would be a second one for good.
+pub fn hand_file_manager<H: LaunchHost>(
+    host: &mut H,
+    found: FileManagerFound,
+    target: LaunchTarget<'_>,
+) -> FileManagerHand {
+    match found {
+        FileManagerFound::Gone => FileManagerHand::Start,
+        FileManagerFound::Starting => FileManagerHand::Wait,
+        FileManagerFound::Live(app) => match resolve_launch(host, Some(app), true, Some(target)) {
+            Launch::Reused { .. } => FileManagerHand::Handed,
+            Launch::Spawn => FileManagerHand::Refused,
+        },
+    }
+}
+
 /// The label used for a reaped child the launcher did not record (it should
 /// not happen — every desktop child is recorded at launch — but a diagnosis
 /// must never be dropped for want of a name).
@@ -282,6 +366,8 @@ pub struct LaunchedApp {
     /// The bundle entry-point path the child was spawned from — its
     /// attested bundle identity.
     pub run_path: String,
+    /// When its launch was admitted, on the monotonic clock.
+    pub started_ns: u64,
 }
 
 /// Every child the desktop has launched and not yet reaped, keyed by PID, and
@@ -298,6 +384,9 @@ pub struct LaunchTable {
     /// Whether a child was recorded or forgotten since
     /// [`take_moved`](Self::take_moved) last answered.
     moved: bool,
+    /// Targets opened while the file manager was starting, oldest first. At
+    /// most [`MAX_HELD_FOR_FILE_MANAGER`].
+    held: Vec<HeldTarget>,
 }
 
 /// The most launches held between two drains of the table's uses: a
@@ -334,15 +423,38 @@ impl LaunchTable {
 
     /// Record the admitted child `pid`, launched from `run_path` and
     /// reported as `label`.
-    pub fn record(&mut self, pid: u64, label: &str, run_path: &str) {
+    pub fn record(&mut self, pid: u64, label: &str, run_path: &str, started_ns: u64) {
         self.children.insert(
             pid,
             LaunchedApp {
                 label: String::from(label),
                 run_path: String::from(run_path),
+                started_ns,
             },
         );
         self.moved = true;
+    }
+
+    /// Hold `target` for the file manager that is starting, answering `false`
+    /// where [`MAX_HELD_FOR_FILE_MANAGER`] are held already.
+    pub fn hold_for_file_manager(&mut self, target: HeldTarget) -> bool {
+        if self.held.len() >= MAX_HELD_FOR_FILE_MANAGER {
+            return false;
+        }
+        self.held.push(target);
+        true
+    }
+
+    /// Whether a target is held for the file manager.
+    #[must_use]
+    pub fn holds_for_file_manager(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    /// The targets held for the file manager, oldest first, now it can take
+    /// them.
+    pub fn take_held_for_file_manager(&mut self) -> Vec<HeldTarget> {
+        core::mem::take(&mut self.held)
     }
 
     /// Forget (and return) the record for a reaped `pid`.
@@ -487,29 +599,60 @@ pub fn reap_launched<R, P, T>(
 ) where
     R: FnMut() -> Option<(u64, WaitStatus)>,
     P: FnMut(&str),
-    T: FnMut(u64),
+    T: FnMut(u64, Option<&LaunchedApp>),
 {
     while let Some((pid, status)) = reap() {
         let WaitStatus::Exited(_) = status else {
             continue;
         };
-        let label = launched.remove(pid);
-        let label = label
-            .as_ref()
-            .map_or(UNKNOWN_LABEL, |app| app.label.as_str());
+        let app = launched.remove(pid);
+        let label = app.as_ref().map_or(UNKNOWN_LABEL, |app| app.label.as_str());
         if let Some(line) = launch_failure_report(label, status) {
             report(&line);
         }
-        teardown(pid);
+        teardown(pid, app.as_ref());
+    }
+}
+
+/// How long the desktop's file manager must have run for its end to count
+/// as a steady run's rather than a failed start's.
+pub const FILE_MANAGER_STEADY_NS: u64 = 30_000_000_000;
+
+/// How many failed starts in a row the desktop answers with another before
+/// it waits for the user to open a folder.
+pub const FILE_MANAGER_RETRIES: u8 = 3;
+
+/// The desktop's keeping of its file manager, which never quits: one that
+/// ends is started again, unless it keeps ending as it starts, which another
+/// start would only repeat.
+#[derive(Debug, Default)]
+pub struct FileManagerKeeper {
+    /// How many of its runs in a row ended within
+    /// [`FILE_MANAGER_STEADY_NS`] of starting.
+    failed_starts: u8,
+}
+
+impl FileManagerKeeper {
+    /// A run started at `started_ns`, by whichever path started it, ended at
+    /// `now_ns`: whether to start it again.
+    pub fn ended(&mut self, started_ns: u64, now_ns: u64) -> bool {
+        let steady = now_ns.saturating_sub(started_ns) >= FILE_MANAGER_STEADY_NS;
+        self.failed_starts = if steady {
+            0
+        } else {
+            self.failed_starts.saturating_add(1)
+        };
+        self.failed_starts <= FILE_MANAGER_RETRIES
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        admitted_pid, launch_argv, launch_failure_report, reap_launched, resolve_launch,
-        DocumentAuthority, DocumentRelay, Handover, Launch, LaunchHost, LaunchTable, LaunchTarget,
-        UNKNOWN_LABEL,
+        admitted_pid, hand_file_manager, launch_argv, launch_failure_report, reap_launched,
+        resolve_launch, DocumentAuthority, DocumentRelay, FileManagerFound, FileManagerHand,
+        FileManagerKeeper, Handover, HeldTarget, Launch, LaunchHost, LaunchTable, LaunchTarget,
+        FILE_MANAGER_RETRIES, FILE_MANAGER_STEADY_NS, MAX_HELD_FOR_FILE_MANAGER, UNKNOWN_LABEL,
     };
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -551,6 +694,7 @@ mod tests {
         fn queue_open_target(&mut self, app: ProcId, target: LaunchTarget<'_>) -> bool {
             let named = match target {
                 LaunchTarget::Path(path) => String::from(path),
+                LaunchTarget::Image(path) => alloc::format!("image:{path}"),
                 LaunchTarget::Document { name, .. } => alloc::format!("document:{}", name.as_str()),
                 LaunchTarget::Pane(pane) => alloc::format!("pane:{pane}"),
             };
@@ -683,6 +827,11 @@ mod tests {
             super::open_entry(LaunchTarget::Pane("wallpaper"), &mut relay, APP),
             Ok(OpenEntry::Pane(String::from("wallpaper"))),
             "a pane confers nothing, so nothing is relayed"
+        );
+        assert_eq!(
+            super::open_entry(LaunchTarget::Image("/Users/ada/wb.adf"), &mut relay, APP),
+            Ok(OpenEntry::Image(String::from("/Users/ada/wb.adf"))),
+            "an image is a path to attach, and relays nothing either"
         );
         assert_eq!(relay.asked.len(), 1);
     }
@@ -873,8 +1022,8 @@ mod tests {
     fn the_table_resolves_a_running_child_by_its_run_path() {
         let mut launched = LaunchTable::new();
         assert!(launched.is_empty());
-        launched.record(10, "Files", tairix_abi::FILES_RUN_PATH);
-        launched.record(11, "Chess", "/System/Applications/chess.app/Run");
+        launched.record(10, "Files", tairix_abi::FILES_RUN_PATH, 0);
+        launched.record(11, "Chess", "/System/Applications/chess.app/Run", 0);
         assert_eq!(launched.len(), 2);
 
         assert_eq!(launched.running_from(tairix_abi::FILES_RUN_PATH), Some(10));
@@ -893,7 +1042,7 @@ mod tests {
     fn a_child_recorded_or_forgotten_moves_the_table_once() {
         let mut launched = LaunchTable::new();
         assert!(!launched.take_moved());
-        launched.record(10, "Files", tairix_abi::FILES_RUN_PATH);
+        launched.record(10, "Files", tairix_abi::FILES_RUN_PATH, 0);
         assert!(launched.take_moved());
         assert!(!launched.take_moved(), "the latch drains");
         assert_eq!(launched.remove(11), None);
@@ -931,7 +1080,7 @@ mod tests {
     #[test]
     fn get_resolves_a_running_child_by_its_pid() {
         let mut launched = LaunchTable::new();
-        launched.record(11, "Chess", "/System/Applications/chess.app/Run");
+        launched.record(11, "Chess", "/System/Applications/chess.app/Run", 0);
 
         let app = launched.get(11).expect("recorded");
         assert_eq!(app.label, "Chess");
@@ -954,8 +1103,8 @@ mod tests {
     #[test]
     fn reap_drains_and_reports_only_the_refused_launch() {
         let mut launched = LaunchTable::new();
-        launched.record(10, "Files", tairix_abi::FILES_RUN_PATH);
-        launched.record(11, "Terminal", "/System/Applications/terminal.app/Run");
+        launched.record(10, "Files", tairix_abi::FILES_RUN_PATH, 0);
+        launched.record(11, "Terminal", "/System/Applications/terminal.app/Run", 0);
 
         let mut script = alloc::vec![
             (10u64, WaitStatus::Exited(LOAD_UNVERIFIED)),
@@ -969,7 +1118,7 @@ mod tests {
             &mut launched,
             || script.next(),
             |line| reported.push(String::from(line)),
-            |pid| torn_down.push(pid),
+            |pid, _| torn_down.push(pid),
         );
 
         assert!(launched.is_empty(), "every reaped child is dropped");
@@ -997,7 +1146,7 @@ mod tests {
             &mut launched,
             || script.next(),
             |line| reported.push(String::from(line)),
-            |pid| torn_down.push(pid),
+            |pid, _| torn_down.push(pid),
         );
 
         assert_eq!(torn_down, alloc::vec![7]);
@@ -1010,7 +1159,7 @@ mod tests {
     #[test]
     fn a_stopped_child_keeps_its_record_and_its_windows() {
         let mut launched = LaunchTable::new();
-        launched.record(10, "Viewer", "/System/Applications/viewer.app/Run");
+        launched.record(10, "Viewer", "/System/Applications/viewer.app/Run", 0);
 
         let mut script = alloc::vec![(10u64, WaitStatus::Stopped(Signal::Stop))].into_iter();
         let mut reported: Vec<String> = Vec::new();
@@ -1020,7 +1169,7 @@ mod tests {
             &mut launched,
             || script.next(),
             |line| reported.push(String::from(line)),
-            |pid| torn_down.push(pid),
+            |pid, _| torn_down.push(pid),
         );
 
         assert_eq!(launched.len(), 1, "a stopped child is still launched");
@@ -1036,8 +1185,8 @@ mod tests {
     #[test]
     fn a_stop_does_not_stop_the_drain() {
         let mut launched = LaunchTable::new();
-        launched.record(10, "Viewer", "/System/Applications/viewer.app/Run");
-        launched.record(11, "Terminal", "/System/Applications/terminal.app/Run");
+        launched.record(10, "Viewer", "/System/Applications/viewer.app/Run", 0);
+        launched.record(11, "Terminal", "/System/Applications/terminal.app/Run", 0);
 
         let mut script = alloc::vec![
             (10u64, WaitStatus::Stopped(Signal::Stop)),
@@ -1050,7 +1199,7 @@ mod tests {
             &mut launched,
             || script.next(),
             |_| {},
-            |pid| {
+            |pid, _| {
                 torn_down.push(pid);
             },
         );
@@ -1064,6 +1213,138 @@ mod tests {
         assert!(
             launched.get(10).is_some(),
             "the stopped child is still recorded"
+        );
+    }
+
+    /// The reaped child's own record reaches the teardown, so the desktop can
+    /// tell which program ended; a child it never launched comes with none.
+    #[test]
+    fn the_teardown_is_told_which_program_ended() {
+        let mut launched = LaunchTable::new();
+        launched.record(10, "Files", tairix_abi::FILES_RUN_PATH, 0);
+        let mut script = alloc::vec![
+            (10u64, WaitStatus::Exited(0)),
+            (12u64, WaitStatus::Exited(0)),
+        ]
+        .into_iter();
+        let mut ended: Vec<(u64, Option<String>)> = Vec::new();
+        reap_launched(
+            &mut launched,
+            || script.next(),
+            |_| {},
+            |pid, app| ended.push((pid, app.map(|app| app.run_path.clone()))),
+        );
+        assert_eq!(
+            ended,
+            [
+                (10, Some(String::from(tairix_abi::FILES_RUN_PATH))),
+                (12, None)
+            ]
+        );
+    }
+
+    /// The file manager is started only where none runs: one still starting,
+    /// or one that turns the target away, is never joined by a second.
+    #[test]
+    fn a_second_file_manager_is_never_started_beside_one() {
+        let mut host = FakeHost::reachable();
+        assert_eq!(
+            hand_file_manager(&mut host, FileManagerFound::Gone, path("/Users/ann")),
+            FileManagerHand::Start
+        );
+        assert_eq!(
+            hand_file_manager(&mut host, FileManagerFound::Starting, path("/Users/ann")),
+            FileManagerHand::Wait,
+            "held for it, never handed to a second"
+        );
+        assert_eq!(
+            hand_file_manager(&mut host, FileManagerFound::Live(APP), path("/Users/ann")),
+            FileManagerHand::Handed
+        );
+        assert_eq!(host.queued, [(APP, String::from("/Users/ann"))]);
+        let mut refusing = FakeHost::default();
+        assert_eq!(
+            hand_file_manager(
+                &mut refusing,
+                FileManagerFound::Live(APP),
+                path("/Users/ann")
+            ),
+            FileManagerHand::Refused,
+            "where the generic launch would spawn a second"
+        );
+    }
+
+    /// The file manager is started again whenever a steady run ends, but a
+    /// run of failed starts is retried only so far, and a steady run after
+    /// them counts afresh.
+    #[test]
+    fn the_file_manager_is_kept_but_a_failing_start_is_not_repeated_for_ever() {
+        let mut keeper = FileManagerKeeper::default();
+        assert!(
+            keeper.ended(0, FILE_MANAGER_STEADY_NS),
+            "a steady run ends: again"
+        );
+        let mut now = FILE_MANAGER_STEADY_NS;
+        for retry in 0..FILE_MANAGER_RETRIES {
+            assert!(
+                keeper.ended(now, now + 1),
+                "failed start {retry} is retried"
+            );
+            now += 1;
+        }
+        assert!(
+            !keeper.ended(now, now + 1),
+            "one failed start too many waits"
+        );
+        assert!(
+            keeper.ended(now + 2, now + 2 + FILE_MANAGER_STEADY_NS),
+            "a steady run starts the count again"
+        );
+    }
+
+    /// A run is judged by when it started, whichever path started it — the
+    /// keeper's own restart or an open that found none running — so a start
+    /// for an open that fails at once counts as a failed start.
+    #[test]
+    fn a_run_is_judged_from_its_own_start() {
+        let mut launched = LaunchTable::new();
+        let later = FILE_MANAGER_STEADY_NS * 10;
+        launched.record(4, "Files", tairix_abi::FILES_RUN_PATH, later);
+        let ended = launched.remove(4).expect("recorded");
+        let mut keeper = FileManagerKeeper::default();
+        for _ in 0..FILE_MANAGER_RETRIES {
+            assert!(keeper.ended(ended.started_ns, later + 1));
+        }
+        assert!(
+            !keeper.ended(ended.started_ns, later + 1),
+            "a run started for an open and failing at once is a failed start"
+        );
+    }
+
+    /// Targets opened while the file manager starts are held, oldest first,
+    /// and no more than the bound, so none is dropped for its starting and
+    /// none is handed to a second.
+    #[test]
+    fn targets_opened_while_the_file_manager_starts_are_held_in_order() {
+        let mut launched = LaunchTable::new();
+        assert!(!launched.holds_for_file_manager());
+        for at in 0..MAX_HELD_FOR_FILE_MANAGER {
+            let folder = alloc::format!("/Users/ann/{at}");
+            let held = HeldTarget::of(LaunchTarget::Path(&folder)).expect("a folder is held");
+            assert!(launched.hold_for_file_manager(held));
+        }
+        assert!(
+            !launched.hold_for_file_manager(HeldTarget::Image(String::from("/x.adf"))),
+            "past the bound one is refused"
+        );
+        let held = launched.take_held_for_file_manager();
+        assert_eq!(held.len(), MAX_HELD_FOR_FILE_MANAGER);
+        assert_eq!(held[0].target(), LaunchTarget::Path("/Users/ann/0"));
+        assert!(!launched.holds_for_file_manager());
+        assert_eq!(
+            HeldTarget::of(LaunchTarget::Image("/d.iso"))
+                .map(|held| held.target() == LaunchTarget::Image("/d.iso")),
+            Some(true)
         );
     }
 
@@ -1087,7 +1368,7 @@ mod tests {
     fn reap_with_no_zombies_does_nothing() {
         let mut launched = LaunchTable::new();
         let path = tairix_abi::FILES_RUN_PATH;
-        launched.record(3, "Files", path);
+        launched.record(3, "Files", path, 0);
         let mut reported: Vec<String> = Vec::new();
         let mut torn_down: Vec<u64> = Vec::new();
 
@@ -1095,7 +1376,7 @@ mod tests {
             &mut launched,
             || None,
             |line| reported.push(String::from(line)),
-            |pid| torn_down.push(pid),
+            |pid, _| torn_down.push(pid),
         );
 
         assert_eq!(launched.len(), 1, "an unexited child stays in flight");

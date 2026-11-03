@@ -117,10 +117,10 @@ mod program {
     use tairix_appdata::RtHost;
     use tairix_audio::live::{live_captures, RtAudio};
     use tairix_audio::stream::{devices, set_control, DeviceControl};
-    use tairix_browse::mount::{MountAct, MountDone, MountWorker};
     use tairix_browse::{
-        AppAssociation, DirectorySource, Entry, GridView, Listing, ListingDesk, ListingJob, Probe,
-        Probes, RtLinkReader, Took, WatchUpdate, WatchedDirectory, Watches, WATCH_BUFFER_LEN,
+        AppAssociation, DirectorySource, Entry, FilerPreferences, GridView, Listing, ListingDesk,
+        ListingJob, Probe, Probes, RtLinkReader, Took, WatchUpdate, WatchedDirectory, Watches,
+        WATCH_BUFFER_LEN,
     };
     use tairix_caps::CapabilitySet;
     use tairix_controls::{damage, RowIcon};
@@ -149,9 +149,9 @@ mod program {
     use tairix_desktop_session::{
         admitted_pid, adopt_unlocks, catalogued, chain_geometry, deliver_pending_open,
         desktop_info, drain_authorising, drain_away, drain_locked, drop_is_noteworthy,
-        encode_switchboard_reply, focus_reports, land_preview, launch_argv,
+        encode_switchboard_reply, focus_reports, hand_file_manager, land_preview, launch_argv,
         load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report, open_entry,
-        open_tray, park_within, parse, publish_pinboard, reap_launched, relay_power,
+        open_tray, park_within, parse, publish_asked, reap_launched, relay_power,
         resize_drag_event, resolve_launch, resolve_window_identities, seat_held, serve_park_ns,
         serve_pinboard, serve_switchboard_request, settled_size_event, size_state_name,
         tool_move_abandoned_event, tool_move_event, window_control_alternate_event,
@@ -161,16 +161,17 @@ mod program {
         BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop, DesktopAction,
         DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource, DocumentAuthority,
         DocumentRelay, DragEnd, DragPlace, DragSurface, DropRefusal, ElevateAsk, Elevation,
-        Elevator, FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
-        GestureRefusal, HangTracker, HoldBack, IdleAction, IdleClock, IdlePolicy, InputPolicy,
-        KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
-        LayerDecision, LayerFeed, Listing as Authorisers, LoadedPinboard, LoadedPrograms,
-        MachineWatch, OwedReport, OwnPick, OwnerBundleGate, OwnerWindow, PickAccess, PickEnd,
-        PickStep, PinboardApplied, PinboardCall, PinboardRefusal, Prepared, PresentedOwners,
-        PreviewBudget, PreviewDone, PreviewJob, PreviewRequest, PreviewRun, PreviewTarget,
-        PromptOutcome, Requester, ResizedRecord, ResolutionAsk, ResolutionPrompt, Routed,
-        SaverContext, SaverEnd, SaverLaunch, SaverLauncher, SaverSetup, ScreenFade, ScreenLock,
-        Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake,
+        Elevator, FileManagerFound, FileManagerHand, FileManagerKeeper, FrameContent, FramePacer,
+        FrameReportGate, FrameStatsPublisher, FrameStatsSink, GestureRefusal, HangTracker,
+        HeldTarget, HoldBack, IdleAction, IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource,
+        Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed,
+        Listing as Authorisers, LoadedPrograms, MachineWatch, OfferEnd, OwedReport, OwnPick,
+        OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, PinboardApplied, PinboardCall,
+        PinboardRefusal, Prepared, PresentedOwners, PreviewBudget, PreviewDone, PreviewJob,
+        PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, Publication, Requester,
+        ResizedRecord, ResolutionAsk, ResolutionPrompt, Routed, SaveEnd, SaveOffer, SaverContext,
+        SaverEnd, SaverLaunch, SaverLauncher, SaverSetup, ScreenFade, ScreenLock, Screensaver,
+        Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake,
         SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SlideWant,
         SlotAnswer, SoundCall, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Timed,
         Trial, TrialEnd, TrialOutcome, UnlockAnswer, UnlockAsk, WallpaperDesk, WallpaperJob,
@@ -459,10 +460,6 @@ mod program {
     /// The wait-set token of every saver taken down while it still ran: ready
     /// once one has exited, to be reaped.
     const SAVER_EXIT_TOKEN: u64 = 31;
-
-    /// The wait-set token of the mount worker's wake: a disk image opened on
-    /// the desktop was mounted, or refused.
-    const MOUNT_TOKEN: u64 = 32;
 
     /// How often the user's screensaver store's watch may report: a bundle
     /// copied in costs one read of the stores, and is most often whole by
@@ -1093,9 +1090,17 @@ mod program {
         confirm.abandon(shell, compositor);
         report_elevation(elevate.abandon(compositor));
         resolution.abandon(shell, compositor);
-        if let Some(ended) = shell.end_drag(compositor, false) {
+        match shell.end_drag(compositor, false) {
             // A source whose port has gone is torn down by its next delivery.
-            let _ = server.conclude_drag(sink, ended.source, ended.ended);
+            Some(DragEnd::Items(ended)) => {
+                let _ = server.conclude_drag(sink, ended.source, ended.ended);
+            }
+            Some(DragEnd::Save(SaveEnd {
+                offer: Some(offer), ..
+            })) => {
+                let _ = server.deliver_event(sink, &offer.event());
+            }
+            Some(DragEnd::Save(_)) | None => {}
         }
         if !lock.engage(named, shell, compositor) {
             io::write_stderr_line("desktop: could not lock the screen; it is still open");
@@ -1612,6 +1617,7 @@ mod program {
             let owner = match owner {
                 ChainOwner::Window { .. } => "window",
                 ChainOwner::Backdrop => "backdrop",
+                ChainOwner::Picker { .. } => "picker",
                 ChainOwner::Bar(_) => "bar",
             };
             let field = LogField {
@@ -1816,11 +1822,10 @@ mod program {
     /// The file manager is a component of the desktop rather than an
     /// application the user starts: it holds a permanent icon-bar slot from
     /// bring-up, offers the user's places and the mounted volumes on that
-    /// slot's menu, and cannot be quit. The shared
+    /// slot's menu, and never quits. The shared
     /// [`DESKTOP_ROLE_SWITCH`](tairix_window::DESKTOP_ROLE_SWITCH) is what
-    /// says so — the same binary launched without it (from a shell, or by
-    /// opening a folder on the desktop) is the ordinary, quittable file
-    /// manager, so a second component can never appear.
+    /// says so, and the file manager refuses to run without it, so it never
+    /// runs as an ordinary application.
     ///
     /// It is spawned before anything else so it takes the leading application
     /// slot: the strip keeps the order the session first saw each process in,
@@ -1828,11 +1833,9 @@ mod program {
     /// starts. A refused spawn is reported by the reap like any other and
     /// leaves the desktop running without it.
     ///
-    /// Spawned outright rather than through the launch funnel: this runs
-    /// before the session has served anything, so the launch table is empty
-    /// and there is nothing for the funnel to find — and the role switch
-    /// makes it a different program from the quittable file manager a later
-    /// launch would reach.
+    /// Spawned outright rather than through the launch funnel: at bring-up the
+    /// launch table is empty and there is nothing for the funnel to find, and
+    /// once it has ended there is no instance left to reach.
     fn spawn_files(launched: &mut LaunchTable) {
         let _ = spawn_and_record(
             launched,
@@ -2954,30 +2957,6 @@ mod program {
             );
         }
         let _elevate_guard = tairix_rt::work::WorkerGuard::new(&elevate_worker);
-        // A disk image opened on the desktop is mounted on a thread of its
-        // own: the attach waits for the volume's driver, which behind the file
-        // worker would hold every picker up. With no memory for one, each
-        // image opened is refused, saying so.
-        let mounts = tairix_browse::mount::mount_worker()
-            .ok()
-            .map(alloc::sync::Arc::new);
-        match &mounts {
-            Some(worker) => {
-                if let Err(reason) = Worker::start(worker) {
-                    app::report(
-                        APP_NAME,
-                        format_args!(
-                            "no mount thread ({reason:?}); a disk image is mounted on the serve loop"
-                        ),
-                    );
-                }
-            }
-            None => app::report(
-                APP_NAME,
-                "no memory for the mount worker; disk images are not mounted",
-            ),
-        }
-        let _mount_guard = mounts.as_ref().map(tairix_rt::work::WorkerGuard::new);
         // The one thread that waits on the font service: the desktop draws
         // without waiting, and this fetches what it drew provisionally. With
         // no thread, text is fetched on the serve loop as it is drawn.
@@ -3172,7 +3151,13 @@ mod program {
             );
         }
         let _zone_guard = tairix_rt::work::WorkerGuard::new(&zone_worker);
-        let mut pinboard = load_pinboard(&mut desktop, &mut shell, &mut compositor, sandbox);
+        let mut pinboard = load_pinboard(
+            &mut desktop,
+            &mut shell,
+            &mut compositor,
+            &publisher,
+            sandbox,
+        );
         report_passed_over(shell.adopt_civil(desktop.settings()), desktop.settings());
         // The resolution the user chose is drawn from the first frame, where
         // this output offers it; nothing is on the screen yet to re-lay.
@@ -3528,18 +3513,6 @@ mod program {
                 return app::fail(APP_NAME, EXIT_WAIT_FAILED, "elevation wake wait refused");
             }
         }
-        if let Some(read) = mounts.as_ref().and_then(|worker| worker.wake().read_end()) {
-            if tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Add,
-                WaitSourceKind::Stream,
-                u64::from(read),
-                MOUNT_TOKEN,
-            ) != 0
-            {
-                return app::fail(APP_NAME, EXIT_WAIT_FAILED, "mount wake wait refused");
-            }
-        }
         if let Some(read) = zone_worker.wake().read_end() {
             if tairix_rt::waitset_ctl(
                 set,
@@ -3688,10 +3661,11 @@ mod program {
         // Whether the live monitor publishes the machine reports a System
         // Monitor screensaver draws.
         let mut machine_watch = MachineWatch::new();
-        // Start the desktop's file manager in its core role. It is a
-        // component of the desktop, not an application the user starts, so it
-        // comes up with the session and holds its icon-bar slot from here on.
+        // Start the desktop's file manager. It is a component of the desktop,
+        // not an application the user starts, so it comes up with the session
+        // and holds its icon-bar slot from here on.
         spawn_files(&mut launched);
+        let mut file_manager = FileManagerKeeper::default();
         // A tray press with no live monitor to receive it: the section the
         // bar asked to open on, held until that instance's first publish
         // proves it is up. One pending open, replaced by a later press
@@ -3920,6 +3894,19 @@ mod program {
             if switch.is_background() && saver.dismiss(&mut compositor, None) == Ok(true) {
                 wallpapers.forget_slides();
             }
+            // What was opened while the file manager was starting is handed to
+            // it once it can take it.
+            if launched.holds_for_file_manager() {
+                LaunchCtx {
+                    launched: &mut launched,
+                    apps: &apps.service,
+                    server: &mut server,
+                    sink: &mut sink,
+                    windows: &windows,
+                    identity: &identity,
+                }
+                .deliver_held_for_file_manager((&mut shell, &mut compositor));
+            }
             // A System Monitor coming up is the demand for the monitor that
             // feeds it, so one found not running is started once — at the
             // board's start, never in a loop over a monitor that keeps dying —
@@ -4056,7 +4043,7 @@ mod program {
             windows.alerts.paint_owed(&shell, &mut compositor);
             confirm.paint_owed(&shell, &mut compositor);
             resolution.paint_owed(&shell, &mut compositor);
-            picker.paint_owed(&shell, &mut compositor);
+            picker.paint_owed(&mut shell, &mut compositor);
             post_push(&mut effects, &mut cue_posts, set);
             watch_saver(&mut saver_members, &mut saver, &mut compositor);
             let timeout_ns = {
@@ -4142,7 +4129,7 @@ mod program {
                 // takes down one whose grace has, and steps a scrollbar press
                 // the pointer holds still.
                 shell.tick_taskbar(&mut compositor, now_ns);
-                picker.scroll_repeat(now_ns, &shell, &mut compositor);
+                picker.scroll_repeat(now_ns, &mut shell, &mut compositor);
                 windows.alerts.repeat(now_ns, &shell, &compositor);
                 // Idleness produces no event, so this is where it is acted on.
                 while let Some(action) = idle.due(now_ns) {
@@ -4360,11 +4347,6 @@ mod program {
                         |owner| identity.app_of(owner),
                     );
                     let _ = tairix_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
-                    // An answer this pass took may light or darken the
-                    // desktop folder a carried drag is over.
-                    if shell.drag_active() {
-                        light_drop_icon(&mut shell, &mut compositor, &mut desktop);
-                    }
                     // Settings reading the screensavers to the end of the list
                     // reads the stores again, for its next listing.
                     if shell.take_savers_listed() && scan_savers(&saver_files, &mut scan_owed) {
@@ -4417,6 +4399,24 @@ mod program {
                         &mut apps.service,
                         &mut menu,
                     );
+                    // A window that named the folder a save was dropped on
+                    // has the file opened there now.
+                    step_pick(
+                        picker.take_owed_step(),
+                        &Openers {
+                            identity: &identity,
+                            programs: &programs,
+                        },
+                        &files,
+                        &mut server,
+                        &mut sink,
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &mut picker,
+                        &mut apps,
+                        &mut menu,
+                    );
                     reconcile_focus(
                         &mut focused,
                         &mut server,
@@ -4453,7 +4453,6 @@ mod program {
                             publisher: &publisher,
                             catalogs: &catalogs,
                             files: &files,
-                            mounts: mounts.as_deref(),
                             desktop: &mut desktop,
                             launched: &mut launched,
                             programs: &mut programs,
@@ -4571,8 +4570,8 @@ mod program {
                 // runs as this session's own user from the kernel (never
                 // the wire), parse the carried document with the one
                 // settings engine, and put it through the very same
-                // persist-then-adopt path the backdrop menu uses, so the
-                // two routes cannot diverge. A foreign caller, a malformed
+                // persist-then-adopt path the backdrop menu uses, so no two
+                // routes can diverge. A foreign caller, a malformed
                 // frame, an unusable document, or a refused write is a
                 // typed refusal stated on `stderr`, so no caller is left
                 // parked and the desktop keeps the settings it had. The
@@ -4586,13 +4585,24 @@ mod program {
                     // arriving before the last one has landed does not undo it.
                     let attested = attest_pinboard(
                         self_origin.uid(),
-                        (&publisher.base(desktop.settings()), shell.zones()),
+                        (
+                            &publisher.base(desktop.settings()),
+                            &publisher.files_base(shell.files()),
+                            shell.zones(),
+                        ),
                         ticket,
                         &request[..len],
                     );
+                    // While the user is deciding about a resolution, one change
+                    // is in hand: another could only race the answer.
+                    let deciding = resolution.is_open() || publisher.keeping();
                     let asked = match attested {
                         Err(err) => {
                             reply_pinboard(ticket, Err(err));
+                            None
+                        }
+                        Ok(call) if deciding && call.changes_settings() => {
+                            reply_pinboard(ticket, Err(Errno::Busy));
                             None
                         }
                         Ok(PinboardCall::Sound(call)) => {
@@ -4608,6 +4618,27 @@ mod program {
                             );
                             None
                         }
+                        Ok(PinboardCall::ApplyFiles(files)) => {
+                            if let Some(answer) = publisher.submit(
+                                publisher.base(desktop.settings()),
+                                files,
+                                Some(ticket),
+                            ) {
+                                if adopt_publish(
+                                    answer,
+                                    &publisher,
+                                    &mut pinboard,
+                                    &wallpapers,
+                                    &mut desktop,
+                                    &mut shell,
+                                    &mut compositor,
+                                    tairix_rt::clock_get(),
+                                ) {
+                                    shell.present_desktop(&mut compositor, &desktop);
+                                }
+                            }
+                            None
+                        }
                         Ok(PinboardCall::Apply(applied)) => apply_pinboard(
                             applied,
                             &publisher,
@@ -4616,10 +4647,7 @@ mod program {
                             &mut desktop,
                             &mut shell,
                             &mut compositor,
-                            (
-                                resolution.is_open() || publisher.keeping(),
-                                lock.is_locked() || saver.is_shown(),
-                            ),
+                            lock.is_locked() || saver.is_shown(),
                             ticket,
                         ),
                     };
@@ -4778,6 +4806,7 @@ mod program {
                         |owner| identity.app_of(owner),
                     );
                     shell.present_icon_artwork(&mut compositor, &arted);
+                    picker.artwork_landed(&arted, &mut shell, &mut compositor);
                     // An open chain re-resolves its pictures as it presents,
                     // so a sheet or row that opened before its decode landed
                     // is drawn with it now rather than on the next open.
@@ -4832,22 +4861,37 @@ mod program {
                     listings.unwatch(ListingClient::Picker);
                 }
                 picker.follow(update, &mut shell, &mut compositor);
+                // Whatever moved a carried drag's folder this turn — an answer
+                // lighting it, a drop, a window it was offered to closing, the
+                // screen locking — leaves the desktop showing the one it names.
+                if desktop.drop_target() != shell.drag_drop_icon() {
+                    light_drop_icon(&mut shell, &mut compositor, &mut desktop);
+                }
                 // Every file call carried out since the last wake, in the order
                 // it was asked.
                 while let Some(answer) = files.collect() {
                     match answer {
-                        FileAnswer::Pick { serial, opened } => settle_pick(
+                        FileAnswer::Pick {
                             serial,
                             opened,
-                            &mut server,
-                            &mut sink,
-                            &mut shell,
-                            &mut compositor,
-                            &mut windows,
-                            &mut picker,
-                            &mut apps,
-                            &mut menu,
-                        ),
+                            created,
+                        } => {
+                            let discard = settle_pick(
+                                serial,
+                                (opened, created),
+                                &mut server,
+                                &mut sink,
+                                &mut shell,
+                                &mut compositor,
+                                &mut windows,
+                                &mut picker,
+                                &mut apps,
+                                &mut menu,
+                            );
+                            if let Some(job) = discard {
+                                let _ = files.submit(job);
+                            }
+                        }
                         FileAnswer::Folder { serial, opened } => settle_folder_pick(
                             serial,
                             opened,
@@ -4860,6 +4904,10 @@ mod program {
                             &mut apps,
                             &mut menu,
                         ),
+                        FileAnswer::NewFolder { serial, made } => {
+                            picker.folder_made(serial, made, &mut shell, &mut compositor);
+                        }
+                        FileAnswer::Discarded => {}
                         FileAnswer::Desktop(done) => {
                             settle_desktop_call(
                                 done,
@@ -5053,6 +5101,7 @@ mod program {
                 // yields nothing once no zombie remains. The whole
                 // reap/report/teardown flow is the shared, host-tested
                 // `reap_launched`.
+                let mut file_manager_ended = None;
                 reap_launched(
                     &mut launched,
                     || {
@@ -5068,7 +5117,10 @@ mod program {
                         }
                     },
                     app::report_line,
-                    |pid| {
+                    |pid, ended| {
+                        if let Some(app) = ended.filter(|app| app.run_path == FILES_RUN_PATH) {
+                            file_manager_ended = Some(app.started_ns);
+                        }
                         if let Some(client) = identity.take_by_pid(pid) {
                             let mut bridge = ShellWindowHost {
                                 shell: &mut shell,
@@ -5119,6 +5171,24 @@ mod program {
                         machine_watch.forget(pid);
                     },
                 );
+                // The desktop's file manager never quits, so one that ended is
+                // started again — unless a folder opened meanwhile already did,
+                // or the session is itself leaving.
+                if let Some(started_ns) = file_manager_ended.filter(|_| {
+                    departure.is_none() && launched.running_from(FILES_RUN_PATH).is_none()
+                }) {
+                    if file_manager.ended(started_ns, tairix_rt::clock_get()) {
+                        spawn_files(&mut launched);
+                    } else {
+                        app::report(
+                            APP_NAME,
+                            format_args!(
+                                "the file manager keeps stopping as it starts; opening a folder \
+                                 on the desktop starts it again"
+                            ),
+                        );
+                    }
+                }
             } else if token == DISPLAY_EVENT_TOKEN {
                 // A latch frees the frame a held present waits for; the
                 // frame path below presents it.
@@ -5283,28 +5353,6 @@ mod program {
             } else if token == ELEVATE_TOKEN {
                 elevate_worker.wake().drain();
                 adopt_elevations(&mut elevator, &mut elevate, &shell, &mut compositor);
-            } else if token == MOUNT_TOKEN {
-                if let Some(mounts) = &mounts {
-                    mounts.wake().drain();
-                    mounts.collect_landed(|done| {
-                        let settled = settle_mount(
-                            done,
-                            &mut shell,
-                            &mut compositor,
-                            &mut LaunchCtx {
-                                launched: &mut launched,
-                                apps: &apps.service,
-                                server: &mut server,
-                                sink: &mut sink,
-                                windows: &windows,
-                                identity: &identity,
-                            },
-                        );
-                        if let Err(refusal) = settled {
-                            state_refusal(&refusal, &mut windows, &mut shell, &mut compositor);
-                        }
-                    });
-                }
             } else if token == FONT_TOKEN {
                 // What landed is laid out again at the end of this turn, where
                 // every surface is brought up to date before the frame.
@@ -5449,7 +5497,6 @@ mod program {
                         publisher: &publisher,
                         catalogs: &catalogs,
                         files: &files,
-                        mounts: mounts.as_deref(),
                         pinboard: &mut pinboard,
                         wallpapers: &wallpapers,
                         desktop: &mut desktop,
@@ -5635,7 +5682,7 @@ mod program {
                 elevate.repaint(&shell, &mut compositor);
                 resolution.repaint(&mut shell, &mut compositor);
                 windows.alerts.repaint(&shell, &mut compositor);
-                picker.restyle(&shell, &mut compositor);
+                picker.restyle(&mut shell, &mut compositor);
             }
             // One window thumbnail per wake, so a hover picker over a
             // screenful of windows fills in across the turns the loop was
@@ -6948,19 +6995,35 @@ mod program {
     /// caller is ever left parked on an answer nobody will produce.
     struct PublishJob {
         settings: DesktopSettings,
+        /// The file manager's settings, published in the same document: a job
+        /// always carries both, so the newest job is a whole document.
+        files: FilerPreferences,
         /// The `PINBOARD_ENDPOINT` call to answer, for a publish a foreign
         /// application asked for. `None` for one the desktop asked itself.
         ticket: Option<u64>,
         /// Which ask it is, in the order asked.
         number: u64,
+        /// Whether it was made over the settings the store holds; one that was
+        /// not reads the store in its place.
+        over_stored: bool,
     }
 
     /// What publishing the desktop's settings produced: the settings to adopt,
     /// the refusal to state, and the call to answer with either.
     struct PublishAnswer {
-        outcome: Result<LoadedPinboard, Errno>,
+        outcome: Result<Publication, Errno>,
         ticket: Option<u64>,
         number: u64,
+    }
+
+    impl PublishAnswer {
+        /// What the call that asked for the publish is answered.
+        fn reply(&self) -> Result<(), Errno> {
+            match &self.outcome {
+                Ok(publication) => publication.answer(),
+                Err(err) => Err(*err),
+            }
+        }
     }
 
     impl Publisher {
@@ -6982,6 +7045,12 @@ mod program {
             self.asked.lock().base(adopted)
         }
 
+        /// The file manager's settings the next change is made over, as
+        /// [`base`](Self::base) is for the desktop's.
+        fn files_base(&self, adopted: &FilerPreferences) -> FilerPreferences {
+            self.asked.lock().files_base(adopted)
+        }
+
         /// Whether a publish asked for has yet to land: the settings in force
         /// are about to change, so nothing is drawn from them meanwhile.
         fn publishing(&self) -> bool {
@@ -6991,6 +7060,12 @@ mod program {
         /// Note that ask `number` has landed, adopted or refused.
         fn landed(&self, number: u64) {
             self.asked.lock().landed(number);
+        }
+
+        /// Note that the settings adopted are the ones the store holds, so a
+        /// change made from here on is published.
+        fn read_store(&self) {
+            self.asked.lock().read_store();
         }
 
         /// Answer the pinboard call `ticket`, noting it if it is the kept
@@ -7048,10 +7123,9 @@ mod program {
                         desk = self.work.wait(desk);
                     }
                 };
-                // The store round trip, with no lock held: this is the call that
-                // used to stall the desktop.
+                // The store round trip, with no lock held.
                 let answer = PublishAnswer {
-                    outcome: publish_pinboard(&mut RtHost, &job.settings),
+                    outcome: publish_asked(&mut RtHost, &job.settings, &job.files, job.over_stored),
                     ticket: job.ticket,
                     number: job.number,
                 };
@@ -7059,7 +7133,7 @@ mod program {
                 // dropped for *adoption* — the queued one will replace what it
                 // would have shown — but it did happen, so its caller learns
                 // the outcome it actually got rather than a refusal.
-                let outcome = answer.outcome.as_ref().map(|_| ()).map_err(|err| *err);
+                let outcome = answer.reply();
                 let ticket = answer.ticket;
                 if self.desk.lock().deliver(answer) {
                     self.wake.nudge();
@@ -7069,29 +7143,36 @@ mod program {
             }
         }
 
-        /// Ask for `settings` to be published, answering the pinboard call
-        /// `ticket` when the store has spoken.
+        /// Ask for `settings` and `files` to be published, answering the
+        /// pinboard call `ticket` when the store has spoken.
         ///
         /// With no publisher to answer it the publish happens on the calling
         /// thread, exactly as the session did before it had one: a submitted
         /// change nobody will serve would leave the desktop showing settings it
         /// never adopted.
-        fn submit(&self, settings: DesktopSettings, ticket: Option<u64>) -> Option<PublishAnswer> {
-            let number = self.asked.lock().ask(&settings);
+        fn submit(
+            &self,
+            settings: DesktopSettings,
+            files: FilerPreferences,
+            ticket: Option<u64>,
+        ) -> Option<PublishAnswer> {
+            let ask = self.asked.lock().ask(&settings, &files);
             let submitted = {
                 let mut desk = self.desk.lock();
                 if desk.stopping() {
                     drop(desk);
                     return Some(PublishAnswer {
-                        outcome: publish_pinboard(&mut RtHost, &settings),
+                        outcome: publish_asked(&mut RtHost, &settings, &files, ask.over_stored),
                         ticket,
-                        number,
+                        number: ask.number,
                     });
                 }
                 desk.submit(PublishJob {
                     settings,
+                    files,
                     ticket,
-                    number,
+                    number: ask.number,
+                    over_stored: ask.over_stored,
                 })
             };
             if submitted.wake {
@@ -7228,6 +7309,17 @@ mod program {
             path: alloc::string::String,
             kinds: Vec<alloc::string::String>,
         },
+        /// Make the folder a save asked for, for the attempt `serial` names.
+        NewFolder {
+            serial: u64,
+            path: alloc::string::String,
+        },
+        /// Take back the file a save made after its pick had gone: the name
+        /// at `path` is removed only while it still names `file`.
+        Discard {
+            file: tairix_rt::File,
+            path: alloc::string::String,
+        },
         /// A call for the user's own gesture on the desktop.
         Desktop(DesktopCall),
     }
@@ -7263,16 +7355,28 @@ mod program {
     /// What a [`FileJob`] came to, in the shape its own kind of call yields,
     /// so an open never answers with nothing opened.
     enum FileAnswer {
-        /// What a pick chose, opened for the attempt `serial` names.
-        Pick { serial: u64, opened: Opened },
+        /// What a pick chose, opened for the attempt `serial` names, and the
+        /// name the open made where it made a new file.
+        Pick {
+            serial: u64,
+            opened: Opened,
+            created: Option<alloc::string::String>,
+        },
         /// The files of the folder a pick chose, opened for the attempt
         /// `serial` names.
         Folder {
             serial: u64,
             opened: Result<FolderFiles, Errno>,
         },
+        /// The folder a save asked for, made for the attempt `serial` names.
+        NewFolder {
+            serial: u64,
+            made: Result<(), Errno>,
+        },
         /// A desktop gesture's call.
         Desktop(DesktopAnswer),
+        /// A file taken back, or left where it no longer names what was made.
+        Discarded,
     }
 
     /// What a [`DesktopCall`] came to.
@@ -7319,10 +7423,23 @@ mod program {
                             file,
                             writable: true,
                         })
-                        .map_err(Errno::from_syscall),
+                        .map_err(|ret| match Errno::from_syscall(ret) {
+                            Errno::AlreadyExists => occupant_of(&path),
+                            err => err,
+                        }),
                         None => tairix_browse::document::open_for(path.as_bytes(), edits),
                     };
-                    FileAnswer::Pick { serial, opened }
+                    // Only an exclusive create makes the name it opens.
+                    let created = (access == PickAccess::Create && opened.is_ok()).then_some(path);
+                    FileAnswer::Pick {
+                        serial,
+                        opened,
+                        created,
+                    }
+                }
+                Self::Discard { file, path } => {
+                    discard(&file, &path);
+                    FileAnswer::Discarded
                 }
                 Self::Folder {
                     serial,
@@ -7331,6 +7448,13 @@ mod program {
                 } => FileAnswer::Folder {
                     serial,
                     opened: open_folder(&path, &kinds),
+                },
+                Self::NewFolder { serial, path } => FileAnswer::NewFolder {
+                    serial,
+                    made: status(tairix_rt::fs_mkdir(
+                        path.as_bytes(),
+                        tairix_abi::fs::FS_NEW_DIR_MODE,
+                    )),
                 },
                 Self::Desktop(DesktopCall::Document {
                     run_path,
@@ -7369,10 +7493,16 @@ mod program {
                 Self::Pick { serial, .. } => FileAnswer::Pick {
                     serial,
                     opened: Err(err),
+                    created: None,
                 },
+                Self::Discard { .. } => FileAnswer::Discarded,
                 Self::Folder { serial, .. } => FileAnswer::Folder {
                     serial,
                     opened: Err(err),
+                },
+                Self::NewFolder { serial, .. } => FileAnswer::NewFolder {
+                    serial,
+                    made: Err(err),
                 },
                 Self::Desktop(DesktopCall::Document {
                     run_path,
@@ -7391,6 +7521,49 @@ mod program {
                     made: Err(err),
                 }),
             }
+        }
+    }
+
+    /// Remove the name at `path` while it still names the node `file` holds:
+    /// a name replaced since by another file is left as it is.
+    fn discard(file: &tairix_rt::File, path: &str) {
+        let Some((folder, name)) = path.rsplit_once('/') else {
+            return;
+        };
+        let folder = if folder.is_empty() { "/" } else { folder };
+        let (Ok(stat), Ok(dir)) = (file.stat(), tairix_rt::Dir::open(folder.as_bytes())) else {
+            return;
+        };
+        let expect = tairix_abi::fs::NodeExpect {
+            id: stat.id,
+            content_gen: 0,
+            size: 0,
+            modified: tairix_abi::time::Time64::UNIX_EPOCH,
+            changed: tairix_abi::time::Time64::UNIX_EPOCH,
+        };
+        let _ = dir.unlink(
+            name.as_bytes(),
+            tairix_abi::fs::UnlinkFlags::EXPECT_NODE,
+            Some(&expect),
+        );
+    }
+
+    /// Why the name at `path` an exclusive create refused is taken:
+    /// [`Errno::AlreadyExists`] for a file a save may replace once asked,
+    /// [`Errno::IsADirectory`] for a folder and [`Errno::LinkLoop`] for a
+    /// link, which no save replaces.
+    ///
+    /// The node is resolved without following a link and opened for neither
+    /// read nor write, so this reads only its kind.
+    fn occupant_of(path: &str) -> Errno {
+        let kind = tairix_rt::File::open(path.as_bytes(), tairix_abi::fs::OpenFlags::NO_FOLLOW)
+            .ok()
+            .and_then(|node| node.stat().ok())
+            .map(|stat| stat.kind);
+        match kind {
+            Some(tairix_abi::fs::FileKind::Directory) => Errno::IsADirectory,
+            Some(tairix_abi::fs::FileKind::Symlink) => Errno::LinkLoop,
+            Some(tairix_abi::fs::FileKind::Regular) | None => Errno::AlreadyExists,
         }
     }
 
@@ -8178,7 +8351,6 @@ mod program {
         publisher: &'a Publisher,
         catalogs: &'a Catalogs,
         files: &'a Files,
-        mounts: Option<&'a MountWorker>,
         desktop: &'a mut Desktop<S>,
         launched: &'a mut LaunchTable,
         programs: &'a mut Programs,
@@ -8194,7 +8366,6 @@ mod program {
         publisher: &'a Publisher,
         catalogs: &'a Catalogs,
         files: &'a Files,
-        mounts: Option<&'a MountWorker>,
         pinboard: &'a mut PinboardPanel,
         wallpapers: &'a Wallpapers,
         desktop: &'a mut Desktop<S>,
@@ -8283,7 +8454,7 @@ mod program {
             let refused = route_desktop(
                 &outcome,
                 self.publisher,
-                (self.files, self.mounts),
+                self.files,
                 self.pinboard,
                 self.wallpapers,
                 self.desktop,
@@ -8374,7 +8545,6 @@ mod program {
                     publisher: self.publisher,
                     catalogs: self.catalogs,
                     files: self.files,
-                    mounts: self.mounts,
                     desktop: self.desktop,
                     launched: self.launched,
                     programs: self.programs,
@@ -8397,15 +8567,22 @@ mod program {
         }
 
         fn drag_place(&mut self, seat: &mut Seat<'_>, at: tairix_wm::Point) -> DragPlace {
-            let Some((source, _)) = seat.shell.drag_items() else {
-                return DragPlace::Nothing;
-            };
-            let scale = seat.compositor.scale();
-            if let Some(index) = seat.shell.session().taskbar().app_slot_at(at, scale) {
-                return DragPlace::Slot { index };
-            }
-            if let Some(wm) = seat.compositor.window_at(at) {
-                return self.drag_window(seat.compositor, source, wm, at);
+            let wm = seat.compositor.window_at(at);
+            if let Some(saving) = seat.shell.save_source() {
+                if let Some(wm) = wm {
+                    return self.save_window(seat.compositor, saving, wm, at);
+                }
+            } else {
+                let Some((source, _)) = seat.shell.drag_items() else {
+                    return DragPlace::Nothing;
+                };
+                let scale = seat.compositor.scale();
+                if let Some(index) = seat.shell.session().taskbar().app_slot_at(at, scale) {
+                    return DragPlace::Slot { index };
+                }
+                if let Some(wm) = wm {
+                    return self.drag_window(seat.compositor, source, wm, at);
+                }
             }
             let layout = seat.shell.desktop_layout(seat.compositor, self.desktop);
             DragPlace::Desktop {
@@ -8437,6 +8614,7 @@ mod program {
                         .and_then(|(_, items)| self.slot_answer(index, &items)),
                 },
                 DragPlace::Window { window_id, x, y } => DragSurface::Window { window_id, x, y },
+                DragPlace::Offer { window_id, x, y } => DragSurface::Offer { window_id, x, y },
                 DragPlace::Desktop { icon, revision } => DragSurface::Desktop {
                     folder: self.desktop.drop_folder(icon),
                     icon,
@@ -8446,23 +8624,58 @@ mod program {
         }
 
         fn report_drag(&mut self, seat: &mut Seat<'_>, report: OwedReport) {
-            let at = match &report.at {
-                &DragSurface::Window { window_id, x, y } => DragReport::Window { window_id, x, y },
-                DragSurface::Desktop { folder, .. } => DragReport::Desktop { folder },
-                DragSurface::Nothing | DragSurface::Slot { .. } | DragSurface::AppWindow { .. } => {
-                    DragReport::Nowhere
+            match report {
+                OwedReport::Items(report) => {
+                    let at = match &report.at {
+                        &DragSurface::Window { window_id, x, y } => {
+                            DragReport::Window { window_id, x, y }
+                        }
+                        DragSurface::Desktop { folder, .. } => DragReport::Desktop { folder },
+                        DragSurface::Nothing
+                        | DragSurface::Slot { .. }
+                        | DragSurface::AppWindow { .. }
+                        | DragSurface::Offer { .. } => DragReport::Nowhere,
+                    };
+                    // A report the engine refuses — the window under the
+                    // pointer has just closed — draws no answer, so the
+                    // pointer shows none and a drop there drops nothing.
+                    let _ = self.server.report_drag(
+                        self.sink,
+                        report.source,
+                        report.serial,
+                        at,
+                        report.shift,
+                    );
                 }
-            };
-            // A report the engine refuses — the window under the pointer has
-            // just closed — draws no answer, so the pointer shows none and a
-            // drop there drops nothing.
-            let _ =
-                self.server
-                    .report_drag(self.sink, report.source, report.serial, at, report.shift);
+                OwedReport::Save(report) => {
+                    let left = report.left.map(OfferEnd::event);
+                    let over = report.over.map(SaveOffer::event);
+                    for event in left.iter().chain(over.iter()) {
+                        deliver(
+                            self.server,
+                            self.sink,
+                            seat.shell,
+                            seat.compositor,
+                            self.windows,
+                            self.picker,
+                            &mut self.apps.service,
+                            seat.menu,
+                            event,
+                        );
+                    }
+                }
+            }
             light_drop_icon(seat.shell, seat.compositor, self.desktop);
         }
 
         fn settle_drag(&mut self, seat: &mut Seat<'_>, ended: DragEnd) {
+            let ended = match ended {
+                DragEnd::Items(ended) => ended,
+                DragEnd::Save(end) => {
+                    self.settle_save(seat, end);
+                    return;
+                }
+            };
             if let Some(refusal) = &ended.refused {
                 state_drop_refusal(refusal, self.windows, seat.shell, seat.compositor);
             }
@@ -8536,6 +8749,76 @@ mod program {
             })))
         }
 
+        /// Tell the window a carried save was last offered to that it ended,
+        /// and save the document where it was dropped.
+        fn settle_save(&mut self, seat: &mut Seat<'_>, end: SaveEnd) {
+            // The wait is recorded before the window hears of the drop, so a
+            // delivery that finds it gone ends the wait rather than missing it.
+            let step = self
+                .picker
+                .save_dropped(end.dropped, seat.shell, seat.compositor);
+            if let Some(mut offer) = end.offer {
+                // A drop the panel refused asks the window for no folder.
+                let awaited = self.picker.awaits_drop(offer.window_id, offer.serial);
+                if !awaited {
+                    offer.dropped = None;
+                }
+                let delivered = deliver(
+                    self.server,
+                    self.sink,
+                    seat.shell,
+                    seat.compositor,
+                    self.windows,
+                    self.picker,
+                    &mut self.apps.service,
+                    seat.menu,
+                    &offer.event(),
+                );
+                if awaited && !delivered {
+                    self.picker.drop_unreached(seat.shell, seat.compositor);
+                }
+            }
+            step_pick(
+                step,
+                &Openers {
+                    identity: self.identity,
+                    programs: self.programs,
+                },
+                self.files,
+                self.server,
+                self.sink,
+                seat.shell,
+                seat.compositor,
+                self.windows,
+                self.picker,
+                self.apps,
+                seat.menu,
+            );
+            light_drop_icon(seat.shell, seat.compositor, self.desktop);
+        }
+
+        /// The compositor window `wm` under a carried save at `at`, for the
+        /// window `requester`: an offer to an application's window there, and
+        /// nothing on the desktop's own surfaces, the window the save is for,
+        /// a window an alert holds, or a window's furniture.
+        fn save_window(
+            &self,
+            compositor: &Compositor,
+            requester: u64,
+            wm: tairix_wm::WindowId,
+            at: tairix_wm::Point,
+        ) -> DragPlace {
+            let Some(window_id) = self.windows.ipc_id(wm).filter(|id| *id != requester) else {
+                return DragPlace::Nothing;
+            };
+            match content_point(compositor, wm, at) {
+                Some((x, y)) if !self.windows.is_held(window_id) => {
+                    DragPlace::Offer { window_id, x, y }
+                }
+                _ => DragPlace::Nothing,
+            }
+        }
+
         /// The compositor window `wm` under a carried drag at `at`: the drag's
         /// own application's window, at a point in its content, which that
         /// application answers; another application's, which takes the drop
@@ -8551,10 +8834,7 @@ mod program {
             let Some(window_id) = self.windows.ipc_id(wm) else {
                 return DragPlace::Nothing;
             };
-            let Some(client) = compositor
-                .window_client_rect(wm)
-                .filter(|rect| rect.contains(at))
-            else {
+            let Some(local) = content_point(compositor, wm, at) else {
                 return DragPlace::Nothing;
             };
             let (Some(source_owner), Some(owner)) = (
@@ -8564,14 +8844,7 @@ mod program {
                 return DragPlace::Nothing;
             };
             let under = if owner == source_owner {
-                let local = (
-                    u32::try_from(i64::from(at.x) - i64::from(client.left())),
-                    u32::try_from(i64::from(at.y) - i64::from(client.top())),
-                );
-                WindowUnder::Own(match local {
-                    (Ok(x), Ok(y)) => Some((x, y)),
-                    _ => None,
-                })
+                WindowUnder::Own(Some(local))
             } else {
                 WindowUnder::Foreign(
                     self.apps
@@ -8583,6 +8856,21 @@ mod program {
             let held = self.windows.is_held(window_id);
             DragPlace::over_window(window_id, held, under)
         }
+    }
+
+    /// Where screen point `at` lies in compositor window `wm`'s content, or
+    /// `None` where it lies outside it.
+    fn content_point(
+        compositor: &Compositor,
+        wm: tairix_wm::WindowId,
+        at: tairix_wm::Point,
+    ) -> Option<(u32, u32)> {
+        let client = compositor
+            .window_client_rect(wm)
+            .filter(|rect| rect.contains(at))?;
+        let x = u32::try_from(i64::from(at.x) - i64::from(client.left())).ok()?;
+        let y = u32::try_from(i64::from(at.y) - i64::from(client.top())).ok()?;
+        Some((x, y))
     }
 
     /// Light the desktop folder icon a carried drag would drop into while its
@@ -8603,7 +8891,8 @@ mod program {
 
     /// Load the user's pinboard settings into `desktop` (reporting an
     /// unusable store loudly) and answer with the session's pinboard state
-    /// over the production file seams and `sandbox`.
+    /// over the production file seams and `sandbox`. `publisher` publishes
+    /// over what was loaded only once the store has been read.
     ///
     /// The settings are applied to the model here rather than returned, so
     /// only the desktop ever holds what is in force, and the appearance the
@@ -8615,12 +8904,17 @@ mod program {
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
+        publisher: &Publisher,
         sandbox: SharedSandbox,
     ) -> PinboardPanel {
         let loaded = read_pinboard_store(&mut RtHost);
         for warning in &loaded.warnings {
             app::report_line(warning);
         }
+        if loaded.read {
+            publisher.read_store();
+        }
+        shell.adopt_files(loaded.files, first_settings_generation());
         let wanted = loaded.settings.clone();
         if let Some(change) = desktop.apply_settings(loaded.settings) {
             // Through the same adopt path a later change takes, so the
@@ -8632,6 +8926,26 @@ mod program {
             sandbox,
             prepared: None,
         }
+    }
+
+    /// Where this session starts counting its publications of the file
+    /// manager's settings: drawn, because every session on the machine
+    /// publishes the one `Desktop` notice the count rides, and counts from
+    /// zero would meet.
+    fn first_settings_generation() -> u32 {
+        let mut drawn = [0u8; 4];
+        if let Err(errno) = tairix_rt::random_fill(&mut drawn) {
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "no random seed to be had ({errno}); the clock starts the settings \
+                     count"
+                ),
+            );
+            let [a, b, c, d, ..] = tairix_rt::clock_get().to_le_bytes();
+            drawn = [a, b, c, d];
+        }
+        u32::from_le_bytes(drawn)
     }
 
     /// Ask for the wallpaper the desktop layer should be painted over, and
@@ -8737,6 +9051,10 @@ mod program {
                         (shell, compositor.scale(), now_ns),
                         desk,
                     );
+                    continue;
+                }
+                ChainOwner::Picker { .. } => {
+                    picker.menu_answered(&outcome, shell, compositor);
                     continue;
                 }
             };
@@ -8881,7 +9199,7 @@ mod program {
         let applied = apply_desktop_action(
             acted.action,
             desk.publisher,
-            (desk.files, desk.mounts),
+            desk.files,
             desk.pinboard,
             desk.wallpapers,
             desk.desktop,
@@ -8970,15 +9288,9 @@ mod program {
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-        (deciding, covered): (bool, bool),
+        covered: bool,
         ticket: u64,
     ) -> Option<TrialAsk> {
-        // While the user is deciding about a resolution, one change is in
-        // hand: another could only race the answer.
-        if deciding {
-            reply_pinboard(ticket, Err(Errno::Busy));
-            return None;
-        }
         let output = compositor.mode();
         match resolution_ask(
             applied.settings.resolution,
@@ -9030,7 +9342,7 @@ mod program {
     /// — each stated on `stderr` in the session's own wording.
     fn attest_pinboard(
         session_uid: u32,
-        held: (&DesktopSettings, Option<&ZoneInfo<'_>>),
+        held: (&DesktopSettings, &FilerPreferences, Option<&ZoneInfo<'_>>),
         ticket: u64,
         request: &[u8],
     ) -> Result<PinboardCall, Errno> {
@@ -9756,8 +10068,16 @@ mod program {
                 // client); refuse rather than wrap if it ever did.
                 InputResponse::ClientPointerMoved { window, local } => {
                     if picker.wm_id() == Some(window) {
-                        let moved = tairix_wm::InputEvent::PointerMoved { to: local };
-                        picker.handle_pointer(local, &moved, shell, compositor);
+                        // A press carried off the save panel's icon is the
+                        // document itself, carried to where it is saved.
+                        if let Some((document, for_window)) =
+                            picker.icon_drag(local, compositor.scale())
+                        {
+                            let _ = shell.begin_save_drag(compositor, (window, for_window), document);
+                        } else {
+                            let moved = tairix_wm::InputEvent::PointerMoved { to: local };
+                            picker.handle_pointer(local, &moved, shell, compositor);
+                        }
                     } else if windows.alerts.owns(window) {
                         // A motion answers nothing: it only lights, drags or
                         // carries a held press.
@@ -11217,7 +11537,7 @@ mod program {
     fn route_desktop<S: DirectorySource>(
         outcome: &Timed<tairix_desktop_session::ShellOutcome>,
         publisher: &Publisher,
-        file_work: (&Files, Option<&MountWorker>),
+        files: &Files,
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
@@ -11294,7 +11614,7 @@ mod program {
         // The settings and folder edits `apply_desktop_action` performs are
         // the changes that genuinely repaint the whole layer.
         let applied = apply_desktop_action(
-            action, publisher, file_work, pinboard, wallpapers, desktop, shell, compositor, launch,
+            action, publisher, files, pinboard, wallpapers, desktop, shell, compositor, launch,
             now_ns,
         );
         if applied == Ok(true) {
@@ -11469,7 +11789,7 @@ mod program {
     fn apply_desktop_action<S: DirectorySource>(
         action: Option<DesktopAction>,
         publisher: &Publisher,
-        (files, mounts): (&Files, Option<&MountWorker>),
+        files: &Files,
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
@@ -11479,14 +11799,16 @@ mod program {
         now_ns: u64,
     ) -> Result<bool, GestureRefusal> {
         Ok(match action {
+            // The desktop's file manager is handed the folder; one that has
+            // gone is started again to show it.
             Some(DesktopAction::Activate(DesktopActivation::OpenFolder { path })) => {
-                let _ = launch.launch(
-                    shell,
-                    compositor,
-                    FILES_RUN_PATH,
-                    FILES_LABEL,
-                    &[path.as_bytes()],
-                    Some(LaunchTarget::Path(&path)),
+                launch.hand_file_manager(
+                    (shell, compositor),
+                    &[
+                        tairix_window::DESKTOP_ROLE_SWITCH.as_bytes(),
+                        path.as_bytes(),
+                    ],
+                    LaunchTarget::Path(&path),
                 );
                 false
             }
@@ -11498,8 +11820,18 @@ mod program {
                 let _ = launch.launch(shell, compositor, &run_path, &label, &[], None);
                 false
             }
+            // The file manager attaches it, as an image opened in one of its
+            // windows is, so it is the file manager's to let go once shown.
             Some(DesktopAction::Activate(DesktopActivation::MountImage { path })) => {
-                mount_image(path, mounts, shell, compositor, launch)?;
+                launch.hand_file_manager(
+                    (shell, compositor),
+                    &[
+                        tairix_window::DESKTOP_ROLE_SWITCH.as_bytes(),
+                        tairix_browse::mount::MOUNT_SWITCH.as_bytes(),
+                        path.as_bytes(),
+                    ],
+                    LaunchTarget::Image(&path),
+                );
                 false
             }
             // The document is opened on the file worker, and the launch
@@ -11656,66 +11988,6 @@ mod program {
         }
     }
 
-    /// Mount the disk image at `path` the user opened on the desktop, off the
-    /// loop. With no thread it is mounted here, and settled at once.
-    fn mount_image(
-        path: alloc::string::String,
-        mounts: Option<&MountWorker>,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-        launch: &mut LaunchCtx<'_>,
-    ) -> Result<(), GestureRefusal> {
-        let act = MountAct::Attach {
-            path,
-            read_only: false,
-        };
-        let Some(mounts) = mounts else {
-            return Err(gesture_refusal(act.refused(tairix_browse::mount::UNSERVED)));
-        };
-        match mounts.submit(act) {
-            Ok(false) => Ok(()),
-            Ok(true) => mounts
-                .collect()
-                .map_or(Ok(()), |done| settle_mount(done, shell, compositor, launch)),
-            Err(act) => Err(gesture_refusal(act.refused(tairix_browse::mount::CROWDED))),
-        }
-    }
-
-    /// Show the volume a disk image opened on the desktop holds, as a folder
-    /// opened there is shown.
-    ///
-    /// # Errors
-    ///
-    /// Why the image was not mounted.
-    fn settle_mount(
-        done: MountDone,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-        launch: &mut LaunchCtx<'_>,
-    ) -> Result<(), GestureRefusal> {
-        let Some(location) = done.shown().map_err(gesture_refusal)? else {
-            return Ok(());
-        };
-        let path = tairix_browse::vfs::spell_absolute_path(&location);
-        let _ = launch.launch(
-            shell,
-            compositor,
-            FILES_RUN_PATH,
-            FILES_LABEL,
-            &[path.as_bytes()],
-            Some(LaunchTarget::Path(&path)),
-        );
-        Ok(())
-    }
-
-    /// A refused mount, as the desktop states a refused gesture.
-    fn gesture_refusal(refusal: tairix_browse::mount::MountRefusal) -> GestureRefusal {
-        GestureRefusal::new(
-            refusal.headline,
-            tairix_window::client::alert_sentence(refusal.reason),
-        )
-    }
-
     /// Settle a desktop call the file worker carried out.
     ///
     /// A document launches its application with the descriptor opened for it;
@@ -11755,13 +12027,14 @@ mod program {
     /// Ask for `settings` to be published, and adopt them if the answer comes
     /// back on this thread.
     ///
-    /// Both routes into the settings — a chosen menu row and an apply from
-    /// Settings — come through here, so neither can adopt something
-    /// the other would not have. Nothing is adopted at the point of asking:
-    /// the store round trip happens on the settings worker, and the answer is
-    /// adopted by [`collect_publish`] on the wake it nudges. With no worker to
-    /// answer it the publish happens here and is adopted at once, exactly as
-    /// the session did before it had one.
+    /// Every change to the desktop's own settings — a chosen menu row, an
+    /// apply from Settings, a kept resolution, a remembered sound control —
+    /// comes through here, and a files apply submits to the same publisher, so
+    /// none can adopt something another would not have. Nothing is adopted at
+    /// the point of asking: the store round trip happens on the settings
+    /// worker, and the answer is adopted by [`collect_publish`] on the wake it
+    /// nudges. With no worker to answer it the publish happens here and is
+    /// adopted at once.
     ///
     /// Answers whether the desktop layer needs a whole repaint.
     #[allow(clippy::too_many_arguments)] // The desktop's whole settings state, threaded explicitly.
@@ -11776,11 +12049,14 @@ mod program {
         compositor: &mut Compositor,
         now_ns: u64,
     ) -> bool {
-        publisher.submit(settings, ticket).is_some_and(|answer| {
-            adopt_publish(
-                answer, publisher, pinboard, wallpapers, desktop, shell, compositor, now_ns,
-            )
-        })
+        let files = publisher.files_base(shell.files());
+        publisher
+            .submit(settings, files, ticket)
+            .is_some_and(|answer| {
+                adopt_publish(
+                    answer, publisher, pinboard, wallpapers, desktop, shell, compositor, now_ns,
+                )
+            })
     }
 
     /// Adopt whatever the settings worker has published, if anything, and do
@@ -11809,7 +12085,9 @@ mod program {
     ///
     /// The write came first, so memory and disk can never diverge: a refused
     /// write states why on `stderr`, adopts nothing, and leaves the desktop
-    /// showing the settings the next login would restore.
+    /// showing the settings the next login would restore. An ask made over
+    /// the defaults standing in for an unread store published nothing: what
+    /// the store was read to hold is adopted in its place, and the ask refused.
     #[allow(clippy::too_many_arguments)] // The desktop's whole settings state, threaded explicitly.
     fn adopt_publish<S: DirectorySource>(
         answer: PublishAnswer,
@@ -11822,14 +12100,20 @@ mod program {
         now_ns: u64,
     ) -> bool {
         if let Some(ticket) = answer.ticket {
-            publisher.answer(
-                ticket,
-                answer.outcome.as_ref().map(|_| ()).map_err(|err| *err),
-            );
+            publisher.answer(ticket, answer.reply());
         }
         publisher.landed(answer.number);
         let landed = match answer.outcome {
-            Ok(landed) => landed,
+            Ok(Publication::Published(landed)) => landed,
+            Ok(Publication::Read(read)) => {
+                publisher.read_store();
+                app::report(
+                    APP_NAME,
+                    "a change made before the desktop settings could be read was not \
+                     published; they are read now",
+                );
+                read
+            }
             Err(err) => {
                 app::report(
                     APP_NAME,
@@ -11841,6 +12125,8 @@ mod program {
         for warning in &landed.warnings {
             app::report_line(warning);
         }
+        shell.adopt_published_files(landed.files);
+        publish_desktop(compositor, shell);
         let wanted = landed.settings.clone();
         let Some(change) = desktop.apply_settings(landed.settings) else {
             return false;
@@ -12541,6 +12827,83 @@ mod program {
             launched
         }
 
+        /// Hand the desktop's file manager `target`, starting it again with
+        /// `args` only where it has gone. It is the desktop's own and never
+        /// quits, so a second is never started beside one still starting or
+        /// one that turned the target away: that is stated instead.
+        fn hand_file_manager(
+            &mut self,
+            (shell, compositor): (&mut DesktopShell, &mut Compositor),
+            args: &[&[u8]],
+            target: LaunchTarget<'_>,
+        ) {
+            let found = match self.launched.running_from(FILES_RUN_PATH) {
+                None => FileManagerFound::Gone,
+                Some(pid) => self
+                    .identity
+                    .proc_id_of(pid)
+                    .map_or(FileManagerFound::Starting, FileManagerFound::Live),
+            };
+            let mut reach = Reach {
+                ctx: self,
+                shell,
+                compositor,
+            };
+            match hand_file_manager(&mut reach, found, target) {
+                FileManagerHand::Start => {
+                    let _ = spawn_and_record(self.launched, FILES_RUN_PATH, FILES_LABEL, args);
+                }
+                FileManagerHand::Handed => {}
+                FileManagerHand::Wait => {
+                    let held = HeldTarget::of(target)
+                        .is_some_and(|held| self.launched.hold_for_file_manager(held));
+                    if !held {
+                        app::report(
+                            APP_NAME,
+                            format_args!(
+                                "the file manager is starting and holds as much as it can take \
+                                 meanwhile; open it again once it shows"
+                            ),
+                        );
+                    }
+                }
+                FileManagerHand::Refused => app::report(
+                    APP_NAME,
+                    format_args!("the file manager could not take what was opened"),
+                ),
+            }
+        }
+
+        /// Hand the file manager what was opened while it was starting, once
+        /// it can take it; held meanwhile, and through a restart.
+        fn deliver_held_for_file_manager(
+            &mut self,
+            (shell, compositor): (&mut DesktopShell, &mut Compositor),
+        ) {
+            let Some(app) = self
+                .launched
+                .running_from(FILES_RUN_PATH)
+                .and_then(|pid| self.identity.proc_id_of(pid))
+            else {
+                return;
+            };
+            for held in self.launched.take_held_for_file_manager() {
+                let mut reach = Reach {
+                    ctx: self,
+                    shell,
+                    compositor,
+                };
+                if hand_file_manager(&mut reach, FileManagerFound::Live(app), held.target())
+                    != FileManagerHand::Handed
+                {
+                    app::report(
+                        APP_NAME,
+                        format_args!("the file manager could not take what was opened"),
+                    );
+                }
+            }
+        }
+
         /// Offer a launch of `run_path` naming `target` to its live instance,
         /// answering the recorded child that took it — or `None`, when the
         /// launch must spawn.
@@ -12608,7 +12971,7 @@ mod program {
             app::report(APP_NAME, format_args!("{label} launch refused"));
             return None;
         };
-        launched.record(pid, label, run_path);
+        launched.record(pid, label, run_path, tairix_rt::clock_get());
         Some(pid)
     }
 
@@ -12637,6 +13000,30 @@ mod program {
                     for_window, None, server, sink, shell, compositor, windows, picker, apps, menu,
                 );
                 return;
+            }
+            Some(PickStep::Menu {
+                model,
+                anchor,
+                for_window,
+            }) => {
+                let geom = chain_geometry(shell.session(), compositor);
+                match open_desktop_menu(
+                    menu,
+                    ChainOwner::Picker { for_window },
+                    model,
+                    window_menu_placement(anchor),
+                    false,
+                    &geom,
+                ) {
+                    Ok(()) => present_menu_chain(menu, shell, compositor, windows),
+                    Err(refused) => {
+                        app::report(APP_NAME, format_args!("no save menu ({refused:?})"));
+                    }
+                }
+                return;
+            }
+            Some(PickStep::NewFolder { serial, path }) => {
+                files.submit(FileJob::NewFolder { serial, path })
             }
             Some(PickStep::Open {
                 serial,
@@ -12668,13 +13055,34 @@ mod program {
         // Answered at once: carried out here for want of a worker, or
         // refused because too many calls are waiting.
         match answered {
-            Some(FileAnswer::Pick { serial, opened }) => settle_pick(
-                serial, opened, server, sink, shell, compositor, windows, picker, apps, menu,
-            ),
+            Some(FileAnswer::Pick {
+                serial,
+                opened,
+                created,
+            }) => {
+                let discard = settle_pick(
+                    serial,
+                    (opened, created),
+                    server,
+                    sink,
+                    shell,
+                    compositor,
+                    windows,
+                    picker,
+                    apps,
+                    menu,
+                );
+                if let Some(job) = discard {
+                    let _ = files.submit(job);
+                }
+            }
             Some(FileAnswer::Folder { serial, opened }) => settle_folder_pick(
                 serial, opened, server, sink, shell, compositor, windows, picker, apps, menu,
             ),
-            Some(FileAnswer::Desktop(_)) | None => {}
+            Some(FileAnswer::NewFolder { serial, made }) => {
+                picker.folder_made(serial, made, shell, compositor);
+            }
+            Some(FileAnswer::Desktop(_) | FileAnswer::Discarded) | None => {}
         }
     }
 
@@ -12742,11 +13150,12 @@ mod program {
     /// window that asked and deliver `FilePicked`, or — when the open or the
     /// grant was refused — state why and deliver `PickCancelled`, since
     /// nothing was delegated. An answer the picker no longer waits for is
-    /// dropped, and the file it opened closes with it.
+    /// dropped, and the file it opened closes with it; one the open `created`
+    /// is answered with the job that takes it back.
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
     fn settle_pick<S: DirectorySource, F: FnMut() -> S>(
         serial: u64,
-        result: Opened,
+        (result, created): (Opened, Option<alloc::string::String>),
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
         shell: &mut DesktopShell,
@@ -12755,13 +13164,20 @@ mod program {
         picker: &mut SessionPicker<S, F>,
         apps: &mut AppBarPanel,
         menu: &mut MenuChain,
-    ) {
+    ) -> Option<FileJob> {
         let opened = match &result {
             Ok(_) => Ok(()),
             Err(err) => Err(*err),
         };
         let (for_window, chosen) = match picker.opened(serial, opened, shell, compositor) {
-            None => return,
+            None => {
+                return created
+                    .zip(result.ok())
+                    .map(|(path, made)| FileJob::Discard {
+                        file: made.file,
+                        path,
+                    });
+            }
             Some(PickEnd::Refused { for_window }) => {
                 if let Err(err) = result {
                     app::report(
@@ -12801,6 +13217,7 @@ mod program {
             apps,
             menu,
         );
+        None
     }
 
     /// Deliver window `window_id`'s pick conclusion — the delegation handle
@@ -13199,7 +13616,7 @@ mod program {
     /// nothing is published: an application keeps the last state it was given
     /// rather than being handed a guess.
     fn publish_desktop(compositor: &Compositor, shell: &DesktopShell) {
-        let desktop = match desktop_info(compositor, shell.machine_zone()) {
+        let desktop = match desktop_info(compositor, shell) {
             Ok(desktop) => desktop,
             Err(err) => {
                 app::report(
@@ -13250,7 +13667,7 @@ mod program {
 
     /// Deliver one app-ward event, tearing the owner's windows down when
     /// the kernel proves the owner is gone (its event port was reclaimed,
-    /// so the send finds nothing).
+    /// so the send finds nothing), and answering whether it was delivered.
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
     fn deliver<S: DirectorySource, F: FnMut() -> S>(
         server: &mut WindowServer<RtShmMapper>,
@@ -13262,25 +13679,31 @@ mod program {
         apps: &mut dyn AppBarBridge,
         menu: &mut MenuChain,
         event: &WindowEvent,
-    ) {
+    ) -> bool {
         // Window-scoped only: an icon-bar event names no window and goes
         // out through `relay_app_bar`, which addresses the declaration
         // instead.
         let Some(owner) = event.window_id().and_then(|id| server.owner_of(id)) else {
-            return;
+            return false;
         };
         // A held window takes no new input until its holder is gone, and a
         // dialog no press until it has been seen.
         if !windows.admits(event, tairix_rt::clock_get) {
-            return;
+            return false;
         }
-        if let Err(Errno::NotFound) = server.deliver_event(sink, event) {
-            drop_departed(
-                owner, server, shell, compositor, windows, picker, apps, menu,
-            );
-            return;
+        match server.deliver_event(sink, event) {
+            Ok(()) => {
+                windows.note_delivered(event);
+                true
+            }
+            Err(Errno::NotFound) => {
+                drop_departed(
+                    owner, server, shell, compositor, windows, picker, apps, menu,
+                );
+                false
+            }
+            Err(_) => false,
         }
-        windows.note_delivered(event);
     }
 
     /// Tear down the windows of `owner`, whose event port a delivery found

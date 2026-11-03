@@ -2350,6 +2350,8 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
+            | WindowEvent::SaveOffered { .. }
+            | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }
     }
@@ -2437,6 +2439,8 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
+            | WindowEvent::SaveOffered { .. }
+            | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }
     }
@@ -2552,6 +2556,8 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
+            | WindowEvent::SaveOffered { .. }
+            | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }
     }
@@ -2904,7 +2910,7 @@ impl<A: DocumentApp> Host<A> {
                 // Unreachable from the desktop, which hands a document
                 // application an open document because it holds no authority
                 // to open a name.
-                Target::Path(path) => self.report(format!(
+                Target::Path(path) | Target::Image(path) => self.report(format!(
                     "{path} was handed over as a path; {} holds no filesystem authority and \
                      can only be given an open document",
                     A::NAME

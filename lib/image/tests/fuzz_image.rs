@@ -54,11 +54,12 @@ use tairix_image::inspect::inspect;
 use tairix_image::{
     decode, decode_as, decode_fitted, decode_fitted_as, decode_named, decode_peak_bytes,
     decode_peak_bytes_as, encode_bmp, encode_gif, encode_jpeg, encode_ora, encode_png,
-    encode_sprite_area, encode_tiff, find_named, open_native, probe_as, sniff, DecodeError,
-    DecodeLimits, EncodeError, FitBox, GifOptions, ImageFormat, IndexDepth, JpegOptions,
-    NativeDocument, OraLayer, OraLayerSource, Picture, PictureKind, PictureSource, RasterImage,
-    Rgba8, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry, SpriteInput, SpriteMode,
-    SpriteName, SpritePalette, TiffCompression, TiffOptions, MOST_ORA_LAYERS,
+    encode_sprite_area, encode_tiff, find_named, open_native, probe_as, recognise, sniff,
+    DecodeError, DecodeLimits, EncodeError, FitBox, GifOptions, ImageFormat, IndexDepth,
+    JpegOptions, NativeDocument, OraLayer, OraLayerSource, Picture, PictureKind, PictureSource,
+    RasterImage, Rgba8, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry, SpriteInput,
+    SpriteMode, SpriteName, SpritePalette, TiffCompression, TiffOptions, MOST_ORA_LAYERS,
+    RECOGNITION_HEAD,
 };
 use tairix_util::report::{MAX_LINE_BYTES, MAX_REPORT_LINES};
 
@@ -2207,10 +2208,17 @@ fn decode_never_panics_and_respects_limits(bytes: &[u8]) {
     if let Ok(sequence) = Sequence::open(bytes, &limits) {
         walk(sequence, &limits);
     }
-    // A RISC OS sprite area carries no signature, so the sniffing doors
-    // above can never reach its decoder — and, for the same reason, any
-    // bytes at all are a candidate sprite area. Naming the format is both
-    // the only way in and free extra coverage for every fixture here.
+    assert_eq!(
+        recognise(
+            &bytes[..bytes.len().min(RECOGNITION_HEAD)],
+            bytes.len() as u64
+        ),
+        sniff(bytes),
+        "a listing's head and the whole file recognise alike"
+    );
+    // The sniffing doors reach a sprite area only where its header states
+    // the input's length, and any bytes at all are a candidate sprite area,
+    // so naming the format is free extra coverage for every fixture here.
     let _ = probe_as(ImageFormat::Sprite, bytes);
     let reduced = FitBox::new(3, 3);
     let bound = decode_peak_bytes_as(ImageFormat::Sprite, bytes, &limits, reduced);
@@ -2516,6 +2524,11 @@ fn sprite_area_writes_back(entries: &[SpriteEntry], limits: &DecodeLimits) {
         return;
     }
     let area = written.expect("an area that opened writes back");
+    assert_eq!(
+        sniff(&area),
+        Some(ImageFormat::Sprite),
+        "an area written is recognised by its content, so a file named nothing reopens"
+    );
     let mut again = SpriteAreaReader::open(&area[..], limits).expect("the area written reopens");
     assert_eq!(again.count() as usize, entries.len());
     for (index, before) in (0u32..).zip(entries) {

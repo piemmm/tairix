@@ -1,21 +1,22 @@
 //! Which of the file manager's own chrome bands a window is showing, the keys
 //! that turn them on, and the keys that run the toolbar's commands directly.
 //!
-//! A window opens showing what the file manager's own settings say
-//! ([`crate::preferences`]), the listing alone unless the user asked for more.
+//! A window opens showing what the file manager's settings say
+//! ([`tairix_browse::FilerPreferences`]), the listing alone unless the user
+//! asked for more.
 //! The places rail and the command toolbar are surfaces the user asks for, not
 //! fixed parts of the layout, so neither reserves any of the window until it
 //! does; the two toggles here are how they are reached from the window itself,
 //! and are what keeps every command the toolbar carries — the view toggle, the
 //! sort cycle, the Trash tools — reachable while it is hidden. [`Accelerator`]
 //! is the keyboard's direct reach to the rest, and [`opens_settings`] to the
-//! settings window.
+//! file manager's settings in the Settings application.
 //!
 //! Each decision is a pure function of the key, so it is host-tested; the
 //! program only applies the answer.
 
 use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode};
-use tairix_browse::{ManagerTool, Places, ToolbarBand, ToolbarCommand, MANAGER_TOOLBAR_BAND};
+use tairix_browse::{FilerPreferences, ManagerTool, Places, ToolbarBand, ToolbarCommand};
 
 /// The chrome bands one window is showing.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -27,11 +28,14 @@ pub struct Chrome {
 }
 
 impl Chrome {
-    /// What a window opens with: the listing alone.
-    pub const HIDDEN: Self = Self {
-        rail: false,
-        toolbar: MANAGER_TOOLBAR_BAND,
-    };
+    /// What a new window opens with, as `settings` say.
+    #[must_use]
+    pub const fn of(settings: &FilerPreferences) -> Self {
+        Self {
+            rail: settings.places,
+            toolbar: settings.toolbar,
+        }
+    }
 
     /// The rail model the renderer and every rail hit-test take, or `None`
     /// when this window draws no rail — the one place the flag becomes the

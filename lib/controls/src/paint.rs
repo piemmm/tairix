@@ -1993,6 +1993,26 @@ pub(crate) fn paint_drop_target(
     );
 }
 
+/// Draw the keyboard Focus Ring inside `(x, y, w, h)`: the one edge every
+/// control holding the keyboard wears, for a surface drawn outside this crate
+/// too — a listing that holds the keyboard as a whole.
+pub fn paint_focus_ring(
+    surface: &mut Surface,
+    (x, y, w, h): (u32, u32, u32, u32),
+    scale: Scale,
+    theme: &Theme,
+) {
+    draw_outline(
+        surface,
+        x,
+        y,
+        w,
+        h,
+        plate_border(theme, scale).max(1),
+        Color::from(theme.palette().rim_active),
+    );
+}
+
 /// Draw a hollow rectangular outline of `thickness` inside `(x, y, w, h)`: the
 /// one focus-ring and cell-outline primitive the row and tab families share.
 pub(crate) fn draw_outline(
@@ -2379,7 +2399,6 @@ pub(crate) fn paint_row(
     // check) is reserved unconditionally, exactly like the leading gutter
     // above: only whether a bead actually paints inside it depends on the row's
     // state, never the band's own width (spec §13, §15).
-    let border = plate_border(theme, scale);
     let pad = scale.scale_length(theme.metrics().control_inset).max(1);
     let band = bead_band(theme, scale, h);
     if let Some((color, shape)) = resolve_bead(theme, state) {
@@ -2391,17 +2410,9 @@ pub(crate) fn paint_row(
         }
     }
 
-    // The keyboard focus ring, distinct from a pointer hover tint (spec §15).
+    // The keyboard focus ring, distinct from a pointer hover tint.
     if state.focus.focused {
-        draw_outline(
-            surface,
-            x,
-            y,
-            w,
-            h,
-            border.max(1),
-            Color::from(palette.rim_active),
-        );
+        paint_focus_ring(surface, (x, y, w, h), scale, theme);
     }
 
     row_content_span(scale, theme, x, w, h).map(|(cx, cw)| (cx, y, cw, h))

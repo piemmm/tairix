@@ -45,6 +45,7 @@ use tairix_abi::zone::ZoneName;
 use tairix_abi::{BundleId, Errno};
 use tairix_appconf::Registry;
 use tairix_audio::stream::DeviceControl;
+use tairix_browse::{FilerKey, FilerPreferences};
 use tairix_colour::Rgb;
 use tairix_controls::{
     stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
@@ -68,6 +69,7 @@ use tairix_wallpaper::{
 use crate::accounts::{self, AccountFacts, AccountField, AccountRun, AccountSetting, Unappliable};
 use crate::civil::{self, CivilChoices};
 use crate::effects::{self, EffectsAsk, EffectsReading, EffectsRow};
+use crate::files::FilesSetting;
 use crate::machine::MachineSetting;
 use crate::network::{self, Addressing, Choice, IfaceSetting};
 use crate::notices;
@@ -1235,6 +1237,9 @@ pub(crate) enum Owner {
     /// One row of the chosen screensaver's own group, in the desktop's own
     /// document.
     Saver(SaverRow),
+    /// One of the file manager's settings, which the desktop session keeps
+    /// beside its own and adopts a change to through an apply of its own.
+    Files(FilesSetting),
 }
 
 /// A settable a composition **declares** in a static table, as opposed to
@@ -1252,6 +1257,8 @@ enum Declared {
     Desktop(Setting),
     /// The machine's boot-time configuration store.
     Machine(MachineSetting),
+    /// The file manager's settings, in the desktop's document.
+    Files(FilesSetting),
     /// A command about the pane's settings, rather than a setting.
     Action(Action),
 }
@@ -1320,6 +1327,7 @@ impl Declared {
         match self {
             Self::Desktop(setting) => setting.label(),
             Self::Machine(setting) => setting.label(),
+            Self::Files(setting) => setting.label(),
             Self::Action(action) => action.label(),
         }
     }
@@ -1339,6 +1347,7 @@ impl Declared {
                 },
             ),
             Self::Machine(setting) => setting.row(documents.config, documents.cooling),
+            Self::Files(setting) => setting.row(documents.files),
             Self::Action(action) => action.row(documents),
         }
     }
@@ -1348,6 +1357,7 @@ impl Declared {
         match self {
             Self::Desktop(setting) => Owner::Desktop(setting),
             Self::Machine(setting) => Owner::Machine(setting),
+            Self::Files(setting) => Owner::Files(setting),
             Self::Action(action) => Owner::Action(action),
         }
     }
@@ -1639,6 +1649,64 @@ const WALLPAPER_GROUPS: [GroupSpec; 2] = [
     },
 ];
 
+/// The Files pane's groups: what a new window opens with, how every window
+/// shows and orders its items, how names and pictures are drawn, the Trash,
+/// and what becomes of an image once it is closed.
+const FILES_GROUPS: [GroupSpec; 6] = [
+    GroupSpec {
+        caption: "NEW WINDOWS",
+        settings: &[
+            Declared::Files(FilesSetting::Start),
+            Declared::Files(FilesSetting::Places),
+            Declared::Files(FilesSetting::Toolbar),
+        ],
+        pictures: None,
+        footnote: None,
+    },
+    GroupSpec {
+        caption: "ITEMS",
+        settings: &[
+            Declared::Files(FilesSetting::View),
+            Declared::Files(FilesSetting::SortBy),
+            Declared::Files(FilesSetting::Order),
+            Declared::Files(FilesSetting::FoldersFirst),
+        ],
+        pictures: None,
+        footnote: None,
+    },
+    GroupSpec {
+        caption: "NAMES",
+        settings: &[
+            Declared::Files(FilesSetting::HideAppEndings),
+            Declared::Files(FilesSetting::HideKnownEndings),
+            Declared::Files(FilesSetting::HiddenItems),
+        ],
+        pictures: None,
+        footnote: None,
+    },
+    GroupSpec {
+        caption: "ICONS",
+        settings: &[
+            Declared::Files(FilesSetting::Thumbnails),
+            Declared::Files(FilesSetting::FolderContents),
+        ],
+        pictures: None,
+        footnote: None,
+    },
+    GroupSpec {
+        caption: "TRASH",
+        settings: &[Declared::Files(FilesSetting::ConfirmTrash)],
+        pictures: None,
+        footnote: None,
+    },
+    GroupSpec {
+        caption: "DISK IMAGES AND ARCHIVES",
+        settings: &[Declared::Files(FilesSetting::UnmountWhenClosed)],
+        pictures: None,
+        footnote: None,
+    },
+];
+
 /// How a composition's changes become durable.
 ///
 /// Declared per composition and never improvised, so a reader learns the
@@ -1714,6 +1782,8 @@ pub enum Composition {
     /// The Raspberry Pi pane: what the cooling service reads, then the CPU
     /// fan's policy.
     RaspberryPi,
+    /// The Files pane: the file manager's settings.
+    Files,
 }
 
 impl Composition {
@@ -1736,6 +1806,7 @@ impl Composition {
             Self::LockScreen => &LOCK_GROUPS,
             Self::Language => &LANGUAGE_GROUPS,
             Self::RaspberryPi => &RASPBERRY_PI_GROUPS,
+            Self::Files => &FILES_GROUPS,
             Self::Ethernet | Self::Dns | Self::Users | Self::Sound | Self::SoundEffects => &[],
         }
     }
@@ -1756,7 +1827,8 @@ impl Composition {
             | Self::LockScreen
             | Self::Language
             | Self::Sound
-            | Self::SoundEffects => Posture::Immediate,
+            | Self::SoundEffects
+            | Self::Files => Posture::Immediate,
             // Writing either of the machine's stores is a re-authenticated
             // run of the tool that owns them, which is not something to ask
             // for per pointer sample.
@@ -1794,6 +1866,13 @@ impl Composition {
                 | Self::LockScreen
                 | Self::Language
         )
+    }
+
+    /// Whether this composition's rows read the file manager's settings, and
+    /// so are rebuilt when the session answers an apply of them.
+    #[must_use]
+    pub(crate) const fn reads_files(self) -> bool {
+        matches!(self, Self::Files)
     }
 
     /// Whether this composition's rows read the shipped picture catalog: the
@@ -1874,7 +1953,17 @@ impl Composition {
             | Self::Users
             | Self::Sound
             | Self::SoundEffects
-            | Self::RaspberryPi => &[],
+            | Self::RaspberryPi
+            | Self::Files => &[],
+        }
+    }
+
+    /// The file manager's keys an apply from this composition renders: only
+    /// its own, as [`keys`](Self::keys) are for the desktop's.
+    const fn files_keys(self) -> &'static [FilerKey] {
+        match self {
+            Self::Files => &FilerKey::ALL,
+            _ => &[],
         }
     }
 
@@ -2139,6 +2228,9 @@ pub(crate) struct Documents<'a> {
     /// The desktop's own settings document, which the caller always holds
     /// (an unpublished one means the documented defaults).
     pub(crate) settings: &'a DesktopSettings,
+    /// The file manager's settings, read from the same document, or `None`
+    /// while they have not been.
+    pub(crate) files: Option<&'a FilerPreferences>,
     /// The cursor sets the desktop answered with.
     pub(crate) cursor_sets: &'a [CursorSetId],
     /// The shipped pictures the desktop answered with.
@@ -2204,7 +2296,8 @@ const fn secret_owner(owner: Owner) -> bool {
         | Owner::Pictures(_)
         | Owner::Sound(_)
         | Owner::Effects(_)
-        | Owner::Saver(_) => false,
+        | Owner::Saver(_)
+        | Owner::Files(_) => false,
     }
 }
 
@@ -2252,6 +2345,10 @@ pub enum FormOutcome {
     /// whole document would reimpose whatever the other panes happened to
     /// hold when it opened.
     Apply(String),
+    /// The reader chose one of the file manager's values: the document of
+    /// its keys that choice implies, for the session to adopt as the desktop
+    /// apply's is.
+    ApplyFiles(String),
     /// The reader changed a staged row. Nothing durable happened and
     /// nothing was asked for; the pane's own action band has to re-render,
     /// because what it offers depends on whether anything now differs.
@@ -2299,6 +2396,8 @@ pub struct Form {
     /// The settable each row writes, indexed as `groups`.
     owners: Vec<Vec<Owner>>,
     settings: DesktopSettings,
+    /// The file manager's settings, `None` while none have been read.
+    files: Option<FilerPreferences>,
     /// The working copy of the machine's store the staged rows edit, and
     /// `None` while it has not been read.
     config: Option<SystemConfig>,
@@ -2392,6 +2491,7 @@ impl Form {
             groups: Vec::new(),
             owners: Vec::new(),
             settings: documents.settings.clone(),
+            files: documents.files.copied(),
             config: documents.config.cloned(),
             config_in_effect: documents.config.cloned(),
             addressing: documents.addressing.clone(),
@@ -2436,6 +2536,22 @@ impl Form {
         if self.composition.reads_desktop() {
             self.rebuild();
         }
+    }
+
+    /// Adopt the file manager's settings the session now holds, or `None`
+    /// where they could not be read, rebuilding only a pane that reads them.
+    pub fn adopt_files(&mut self, files: Option<&FilerPreferences>) {
+        self.files = files.copied();
+        if self.composition.reads_files() {
+            self.rebuild();
+        }
+    }
+
+    /// The file manager's settings this form holds, `None` while none have
+    /// been read.
+    #[must_use]
+    pub const fn files(&self) -> Option<&FilerPreferences> {
+        self.files.as_ref()
     }
 
     /// Adopt what the machine's store now holds.
@@ -2703,7 +2819,8 @@ impl Form {
             | Owner::Pictures(_)
             | Owner::Sound(_)
             | Owner::Effects(_)
-            | Owner::Saver(_) => None,
+            | Owner::Saver(_)
+            | Owner::Files(_) => None,
             Owner::Machine(setting) => {
                 let (working, effect) = (self.config.as_ref()?, self.config_in_effect.as_ref()?);
                 let value = setting.value(working);
@@ -2935,6 +3052,7 @@ impl Form {
         let held = self.groups.get(self.focus).and_then(FieldGroup::focus);
         let built = self.composition.build(Documents {
             settings: &self.settings,
+            files: self.files.as_ref(),
             cursor_sets: &self.cursor_sets,
             catalog: &self.catalog,
             savers: &self.savers,
@@ -3600,9 +3718,23 @@ impl Form {
         FormOutcome::Apply(self.applied())
     }
 
+    /// Adopt the choice at `index` for the file manager's `setting`: nothing
+    /// to post while none have been read, or where it is the value held.
+    fn chose_files(&mut self, setting: FilesSetting, index: usize) -> FormOutcome {
+        let Some(files) = self.files.as_mut() else {
+            return FormOutcome::Changed;
+        };
+        let held = *files;
+        if !setting.adopt(index, files) || *files == held {
+            return FormOutcome::Changed;
+        }
+        FormOutcome::ApplyFiles(files.document_of(self.composition.files_keys()).render())
+    }
+
     /// Adopt the choice at `index` for `owner`.
     fn chose(&mut self, owner: Owner, index: usize) -> FormOutcome {
         match owner {
+            Owner::Files(setting) => self.chose_files(setting, index),
             Owner::Desktop(setting) => {
                 let Some(reshaped) = self.adopt_choice(setting, index) else {
                     return FormOutcome::Changed;

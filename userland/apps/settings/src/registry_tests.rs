@@ -26,6 +26,7 @@ const EVERY_CATEGORY: &[Category] = &[
     Category::Appearance,
     Category::Wallpaper,
     Category::Theme,
+    Category::Files,
     Category::Displays,
     Category::LockScreen,
     Category::Screensaver,
@@ -62,6 +63,7 @@ const EVERY_PANE: &[Pane] = &[
     Pane::Appearance,
     Pane::Wallpaper,
     Pane::Theme,
+    Pane::Files,
     Pane::Displays,
     Pane::LockScreen,
     Pane::Screensaver,
@@ -316,6 +318,20 @@ fn the_shared_wallpaper_pane_name_reaches_the_wallpaper_pane() {
     assert_eq!(
         Pane::named(tairix_wallpaper::WALLPAPER_PANE, every()),
         Some(Pane::Wallpaper)
+    );
+}
+
+/// The file manager's *Settings…* hands this name over, so the one spelling
+/// both sides share must reach the pane that shows its settings.
+#[test]
+fn the_shared_files_pane_name_reaches_the_files_pane() {
+    assert_eq!(
+        Pane::named(tairix_browse::SETTINGS_PANE, every()),
+        Some(Pane::Files)
+    );
+    assert_eq!(
+        Pane::launched(&[tairix_browse::SETTINGS_PANE], every()),
+        Some(Pane::Files)
     );
 }
 

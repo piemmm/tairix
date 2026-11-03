@@ -559,11 +559,13 @@ typedef struct tairix_image_attach_reply {
 
 /* The frame volume_detach() takes: the 16-byte identity an attach
  * reply names, then one TAIRIX_VOLUME_DETACH_* mode byte. LOST forces a
- * volume recorded lost and is PLAIN for any other. */
+ * volume recorded lost and is PLAIN for any other; IDLE is PLAIN, a volume
+ * still in use refused as one is but recorded as no warning. */
 #define TAIRIX_VOLUME_DETACH_LEN 17u
 #define TAIRIX_VOLUME_DETACH_PLAIN ((uint8_t)0u)
 #define TAIRIX_VOLUME_DETACH_FORCE ((uint8_t)1u)
 #define TAIRIX_VOLUME_DETACH_LOST ((uint8_t)2u)
+#define TAIRIX_VOLUME_DETACH_IDLE ((uint8_t)3u)
 
 /* fs_readdir() reads a directory a batch at a time from the open description's
 * position: whole records of at most TAIRIX_READDIR_BATCH_MAX bytes per call,
@@ -719,9 +721,9 @@ typedef struct tairix_lock_conflict {
 * live display lease, the audio topics only the process bound to the audio
 * service's endpoint, the network topic only the one bound to the network
 * stack's, and every kernel-owned topic admits nobody. */
-#define TAIRIX_NOTICE_PAYLOAD_MAX 123u
+#define TAIRIX_NOTICE_PAYLOAD_MAX 127u
 #define TAIRIX_NOTICE_TOPIC_DESKTOP 0u
-#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 123u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 127u
 #define TAIRIX_NOTICE_TOPIC_MOUNTS 1u
 #define TAIRIX_NOTICE_PAYLOAD_LEN_MOUNTS 0u
 #define TAIRIX_NOTICE_TOPIC_MEMORY_PRESSURE 2u

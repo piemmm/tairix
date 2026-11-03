@@ -387,9 +387,9 @@ sandboxes a parse imports it:
   count, whether the entries are frames to play or pages to choose
   between, any loop count, and the picture the container as a whole is —
   decoding no pixels; a caller may *name* the format instead of having it
-  sniffed, which is the only door to a RISC OS sprite area, and the named
-  format's own parser still validates the bytes so naming the wrong one is
-  refused rather than misread. `OP_VIEW_PAGE` decodes one entry and the
+  sniffed — how a typed RISC OS sprite area whose header does not recognise
+  it is opened — and the named format's own parser still validates the bytes
+  so naming the wrong one is refused rather than misread. `OP_VIEW_PAGE` decodes one entry and the
   worker holds it; `OP_VIEW_RENDER` fixes which *rectangle* of that held
   page is drawn onto which destination extent; `OP_VIEW_BAND` returns
   exactly the destination rows asked for; `OP_VIEW_RELEASE` drops the

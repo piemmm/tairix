@@ -3,10 +3,12 @@
 //! name, what a manifest requests and claims — then the whole file as a hex
 //! dump, read-only beside the text and hex views.
 //!
-//! The editor parses neither. Its opening bytes are matched against the
-//! picture formats' signatures (`tairix_image::sniff`) and the manifest magics
-//! (`tairix_binfmt::detect`), bounded compares, or its name against the one
-//! picture format that carries none, only to offer the display. The report is
+//! The editor parses neither. Its opening bytes are matched against what the
+//! picture formats open with (`tairix_image::recognise`: a signature, or a
+//! sprite area's header stating the file's own length) and the manifest magics
+//! (`tairix_binfmt::detect`), bounded compares, or its name and filetype
+//! against the one picture format that carries no signature, only to offer the
+//! display. The report is
 //! read by a sandboxed worker of the editor's own (`run.rs`) — the picture
 //! worker for a picture, the decode worker for a manifest — so a hostile file
 //! is parsed in neither the editor nor the worker that colours text; the hex
@@ -30,8 +32,9 @@ use crate::answer::{Answered, Unlisted};
 /// What a document's structure is read as, and so which worker reads it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Structure {
-    /// A picture, read by the picture worker — as the format its name gives
-    /// it, for one whose content carries no signature: a sprite area.
+    /// A picture, read by the picture worker — as the format its name or
+    /// recorded filetype gives it where that names a sprite area, whose
+    /// content may not say so.
     Picture(Option<ViewFormat>),
     /// A signed manifest, read by the decode worker.
     Manifest,
@@ -104,14 +107,14 @@ pub struct DataDisplay {
 }
 
 impl DataDisplay {
-    /// The display for a document called `name`, whose volume records
-    /// `recorded` as its filetype, opening with `head`, shown at once, or
-    /// `None` when it is neither a picture nor a manifest.
+    /// The display for a document `length` bytes long called `name`, whose
+    /// volume records `recorded` as its filetype, opening with `head`, shown
+    /// at once, or `None` when it is neither a picture nor a manifest.
     #[must_use]
-    pub fn of(head: &[u8], name: &str, recorded: Option<Filetype>) -> Option<Self> {
+    pub fn of(head: &[u8], length: u64, name: &str, recorded: Option<Filetype>) -> Option<Self> {
         let named = (media_for_document(name, recorded) == Some(MediaType::ImageSprite))
             .then_some(ViewFormat::Sprite);
-        let structure = if named.is_some() || tairix_image::sniff(head).is_some() {
+        let structure = if named.is_some() || tairix_image::recognise(head, length).is_some() {
             Structure::Picture(named)
         } else if matches!(
             tairix_binfmt::detect(head),

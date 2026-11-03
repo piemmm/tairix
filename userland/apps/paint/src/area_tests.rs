@@ -11,7 +11,9 @@ use tairix_theme::ThemeRegistry;
 use tairix_window::docapp::Request as HostRequest;
 use tairix_window::document::{Access, SavedDocument};
 
-use tairix_raster::{Pixel, Surface};
+use tairix_controls::{ControlState, IconTile, SelectionState};
+use tairix_icon::{IconKind, IconPicture};
+use tairix_raster::{Color, Pixel, Surface};
 use tairix_window::docapp::Relayout;
 
 use super::{render_area, AreaLayout, AreaView, SpriteOpening, OPEN_CELLS, SPRITES_AT_ONCE};
@@ -652,4 +654,128 @@ fn a_sprite_file_opens_with_room_for_its_sprites_and_its_band() {
     assert_eq!(layout.shown(0, most), 0..most);
     let last = layout.cell_rect(most - 1, 0);
     assert!(last.bottom() <= layout.status().top(), "above its band");
+}
+
+/// The window's drawing of `window`, at the reference scale.
+fn drawn(window: &Window) -> Surface {
+    let theme = window.registry.active();
+    let mut surface = Surface::new(WINDOW.0, WINDOW.1).expect("a surface");
+    render_area(
+        &mut surface,
+        &window.view,
+        &window.layout,
+        theme,
+        Faces::of(theme, Scale::ONE),
+        Scale::ONE,
+    );
+    surface
+}
+
+/// A chosen sprite is marked over the window's own ground, as the file
+/// manager marks a chosen file, never by replacing that ground with the
+/// translucent selection colour, which lets whatever is behind the window show
+/// through the mark.
+#[test]
+fn a_chosen_sprite_is_marked_over_the_windows_ground() {
+    let mut window = Window::of(&["a", "b"]);
+    draw_thumbnails(&mut window);
+    assert!(window.view.is_chosen(window.id(0)));
+    assert!(!window.view.is_chosen(window.id(1)));
+    let surface = drawn(&window);
+    let cell = window.layout.cell_rect(0, 0);
+    let (left, top) = (
+        u32::try_from(cell.left()).expect("on the window"),
+        u32::try_from(cell.top()).expect("on the window"),
+    );
+    for y in top..top + cell.height {
+        for x in left..left + cell.width {
+            let pixel = surface.get(x, y).expect("in the window");
+            assert_eq!(
+                pixel.a,
+                u8::MAX,
+                "({x},{y}) shows what is behind the window"
+            );
+        }
+    }
+}
+
+/// A sprite's cell is the file manager's tile, pixel for pixel: its thumbnail
+/// drawn at exactly the side the tile seats it, and a chosen sprite wearing the
+/// tile's own selection mark.
+#[test]
+fn a_sprites_cell_is_drawn_as_a_files_tile() {
+    let mut window = Window::of(&["a", "b"]);
+    draw_thumbnails(&mut window);
+    let theme = window.registry.active();
+    let surface = drawn(&window);
+    for index in 0..2 {
+        let id = window.id(index);
+        let cell = window.layout.cell_rect(index, 0);
+        assert_eq!(
+            super::TILE.icon_side(cell, Scale::ONE, theme),
+            window.layout.thumb(),
+            "the thumbnail is drawn at the side its tile seats"
+        );
+        let thumb = window
+            .view
+            .thumbnail(id, window.layout.thumb())
+            .expect("its thumbnail landed");
+        let mut state = ControlState::idle();
+        if window.view.is_chosen(id) {
+            state.selection = SelectionState::Selected;
+        }
+        let mut tile = Surface::new(WINDOW.0, WINDOW.1).expect("a surface");
+        tile.fill(Color::from(theme.palette().surface));
+        IconTile::new(window.names()[index].clone(), IconKind::Image)
+            .with_layout(super::TILE)
+            .with_state(state)
+            .render(
+                &mut tile,
+                cell,
+                Scale::ONE,
+                theme,
+                Some(IconPicture::coloured(thumb)),
+            );
+        let (left, top) = (
+            u32::try_from(cell.left()).expect("on the window"),
+            u32::try_from(cell.top()).expect("on the window"),
+        );
+        for y in top..top + cell.height {
+            for x in left..left + cell.width {
+                assert_eq!(
+                    surface.get(x, y),
+                    tile.get(x, y),
+                    "sprite {index} at ({x},{y})"
+                );
+            }
+        }
+    }
+}
+
+/// A sprite whose thumbnail has not landed shows the picture glyph, the very
+/// pixels the tile draws for a picture it was handed none of.
+#[test]
+fn a_sprite_awaiting_its_thumbnail_shows_the_picture_glyph() {
+    let window = Window::of(&["a", "b"]);
+    let theme = window.registry.active();
+    assert!(window
+        .view
+        .thumbnail(window.id(1), window.layout.thumb())
+        .is_none());
+    let surface = drawn(&window);
+    let cell = window.layout.cell_rect(1, 0);
+    let mut tile = Surface::new(WINDOW.0, WINDOW.1).expect("a surface");
+    tile.fill(Color::from(theme.palette().surface));
+    IconTile::new(window.names()[1].clone(), IconKind::Image)
+        .with_layout(super::TILE)
+        .render(&mut tile, cell, Scale::ONE, theme, None);
+    let (left, top) = (
+        u32::try_from(cell.left()).expect("on the window"),
+        u32::try_from(cell.top()).expect("on the window"),
+    );
+    for y in top..top + cell.height {
+        for x in left..left + cell.width {
+            assert_eq!(surface.get(x, y), tile.get(x, y), "({x},{y})");
+        }
+    }
 }

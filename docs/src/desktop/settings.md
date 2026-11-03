@@ -351,6 +351,30 @@ that do exist are set today: the appearance in Appearance, the picture in
 Wallpaper. What would have to land is recorded in
 `plans/NEW-DESKTOP-SETTINGS.md` §3.
 
+## Files
+
+The file manager's settings (`tairix_browse::FilerPreferences`, its closed
+registry of `files.*` keys), which the desktop session keeps in its own
+document beside its others: where a new window opens and whether it shows the
+places rail and the toolbar, the display and order every window shows its
+items in unless the user chose one in that window, where folders stand, the
+hidden endings and items, the picture and folder previews, whether a move to
+the Trash asks, and whether a disk image or archive the user opened is
+unmounted once its windows close. The rows (`files.rs`, `FilesSetting`) are
+immediate, as the desktop's own are, and post only the `files.*` keys through
+the file manager's own apply (`PinboardRequest::ApplyFiles`, sent by
+`tairix_wallpaper::apply(ApplyTo::Files, ..)`), on a desk of their own so
+neither apply evicts the other's answer; the rows then show what the published
+document holds. A choice is the newest the rows asked for until its answer
+lands, so a pane built again meanwhile shows it, and an answer with a newer
+apply behind it is only stated. Until the document has been read the rows say
+so and offer nothing to choose, so no apply carries values nobody read; the
+pane reads it again whenever it comes on show holding none. The file manager
+reaches the pane by the name both sides take from
+`tairix_browse::SETTINGS_PANE` — a running Settings shows it and comes
+forward under the activation the hand-over lent it — and reads the document
+again whenever the desktop's `settings_generation` moves.
+
 ## Storage
 
 The one pane that composes no settable at all: there is no table behind it,
@@ -867,7 +891,7 @@ the staged source of truth; the shape of it is:
   counters that do need `CAP_SYSINFO_KERNEL` stay the Switchboard's alone.
   The walk is an IPC round trip, so it runs on a worker and the pane draws
   what has arrived rather than waiting;
-- **user-scope panes** (Appearance, Wallpaper, Displays, Lock Screen,
+- **user-scope panes** (Appearance, Wallpaper, Files, Displays, Lock Screen,
   Screensaver, Notifications, Keyboard, Mouse, Trackpad, Accessibility,
   Language & Region) post a
   document to the desktop session, which validates it, applies it and persists

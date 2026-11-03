@@ -46,7 +46,7 @@ use tairix_abi::switchboard_ipc::{NetworkReport, TraySummary};
 use tairix_abi::time::WallClockReading;
 use tairix_abi::zone::ZoneName;
 use tairix_abi::{AppIdentity, BundleId, Errno, Origin};
-use tairix_browse::{DirectorySource, GridView};
+use tairix_browse::{DirectorySource, FilerPreferences, GridView};
 use tairix_controls::damage::{self, Repaint};
 use tairix_controls::ClipboardChord;
 use tairix_cursor::{CursorRegistry, CursorTheme, CURSOR_BASE_SIDE_PX};
@@ -320,6 +320,12 @@ pub struct DesktopShell {
     zones: Option<HeldZones>,
     /// The machine's own zone, which a user who chose none reads.
     machine_zone: Option<ZoneName>,
+    /// The file manager's settings in effect, published in the desktop's
+    /// document.
+    files: FilerPreferences,
+    /// Which publication of the file manager's settings is in effect, as
+    /// every windowed application is told it.
+    settings_generation: u32,
     /// The per-frame shell work counted so far, so a test can prove a
     /// drained batch settles once rather than once per sample. Test-only:
     /// the product carries no counter.
@@ -500,6 +506,8 @@ impl DesktopShell {
             clock: SessionClock::new(CivilClock::UTC),
             zones: None,
             machine_zone: None,
+            files: FilerPreferences::default(),
+            settings_generation: 0,
             #[cfg(test)]
             settled: SettleWork::default(),
         }
@@ -552,6 +560,16 @@ impl DesktopShell {
     /// the same shell cannot be held together.
     pub fn artwork_parts(&mut self) -> (&mut ArtworkCache, &mut dyn ArtworkResolver) {
         (&mut self.artwork, self.artwork_resolver.as_mut())
+    }
+
+    /// The active theme and the artwork lookup icons are drawn through, for a
+    /// surface the shell does not paint itself — the picker — that needs both
+    /// in one paint.
+    pub fn theme_and_artwork(&mut self) -> (&Theme, IconArtworkSource<'_>) {
+        (
+            self.session.active_theme(),
+            IconArtworkSource::new(&mut self.artwork, self.artwork_resolver.as_mut()),
+        )
     }
 
     /// Give back every rasterised pixel the current memory-pressure band
@@ -1280,6 +1298,18 @@ impl DesktopShell {
         let taskbar = self.session.taskbar();
         let bar = taskbar.layout(compositor.scale()).bar;
         work_area_excluding(screen, bar, taskbar.config().edge)
+    }
+
+    /// Keep `window` wholly on the work area, moving it no further than it
+    /// must: a dialog that grew past an edge comes back onto it.
+    pub fn keep_on_work_area(&mut self, compositor: &mut Compositor, window: WindowId) {
+        let Some(bounds) = compositor.window(window).map(tairix_wm::Window::bounds) else {
+            return;
+        };
+        let fitted = bounds.clamped_onto(self.work_area(compositor));
+        if fitted.origin != bounds.origin {
+            compositor.move_window(window, fitted.origin);
+        }
     }
 
     /// Install a loaded notification-icon set on the renderer, replacing the
@@ -2679,6 +2709,42 @@ impl DesktopShell {
     #[must_use]
     pub const fn machine_zone(&self) -> Option<ZoneName> {
         self.machine_zone
+    }
+
+    /// The file manager's settings in effect.
+    #[must_use]
+    pub const fn files(&self) -> &FilerPreferences {
+        &self.files
+    }
+
+    /// Hold `files` as the file manager's settings, read from the store the
+    /// session started on, and count this session's publications of them
+    /// from `first`.
+    ///
+    /// The `Desktop` notice carrying the count is machine-wide and every
+    /// session publishes it in turn, so `first` is drawn per session: counted
+    /// from zero, two sessions' counts would meet.
+    pub fn adopt_files(&mut self, files: FilerPreferences, first: u32) {
+        self.files = files;
+        self.settings_generation = first;
+    }
+
+    /// Hold `files`, from a publish of the desktop's document that landed or
+    /// the store read in its place, moving the generation every windowed
+    /// application is told only when they changed, so the file manager reads
+    /// them again exactly when there is something new.
+    pub fn adopt_published_files(&mut self, files: FilerPreferences) {
+        if self.files != files {
+            self.files = files;
+            self.settings_generation = self.settings_generation.wrapping_add(1);
+        }
+    }
+
+    /// Which publication of the file manager's settings is in effect, as
+    /// every windowed application is told it.
+    #[must_use]
+    pub const fn settings_generation(&self) -> u32 {
+        self.settings_generation
     }
 
     /// Read the clock in the zone and region `settings` name — the machine's

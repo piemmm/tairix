@@ -403,12 +403,25 @@ can never diverge in navigation semantics, listing policy, or look.
   because an attach waits for a driver, and an eject wherever the launcher's
   own holds on the volume have let go (`files.app`'s reader); and
   `MountDone::shown` answers where the volume is or the refusal, in the one
-  wording `files.app` and the desktop both state. `MountAct::eject_chosen` and
+  wording `files.app` states. `MountAct::eject_chosen` and
   `MountAct::read_only_of` decide what the menu's *Eject* and *Mount
   Read-Only* ask for, the latter refusing an image no path can name; an eject
   of a lost volume asks `lost_eject_question` first and detaches with
   `DetachMode::Lost`; and `within` is the one rule for a place lying on a
-  volume being ejected.
+  volume being ejected. Why an eject is asked (`EjectAsked`) decides its
+  detach mode: an image the user has finished with (`MountAct::finished`) is
+  asked `DetachMode::Idle`, and its in-use answer is shown as nothing at all.
+  `MountDone::attached` names the volume an attach made, which is the only
+  one its surface may let go; `MOUNT_SWITCH` is the file manager's switch for
+  an image to attach and show, spelled once for the desktop that starts it so.
+- **Settings** (`preferences`, `plans/NEW-FILEMANAGER.md` FM23):
+  `FilerPreferences`, the file manager's closed `tairix_appconf` registry of
+  `files.*` keys — where a new window opens (`Start`), its view, order, rail
+  and toolbar, the presentation, whether a move to the Trash asks, and whether
+  an image opened is unmounted once closed. The desktop session keeps the keys
+  in its document, the Settings application edits them in the pane
+  `SETTINGS_PANE` names, and `reorder` is the one rule for where a window's own
+  order puts its folders.
 - **Places / devices rail** (`places`, `layout::SidebarView`,
   `plans/NEW-FILEMANAGER.md`): the shortcut column down the leading edge of a
   file-manager window — the user's own places above, every mounted volume

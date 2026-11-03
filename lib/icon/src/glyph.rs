@@ -668,6 +668,8 @@ pub enum IconKind {
     TextCsv,
     /// A makefile: the rules a build follows.
     TextMakefile,
+    /// A folder, for the file manager's settings category.
+    FileManager,
 }
 
 impl IconKind {
@@ -971,6 +973,7 @@ impl IconKind {
             "application-x-arcfs" => Self::ArchiveArcFs,
             "text-csv" => Self::TextCsv,
             "text-x-makefile" => Self::TextMakefile,
+            "file-manager" => Self::FileManager,
             _ => Self::Generic,
         }
     }
@@ -1280,6 +1283,7 @@ impl IconKind {
             Self::ArchiveArcFs => 288,
             Self::TextCsv => 289,
             Self::TextMakefile => 290,
+            Self::FileManager => 291,
         }
     }
 
@@ -1588,6 +1592,7 @@ impl IconKind {
             Self::ArchiveArcFs => "application-x-arcfs",
             Self::TextCsv => "text-csv",
             Self::TextMakefile => "text-x-makefile",
+            Self::FileManager => "file-manager",
         }
     }
 }
@@ -1848,6 +1853,7 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::AlertInformation
         | IconKind::AlertQuestion
         | IconKind::Theme
+        | IconKind::FileManager
         | IconKind::Computer
         | IconKind::Laptop
         | IconKind::Server

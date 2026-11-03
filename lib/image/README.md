@@ -34,9 +34,10 @@ catalog only its own extensions.
 ## Formats
 
 `ImageFormat` is a deliberately closed enum. `decode`, `decode_fitted`, and
-`Sequence::open` dispatch on the signature `sniff` recognises; a caller that
-already knows the type instead *names* the format, which is the only way to
-reach one that carries no signature (see below). A further format is added
+`Sequence::open` dispatch on the format `sniff` recognises from the content —
+a signature, or a sprite area's header (see below); a caller that already
+knows the type instead *names* the format, which also reaches a typed sprite
+area whose header recognition turns down. A further format is added
 only when a real consumer needs it — never speculatively.
 
 - **PNG** (`ImageFormat::Png`, W3C PNG): every colour type and bit depth,
@@ -111,14 +112,21 @@ The OS/2 2.x header lengths are refused by name rather than half-read: they
 share the Windows prefix but read compression codes 3 and 4 as Huffman 1D and
 RLE24, two codecs with no other consumer here.
 
-A sprite area has **no signature at all** — its first word is the sprite
-count, and RISC OS types a file from its directory entry — so `sniff` never
-answers `ImageFormat::Sprite` and never guesses one from a structural
-coincidence. A caller that knows the type from a filetype, a media type, or
-the name a file was picked by reaches the decoder by naming the format
-(`probe_as` / `decode_as` / `Sequence::open_as`); the named format's own
-parser still validates the bytes, so naming the wrong one is refused rather
-than misread. The sprite decoder also takes three readings the format's own
+A sprite area has **no signature** — its first word is the sprite count,
+and RISC OS types a file from its directory entry — but a saved area states
+its own end, so `recognise` answers `ImageFormat::Sprite` only for a file
+whose header says that end is the file's own length, with at least one
+sprite, a word-aligned first sprite after the header, room for every control
+block, and a first sprite that fits the area (and fills it when alone). It
+reads no more than `RECOGNITION_HEAD` bytes, the span of the longest signature
+(OpenRaster's), so an editor holding a file's head and a worker holding the
+whole file agree; a head shorter than that and than the file recognises
+nothing. The chain is the decoder's to validate. A caller that knows the type from a filetype, a media type, or the
+name a file was picked by names the format instead (`probe_as` /
+`decode_as` / `Sequence::open_as`), which also reaches a typed sprite file
+whose header recognition turns down; the named format's own parser still
+validates the bytes, so naming the wrong one is refused rather than
+misread. The sprite decoder also takes three readings the format's own
 text does not settle, all stated in its module rustdoc: a sprite with no
 palette shows the desktop's colours (`desktop_palette`), never a PC palette —
 two colours are Wimp colours 0 and 7, four are 0, 2, 4 and 7, sixteen are the
@@ -321,8 +329,12 @@ from its plane.
 
 ## API shape
 
-- `sniff(&[u8]) -> Option<ImageFormat>` — identify a format from its
-  leading signature. Never answers `Sprite`, which has none.
+- `sniff(&[u8]) -> Option<ImageFormat>` — identify a whole file's format
+  from its content: `recognise` over all of it.
+- `recognise(head, length) -> Option<ImageFormat>` — identify the format of a
+  file `length` bytes long from at most `RECOGNITION_HEAD` bytes of its head:
+  a signature, else a sprite area whose header states that length as its
+  end.
 - `probe(&[u8]) -> Result<ImageInfo, DecodeError>` — the format and natural
   size from the header alone, decoding no pixels. For the caller that cannot
   state its target size until it knows the source's. The reported geometry is
@@ -336,8 +348,8 @@ from its plane.
   caller's target box (see below).
 - `probe_as(ImageFormat, &[u8])` and `decode_as(ImageFormat, &[u8],
   &DecodeLimits)` — the same two, for a caller that already knows the type
-  rather than having it sniffed. The only door to a format with no
-  signature; `probe` and `decode` are `sniff` plus these.
+  rather than having it sniffed; `probe` and `decode` are `sniff` plus
+  these.
 - `FitBox::new(width, height)` plus `width()`/`height()` — a small public
   copy type carrying the largest output the caller intends to use.
 - `DecodeLimits::new(max_width, max_height, max_pixels,
@@ -568,9 +580,11 @@ any byte string decodes to some sequence of boolean choices, and a random
 partition therefore walks the whole header — segmentation, the deltas, every
 token-probability update flag, the mode trees, and the coefficient tokens —
 without the harness restating one of the format's probability tables.
-Since a sprite area has no signature, *every* input is additionally
-driven through the format-naming door, so the sprite decoder gets the whole
-harness's corpus rather than only its own — through
+Every input is also recognised from its head alone and must agree with the
+whole-file sniff, every sprite area written back must be recognised from its
+content, and since any bytes are a candidate sprite area, *every* input is
+additionally driven through the format-naming door, so the sprite decoder
+gets the whole harness's corpus rather than only its own — through
 the shared `tests/fuzzseed` seed and budget seam, registered with
 `cargo xtask fuzz`.
 The subsystem page is `docs/src/lib/image.md`.

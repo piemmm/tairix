@@ -5,11 +5,11 @@
 //! application's whole icon set in one file — so it decodes as a page
 //! container rather than as one picture. It carries **no signature**: its
 //! first word is the sprite count, and RISC OS types a file from its
-//! directory entry rather than from its content. A caller therefore names
-//! this format rather than having it recognised ([`crate::probe_as`],
-//! [`crate::decode_as`], [`crate::Sequence::open_as`]); recognising one from
-//! a structural coincidence would be a false-positive machine, and one this
-//! crate would then act on.
+//! directory entry rather than from its content. A saved area does state its
+//! own end, though, and a file is recognised as one only where that word is
+//! the file's own length ([`recognised`]); a caller that knows the type names
+//! the format instead ([`crate::probe_as`], [`crate::decode_as`],
+//! [`crate::Sequence::open_as`]).
 //!
 //! # Readings the format's own text does not settle
 //!
@@ -1362,6 +1362,45 @@ struct AreaHeader {
     count: u32,
     first: u32,
     end: u32,
+}
+
+/// Whether a file `length` bytes long opening with `head` is a sprite area by
+/// its own header: at least one sprite, the first on a word after the header,
+/// room for every control block, and the area ending exactly where the file
+/// does, as every saved area does. Where `head` reaches the first sprite's
+/// length word, that sprite must fit the area too, and fill it when alone.
+///
+/// The chain itself is the decoder's to validate; this names only what the
+/// header states, so a listing reading a few bytes and a worker holding the
+/// whole file agree.
+pub(crate) fn recognised(head: &[u8], length: u64) -> bool {
+    let at = |offset: u32| word(head, offset).ok();
+    let (Some(count), Some(first), Some(free)) = (at(0), at(4), at(8)) else {
+        return false;
+    };
+    let (Some(first), Some(end)) = (
+        first.checked_sub(AREA_OFFSET_BIAS),
+        free.checked_sub(AREA_OFFSET_BIAS),
+    ) else {
+        return false;
+    };
+    let room = u64::from(end.saturating_sub(first));
+    let blocks = u64::from(count) * u64::from(SPRITE_HEADER_LEN);
+    let framed = count != 0
+        && u64::from(end) == length
+        && end.is_multiple_of(4)
+        && first >= AREA_HEADER_LEN
+        && first.is_multiple_of(4)
+        && first <= end
+        && blocks <= room;
+    framed
+        && at(first).is_none_or(|leading| {
+            let rest = u64::from(count - 1) * u64::from(SPRITE_HEADER_LEN);
+            leading >= SPRITE_HEADER_LEN
+                && leading.is_multiple_of(4)
+                && u64::from(leading) + rest <= room
+                && (count > 1 || u64::from(leading) == room)
+        })
 }
 
 fn read_area(bytes: &[u8]) -> Result<AreaHeader, DecodeError> {

@@ -36,14 +36,13 @@ impl OldMap {
     ///
     /// # Errors
     ///
-    /// * [`DriverError::BadMagic`] if either checksum fails, the end
-    ///   pointer or an entry is structurally invalid, or the recorded
-    ///   disc size does not fit the device.
+    /// * [`DriverError::BadMagic`] if either checksum fails, or the end
+    ///   pointer or an entry is structurally invalid.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
     pub fn load<B: Block>(volume: &mut ByteDevice<B>) -> Result<Self, DriverError> {
         let mut raw = [0u8; OLD_MAP_SIZE];
         volume.read(0, &mut raw)?;
-        validate_old_map(&raw, volume.capacity())?;
+        validate_old_map(&raw)?;
         Ok(Self {
             disc_sectors: get_u24(&raw, DISC_SECTORS),
             raw,

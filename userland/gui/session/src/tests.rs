@@ -2620,7 +2620,7 @@ fn a_text_choice_reaches_the_compositor_and_the_published_desktop() {
         FamilyEntry::new(inter, "Inter", FamilyKind::Proportional, 1210).expect("entry"),
         FamilyEntry::new(serif, "Noto Serif", FamilyKind::Proportional, 1362).expect("entry"),
     ]);
-    let shipped = desktop_info(&comp, None).expect("described").text();
+    let shipped = desktop_info(&comp, &shell).expect("described").text();
     assert_eq!(
         shipped.map(|text| (text.family(), text.size_px())),
         Some((inter, 16))
@@ -2631,7 +2631,7 @@ fn a_text_choice_reaches_the_compositor_and_the_published_desktop() {
         .set_text(TextFamily::Named(serif), TextSize::Points(12));
     assert_eq!(gone, None);
     assert!(shell.sync_theme(&mut comp));
-    let published = desktop_info(&comp, None).expect("described").text();
+    let published = desktop_info(&comp, &shell).expect("described").text();
     // Twelve points in Noto's taller line box.
     assert_eq!(
         published.map(|text| (text.family(), text.size_px())),
@@ -4690,7 +4690,7 @@ fn picker_begin_opens_one_window_and_enforces_the_single_slot() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     let wm = picker.wm_id().expect("a picker window is showing");
     assert_eq!(
@@ -4699,7 +4699,7 @@ fn picker_begin_opens_one_window_and_enforces_the_single_slot() {
         "the picker is placed at its one deterministic origin"
     );
     assert_eq!(
-        picker.begin(9, &OPEN, &mut shell, &mut comp),
+        picker.begin((9, None), &OPEN, &mut shell, &mut comp),
         Err(Errno::AlreadyExists),
         "one picker at a time"
     );
@@ -4713,7 +4713,7 @@ fn picker_follows_a_reported_change_into_the_listing() {
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker.follow(WatchUpdate::Rescan, &mut shell, &mut comp);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     picker.follow(
         WatchUpdate::Changes(vec![tairix_browse::EntryChange::Upsert(Entry::file(
@@ -4751,7 +4751,7 @@ fn picker_leaves_a_folder_gone_from_its_path_for_its_parent() {
     let source = Rc::clone(&tree);
     let mut picker = SessionPicker::new(move || SharedTree(Rc::clone(&source)));
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
@@ -4783,7 +4783,7 @@ fn picker_enter_chooses_nothing_once_the_chosen_file_went() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
@@ -4819,7 +4819,7 @@ fn picker_begin_fails_closed_when_the_listing_is_refused() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(|| RefusingSource);
     assert_eq!(
-        picker.begin(7, &OPEN, &mut shell, &mut comp),
+        picker.begin((7, None), &OPEN, &mut shell, &mut comp),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(picker.wm_id(), None, "nothing half-open remains");
@@ -4834,7 +4834,7 @@ fn picker_starting_at_opens_at_the_named_directory() {
     let mut picker =
         SessionPicker::new(TreeSource::fixture).starting_at(vec![String::from("Docs")]);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     // `Docs/` holds only `notes.txt`; Down selects it and Enter chooses it,
     // so the picker must have opened *in* `Docs`, not the root.
@@ -4856,7 +4856,7 @@ fn a_refused_picker_start_climbs_to_its_nearest_listable_folder() {
     let mut picker = SessionPicker::new(TreeSource::fixture)
         .starting_at(vec![String::from("Docs"), String::from("Gone")]);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("a refused start climbs rather than refusing the pick");
     let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
@@ -4875,7 +4875,7 @@ fn a_picker_start_with_no_listable_folder_above_it_opens_at_the_root() {
     let mut picker = SessionPicker::new(TreeSource::fixture)
         .starting_at(vec![String::from("Nowhere"), String::from("missing")]);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("the root still lists");
     let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
@@ -4896,7 +4896,7 @@ fn picker_keys_navigate_and_choose_the_selected_file() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     let wm = picker.wm_id().expect("showing");
 
@@ -4942,7 +4942,7 @@ fn a_refused_open_ends_the_pick_and_a_late_answer_is_not_the_picks() {
     let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
 
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     picker.handle_key(&down, &mut shell, &mut comp);
     picker.handle_key(&down, &mut shell, &mut comp);
@@ -4954,7 +4954,7 @@ fn a_refused_open_ends_the_pick_and_a_late_answer_is_not_the_picks() {
     assert_eq!(picker.wm_id(), None);
 
     picker
-        .begin(9, &OPEN, &mut shell, &mut comp)
+        .begin((9, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     picker.handle_key(&down, &mut shell, &mut comp);
     picker.handle_key(&down, &mut shell, &mut comp);
@@ -4989,7 +4989,7 @@ fn the_session_picks_a_sounds_file_for_itself() {
         .begin_for(sound, &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     assert_eq!(
-        picker.begin(7, &OPEN, &mut shell, &mut comp),
+        picker.begin((7, None), &OPEN, &mut shell, &mut comp),
         Err(Errno::AlreadyExists),
         "one picker at a time"
     );
@@ -5026,14 +5026,15 @@ fn the_session_picks_a_sounds_file_for_itself() {
     );
 }
 
-/// A navigation step repaints the picker into the buffer its window already
-/// holds: a step never changes the window's size, so nothing is reallocated.
+/// A navigation step is painted once its input has drained, into the buffer
+/// the picker's window already holds: a step never changes the window's size,
+/// so nothing is reallocated, and a key paints nothing by itself.
 #[test]
 fn a_picker_navigation_step_repaints_into_the_buffer_it_holds() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     let wm = picker.wm_id().expect("showing");
     let content = |comp: &Compositor| {
@@ -5045,6 +5046,9 @@ fn a_picker_navigation_step_repaints_into_the_buffer_it_holds() {
     let (buffer, drawn) = content(&comp);
     let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     assert_eq!(picker.handle_key(&down, &mut shell, &mut comp), None);
+    assert_eq!(picker.handle_key(&down, &mut shell, &mut comp), None);
+    assert_eq!(content(&comp).1, drawn, "input paints nothing itself");
+    picker.paint_owed(&mut shell, &mut comp);
     let (after, redrawn) = content(&comp);
     assert_eq!(after, buffer, "the step allocated a fresh buffer");
     assert_ne!(redrawn, drawn, "the moved selection was not painted");
@@ -5057,7 +5061,7 @@ fn picker_selection_and_climb_track_the_browser() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
 
     let down = pressed(KeyValue::Named(NamedKeyCode::Down));
@@ -5078,7 +5082,7 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
 
     // The click row must be computed at the scale and theme the picker draws
@@ -5100,7 +5104,7 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
     // A click on the chrome strip above the rows concludes nothing.
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     assert_eq!(
         picker.handle_click(Point::new(4, 0), &mut shell, &mut comp),
@@ -5115,7 +5119,7 @@ fn a_folder_pick_chooses_the_folder_shown() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &PickPurpose::Folder, &mut shell, &mut comp)
+        .begin((7, None), &PickPurpose::Folder, &mut shell, &mut comp)
         .expect("accepted");
     let wm = picker.wm_id().expect("showing");
     let task = shell.tasks().task_for(wm).expect("the picker is a task");
@@ -5164,7 +5168,7 @@ fn a_refused_folder_keeps_the_picker_up_and_a_file_row_chooses_nothing() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &PickPurpose::Folder, &mut shell, &mut comp)
+        .begin((7, None), &PickPurpose::Folder, &mut shell, &mut comp)
         .expect("accepted");
     let theme = shell.session().active_theme();
     let row = i32::try_from(picker_rows_top(theme)).expect("a small chrome height");
@@ -5270,17 +5274,17 @@ fn a_wheel_turn_over_the_picker_scrolls_its_listing() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(|| long_root(60));
     assert!(
-        !picker.scroll((0, SCROLL_UNITS_PER_DETENT), &shell, &mut comp),
+        !picker.scroll((0, SCROLL_UNITS_PER_DETENT), &mut shell, &mut comp),
         "no pick is showing"
     );
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     assert!(
-        !picker.scroll((0, -SCROLL_UNITS_PER_DETENT), &shell, &mut comp),
+        !picker.scroll((0, -SCROLL_UNITS_PER_DETENT), &mut shell, &mut comp),
         "already at the top"
     );
-    assert!(picker.scroll((0, 3 * SCROLL_UNITS_PER_DETENT), &shell, &mut comp));
+    assert!(picker.scroll((0, 3 * SCROLL_UNITS_PER_DETENT), &mut shell, &mut comp));
 
     let theme = shell.session().active_theme();
     let top = picker_rows_top(theme);
@@ -5316,7 +5320,7 @@ fn a_held_picker_bar_arrow_repeats_on_the_loops_timed_wake() {
     let first_row = Point::new(4, top);
     let mut picker = SessionPicker::new(|| long_root(60));
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     let increment = Point::new(x, bar.bottom() - 1);
     assert_eq!(picker.handle_click(increment, &mut shell, &mut comp), None);
@@ -5324,11 +5328,11 @@ fn a_held_picker_bar_arrow_repeats_on_the_loops_timed_wake() {
     let due = picker
         .scroll_repeat_deadline(0)
         .expect("a held arrow arms a repeat");
-    picker.scroll_repeat(due, &shell, &mut comp);
+    picker.scroll_repeat(due, &mut shell, &mut comp);
     let release = InputEvent::PointerReleased {
         button: PointerButton::Primary,
     };
-    assert!(picker.handle_pointer(increment, &release, &shell, &mut comp));
+    assert!(picker.handle_pointer(increment, &release, &mut shell, &mut comp));
     assert_eq!(picker.scroll_repeat_deadline(due), None, "let go");
     assert_eq!(
         asked_path(picker.handle_click(first_row, &mut shell, &mut comp)),
@@ -5367,7 +5371,7 @@ fn the_picker_scroll_bar_steps_and_drags_its_listing() {
 
     let mut picker = SessionPicker::new(|| long_root(60));
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     let increment = Point::new(x, bar.bottom() - 1);
     assert_eq!(
@@ -5375,7 +5379,7 @@ fn the_picker_scroll_bar_steps_and_drags_its_listing() {
         None,
         "a press on the bar is not a press on a row"
     );
-    assert!(picker.handle_pointer(increment, &release, &shell, &mut comp));
+    assert!(picker.handle_pointer(increment, &release, &mut shell, &mut comp));
     assert_eq!(
         asked_path(picker.handle_click(first_row, &mut shell, &mut comp)),
         "/f001",
@@ -5384,7 +5388,7 @@ fn the_picker_scroll_bar_steps_and_drags_its_listing() {
 
     let mut picker = SessionPicker::new(|| long_root(60));
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     // At rest the thumb starts where the track does, just past the decrement
     // button, which is as long as the bar is wide.
@@ -5396,18 +5400,18 @@ fn the_picker_scroll_bar_steps_and_drags_its_listing() {
         picker.handle_pointer(
             dragged,
             &InputEvent::PointerMoved { to: dragged },
-            &shell,
+            &mut shell,
             &mut comp
         ),
         "the drag is the bar's"
     );
-    assert!(picker.handle_pointer(dragged, &release, &shell, &mut comp));
+    assert!(picker.handle_pointer(dragged, &release, &mut shell, &mut comp));
     let away = Point::new(4, top + 40);
     assert!(
         !picker.handle_pointer(
             away,
             &InputEvent::PointerMoved { to: away },
-            &shell,
+            &mut shell,
             &mut comp
         ),
         "after the release the pointer is the listing's again"
@@ -5427,7 +5431,7 @@ fn picker_title_carries_the_location_and_follows_a_navigation() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     let wm = picker.wm_id().expect("showing");
     let task = shell.tasks().task_for(wm).expect("the picker is a task");
@@ -5474,7 +5478,7 @@ fn picker_toolbar_clicks_never_conclude_the_pick() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
 
     // Sweep the toolbar strip's middle row: every click is a read-only
@@ -5502,7 +5506,7 @@ fn picker_escape_cancels_and_frees_the_slot() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
     assert_eq!(
@@ -5511,7 +5515,7 @@ fn picker_escape_cancels_and_frees_the_slot() {
     );
     assert_eq!(picker.wm_id(), None);
     picker
-        .begin(9, &OPEN, &mut shell, &mut comp)
+        .begin((9, None), &OPEN, &mut shell, &mut comp)
         .expect("the slot is free again");
 }
 
@@ -5528,7 +5532,7 @@ fn the_chooser_wears_the_window_frame_and_is_titled_in_it() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     let wm = picker.wm_id().expect("a picker window is showing");
 
@@ -5577,7 +5581,7 @@ fn the_choosers_close_control_cancels_the_pick() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     let wm = picker.wm_id().expect("a picker window is showing");
     let mut windows = SessionWindows::new();
@@ -5616,7 +5620,7 @@ fn picker_abort_is_scoped_to_the_requesting_window() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
 
     // A different window's death leaves the pick showing.
@@ -5666,7 +5670,7 @@ fn the_picker_witness_waits_for_its_listing_and_is_announced_once() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(DeferredSource::fixture);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     assert!(
         picker.wm_id().is_some(),
@@ -5698,7 +5702,7 @@ fn a_picker_start_refused_on_reading_climbs_to_the_nearest_listable_folder() {
     let mut picker = SessionPicker::new(DeferredSource::fixture)
         .starting_at(vec![String::from("Docs"), String::from("Gone")]);
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted while the start is read");
     // The start is refused, and the climb's own read of `Docs` lands next.
     picker.resume(&mut shell, &mut comp);
@@ -5727,7 +5731,7 @@ fn the_picker_witness_is_silent_with_no_pick_showing() {
     // A concluded pick leaves the slot idle again, and a later present over
     // that idle slot is silent too.
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     picker.report_newly_shown(|| announcements += 1);
     assert_eq!(announcements, 1, "the showing pick is announced");
@@ -5747,16 +5751,851 @@ fn the_picker_witness_is_announced_again_for_a_later_pick() {
 
     let mut announcements = 0;
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     picker.report_newly_shown(|| announcements += 1);
     picker.abort_for(7, &mut shell, &mut comp);
 
     picker
-        .begin(9, &OPEN, &mut shell, &mut comp)
+        .begin((9, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     picker.report_newly_shown(|| announcements += 1);
     assert_eq!(announcements, 2, "a second pick is announced too");
+}
+
+/// Press *Show Folders* on the showing save, so its listing is there to
+/// press a row of.
+fn show_folders<S: DirectorySource, F: FnMut() -> S>(
+    picker: &mut SessionPicker<S, F>,
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+) {
+    let layout = picker
+        .panel_for_test(comp.scale(), shell.session().active_theme())
+        .expect("a save");
+    let at = Point::new(
+        layout.browse.left().saturating_add(2),
+        layout.browse.top().saturating_add(2),
+    );
+    assert_eq!(picker.handle_click(at, shell, comp), None);
+}
+
+/// Press the save panel's part `part` names.
+fn press_panel<S: DirectorySource, F: FnMut() -> S>(
+    picker: &mut SessionPicker<S, F>,
+    part: fn(&crate::savepanel::PanelLayout) -> Rect,
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+) -> Option<PickStep> {
+    let layout = picker
+        .panel_for_test(comp.scale(), shell.session().active_theme())
+        .expect("a save");
+    let rect = part(&layout);
+    let at = Point::new(rect.left().saturating_add(2), rect.top().saturating_add(2));
+    picker.handle_click(at, shell, comp)
+}
+
+/// A save opens as a dialog of the window that asked, so it reads as that
+/// document's question; an open keeps its fixed place.
+#[test]
+fn a_save_opens_over_the_window_that_asked() {
+    let (mut shell, mut comp) = headless_desktop();
+    let owner = shell
+        .open_window(&mut comp, Point::new(40, 40), app_surface(), "Editor")
+        .expect("the window opens");
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    picker
+        .begin(
+            (7, Some(owner)),
+            &save_as("notes.txt"),
+            &mut shell,
+            &mut comp,
+        )
+        .expect("accepted");
+    let wm = picker.wm_id().expect("showing");
+    assert_eq!(comp.window(wm).expect("on screen").parent(), Some(owner));
+    assert!(picker.cancel(&mut shell, &mut comp).is_some());
+    picker
+        .begin((7, Some(owner)), &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
+    let wm = picker.wm_id().expect("showing");
+    assert_eq!(comp.window(wm).expect("on screen").parent(), None);
+}
+
+/// A save's dialog leaves the screen however its pick ends — *Cancel*,
+/// `Escape`, or the window that asked going away — and the keyboard goes back
+/// to the window that asked.
+#[test]
+fn a_save_dialog_leaves_the_screen_and_gives_the_keyboard_back() {
+    let (mut shell, mut comp) = headless_desktop();
+    let owner = shell
+        .open_window(&mut comp, Point::new(40, 40), app_surface(), "Editor")
+        .expect("the window opens");
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
+    for ending in ["cancel", "escape", "abort"] {
+        picker
+            .begin(
+                (7, Some(owner)),
+                &save_as("notes.txt"),
+                &mut shell,
+                &mut comp,
+            )
+            .expect("accepted");
+        let dialog = picker.wm_id().expect("showing");
+        assert_eq!(shell.router().focused(), Some(dialog), "{ending}");
+        match ending {
+            "cancel" => {
+                picker.cancel(&mut shell, &mut comp);
+            }
+            "escape" => {
+                picker.handle_key(&escape, &mut shell, &mut comp);
+            }
+            _ => picker.abort_for(7, &mut shell, &mut comp),
+        }
+        assert!(picker.wm_id().is_none(), "{ending}: the pick ended");
+        assert!(
+            comp.window(dialog).is_none(),
+            "{ending}: the dialog is gone"
+        );
+        if ending != "abort" {
+            assert_eq!(shell.router().focused(), Some(owner), "{ending}");
+        }
+    }
+}
+
+/// Showing the folders grows the dialog upward, so the panel — the name being
+/// typed and the toggle under the pointer — stays where it was on screen; the
+/// browser opens at no more than half an open's height.
+#[test]
+fn showing_the_folders_keeps_the_panel_where_it_was() {
+    let (mut shell, mut comp) = headless_desktop();
+    let owner = shell
+        .open_window(&mut comp, Point::new(200, 360), app_surface(), "Editor")
+        .expect("the window opens");
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    picker
+        .begin(
+            (7, Some(owner)),
+            &save_as("notes.txt"),
+            &mut shell,
+            &mut comp,
+        )
+        .expect("accepted");
+    let wm = picker.wm_id().expect("showing");
+    let panel_on_screen = |picker: &SessionPicker<TreeSource, fn() -> TreeSource>,
+                           shell: &DesktopShell,
+                           comp: &Compositor| {
+        let panel = picker
+            .panel_for_test(comp.scale(), shell.session().active_theme())
+            .expect("a save")
+            .panel;
+        window_rect(comp, wm).top() + panel.top()
+    };
+    let before = panel_on_screen(&picker, &shell, &comp);
+    let compact = window_rect(&comp, wm).height;
+    show_folders(&mut picker, &mut shell, &mut comp);
+    assert_eq!(panel_on_screen(&picker, &shell, &comp), before);
+    let grown = window_rect(&comp, wm).height - compact;
+    assert!(grown > 0 && grown <= Scale::ONE.scale_length(tairix_browse::WIN_HEIGHT) / 2);
+    show_folders(&mut picker, &mut shell, &mut comp);
+    assert_eq!(
+        panel_on_screen(&picker, &shell, &comp),
+        before,
+        "folding them away keeps it put too"
+    );
+}
+
+/// The picker draws its pictures through the session's artwork, as the file
+/// manager does: a paint asks for the save's own document picture and the
+/// listing's, so neither is left a glyph once its decode lands.
+#[test]
+fn the_picker_draws_its_pictures_through_the_sessions_artwork() {
+    let (mut shell, mut comp) = headless_desktop();
+    let desk = deferred_artwork(&mut shell);
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    picker
+        .begin((7, None), &save_as("notes.txt"), &mut shell, &mut comp)
+        .expect("accepted");
+    let icon = picker
+        .panel_for_test(comp.scale(), shell.session().active_theme())
+        .expect("a save")
+        .icon;
+    let kind = tairix_browse::media::media_for_name("notes.txt")
+        .map_or(IconKind::File, tairix_browse::media::MediaType::icon);
+    // Answered with a picture, so the panel never asks for it again and what
+    // the listing asks for is all that is left to land.
+    let landed = {
+        let mut desk = desk.borrow_mut();
+        while let Some(job) = desk.next_job() {
+            let picture = Surface::new(job.side, job.side).map(tairix_icon::Artwork::new);
+            let _ = desk.deliver(&job, picture);
+        }
+        desk.take_landed()
+    };
+    assert!(
+        landed.resolves(tairix_icon::IconRequest::kind(kind), icon.width),
+        "the document's picture was asked for"
+    );
+    picker.artwork_landed(&landed, &mut shell, &mut comp);
+    assert!(land(&desk, |_| true).is_empty(), "nothing else was asked");
+    show_folders(&mut picker, &mut shell, &mut comp);
+    assert!(
+        !land(&desk, |_| true).is_empty(),
+        "the listing's pictures were asked for once it showed"
+    );
+}
+
+/// *Format* offers each ending the requester writes, and choosing one puts
+/// the name in it, keeping the stem.
+#[test]
+fn a_format_chosen_from_its_menu_renames_the_document() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    let mut endings = SaveEndings::ANY;
+    endings.push('.', "png").expect("an extension");
+    endings.push('.', "jpg").expect("an extension");
+    picker
+        .begin(
+            (7, None),
+            &save_held("Holiday.png", endings),
+            &mut shell,
+            &mut comp,
+        )
+        .expect("accepted");
+    let Some(PickStep::Menu { model, .. }) = press_panel(
+        &mut picker,
+        |layout| layout.format_box.expect("two endings"),
+        &mut shell,
+        &mut comp,
+    ) else {
+        panic!("the format menu is asked for");
+    };
+    assert_eq!(model.rows().len(), 2);
+    let jpg = tairix_abi::window_ipc::AppMenuItemId::for_index(1).expect("an id");
+    picker.menu_answered(&ChainOutcome::Chosen(jpg), &mut shell, &mut comp);
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let (_, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(path, "/Holiday.jpg");
+}
+
+/// A save starts in the folder the last one went to, and *Where* still leads
+/// back to where saves began.
+#[test]
+fn a_save_starts_where_the_last_one_went() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    picker
+        .begin((7, None), &save_as("Docs"), &mut shell, &mut comp)
+        .expect("accepted");
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "into Docs"
+    );
+    type_into(&mut picker, "fresh.txt", &mut shell, &mut comp);
+    let (serial, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(path, "/Docs/fresh.txt");
+    assert!(picker
+        .opened(serial, Ok(()), &mut shell, &mut comp)
+        .is_some());
+
+    picker
+        .begin((7, None), &save_as("next.txt"), &mut shell, &mut comp)
+        .expect("accepted");
+    let (serial, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(path, "/Docs/next.txt", "where the last save went");
+    assert!(picker
+        .opened(serial, Ok(()), &mut shell, &mut comp)
+        .is_some());
+
+    picker
+        .begin((7, None), &save_as("other.txt"), &mut shell, &mut comp)
+        .expect("accepted");
+    let Some(PickStep::Menu { model, .. }) = press_panel(
+        &mut picker,
+        |layout| layout.where_box,
+        &mut shell,
+        &mut comp,
+    ) else {
+        panic!("the places are asked for");
+    };
+    assert_eq!(
+        model.rows().len(),
+        2,
+        "the folder shown, which the last save's is, and the start"
+    );
+    let start = tairix_abi::window_ipc::AppMenuItemId::for_index(1).expect("an id");
+    picker.menu_answered(&ChainOutcome::Chosen(start), &mut shell, &mut comp);
+    let (_, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(path, "/other.txt");
+}
+
+/// A save of `name` for window 7, its listing folded away.
+fn begin_save(
+    name: &str,
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+) -> SessionPicker<TreeSource, fn() -> TreeSource> {
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    picker
+        .begin((7, None), &save_as(name), shell, comp)
+        .expect("accepted");
+    picker
+}
+
+/// The document's icon, held and carried past the drag slop, is the
+/// document: the press is the drag's from there, and a press anywhere else
+/// carries nothing.
+#[test]
+fn the_icon_carried_past_the_slop_is_the_document() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    assert_eq!(
+        picker.icon_drag(Point::new(40, 40), Scale::ONE),
+        None,
+        "nothing held"
+    );
+    assert_eq!(
+        press_panel(&mut picker, |layout| layout.icon, &mut shell, &mut comp),
+        None
+    );
+    let icon = picker
+        .panel_for_test(comp.scale(), shell.session().active_theme())
+        .expect("a save")
+        .icon;
+    let held = Point::new(icon.left() + 2, icon.top() + 2);
+    assert_eq!(
+        picker.icon_drag(Point::new(held.x + 1, held.y), Scale::ONE),
+        None,
+        "a hand holding still"
+    );
+    let (document, for_window) = picker
+        .icon_drag(Point::new(held.x + 40, held.y + 10), Scale::ONE)
+        .expect("carried");
+    assert_eq!(for_window, 7);
+    assert_eq!(document.name, "Report.txt");
+    assert_eq!(
+        picker.icon_drag(Point::new(300, 300), Scale::ONE),
+        None,
+        "taken once"
+    );
+
+    show_folders(&mut picker, &mut shell, &mut comp);
+    assert_eq!(
+        press_panel(
+            &mut picker,
+            |layout| layout.new_folder.expect("the folders show"),
+            &mut shell,
+            &mut comp
+        ),
+        None
+    );
+    let icon = picker
+        .panel_for_test(comp.scale(), shell.session().active_theme())
+        .expect("a save")
+        .icon;
+    assert_eq!(
+        press_panel(&mut picker, |layout| layout.icon, &mut shell, &mut comp),
+        None
+    );
+    assert_eq!(
+        picker.icon_drag(Point::new(icon.left() + 60, icon.top() + 2), Scale::ONE),
+        None,
+        "while a folder is named the field holds no document name to carry"
+    );
+}
+
+/// Dropped on a folder, the save creates its file there exclusively, and a
+/// name already taken there is asked about before it is replaced.
+#[test]
+fn a_save_dropped_in_a_folder_creates_its_file_there() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    let into = crate::drag::SaveDrop::Folder(String::from("/Users/ann/Desktop"));
+    let (serial, path, access) = asked(picker.save_dropped(into, &mut shell, &mut comp));
+    assert_eq!(
+        (path.as_str(), access),
+        ("/Users/ann/Desktop/Report.txt", PickAccess::Create)
+    );
+    assert_eq!(
+        picker.opened(serial, Err(Errno::AlreadyExists), &mut shell, &mut comp),
+        None
+    );
+    assert!(
+        picker.question_wm().is_some(),
+        "asked though the folder is not the one shown"
+    );
+    let tab = pressed(KeyValue::Named(NamedKeyCode::Tab));
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(on_question(&mut picker, &tab, &mut shell, &mut comp), None);
+    let (serial, path, access) = asked(on_question(&mut picker, &enter, &mut shell, &mut comp));
+    assert_eq!(
+        (path.as_str(), access),
+        ("/Users/ann/Desktop/Report.txt", PickAccess::Replace)
+    );
+    assert_eq!(
+        picker.opened(serial, Ok(()), &mut shell, &mut comp),
+        Some(PickEnd::Chosen {
+            for_window: 7,
+            name: String::from("Report.txt"),
+        })
+    );
+}
+
+/// A name a folder or a link already holds is refused, never replaced, and
+/// the panel goes back to the name.
+#[test]
+fn a_name_held_by_a_folder_or_a_link_is_refused_not_replaced() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    for taken in [Errno::IsADirectory, Errno::LinkLoop] {
+        let into = crate::drag::SaveDrop::Folder(String::from("/Docs"));
+        let (serial, ..) = asked(picker.save_dropped(into, &mut shell, &mut comp));
+        assert_eq!(
+            picker.opened(serial, Err(taken), &mut shell, &mut comp),
+            None
+        );
+        assert_eq!(picker.question_wm(), None, "{taken:?} is not asked about");
+        let (_, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+        assert_eq!(path, "/Report.txt", "the panel saves again");
+        assert_eq!(
+            picker.opened(serial + 1, Err(Errno::NoSpace), &mut shell, &mut comp),
+            None
+        );
+    }
+}
+
+/// Dropped on a window, the save waits for that window's application to
+/// name the folder, hearing only *Cancel* meanwhile; the folder named for
+/// that drop and no other is where the file is created.
+#[test]
+fn a_save_dropped_on_a_window_waits_for_its_folder() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    let dropped = crate::drag::SaveDrop::Offer {
+        window_id: 9,
+        serial: 4,
+    };
+    assert_eq!(picker.save_dropped(dropped, &mut shell, &mut comp), None);
+    assert!(picker.awaits_drop(9, 4));
+    assert!(!picker.awaits_drop(9, 5), "another drop's number");
+    assert!(!picker.awaits_drop(8, 4), "another window");
+    assert_eq!(
+        press_panel(&mut picker, |layout| layout.save, &mut shell, &mut comp),
+        None,
+        "Save waits with everything else"
+    );
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(picker.handle_key(&enter, &mut shell, &mut comp), None);
+    let docs = Some(String::from("/Docs"));
+    assert_eq!(
+        picker.save_folder_answered((9, 5), docs.clone(), &mut shell, &mut comp),
+        Err(Errno::NotFound),
+        "an answer for another drop"
+    );
+    assert_eq!(picker.take_owed_step(), None);
+    assert_eq!(
+        picker.save_folder_answered((9, 4), docs, &mut shell, &mut comp),
+        Ok(())
+    );
+    let (serial, path, access) = asked(picker.take_owed_step());
+    assert_eq!(
+        (path.as_str(), access),
+        ("/Docs/Report.txt", PickAccess::Create)
+    );
+    assert_eq!(picker.take_owed_step(), None, "owed once");
+    assert!(picker
+        .opened(serial, Ok(()), &mut shell, &mut comp)
+        .is_some());
+
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    let dropped = crate::drag::SaveDrop::Offer {
+        window_id: 9,
+        serial: 6,
+    };
+    assert_eq!(picker.save_dropped(dropped, &mut shell, &mut comp), None);
+    assert_eq!(
+        press_panel(&mut picker, |layout| layout.cancel, &mut shell, &mut comp),
+        Some(PickStep::Cancelled { for_window: 7 }),
+        "Cancel still answers"
+    );
+    assert_eq!(
+        picker.save_folder_answered((9, 6), Some(String::from("/Docs")), &mut shell, &mut comp),
+        Err(Errno::NotFound),
+        "nothing waits once cancelled"
+    );
+}
+
+/// The open a drop target's answer owed the pick is owed nobody once the pick
+/// is cancelled, so no file is made for a save the user gave up on.
+#[test]
+fn a_cancelled_pick_owes_no_step() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    let dropped = crate::drag::SaveDrop::Offer {
+        window_id: 9,
+        serial: 4,
+    };
+    assert_eq!(picker.save_dropped(dropped, &mut shell, &mut comp), None);
+    assert_eq!(
+        picker.save_folder_answered((9, 4), Some(String::from("/Docs")), &mut shell, &mut comp),
+        Ok(())
+    );
+    assert!(picker.cancel(&mut shell, &mut comp).is_some());
+    assert_eq!(picker.take_owed_step(), None);
+}
+
+/// A drop its window could not be told of ends the wait at once: nothing is
+/// saved, the panel says why, and it saves again.
+#[test]
+fn a_drop_its_window_never_heard_of_ends_the_wait() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    let dropped = crate::drag::SaveDrop::Offer {
+        window_id: 9,
+        serial: 4,
+    };
+    assert_eq!(picker.save_dropped(dropped, &mut shell, &mut comp), None);
+    picker.drop_unreached(&mut shell, &mut comp);
+    assert!(!picker.awaits_drop(9, 4));
+    assert_eq!(
+        picker.save_folder_answered((9, 4), Some(String::from("/Docs")), &mut shell, &mut comp),
+        Err(Errno::NotFound),
+        "a late answer finds nothing waiting"
+    );
+    assert!(matches!(
+        press_panel(&mut picker, |layout| layout.save, &mut shell, &mut comp),
+        Some(PickStep::Open { .. })
+    ));
+}
+
+/// The window a save was dropped on closing before it names a folder ends
+/// the wait, and the panel saves again; another window closing changes
+/// nothing.
+#[test]
+fn a_drop_targets_window_closing_ends_the_wait() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    let dropped = crate::drag::SaveDrop::Offer {
+        window_id: 9,
+        serial: 4,
+    };
+    assert_eq!(picker.save_dropped(dropped, &mut shell, &mut comp), None);
+    picker.abort_for(5, &mut shell, &mut comp);
+    assert_eq!(
+        press_panel(&mut picker, |layout| layout.save, &mut shell, &mut comp),
+        None,
+        "still waiting on window 9"
+    );
+    picker.abort_for(9, &mut shell, &mut comp);
+    assert!(picker.wm_id().is_some(), "the pick stays up");
+    assert_eq!(
+        picker.save_folder_answered((9, 4), Some(String::from("/Docs")), &mut shell, &mut comp),
+        Err(Errno::NotFound)
+    );
+    let (_, path, _) = asked(press_panel(
+        &mut picker,
+        |layout| layout.save,
+        &mut shell,
+        &mut comp,
+    ));
+    assert_eq!(path, "/Report.txt");
+}
+
+/// The keyboard reaches every control: `Tab` walks to each, `Enter` answers
+/// the one it is on, `Shift+Tab` walks back, and `Escape` cancels from any.
+#[test]
+fn the_keyboard_reaches_every_save_control() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    let mut endings = SaveEndings::ANY;
+    endings.push('.', "png").expect("an extension");
+    endings.push('.', "jpg").expect("an extension");
+    picker
+        .begin(
+            (7, None),
+            &save_held("Holiday.png", endings),
+            &mut shell,
+            &mut comp,
+        )
+        .expect("accepted");
+    let tab = pressed(KeyValue::Named(NamedKeyCode::Tab));
+    let back_tab = KeyInput::Pressed {
+        key: KeyValue::Named(NamedKeyCode::Tab),
+        modifiers: Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    };
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(
+        picker.handle_key(&tab, &mut shell, &mut comp),
+        None,
+        "to Where"
+    );
+    assert!(
+        matches!(
+            picker.handle_key(&enter, &mut shell, &mut comp),
+            Some(PickStep::Menu { .. })
+        ),
+        "Enter opens Where"
+    );
+    picker.menu_answered(&ChainOutcome::Dismissed, &mut shell, &mut comp);
+    assert_eq!(
+        picker.handle_key(&back_tab, &mut shell, &mut comp),
+        None,
+        "back to the name"
+    );
+    assert_eq!(
+        picker.handle_key(&back_tab, &mut shell, &mut comp),
+        None,
+        "round to Save"
+    );
+    let (_, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(
+        (path.as_str(), access),
+        ("/Holiday.png", PickAccess::Create)
+    );
+    picker.cancel(&mut shell, &mut comp);
+
+    picker
+        .begin((7, None), &save_as("notes.txt"), &mut shell, &mut comp)
+        .expect("accepted");
+    assert_eq!(picker.handle_key(&tab, &mut shell, &mut comp), None);
+    assert_eq!(
+        picker.handle_key(
+            &pressed(KeyValue::Named(NamedKeyCode::Escape)),
+            &mut shell,
+            &mut comp
+        ),
+        Some(PickStep::Cancelled { for_window: 7 })
+    );
+}
+
+/// *New Folder* names a folder in the field, makes it once named — a name
+/// the folder already shows refused first — and the save goes on into it;
+/// `Escape` while naming goes back to the document, not out of the pick.
+#[test]
+fn a_new_folder_is_named_made_and_saved_into() {
+    let (mut shell, mut comp) = headless_desktop();
+    let tree = Rc::new(RefCell::new(TreeSource::fixture()));
+    let source = Rc::clone(&tree);
+    let mut picker = SessionPicker::new(move || SharedTree(Rc::clone(&source)));
+    picker
+        .begin((7, None), &save_as("Report.txt"), &mut shell, &mut comp)
+        .expect("accepted");
+    show_folders(&mut picker, &mut shell, &mut comp);
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
+    let new_folder = |picker: &mut SessionPicker<SharedTree, _>,
+                      shell: &mut DesktopShell,
+                      comp: &mut Compositor| {
+        press_panel(
+            picker,
+            |layout| layout.new_folder.expect("the folders show"),
+            shell,
+            comp,
+        )
+    };
+    assert_eq!(new_folder(&mut picker, &mut shell, &mut comp), None);
+    assert_eq!(
+        picker.handle_key(&escape, &mut shell, &mut comp),
+        None,
+        "back to the document"
+    );
+    let (serial, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(path, "/Report.txt");
+    assert_eq!(
+        picker.opened(serial, Err(Errno::NoSpace), &mut shell, &mut comp),
+        None
+    );
+
+    assert_eq!(new_folder(&mut picker, &mut shell, &mut comp), None);
+    for c in "Docs".chars() {
+        let _ = picker.handle_key(&pressed(KeyValue::Char(c)), &mut shell, &mut comp);
+    }
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "a name the folder shows is refused before anything is made"
+    );
+    let backspace = pressed(KeyValue::Named(NamedKeyCode::Backspace));
+    for _ in 0.."Docs".len() {
+        let _ = picker.handle_key(&backspace, &mut shell, &mut comp);
+    }
+    for c in "Projects".chars() {
+        let _ = picker.handle_key(&pressed(KeyValue::Char(c)), &mut shell, &mut comp);
+    }
+    let Some(PickStep::NewFolder { serial, path }) =
+        picker.handle_key(&enter, &mut shell, &mut comp)
+    else {
+        panic!("the folder is asked to be made");
+    };
+    assert_eq!(path, "/Projects");
+    picker.folder_made(serial, Err(Errno::PermissionDenied), &mut shell, &mut comp);
+    let Some(PickStep::NewFolder { serial, .. }) = picker.handle_key(&enter, &mut shell, &mut comp)
+    else {
+        panic!("a refused folder can be asked for again");
+    };
+    tree.borrow_mut()
+        .dirs
+        .insert(String::from("Projects"), Vec::new());
+    picker.folder_made(serial, Ok(()), &mut shell, &mut comp);
+    let (_, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(
+        (path.as_str(), access),
+        ("/Projects/Report.txt", PickAccess::Create),
+        "into the new folder, under the document's name"
+    );
+}
+
+/// `Escape` while a new folder is being made lets that go and gives the field
+/// back to the document, rather than cancelling the save; the folder's late
+/// answer is heeded no more.
+#[test]
+fn escape_while_a_folder_is_made_goes_back_to_the_document() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    show_folders(&mut picker, &mut shell, &mut comp);
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
+    assert_eq!(
+        press_panel(
+            &mut picker,
+            |layout| layout.new_folder.expect("the folders show"),
+            &mut shell,
+            &mut comp
+        ),
+        None
+    );
+    type_into(&mut picker, "Projects", &mut shell, &mut comp);
+    let Some(PickStep::NewFolder { serial, .. }) = picker.handle_key(&enter, &mut shell, &mut comp)
+    else {
+        panic!("the folder is asked to be made");
+    };
+    assert_eq!(picker.handle_key(&escape, &mut shell, &mut comp), None);
+    assert!(picker.wm_id().is_some(), "the save stays up");
+    picker.folder_made(serial, Ok(()), &mut shell, &mut comp);
+    let (_, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(path, "/Report.txt", "the document, where it was");
+}
+
+/// A window that names no folder leaves the panel to say so, and the save
+/// goes back to its name.
+#[test]
+fn a_declined_drop_leaves_the_panel_saving_again() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    let dropped = crate::drag::SaveDrop::Offer {
+        window_id: 9,
+        serial: 2,
+    };
+    assert_eq!(picker.save_dropped(dropped, &mut shell, &mut comp), None);
+    assert_eq!(
+        picker.save_folder_answered((9, 2), None, &mut shell, &mut comp),
+        Ok(())
+    );
+    assert_eq!(picker.take_owed_step(), None);
+    let (_, path, _) = asked(press_panel(
+        &mut picker,
+        |layout| layout.save,
+        &mut shell,
+        &mut comp,
+    ));
+    assert_eq!(path, "/Report.txt");
+}
+
+/// A save dropped on a window that had not yet said whether it takes one saves
+/// nothing, and the panel says so on its status line rather than nothing
+/// happening at all.
+#[test]
+fn a_drop_the_window_never_answered_is_stated_not_silent() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    let unanswered = crate::drag::SaveDrop::Unanswered;
+    assert_eq!(picker.save_dropped(unanswered, &mut shell, &mut comp), None);
+    picker.paint_owed(&mut shell, &mut comp);
+    let status = picker
+        .panel_for_test(comp.scale(), shell.session().active_theme())
+        .expect("a save")
+        .status;
+    let danger = shell.session().active_theme().palette().danger;
+    let content = comp
+        .window(picker.wm_id().expect("still up"))
+        .and_then(tairix_wm::Window::content)
+        .expect("painted");
+    let stated = (status.left()..status.right()).any(|x| {
+        (status.top()..status.bottom()).any(|y| {
+            let at = (u32::try_from(x).ok(), u32::try_from(y).ok());
+            matches!(at, (Some(x), Some(y)) if content.get(x, y).is_some_and(|pixel| {
+                (pixel.r, pixel.g, pixel.b) == (danger.r, danger.g, danger.b)
+            }))
+        })
+    });
+    assert!(stated, "the status line states why");
+}
+
+/// The folder listing holding the keyboard wears the shared Focus Ring, and
+/// gives it up as the keyboard moves on, so which control Tab reached shows.
+#[test]
+fn the_folder_listing_wears_the_focus_ring_while_it_holds_the_keyboard() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    show_folders(&mut picker, &mut shell, &mut comp);
+    let ring = shell.session().active_theme().palette().rim_active;
+    let tab = pressed(KeyValue::Named(NamedKeyCode::Tab));
+    let mut ringed = Vec::new();
+    for _ in 0..8 {
+        assert_eq!(picker.handle_key(&tab, &mut shell, &mut comp), None);
+        picker.paint_owed(&mut shell, &mut comp);
+        let content = comp
+            .window(picker.wm_id().expect("still up"))
+            .and_then(tairix_wm::Window::content)
+            .expect("painted");
+        ringed.push(
+            content
+                .get(content.width() / 2, 0)
+                .is_some_and(|pixel| (pixel.r, pixel.g, pixel.b) == (ring.r, ring.g, ring.b)),
+        );
+    }
+    assert_eq!(
+        ringed.iter().filter(|ringed| **ringed).count(),
+        1,
+        "ringed while it holds the keyboard, once round the panel: {ringed:?}"
+    );
+}
+
+/// A drop is held to the names the requester writes exactly as *Save* is:
+/// a name the spelling refuses saves nowhere.
+#[test]
+fn a_dropped_save_holds_its_name_as_save_does() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
+    type_into(&mut picker, "a/b", &mut shell, &mut comp);
+    let into = || crate::drag::SaveDrop::Folder(String::from("/Docs"));
+    assert_eq!(picker.save_dropped(into(), &mut shell, &mut comp), None);
+    let backspace = pressed(KeyValue::Named(NamedKeyCode::Backspace));
+    for _ in 0..3 {
+        assert_eq!(picker.handle_key(&backspace, &mut shell, &mut comp), None);
+    }
+    type_into(&mut picker, "ok", &mut shell, &mut comp);
+    assert_eq!(
+        picker.save_dropped(crate::drag::SaveDrop::Nothing, &mut shell, &mut comp),
+        None
+    );
+    let (_, path, _) = asked(picker.save_dropped(into(), &mut shell, &mut comp));
+    assert_eq!(path, "/Docs/ok.txt", "the name once it holds");
 }
 
 /// Type `text` into the showing picker.
@@ -5782,15 +6621,24 @@ fn a_save_offers_its_name_and_creates_the_file() {
     let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
         SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &save_as("notes"), &mut shell, &mut comp)
+        .begin((7, None), &save_as("notes"), &mut shell, &mut comp)
         .expect("accepted");
     let wm = picker.wm_id().expect("showing");
     let listing = Scale::ONE.scale_length(tairix_browse::WIN_HEIGHT);
+    let compact = window_rect(&comp, wm).height;
     assert!(
-        window_rect(&comp, wm).height > listing,
-        "the save band sits under the listing"
+        compact < listing,
+        "the panel opens with its folders folded away"
+    );
+    show_folders(&mut picker, &mut shell, &mut comp);
+    let expanded = window_rect(&comp, wm).height;
+    assert!(
+        expanded > compact && expanded - compact <= listing / 2,
+        "the listing shows above the panel, at most half an open's height"
     );
 
+    let end = pressed(KeyValue::Named(NamedKeyCode::End));
+    assert_eq!(picker.handle_key(&end, &mut shell, &mut comp), None);
     type_into(&mut picker, ".txt", &mut shell, &mut comp);
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     let (serial, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
@@ -5825,7 +6673,12 @@ fn a_save_holds_the_name_to_what_the_requester_writes() {
     endings.push('.', "png").expect("an extension");
     endings.push(',', "b60").expect("a RISC OS file type");
     picker
-        .begin(7, &save_held("picture.bmp", endings), &mut shell, &mut comp)
+        .begin(
+            (7, None),
+            &save_held("picture.bmp", endings),
+            &mut shell,
+            &mut comp,
+        )
         .expect("accepted");
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     assert_eq!(
@@ -5835,6 +6688,8 @@ fn a_save_holds_the_name_to_what_the_requester_writes() {
     );
     assert!(picker.wm_id().is_some(), "the save stays up to say why");
 
+    let end = pressed(KeyValue::Named(NamedKeyCode::End));
+    assert_eq!(picker.handle_key(&end, &mut shell, &mut comp), None);
     let backspace = pressed(KeyValue::Named(NamedKeyCode::Backspace));
     for _ in 0..".bmp".len() {
         picker.handle_key(&backspace, &mut shell, &mut comp);
@@ -5858,7 +6713,12 @@ fn a_save_takes_a_name_ending_as_asked_as_typed() {
     endings.push('.', "png").expect("an extension");
     endings.push(',', "b60").expect("a RISC OS file type");
     picker
-        .begin(7, &save_held("Logo,B60", endings), &mut shell, &mut comp)
+        .begin(
+            (7, None),
+            &save_held("Logo,B60", endings),
+            &mut shell,
+            &mut comp,
+        )
         .expect("accepted");
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     let (_, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
@@ -5876,7 +6736,12 @@ fn a_save_held_to_endings_goes_into_a_folder_named() {
     let mut endings = SaveEndings::ANY;
     endings.push('.', "png").expect("an extension");
     picker
-        .begin(7, &save_held("Docs", endings), &mut shell, &mut comp)
+        .begin(
+            (7, None),
+            &save_held("Docs", endings),
+            &mut shell,
+            &mut comp,
+        )
         .expect("accepted");
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     assert_eq!(
@@ -5904,7 +6769,7 @@ fn a_save_over_a_file_is_asked_about_first() {
     let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
         SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &save_as("readme.md"), &mut shell, &mut comp)
+        .begin((7, None), &save_as("readme.md"), &mut shell, &mut comp)
         .expect("accepted");
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
@@ -5981,8 +6846,9 @@ fn a_replace_question_holds_the_picker_until_it_is_answered() {
     let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
         SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &save_as("readme.md"), &mut shell, &mut comp)
+        .begin((7, None), &save_as("readme.md"), &mut shell, &mut comp)
         .expect("accepted");
+    show_folders(&mut picker, &mut shell, &mut comp);
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
     assert_eq!(
@@ -6026,7 +6892,7 @@ fn a_replace_question_ends_when_its_folder_goes() {
     let mut picker = SessionPicker::new(move || SharedTree(Rc::clone(&shared)))
         .starting_at(vec![String::from("Docs")]);
     picker
-        .begin(7, &save_as("notes.txt"), &mut shell, &mut comp)
+        .begin((7, None), &save_as("notes.txt"), &mut shell, &mut comp)
         .expect("accepted");
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     assert_eq!(picker.handle_key(&enter, &mut shell, &mut comp), None);
@@ -6044,9 +6910,10 @@ fn a_name_taken_after_the_folder_changed_is_not_asked_about() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(DeferredSource::fixture);
     picker
-        .begin(7, &save_as("fresh.txt"), &mut shell, &mut comp)
+        .begin((7, None), &save_as("fresh.txt"), &mut shell, &mut comp)
         .expect("accepted");
     picker.resume(&mut shell, &mut comp);
+    show_folders(&mut picker, &mut shell, &mut comp);
     let docs = first_picker_row(&shell);
     assert_eq!(picker.handle_click(docs, &mut shell, &mut comp), None);
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
@@ -6077,7 +6944,7 @@ fn a_refused_save_stays_up() {
     let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
         SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &save_as("fresh.txt"), &mut shell, &mut comp)
+        .begin((7, None), &save_as("fresh.txt"), &mut shell, &mut comp)
         .expect("accepted");
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
 
@@ -6107,7 +6974,7 @@ fn a_save_names_folders_files_and_nonsense_in_place() {
     let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
         SessionPicker::new(TreeSource::fixture);
     picker
-        .begin(7, &save_as(""), &mut shell, &mut comp)
+        .begin((7, None), &save_as(""), &mut shell, &mut comp)
         .expect("accepted");
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
 
@@ -6151,6 +7018,7 @@ fn a_save_names_folders_files_and_nonsense_in_place() {
 
     // The only row in `Docs/` is `notes.txt`: a click offers its name, which
     // then names a file to replace.
+    show_folders(&mut picker, &mut shell, &mut comp);
     let theme = shell.session().active_theme();
     let row = i32::try_from(picker_rows_top(theme)).expect("a small chrome height");
     assert_eq!(
@@ -8977,7 +9845,7 @@ fn monitor_instance() -> ProcId {
 /// records it.
 fn monitor_launched() -> LaunchTable {
     let mut launched = LaunchTable::new();
-    launched.record(MONITOR_PID, "Switchboard", SWITCHBOARD_RUN_PATH);
+    launched.record(MONITOR_PID, "Switchboard", SWITCHBOARD_RUN_PATH, 0);
     launched
 }
 
@@ -8995,8 +9863,8 @@ fn a_live_monitor_is_attested_beneath_an_older_entry_for_the_same_bundle() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut launched = LaunchTable::new();
-    launched.record(MONITOR_PID - 1, "Switchboard", SWITCHBOARD_RUN_PATH);
-    launched.record(MONITOR_PID, "Switchboard", SWITCHBOARD_RUN_PATH);
+    launched.record(MONITOR_PID - 1, "Switchboard", SWITCHBOARD_RUN_PATH, 0);
+    launched.record(MONITOR_PID, "Switchboard", SWITCHBOARD_RUN_PATH, 0);
     let mut relaunches = Relaunches::default();
 
     let outcome = serve_as_monitor(
@@ -9033,8 +9901,8 @@ fn an_accepted_publish_names_the_publishing_instance_not_the_lowest_entry() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut launched = LaunchTable::new();
-    launched.record(MONITOR_PID - 1, "Switchboard", SWITCHBOARD_RUN_PATH);
-    launched.record(MONITOR_PID, "Switchboard", SWITCHBOARD_RUN_PATH);
+    launched.record(MONITOR_PID - 1, "Switchboard", SWITCHBOARD_RUN_PATH, 0);
+    launched.record(MONITOR_PID, "Switchboard", SWITCHBOARD_RUN_PATH, 0);
     let mut relaunches = Relaunches::default();
 
     let outcome = serve_as_monitor(
@@ -9067,7 +9935,7 @@ fn a_caller_launched_from_another_bundle_is_refused() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut launched = monitor_launched();
-    launched.record(41, "Editor", "/System/Applications/Editor.app/Run");
+    launched.record(41, "Editor", "/System/Applications/Editor.app/Run", 0);
     let mut relaunches = Relaunches::default();
     let mut saver = unwatched;
 
@@ -9130,7 +9998,7 @@ fn relaunching_the_monitor_reaches_the_recorded_instance() {
 #[test]
 fn relaunching_the_monitor_with_none_live_spawns() {
     let mut launched = LaunchTable::new();
-    launched.record(3, "Files", tairix_abi::FILES_RUN_PATH);
+    launched.record(3, "Files", tairix_abi::FILES_RUN_PATH, 0);
     let mut host = CountingReach::default();
     assert_eq!(
         resolve_launch(
@@ -9363,7 +10231,7 @@ fn an_unattested_caller_is_refused_for_every_operation() {
         let mut shell = shell();
         let mut comp = compositor();
         let mut launched = monitor_launched();
-        launched.record(41, "Editor", "/System/Applications/Editor.app/Run");
+        launched.record(41, "Editor", "/System/Applications/Editor.app/Run", 0);
         let mut relaunches = Relaunches::default();
         let mut saver = unwatched;
 
@@ -9516,7 +10384,7 @@ fn restart_owner_relaunches_the_recorded_bundle() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut launched = monitor_launched();
-    launched.record(41, "Editor", "/System/Applications/Editor.app/Run");
+    launched.record(41, "Editor", "/System/Applications/Editor.app/Run", 0);
     let mut relaunches = Relaunches::default();
 
     let outcome = serve_as_monitor(
@@ -14924,7 +15792,9 @@ fn session_surfaces_adapt_to_display_scale() {
     let (mut shell2, mut comp2) = headless_desktop();
     assert!(comp2.set_scale(scale_200));
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    assert!(picker.begin(1, &OPEN, &mut shell2, &mut comp2).is_ok());
+    assert!(picker
+        .begin((1, None), &OPEN, &mut shell2, &mut comp2)
+        .is_ok());
     let picker_id = picker.wm_id().expect("picker window exists");
     let p_size_200 = window_rect(&comp2, picker_id);
     assert_eq!(
@@ -14996,7 +15866,8 @@ fn desktop_info_reports_compositor_state() {
     let fast = RefreshRate::from_mhz(144_000);
     assert!(comp.set_refresh_rate(fast));
 
-    let info = desktop_info(&comp, None).expect("info exists");
+    let mut shell = shell();
+    let info = desktop_info(&comp, &shell).expect("info exists");
     assert_eq!(info.scale_percent(), 200);
     assert_eq!(info.screen_width_px(), 1920);
     assert_eq!(info.screen_height_px(), 1080);
@@ -15007,7 +15878,35 @@ fn desktop_info_reports_compositor_state() {
         "the rate the output is composed for"
     );
 
-    let mut shell = shell();
+    assert_eq!(info.settings_generation(), 0);
+    shell.adopt_files(tairix_browse::FilerPreferences::default(), u32::MAX);
+    let generation = |shell: &DesktopShell| {
+        desktop_info(&comp, shell)
+            .expect("info exists")
+            .settings_generation()
+    };
+    assert_eq!(
+        generation(&shell),
+        u32::MAX,
+        "the count starts where the session drew it, and the store it started on is no \
+         publication"
+    );
+    shell.adopt_published_files(tairix_browse::FilerPreferences::default());
+    assert_eq!(
+        generation(&shell),
+        u32::MAX,
+        "a publication that left the file manager's settings as they were is no news to it"
+    );
+    shell.adopt_published_files(tairix_browse::FilerPreferences {
+        view: tairix_browse::ViewMode::List,
+        ..tairix_browse::FilerPreferences::default()
+    });
+    let info = desktop_info(&comp, &shell).expect("info exists");
+    assert_eq!(
+        info.settings_generation(),
+        0,
+        "one that changed them moves the generation, wrapping past the top"
+    );
     let mut picker = SessionPicker::new(TreeSource::fixture);
     let mut apps = AppBarService::new();
     let mut windows = SessionWindows::new();
@@ -16971,6 +17870,7 @@ fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
         EDITOR_PID,
         "App",
         &tairix_appstore::entry_path(EDITOR_BUNDLE),
+        0,
     );
 
     // The launch is recorded; no window exists yet. The desktop asks for the
@@ -17314,7 +18214,7 @@ fn the_seat_is_held_by_the_lock_the_picker_and_any_prompt() {
     assert!(!held(&lock, &picker, &confirm, &elevate, &resolution));
 
     picker
-        .begin(7, &OPEN, &mut shell, &mut comp)
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     assert!(held(&lock, &picker, &confirm, &elevate, &resolution));
     picker.abort_for(7, &mut shell, &mut comp);

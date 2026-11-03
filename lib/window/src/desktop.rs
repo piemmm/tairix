@@ -84,15 +84,23 @@ impl Desktop {
         self.info
     }
 
+    /// Which publication of the desktop's settings document is in effect.
+    #[must_use]
+    pub const fn settings_generation(&self) -> u32 {
+        self.info.settings_generation()
+    }
+
     /// Adopt `info` as the desktop's current state, answering whether the
     /// window must be redrawn.
     ///
     /// The record the session published, not an event: an application
     /// converges on the desktop notice, so this is what it hands the
     /// value to. A record equal to the one held answers `false`, and so does
-    /// one differing in its frame rate alone, which is taken all the same:
-    /// nothing drawn depends on it, and an animation reads [`Self::refresh`]
-    /// as it paces each frame.
+    /// one differing in its frame rate or its settings generation alone, which
+    /// are taken all the same: nothing drawn depends on either, an animation
+    /// reads [`Self::refresh`] as it paces each frame, and an application
+    /// keeping settings in the desktop's document reads
+    /// [`Self::settings_generation`].
     ///
     /// # Errors
     ///
@@ -104,7 +112,10 @@ impl Desktop {
         if info == self.info {
             return Ok(false);
         }
-        let redraw = info.with_refresh(self.info.refresh()) != self.info;
+        let redraw = info
+            .with_refresh(self.info.refresh())
+            .with_settings_generation(self.info.settings_generation())
+            != self.info;
         *self = Self::new(info)?;
         Ok(redraw)
     }

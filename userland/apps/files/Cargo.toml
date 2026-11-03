@@ -89,10 +89,6 @@ tairix-discovery = { path = "../../../lib/discovery", version = "=0.0.0" }
 # grid resolves each tile through, and the empty lookup the host tests paint a
 # listing with.
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
-# The one closed-registry settings engine the file manager's own settings
-# (`src/preferences.rs`) are read, spelled and compared through; they are
-# host-tested.
-tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 # The one namespace join: a piece of work runs on the lane of the volume the
 # binding covering its place shows (`src/lanes.rs`), by the rule `mount` and
 # `df` resolve a path with.
@@ -114,6 +110,8 @@ tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0", features = [
 # bare-metal targets it is actually built for; on the host those parts of the
 # binary are not compiled at all.
 [target.'cfg(target_os = "none")'.dependencies]
+# The settings engine the desktop's published settings are read through.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 # The production discovery transport (`RtTransport`) the reader thread holds
 # the network session over.
 tairix-discovery = { path = "../../../lib/discovery", version = "=0.0.0", features = ["program"] }

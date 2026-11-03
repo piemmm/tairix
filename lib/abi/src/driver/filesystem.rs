@@ -689,6 +689,8 @@ pub enum WriteRefusal {
     SeveralPartitions = 17,
     /// The driver found the volume damaged while writing it.
     Damaged = 18,
+    /// The volume is shorter than the extent its own records describe.
+    Truncated = 19,
 }
 
 impl WriteRefusal {
@@ -714,6 +716,7 @@ impl WriteRefusal {
             Self::MetadataPartition => "metadata_partition",
             Self::SeveralPartitions => "several_partitions",
             Self::Damaged => "damaged",
+            Self::Truncated => "truncated",
         }
     }
 
@@ -748,6 +751,7 @@ impl WriteRefusal {
             16 => Self::MetadataPartition,
             17 => Self::SeveralPartitions,
             18 => Self::Damaged,
+            19 => Self::Truncated,
             _ => return Err(DriverError::OutOfRange),
         })
     }
@@ -1698,14 +1702,14 @@ mod tests {
     #[test]
     fn every_write_refusal_round_trips_its_code_and_spells_distinctly() {
         let mut spelt: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-        for raw in 1..=18 {
+        for raw in 1..=19 {
             let refusal = WriteRefusal::from_u8(raw).expect("named");
             assert_eq!(refusal.as_u8(), raw);
             assert!(!spelt.contains(&refusal.as_str()), "{refusal:?}");
             spelt.push(refusal.as_str());
         }
         assert_eq!(WriteRefusal::from_u8(0), Err(DriverError::OutOfRange));
-        assert_eq!(WriteRefusal::from_u8(19), Err(DriverError::OutOfRange));
+        assert_eq!(WriteRefusal::from_u8(20), Err(DriverError::OutOfRange));
     }
 
     #[test]

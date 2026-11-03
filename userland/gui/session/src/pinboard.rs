@@ -20,7 +20,7 @@
 //! launches anything.
 
 use tairix_abi::window_ipc::{AppMenuItemId, AppMenuSymbol};
-use tairix_controls::{ChainModel, ChainRow, ControlState, MenuItem, MenuMark};
+use tairix_controls::{ChainModel, ChainRow, MenuItem};
 use tairix_wallpaper::{DesktopSettings, IconFlow, IconSort};
 
 /// The root plate's title: the surface the menu acts on, named as the user
@@ -190,16 +190,10 @@ pub fn model(on_icon: bool, settings: &DesktopSettings) -> ChainModel {
         let Some(id) = AppMenuItemId::for_index(index) else {
             continue;
         };
-        let mut item = MenuItem::new(command.label());
-        let mut why = None;
-        if command.in_force(settings) {
-            item = item
-                .with_mark(MenuMark::Radio)
-                .with_state(ControlState::disabled());
-            why = command.already_reason();
-        }
+        let in_force = command.in_force(settings);
+        let item = crate::menu::marked(MenuItem::new(command.label()), in_force);
         let mut row = ChainRow::item(id, command.symbol(), item);
-        if let Some(why) = why {
+        if let Some(why) = in_force.then(|| command.already_reason()).flatten() {
             row = row.explained(why);
         }
         if command.opens_group() && !model.rows().is_empty() {

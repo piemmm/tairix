@@ -381,7 +381,8 @@ Done (code + host coverage). What now holds:
 - **The session's trusted picker** (`tairix_desktop_session::picker`):
   `SessionPicker` — one picker slot at a time, a fresh root listing under
   the session's own authority per pick (a refused listing refuses the
-  pick), a session-owned window at the deterministic `PICKER_ORIGIN`,
+  pick), a session-owned window at the deterministic `PICKER_ORIGIN` for an
+  open or a folder and a dialog over the requester's window for a save,
   key (`Down`/`Up`/`Enter`/`Backspace`/`Escape`) and click (shared
   hit-test) navigation, conclusions delivered by the `Run` binary's
   file worker and privileged tail (the open — read-write for an owner whose

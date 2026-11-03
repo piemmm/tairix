@@ -12,11 +12,13 @@
 //! volume that went away before what was written to it was saved is ejected
 //! only once the user agrees to let that go ([`lost_eject_question`]).
 
+use alloc::collections::BTreeSet;
 #[cfg(feature = "rt")]
 use alloc::collections::TryReserveError;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::{format, vec};
+use core::ops::Bound;
 
 #[cfg(any(feature = "rt", test))]
 use tairix_abi::imageattach::ImageAttach;
@@ -26,10 +28,11 @@ use tairix_abi::netattach::Presentation;
 use tairix_abi::sysinfo::{
     MountAvailability, ViewBindingRecord, VOLUME_ID_LEN, VOLUME_ID_UNPUBLISHED,
 };
+use tairix_abi::volume::DetachMode;
+#[cfg(any(feature = "rt", test))]
+use tairix_abi::volume::VolumeDetachRequest;
 #[cfg(feature = "rt")]
 use tairix_abi::volume::VOLUME_DETACH_LEN;
-#[cfg(any(feature = "rt", test))]
-use tairix_abi::volume::{DetachMode, VolumeDetachRequest};
 use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
 use tairix_abi::{Errno, STORAGE_CATALOG};
 
@@ -77,24 +80,53 @@ const fn private(read_only: bool) -> ImageAttach<'static> {
     }
 }
 
-/// The detach of the volume published as `volume_id`: one that takes it as
-/// lost when the user agreed to let go of what was not saved to it, so the
-/// kernel forces it only if it is lost still, and otherwise a plain one.
+/// The switch that makes the file manager's operand a disk image or archive
+/// to attach and show, rather than a place to open at: how the desktop starts
+/// one to open an image when none is running.
+///
+/// Spelled once because the desktop session names it and the file manager
+/// parses it, and neither may depend on the other.
+pub const MOUNT_SWITCH: &str = "--mount";
+
+/// Why an eject is asked for, which decides how the kernel takes the volume
+/// down and what the user is told of it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EjectAsked {
+    /// The user asked to eject it.
+    ByUser,
+    /// The user asked to eject a volume that went away with what was written
+    /// to it unsaved, agreeing to let that go.
+    LettingGo,
+    /// The last window showing a disk image or archive the user opened closed:
+    /// it is taken down only if nothing is using it, and is otherwise left as
+    /// it is without a word.
+    Finished,
+}
+
+impl EjectAsked {
+    /// The detach mode an eject asked so carries out: one letting go forces a
+    /// volume only if it is lost still.
+    #[must_use]
+    pub const fn mode(self) -> DetachMode {
+        match self {
+            Self::ByUser => DetachMode::Plain,
+            Self::LettingGo => DetachMode::Lost,
+            Self::Finished => DetachMode::Idle,
+        }
+    }
+}
+
+/// The detach of the volume published as `volume_id`, asked as `asked`.
 #[cfg(any(feature = "rt", test))]
-const fn detach_request(volume_id: [u8; VOLUME_ID_LEN], lost: bool) -> VolumeDetachRequest {
+const fn detach_request(volume_id: [u8; VOLUME_ID_LEN], asked: EjectAsked) -> VolumeDetachRequest {
     VolumeDetachRequest {
         volume_id,
-        mode: if lost {
-            DetachMode::Lost
-        } else {
-            DetachMode::Plain
-        },
+        mode: asked.mode(),
     }
 }
 
 /// Detach the volume published as `volume_id`, which the caller attached,
-/// once what it holds is written back, or, `lost`, letting go of what went
-/// with it.
+/// once what it holds is written back, as `asked` asks.
 ///
 /// # Errors
 ///
@@ -102,9 +134,9 @@ const fn detach_request(volume_id: [u8; VOLUME_ID_LEN], lost: bool) -> VolumeDet
 /// image volume lies on it, [`Errno::PermissionDenied`] for a volume the
 /// caller may not detach.
 #[cfg(feature = "rt")]
-fn eject(volume_id: [u8; VOLUME_ID_LEN], lost: bool) -> Result<(), Errno> {
+fn eject(volume_id: [u8; VOLUME_ID_LEN], asked: EjectAsked) -> Result<(), Errno> {
     let mut frame = [0u8; VOLUME_DETACH_LEN];
-    detach_request(volume_id, lost).encode(&mut frame)?;
+    detach_request(volume_id, asked).encode(&mut frame)?;
     match tairix_rt::volume_detach(&frame) {
         0 => Ok(()),
         err => Err(Errno::from_syscall(err)),
@@ -151,9 +183,9 @@ pub enum MountAct {
         volume_id: [u8; VOLUME_ID_LEN],
         /// What the user calls it.
         name: String,
-        /// It went away with what was written to it unsaved, so ejecting it
-        /// lets that go: the user is asked first.
-        lost: bool,
+        /// Why it is ejected: a volume lost with writes unsaved is let go only
+        /// once the user is asked.
+        asked: EjectAsked,
     },
 }
 
@@ -208,13 +240,29 @@ impl MountAct {
         }
     }
 
-    /// The eject of the volume `facts` describe, shown as `name`.
+    /// The eject the user asked for of the volume `facts` describe, shown as
+    /// `name`.
     #[must_use]
     pub fn eject(facts: &VolumeFacts, name: &str) -> Self {
         Self::Eject {
             volume_id: facts.volume_id,
             name: String::from(name),
-            lost: facts.availability == MountAvailability::UnavailableLost,
+            asked: if facts.availability == MountAvailability::UnavailableLost {
+                EjectAsked::LettingGo
+            } else {
+                EjectAsked::ByUser
+            },
+        }
+    }
+
+    /// The eject of the disk image or archive published as `volume_id`, shown
+    /// as `name`, that the user opened and has finished with.
+    #[must_use]
+    pub fn finished(volume_id: [u8; VOLUME_ID_LEN], name: &str) -> Self {
+        Self::Eject {
+            volume_id,
+            name: String::from(name),
+            asked: EjectAsked::Finished,
         }
     }
 
@@ -253,11 +301,11 @@ impl MountAct {
             Self::Eject {
                 volume_id,
                 name,
-                lost,
+                asked,
             } => Self::Eject {
                 volume_id: *volume_id,
                 name: core::mem::take(name),
-                lost: *lost,
+                asked: *asked,
             },
         }
     }
@@ -273,6 +321,20 @@ pub struct MountDone {
 }
 
 impl MountDone {
+    /// The volume this attach made — its identity and its name in the storage
+    /// catalog — or `None` where it made none: one already attached is
+    /// someone's own already, so only what this attach made is the
+    /// attaching surface's to let go.
+    #[must_use]
+    pub fn attached(&self) -> Option<([u8; VOLUME_ID_LEN], &str)> {
+        match &self.answer {
+            Ok(Mounted::Image(ImageAttachReply::Attached(volume))) => {
+                Some((volume.volume_id, volume.name()))
+            }
+            _ => None,
+        }
+    }
+
     /// Where the volume to show the user is, root-first — the one the image
     /// holds, whether it was attached now or already — or `None` for a volume
     /// ejected, which the mount table reports.
@@ -283,6 +345,15 @@ impl MountDone {
     /// has mounted writable already is refused rather than shown, so a
     /// window onto it is never taken for the read-only one asked for.
     pub fn shown(self) -> Result<Option<Vec<String>>, MountRefusal> {
+        // One the user finished with that something is still using stays, and
+        // one gone already is gone as asked: the user asked for neither, so is
+        // told of neither.
+        if let (MountAct::Eject { asked, .. }, Err(err)) = (&self.act, &self.answer) {
+            let gone = *asked == EjectAsked::Finished && *err == Errno::NotFound;
+            if gone || asked.mode().left_in_use(*err) {
+                return Ok(None);
+            }
+        }
         let asked = match self.act {
             MountAct::Attach { read_only, .. } => access(read_only),
             MountAct::Eject { .. } => ImageAccess::WritableWherePossible,
@@ -412,6 +483,19 @@ pub fn within(roots: &[&[String]], at: &[String]) -> bool {
     roots.iter().any(|root| at.starts_with(root))
 }
 
+/// Whether any of the places `reached` lies within one of `roots`, as
+/// [`within`] answers for one, at one range query a root however many places
+/// there are: those beginning with a root sort together from the root itself.
+#[must_use]
+pub fn any_within(reached: &BTreeSet<Vec<String>>, roots: &[&[String]]) -> bool {
+    roots.iter().any(|root| {
+        reached
+            .range::<[String], _>((Bound::Included(*root), Bound::Unbounded))
+            .next()
+            .is_some_and(|at| at.starts_with(root))
+    })
+}
+
 /// Whether `browser` shows, or is on its way to, a place within one of
 /// `roots`.
 pub fn holds_within<S: DirectorySource>(browser: &Browser<S>, roots: &[&[String]]) -> bool {
@@ -446,8 +530,8 @@ pub fn carry_out(act: MountAct) -> MountDone {
             tairix_rt::image_attach_path(path.as_bytes(), &private(*read_only)).map(Mounted::Image)
         }
         MountAct::Eject {
-            volume_id, lost, ..
-        } => eject(*volume_id, *lost).map(|()| Mounted::Ejected),
+            volume_id, asked, ..
+        } => eject(*volume_id, *asked).map(|()| Mounted::Ejected),
     };
     MountDone { act, answer }
 }
@@ -489,8 +573,8 @@ const fn eject_refusal(err: Errno) -> &'static str {
 mod tests {
     use super::{
         attach_refusal, detach_request, eject_refusal, holds_within, lost_eject_question, private,
-        shown_at, within, MountAct, MountDone, MountRefusal, Mounted, Projection, CROWDED,
-        LOST_EJECT_INDEX, MOUNTED_WRITABLE, UNSERVED,
+        shown_at, within, EjectAsked, MountAct, MountDone, MountRefusal, Mounted, Projection,
+        CROWDED, LOST_EJECT_INDEX, MOUNTED_WRITABLE, UNSERVED,
     };
     use crate::browser::Browser;
     use crate::entry::Entry;
@@ -518,7 +602,7 @@ mod tests {
         MountAct::Eject {
             volume_id: [7; 16],
             name: String::from(name),
-            lost: false,
+            asked: EjectAsked::ByUser,
         }
     }
 
@@ -666,6 +750,7 @@ mod tests {
             availability,
             owner: Some(uid),
             volume_id: [5; 16],
+            read_only: false,
         }
     }
 
@@ -728,10 +813,13 @@ mod tests {
             MountAct::Eject {
                 volume_id: [5; 16],
                 name: String::from("game"),
-                lost: true,
+                asked: EjectAsked::LettingGo,
             }
         );
-        assert_eq!(detach_request([5; 16], true).mode, DetachMode::Lost);
+        assert_eq!(
+            detach_request([5; 16], EjectAsked::LettingGo).mode,
+            DetachMode::Lost
+        );
         for availability in [
             MountAvailability::Available,
             MountAvailability::UnavailableDirty,
@@ -739,11 +827,112 @@ mod tests {
         ] {
             assert!(matches!(
                 MountAct::eject(&image_facts(1000, availability), "game"),
-                MountAct::Eject { lost: false, .. }
+                MountAct::Eject {
+                    asked: EjectAsked::ByUser,
+                    ..
+                }
             ));
         }
-        let plain = detach_request([5; 16], false);
+        let plain = detach_request([5; 16], EjectAsked::ByUser);
         assert_eq!((plain.volume_id, plain.mode), ([5; 16], DetachMode::Plain));
+    }
+
+    #[test]
+    fn only_a_volume_the_attach_made_is_the_attachers_to_let_go() {
+        let made = done(
+            attach("/Users/ada/Home/wb.adf"),
+            Ok(Mounted::Image(ImageAttachReply::Attached(volume(
+                "workbench",
+            )))),
+        );
+        assert_eq!(made.attached(), Some(([9; 16], "workbench")));
+        let there = done(
+            attach("/Users/ada/Home/wb.adf"),
+            Ok(Mounted::Image(ImageAttachReply::AlreadyAttached(volume(
+                "workbench",
+            )))),
+        );
+        assert_eq!(there.attached(), None, "someone's own already");
+        assert_eq!(done(attach("/x.adf"), Err(Errno::Busy)).attached(), None);
+        assert_eq!(done(eject("disk"), Ok(Mounted::Ejected)).attached(), None);
+    }
+
+    /// Places within a root are found among any number of others, by whole
+    /// components: a sibling whose name begins with the root's is not one, and
+    /// a place sorting just before the root is no place within it.
+    #[test]
+    fn any_within_finds_a_place_within_a_root_among_many() {
+        let path = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| String::from(*part))
+                .collect::<Vec<_>>()
+        };
+        let mut reached = alloc::collections::BTreeSet::new();
+        for at in 0..1000 {
+            reached.insert(path(&["Users", "ann", "Home", &alloc::format!("f{at}")]));
+        }
+        reached.insert(path(&["Storage", "game"]));
+        reached.insert(path(&["Storage", "gamez", "x"]));
+        let roots = |parts: &[&str]| path(parts);
+        let game = roots(&["Storage", "game"]);
+        let disc = roots(&["Storage", "disc"]);
+        let gam = roots(&["Storage", "gam"]);
+        let home = roots(&["Users", "ann", "Home"]);
+        assert!(
+            super::any_within(&reached, &[game.as_slice()]),
+            "the root itself"
+        );
+        assert!(super::any_within(&reached, &[home.as_slice()]));
+        assert!(!super::any_within(&reached, &[disc.as_slice()]));
+        assert!(
+            !super::any_within(&reached, &[gam.as_slice()]),
+            "by whole components, not by spelling"
+        );
+        assert!(super::any_within(
+            &reached,
+            &[disc.as_slice(), game.as_slice()]
+        ));
+        assert!(!super::any_within(
+            &alloc::collections::BTreeSet::new(),
+            &[game.as_slice()]
+        ));
+    }
+
+    #[test]
+    fn a_finished_image_is_ejected_only_if_idle_and_silently_kept_if_in_use() {
+        let finished = MountAct::finished([5; 16], "game");
+        assert_eq!(
+            detach_request([5; 16], EjectAsked::Finished).mode,
+            DetachMode::Idle
+        );
+        for in_use in [Errno::Busy, Errno::NotEmpty] {
+            assert_eq!(
+                done(finished.clone(), Err(in_use)).shown(),
+                Ok(None),
+                "an image still in use stays, and nothing is said of it"
+            );
+        }
+        assert!(
+            done(finished.clone(), Err(Errno::DeviceFault))
+                .shown()
+                .is_err(),
+            "what it held could not be written back: that is said"
+        );
+        assert_eq!(
+            done(finished.clone(), Err(Errno::NotFound)).shown(),
+            Ok(None),
+            "an image unmounted some other way meanwhile is gone as asked"
+        );
+        assert_eq!(done(finished, Ok(Mounted::Ejected)).shown(), Ok(None));
+        assert!(
+            done(eject("disk"), Err(Errno::Busy)).shown().is_err(),
+            "the user's own eject refused is said"
+        );
+        assert!(
+            done(eject("disk"), Err(Errno::NotFound)).shown().is_err(),
+            "the user's own eject of what is not mounted is said"
+        );
     }
 
     #[test]
@@ -778,7 +967,7 @@ mod tests {
             Some(MountAct::Eject {
                 volume_id: [5; 16],
                 name: String::from("disk"),
-                lost: false,
+                asked: EjectAsked::ByUser,
             })
         );
         assert_eq!(MountAct::eject_row(row, Some(1001)), None, "another's");

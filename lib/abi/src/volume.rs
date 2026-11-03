@@ -922,6 +922,12 @@ pub enum DetachMode {
     /// kernel decides from the volume's state as it stands, so a stale view
     /// can never force a healthy volume that took a lost one's identity.
     Lost = 2,
+    /// A plain detach a surface asks for itself once the user has finished
+    /// with a volume, as the file manager does when the last window showing
+    /// an image it opened closes. A volume still in use is left as it is: the
+    /// detach is refused as one in use is, and that refusal is recorded as
+    /// information rather than as a warning.
+    Idle = 3,
 }
 
 impl DetachMode {
@@ -941,6 +947,7 @@ impl DetachMode {
             0 => Ok(Self::Plain),
             1 => Ok(Self::Force),
             2 => Ok(Self::Lost),
+            3 => Ok(Self::Idle),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -950,10 +957,20 @@ impl DetachMode {
     #[must_use]
     pub const fn forces(self, lost: bool) -> bool {
         match self {
-            Self::Plain => false,
+            Self::Plain | Self::Idle => false,
             Self::Force => true,
             Self::Lost => lost,
         }
+    }
+
+    /// Whether a detach in this mode that met `errno` left the volume as it
+    /// was when it was asked only to take an idle one: held open (`Busy`), or
+    /// with a volume or binding standing within it or writes its recovery
+    /// could not reconcile held for the user (`NotEmpty`). Each is an answer
+    /// for a surface that asked unprompted, never a refusal to state.
+    #[must_use]
+    pub const fn left_in_use(self, errno: Errno) -> bool {
+        matches!(self, Self::Idle) && matches!(errno, Errno::Busy | Errno::NotEmpty)
     }
 }
 
@@ -1554,7 +1571,12 @@ mod tests {
 
     #[test]
     fn detach_round_trips_and_rejects_nil_and_wrong_lengths() {
-        for mode in [DetachMode::Plain, DetachMode::Force, DetachMode::Lost] {
+        for mode in [
+            DetachMode::Plain,
+            DetachMode::Force,
+            DetachMode::Lost,
+            DetachMode::Idle,
+        ] {
             let req = VolumeDetachRequest {
                 volume_id: [7; 16],
                 mode,
@@ -1589,7 +1611,7 @@ mod tests {
             Err(Errno::LengthOutOfRange)
         );
         // A mode byte naming no mode is wire corruption, refused whole.
-        for byte in [3, 255] {
+        for byte in [4, 255] {
             let mut bad = buf;
             bad[VOLUME_ID_LEN] = byte;
             assert_eq!(
@@ -1607,5 +1629,22 @@ mod tests {
         }
         assert!(DetachMode::Lost.forces(true));
         assert!(!DetachMode::Lost.forces(false));
+    }
+
+    #[test]
+    fn an_idle_detach_forces_nothing_and_is_answered_by_a_volume_in_use() {
+        for lost in [false, true] {
+            assert!(!DetachMode::Idle.forces(lost));
+        }
+        assert!(DetachMode::Idle.left_in_use(Errno::Busy));
+        assert!(DetachMode::Idle.left_in_use(Errno::NotEmpty));
+        assert!(
+            !DetachMode::Idle.left_in_use(Errno::PermissionDenied),
+            "a refusal of authority is a refusal in every mode"
+        );
+        assert!(!DetachMode::Idle.left_in_use(Errno::NoSpace));
+        for mode in [DetachMode::Plain, DetachMode::Force, DetachMode::Lost] {
+            assert!(!mode.left_in_use(Errno::Busy), "{mode:?}");
+        }
     }
 }

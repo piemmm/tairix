@@ -480,13 +480,16 @@ rightward from the leading edge and leftward from the trailing one — the
 selection therefore always moves the way the icons the user can see actually
 run.
 
-**Activation** resolves by entry kind: a directory opens the file manager
-*at that path* (passed as the program's own first argument, which the file
-manager now honours); an application bundle launches directly; a disk image
-is mounted for the user on the session's mount worker
-(`tairix_browse::mount::MountWorker`, since an attach waits for a driver) and
-its volume opened in the file manager, a refusal raised as the desktop's own
-alert ([disk images](../filesystem/images.md)); a plain file resolves its
+**Activation** resolves by entry kind: a directory is handed to the desktop's
+file manager to show (`LaunchTarget::Path`, or, should it have stopped, the
+path as the operand of `files --desktop` starting it again); an application
+bundle launches directly; a disk image or archive is handed to the file manager
+to mount and show (`LaunchTarget::Image`, or `files --desktop --mount IMAGE`),
+which is then the one to unmount it once its windows close. Unlike any other
+launch, the file manager's is never answered with a second process beside one
+still starting or one that turned the target away (`hand_file_manager`): that
+is stated instead
+([disk images](../filesystem/images.md)); a plain file resolves its
 association through the catalog the session holds and launches that
 application with the file as its argument; and a file nothing is associated
 with is refused, stating the reason on the error stream rather than failing
@@ -835,11 +838,19 @@ popup-internal changes just re-present — and the embedder (the `Run` binary)
 performs what needs capabilities the shell does not hold
 (`AGENTS.md` §10, §16.5):
 
-- a press on the leading strip slot (the autostarted **file manager**) raises
-  its served window idempotently: if a desktop-launched file manager is
-  already running and serving a window, that window is raised and focused
-  (`DesktopShell::raise_window`); if its launch is still in flight, the
-  press is already satisfied; only otherwise is the bundle spawned.
+- a press on the leading strip slot (the autostarted **file manager**) is the
+  file manager's own: its declaration asks for every click
+  (`AppBarClick::Open`), so the press reaches it as its icon-bar default and
+  it opens a window among the user's own files. The file manager never quits — its menu has no *Quit* row, and it refuses to run
+  without the `--desktop` switch the session passes — and one that ends is
+  started again on the reap (`FileManagerKeeper`), unless more than
+  `FILE_MANAGER_RETRIES` of its runs in a row each ended within
+  `FILE_MANAGER_STEADY_NS` of starting, judged from each run's own start
+  however it was started, when it waits for the next folder or image opened
+  on the desktop rather than repeat a start that fails. A folder or image
+  opened while it is still starting is held, up to
+  `MAX_HELD_FOR_FILE_MANAGER`, and handed to it once it can take it, never to a
+  second. A session leaving starts none.
 - `AppDefault { app }` and `AppMenuChosen { app, item }` — relayed to the
   declaring process through the route its declaration recorded (see *The icon
   bar*).
@@ -1455,7 +1466,10 @@ conclusion is *accepted*.
   converges on, so a later one replaces the held one where it stands and a
   window owes at most one of each. A position is
   level-triggered (newest wins) and a wheel run is additive (a reversal ends
-  it) — the same rule `pump` applies live, from the one shared predicate.
+  it) — the same rule `pump` applies live, from the one shared predicate. A
+  carried drag's report and a save's offer are numbered, so the newest of a
+  run wins too; a save offer's end, which carries where it was dropped,
+  withdraws the offers still held and an earlier end that only left.
   Everything else — keys, buttons, the pick conclusion — is owed in full.
 - **Bounded, and shedding only what can be shed.** `HOLD_BACK_CAPACITY` (64
   per window) is what stops an app that never drains from making the desktop
@@ -1465,9 +1479,11 @@ conclusion is *accepted*.
   took it): a held press is shed together with its end, so an app learns of
   neither rather than holding a press for ever. That is total rather than a
   preference — folding leaves at most six state edges, one pick conclusion,
-  one tool-window move's end and one end of a press already delivered (a
-  window holds one press at a time), so an evictable input event always
-  exists.
+  one authorisation's, one tool-window move's end, one end of a press already
+  delivered (a window holds one press at a time) and one save offer's end,
+  each a later one superseding (one pick runs at a time, and one awaiting its
+  drop's answer starts no drag), so an evictable input event — a drag's
+  report and a save's offer among them — always exists.
 - **A dead owner owes nothing.** A send that answers `NotFound` discards
   everything held for that owner and tears its windows down, exactly as a
   refused direct send does; a reap does the same.
@@ -1819,8 +1835,11 @@ for what they do: a *click* on a resident slot on `APP_BAR_SLOT_SHOWN`, and a
 ### The chooser is a dialog
 
 The trusted picker wears the window manager's frame like anything else on
-screen — fixed-size, because the shared browser view renders at one geometry —
-so the user can see whose window it is, move it by its title bar, and close it.
+screen, so the user can see whose window it is and move it by its title bar.
+An open or a folder pick is a fixed-size window, because the shared browser
+view renders at one geometry, which the user may close; a save is a dialog of
+the requester's window, sized to what it shows, which *Cancel* or `Escape`
+dismisses.
 `PICKER_TITLE`'s contract always said the title showed "in the window chrome";
 it now does.
 
@@ -2684,15 +2703,28 @@ asking again for a folder whose read is merely under way (`take`) joins it.
   pipe it refuses, is stated once and that work happens on the serve loop —
   exactly where it used to be. Slower under load, never wrong.
 - **A settings change is published off the loop, and adopted only once it
-  landed.** Both routes into the desktop's settings — a row chosen from the
-  backdrop menu, and an `Apply` from the Settings application — submit to
-  the settings worker and adopt nothing. The worker publishes to the desktop's own
-  app-data scope and answers with what the store then holds; the serve loop
-  adopts *that* on the wake it nudges, and re-lays-out, re-lists, and re-prepares
-  the wallpaper only for the change the answer actually names. So the adopted
-  state and the published document can never diverge, and neither can freeze the
-  desktop. A refused publish is stated on `stderr` and adopts nothing, leaving
-  the desktop showing the settings the next login would restore.
+  landed.** Every route into the desktop's settings — a row chosen from the
+  backdrop menu, and an `Apply` or an `ApplyFiles` from the Settings
+  application — submits to the settings worker and adopts nothing. The worker
+  publishes to the desktop's own app-data scope and answers with what the store
+  then holds; the serve loop adopts *that* on the wake it nudges, and
+  re-lays-out, re-lists, and re-prepares the wallpaper only for the change the
+  answer actually names. So the adopted state and the published document can
+  never diverge, and neither can freeze the desktop. A refused publish is
+  stated on `stderr` and adopts nothing, leaving the desktop showing the
+  settings the next login would restore.
+  - A store that could not be read at login leaves the desktop on the
+    defaults, and nothing is published over them: a publish replaces the whole
+    document, so it would wipe every setting the store still holds, the file
+    manager's among them. Until a read succeeds the worker reads the store in
+    place of each publish asked for, and the change is answered
+    `Errno::Stale`; once one does, the desktop adopts what it read and the
+    next change is published over it.
+  - The `Desktop` notice carries a settings generation that moves only when a
+    landed publish changes the file manager's settings, so the file manager
+    reads them again exactly then. Each session starts its count at a value it
+    draws, since every session on the machine publishes the one notice in
+    turn.
   - The chooser's `PINBOARD_ENDPOINT` call is answered when the *store* has
     spoken, not when the request was decoded, so the chooser still reports
     whether its document was actually published. A request the user's next

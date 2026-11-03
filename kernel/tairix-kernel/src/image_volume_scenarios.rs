@@ -43,6 +43,7 @@ pub(super) fn run(window_ptr: *mut u8, facility: &'static TestFacility) {
     an_image_whose_driver_is_lost_is_served_again_scenario(window_ptr, facility);
     an_image_whose_driver_is_lost_ejects_without_a_force_scenario(window_ptr, facility);
     a_detach_taking_the_lost_forces_no_healthy_volume_scenario(window_ptr, facility);
+    an_idle_eject_leaves_an_image_still_in_use_scenario(window_ptr, facility);
     an_image_count_is_bounded_per_principal_scenario(window_ptr, facility);
     an_image_asked_writable_is_writable_or_refused_scenario(window_ptr, facility);
     an_image_nesting_is_bounded_scenario(window_ptr, facility);
@@ -847,6 +848,53 @@ fn a_detach_taking_the_lost_forces_no_healthy_volume_scenario(
     retire(host_id, DetachMode::Plain, round);
 }
 
+/// An idle eject of an image still in use leaves it as it is and records the
+/// answer as one, not as a refused eject; once nothing holds it the same
+/// request takes it out. The floppy's label and file are this scenario's
+/// alone.
+fn an_idle_eject_leaves_an_image_still_in_use_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (host_id, round) = host(window_ptr, facility, 39, b"imgs39");
+    let path = "/Storage/imgs39/Idle.adf";
+    put(0, path, &amiga_floppy(b"IdleEject", b"in use"));
+    let member = plain(MEMBER_UID, STORAGE_GID);
+    let volume = mounted(attached(
+        facility,
+        &member,
+        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0196),
+        &private(false),
+    ));
+    let file = std::format!("/Storage/{}/ReadMe", volume.name());
+    let held = Descriptor::open(MEMBER_UID, &file, OpenFlags::READ).expect("opens");
+    assert_eq!(eject(&volume, DetachMode::Idle, &member), Err(Errno::Busy));
+    assert!(shown(volume.name()), "a volume in use is left as it is");
+    assert_eq!(
+        audited(IMAGE_DETACH_REFUSED, volume.name()),
+        [Some(String::from("nodes_open"))]
+    );
+    assert_eq!(
+        audited_levels(IMAGE_DETACH_REFUSED, volume.name()),
+        [Level::Info],
+        "an idle eject that found the volume in use was answered, not refused"
+    );
+    assert_eq!(eject(&volume, DetachMode::Plain, &member), Err(Errno::Busy));
+    assert_eq!(
+        audited_levels(IMAGE_DETACH_REFUSED, volume.name()),
+        [Level::Info, Level::Warn],
+        "the user's own eject is still a refusal"
+    );
+    drop(held);
+    eject(&volume, DetachMode::Idle, &member).expect("an idle eject takes out what nothing holds");
+    assert!(!shown(volume.name()));
+    assert_eq!(
+        audited_text(IMAGE_VOLUME_DETACHED, volume.name(), "outcome"),
+        [Some(String::from("clean"))]
+    );
+    retire(host_id, DetachMode::Plain, round);
+}
+
 /// A principal holds at most a bounded number of image volumes, judged as
 /// each enters, so two attaches racing for the last place cannot both take
 /// it; another principal's are its own, and ejecting one frees its place.
@@ -1378,6 +1426,13 @@ fn an_image_is_settled_before_its_backing_share_detaches_scenario(facility: &'st
         assert!(shown("heldshare") && shown(image.name()));
         assert!(audited(IMAGE_VOLUME_RETIRED, image.name()).is_empty());
     };
+    assert_eq!(eject(&share, DetachMode::Idle, &member()), Err(Errno::Busy));
+    still_there();
+    assert_eq!(
+        audited_levels(NETWORK_DETACH_REFUSED, "heldshare"),
+        [Level::Info],
+        "an idle detach of a share in use is answered, not a warning"
+    );
     assert_eq!(
         eject(&share, DetachMode::Plain, &member()),
         Err(Errno::Busy)
@@ -1393,6 +1448,7 @@ fn an_image_is_settled_before_its_backing_share_detaches_scenario(facility: &'st
     assert_eq!(
         audited(NETWORK_DETACH_REFUSED, "heldshare"),
         [
+            Some(String::from("image_attached")),
             Some(String::from("image_attached")),
             Some(String::from("image_detach_refused"))
         ]

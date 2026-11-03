@@ -13,6 +13,8 @@ use tairix_abi::sysinfo::PlatformCompatible;
 use tairix_abi::thermal_ipc::{FanFault, FanMode, ThermalStatus};
 use tairix_controls::{FieldControl, FieldGroup, FieldRow};
 
+use crate::machine::UNREAD;
+
 /// The `compatible` vendor prefix of every Raspberry Pi board.
 const RASPBERRY_PI_VENDOR: &[u8] = b"raspberrypi,";
 
@@ -52,7 +54,6 @@ pub fn temperature_text(tenths: i32) -> String {
 const STATUS_CAPTION: &str = "STATUS";
 const TEMPERATURE_LABEL: &str = "Processor temperature";
 const FAN_LABEL: &str = "Fan";
-const UNREAD: &str = "not read yet";
 const NO_SERVICE: &str = "the cooling service did not answer";
 
 /// What the fan is doing, in a word.

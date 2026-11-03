@@ -71,6 +71,7 @@ use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
     NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats,
+    WriteRefusal,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
@@ -403,6 +404,10 @@ pub struct Adfs<B: Block> {
     host: Option<&'static dyn VolumeHost>,
     /// The kernel's holds on the mount's objects.
     pins: Pins,
+    /// Why the volume is served read-only, once a reason is found: at open
+    /// for a short device, on loading a directory for one this driver will
+    /// not write back.
+    refusal: Option<WriteRefusal>,
 }
 
 /// The kernel's holds on a mount's objects.
@@ -699,24 +704,34 @@ impl<B: Block> Adfs<B> {
         let mut volume = ByteDevice::new(device)?;
         let layout = tairix_fsprobe::adfs::identify(&mut volume)?.ok_or(DriverError::BadMagic)?;
         let identity = layout.identity();
-        let backing = match layout {
-            Layout::NewMap { record, boot_block } => Backing::New {
-                map: NewMap::open(&mut volume, record)?,
-                boot_block,
-            },
+        let (backing, disc_bytes) = match layout {
+            Layout::NewMap { record, boot_block } => {
+                let disc_bytes = record.disc_size;
+                let map = NewMap::open(&mut volume, record)?;
+                (Backing::New { map, boot_block }, disc_bytes)
+            }
             Layout::OldMap {
                 large_directories,
                 root_sector,
+                disc_sectors,
                 ..
-            } => Backing::Old {
-                format: if large_directories {
-                    FixedFormat::New
-                } else {
-                    FixedFormat::Old
+            } => (
+                Backing::Old {
+                    format: if large_directories {
+                        FixedFormat::New
+                    } else {
+                        FixedFormat::Old
+                    },
+                    root_sector,
                 },
-                root_sector,
-            },
+                u64::from(disc_sectors) * tairix_fsprobe::adfs::OLD_SECTOR_SIZE,
+            ),
         };
+        // An image short of the disc it holds is read where it reaches, and
+        // never written: an allocation could land past its end.
+        let truncated = (disc_bytes > volume.capacity()).then_some(WriteRefusal::Truncated);
+        let copies_disagree = matches!(&backing, Backing::New { map, .. } if map.copies_disagree());
+        let refusal = truncated.or(copies_disagree.then_some(WriteRefusal::UnsupportedFeature));
         let mut adfs = Self {
             volume,
             backing,
@@ -727,6 +742,7 @@ impl<B: Block> Adfs<B> {
             validated: None,
             host: None,
             pins: Pins::new(),
+            refusal,
         };
         // The root directory must itself validate.
         let root = adfs.root_addr();
@@ -757,6 +773,22 @@ impl<B: Block> Adfs<B> {
     #[must_use]
     pub fn volume_identity(&self) -> [u8; 16] {
         self.identity
+    }
+
+    /// Why this handle refuses writes, or `None` while it accepts them.
+    #[must_use]
+    pub fn write_refusal(&self) -> Option<WriteRefusal> {
+        self.refusal
+    }
+
+    /// Refuse a change once the volume is read-only. Every change calls this
+    /// after resolving what it touches and before it writes anything, so a
+    /// directory first loaded by that resolution is weighed too.
+    fn may_write(&self) -> Result<(), DriverError> {
+        match self.refusal {
+            Some(_) => Err(DriverError::ReadOnly),
+            None => Ok(()),
+        }
     }
 
     /// The root directory's node.
@@ -877,7 +909,13 @@ impl<B: Block> Adfs<B> {
             let format = self.fixed_format();
             let mut data = [0u8; dir::NEW_DIR_SIZE];
             self.object_read(indaddr, 0, &mut data[..format.size()])?;
-            Ok(DirHandle::Fixed(FixedDir::parse(&data, format)?))
+            let dir = FixedDir::parse(&data, format)?;
+            if dir.stranded {
+                // Writing it back could revive entries no check byte vouches
+                // for, as a later insertion closing the gap would.
+                self.refusal.get_or_insert(WriteRefusal::UnsupportedFeature);
+            }
+            Ok(DirHandle::Fixed(dir))
         }
     }
 
@@ -2060,6 +2098,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         if self.dir_lookup(dir_addr, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
         }
+        self.may_write()?;
         // RISC OS types a file it is told nothing about as Data; an untyped
         // object would be a load-and-run image at address zero.
         let mut object = typed_at(&Object::named(name)?, acorn::Filetype::DATA, self.now())?;
@@ -2117,6 +2156,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
 
     fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
         let target = self.file_target(file)?;
+        self.may_write()?;
         let (parent, object) = target.object().ok_or(DriverError::Unsupported)?;
         if data.is_empty() {
             return Ok(0);
@@ -2153,6 +2193,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
 
     fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
         let target = self.file_target(file)?;
+        self.may_write()?;
         let (parent, object) = target.object().ok_or(DriverError::Unsupported)?;
         if size > u64::from(u32::MAX) {
             return Err(DriverError::NoSpace);
@@ -2190,6 +2231,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         if object.is_dir() && !self.dir_is_empty(object.indaddr)? {
             return Err(DriverError::DirectoryNotEmpty);
         }
+        self.may_write()?;
         let Some(number) = self.pins.token_of(&object, dir_addr) else {
             self.dir_remove_at(dir_addr, index)?;
             return self.release_maybe_shared(object.indaddr, object.size, dir_addr);
@@ -2221,6 +2263,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
                 return Ok(());
             }
             self.validate_new_name(dst_name)?;
+            self.may_write()?;
             return self.dir_respell_at(src_addr, src_index, &object.renamed(dst_name)?);
         }
         self.validate_new_name(dst_name)?;
@@ -2258,6 +2301,15 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
                 return Err(DriverError::DirectoryNotEmpty);
             }
         }
+        // A moved directory's parent pointer follows it. It is read before
+        // any entry changes, so a refusal its reading brings stops the move
+        // whole.
+        let moved_dir = if object.is_dir() && src_addr != dst_addr {
+            Some(self.load_dir(object.indaddr)?)
+        } else {
+            None
+        };
+        self.may_write()?;
         // A pin of the moved object follows it, so its room is made before
         // an entry changes.
         self.pins.make_room(&object, src_addr)?;
@@ -2273,22 +2325,20 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
             }
         }
         self.pins.moved(&object, src_addr, dst_addr, dst_name)?;
-        // A moved directory's parent pointer follows it.
-        if object.is_dir() && src_addr != dst_addr {
-            match self.load_dir(object.indaddr)? {
-                DirHandle::Fixed(mut child) => {
-                    child.set_parent(dst_addr);
-                    self.store_fixed_dir(object.indaddr, &child)?;
-                }
-                DirHandle::Big(mut child) => {
-                    let mut store = ObjectStore {
-                        adfs: self,
-                        indaddr: object.indaddr,
-                        size: u32::MAX,
-                    };
-                    child.set_parent(&mut store, dst_addr)?;
-                }
+        match moved_dir {
+            Some(DirHandle::Fixed(mut child)) => {
+                child.set_parent(dst_addr);
+                self.store_fixed_dir(object.indaddr, &child)?;
             }
+            Some(DirHandle::Big(mut child)) => {
+                let mut store = ObjectStore {
+                    adfs: self,
+                    indaddr: object.indaddr,
+                    size: u32::MAX,
+                };
+                child.set_parent(&mut store, dst_addr)?;
+            }
+            None => {}
         }
         Ok(())
     }
@@ -2415,6 +2465,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
             return Err(DriverError::Unsupported);
         }
         let target = self.write_target(node)?;
+        self.may_write()?;
         let (_, object) = target.object().ok_or(DriverError::Unsupported)?;
         // ADFS stores no general-purpose attributes; every other namespace
         // has nowhere to live.
@@ -2460,6 +2511,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
             return Err(DriverError::NotFound);
         }
         let target = self.write_target(node)?;
+        self.may_write()?;
         let (_, object) = target.object().ok_or(DriverError::NotFound)?;
         let mut fields = acorn_object(&object);
         fields.remove(key.as_bytes())?;

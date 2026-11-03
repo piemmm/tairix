@@ -25,6 +25,14 @@ use crate::{png, DecodeError, DecodeLimits, FitBox, RasterImage, Unkept, RGBA_BY
 /// What the first entry holds, which names the archive OpenRaster.
 const MIMETYPE: &str = "image/openraster";
 
+/// Where a conforming file's first entry names itself: its local header's
+/// name field.
+const ENTRY_NAME_AT: usize = 30;
+
+/// How many leading bytes the signature spans: through the stored
+/// `mimetype` entry's content, which follows its name.
+pub(crate) const SIGNATURE_LEN: usize = ENTRY_NAME_AT + b"mimetype".len() + MIMETYPE.len();
+
 /// The member holding the layers as composed.
 const MERGED: &str = "mergedimage.png";
 
@@ -96,8 +104,11 @@ pub(crate) fn has_signature(bytes: &[u8]) -> bool {
     bytes.starts_with(b"PK\x03\x04")
         && bytes.get(8..10) == Some(&[0, 0])
         && bytes.get(26..28) == Some(&[8, 0])
-        && bytes.get(30..38) == Some(b"mimetype")
-        && bytes.get(38..54) == Some(MIMETYPE.as_bytes())
+        && bytes
+            .get(ENTRY_NAME_AT..)
+            .and_then(|named| named.strip_prefix(b"mimetype"))
+            .and_then(|content| content.get(..MIMETYPE.len()))
+            == Some(MIMETYPE.as_bytes())
 }
 
 /// Write `layers`, the bottom first, as an OpenRaster document of a

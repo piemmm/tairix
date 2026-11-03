@@ -36,7 +36,7 @@ use tairix_abi::window_ipc::{
     decode_open_target_reply, decode_picked_file_reply, decode_picked_name_reply,
     decode_terrain_reply, decode_wallpapers_reply, AlertSeverity, AlertSpec, AppBar, AppMenu,
     BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DragItems, DropOperation, DropTarget,
-    HandOverDocument, HandOverOutcome, LayerDepth, NameList, OpenTarget, PickPurpose, PickedFile,
+    HandOverOutcome, HandOverTarget, LayerDepth, NameList, OpenTarget, PickPurpose, PickedFile,
     PointerAction, PreviewSubject, TerrainPlate, TooltipText, WallpaperPage, WindowEvent,
     WindowRegion, WindowRequest, WindowTitle, WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN,
     WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
@@ -63,6 +63,9 @@ use crate::server::{
 pub enum Target {
     /// A path the user named. Confers no access.
     Path(String),
+    /// A disk image or archive the user opened, to be attached and shown.
+    /// Confers no access.
+    Image(String),
     /// A document already opened for this application, reachable through a
     /// one-shot `fd_redeem` handle.
     Document {
@@ -668,6 +671,8 @@ pub enum PostedRequest {
     Tooltip,
     /// [`WindowClient::drag_verdict`].
     DragVerdict,
+    /// [`WindowClient::answer_save_offer`].
+    SaveOfferAnswer,
     /// [`WindowClient::set_title`].
     Title,
     /// [`WindowClient::set_sizing`].
@@ -681,6 +686,7 @@ impl PostedRequest {
             Self::Cursor => "a pointer shape",
             Self::Tooltip => "a tooltip",
             Self::DragVerdict => "a drop answer",
+            Self::SaveOfferAnswer => "a save answer",
             Self::Title => "a title",
             Self::Sizing => "a resize range",
         }
@@ -718,6 +724,7 @@ enum Asked {
     Cursor(CursorShape),
     Tooltip(WindowRegion, TooltipText),
     DragVerdict(u32, Option<DropOperation>),
+    SaveOfferAnswer(u32, bool),
     Title(WindowTitle),
     Sizing(WindowSizing),
 }
@@ -728,6 +735,7 @@ impl Asked {
             Self::Cursor(_) => PostedRequest::Cursor,
             Self::Tooltip(..) => PostedRequest::Tooltip,
             Self::DragVerdict(..) => PostedRequest::DragVerdict,
+            Self::SaveOfferAnswer(..) => PostedRequest::SaveOfferAnswer,
             Self::Title(_) => PostedRequest::Title,
             Self::Sizing(_) => PostedRequest::Sizing,
         }
@@ -745,6 +753,11 @@ impl Asked {
                 window_id,
                 serial,
                 verdict,
+            },
+            Self::SaveOfferAnswer(serial, accepts) => WindowRequest::SaveOfferAnswer {
+                window_id,
+                serial,
+                accepts,
             },
             Self::Title(title) => WindowRequest::SetTitle { window_id, title },
             Self::Sizing(sizing) => WindowRequest::SetSizing { window_id, sizing },
@@ -1465,6 +1478,40 @@ impl<T: WindowTransport> WindowClient<T> {
         self.post_or_hold(window_id, Asked::DragVerdict(serial, verdict))
     }
 
+    /// Answer the save offer numbered `serial` over window `window_id`:
+    /// whether a drop there saves the document into a folder this
+    /// application names.
+    ///
+    /// # Errors
+    ///
+    /// A request the wire cannot carry; the session's own answer arrives
+    /// with [`WindowClient::reap_posted`].
+    pub fn answer_save_offer(
+        &mut self,
+        window_id: u64,
+        serial: u32,
+        accepts: bool,
+    ) -> Result<(), Errno> {
+        self.post_or_hold(window_id, Asked::SaveOfferAnswer(serial, accepts))
+    }
+
+    /// Answer the save dropped on window `window_id`, numbered `serial`, with
+    /// the folder it goes in: `location`, a `fd_grant_location` handle this
+    /// process minted to the session from a folder it opened itself, or zero
+    /// to decline. The session consumes the location whatever it answers.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when no such drop awaits its folder, the session's
+    /// refusal, a transport failure, or a corrupt status frame.
+    pub fn save_into(&mut self, window_id: u64, serial: u32, location: u64) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::SaveInto {
+            window_id,
+            serial,
+            location,
+        })
+    }
+
     /// The desktop folder the drag report numbered `serial` named, for the
     /// drag window `window_id` began.
     ///
@@ -1845,6 +1892,7 @@ impl<T: WindowTransport> WindowClient<T> {
         match decode_open_target_reply(reply)? {
             None => Ok(None),
             Some(OpenTarget::Path(path)) => Ok(Some(Target::Path(text(path)?))),
+            Some(OpenTarget::Image(path)) => Ok(Some(Target::Image(text(path)?))),
             Some(OpenTarget::Document {
                 name,
                 grant,
@@ -1887,11 +1935,11 @@ impl<T: WindowTransport> WindowClient<T> {
     }
 
     /// Ask the session to reach the live instance of the bundle whose entry
-    /// binary is `run_path`, handing it `document` if one is named.
+    /// binary is `run_path`, handing it `target`.
     ///
     /// The single-instance funnel for a launcher that is not the desktop: a
     /// file manager that spawns a viewer per document otherwise bypasses it
-    /// and a bundle declaring one instance gets several. `document`'s grant
+    /// and a bundle declaring one instance gets several. A document's grant
     /// is minted by the *caller*, to the session
     /// ([`session`](Self::session)), from a descriptor the caller opened
     /// itself — the session opens nothing on the caller's behalf.
@@ -1909,11 +1957,11 @@ impl<T: WindowTransport> WindowClient<T> {
     pub fn hand_over_launch(
         &mut self,
         run_path: &str,
-        document: Option<HandOverDocument>,
+        target: HandOverTarget,
     ) -> Result<HandOverOutcome, Errno> {
         let request = WindowRequest::HandOverLaunch {
             run_path: BundleRunPath::new(run_path)?,
-            document,
+            target,
         };
         let mut reply = [0u8; WINDOW_HAND_OVER_REPLY_LEN];
         let n = self.call(&request, &mut reply)?;

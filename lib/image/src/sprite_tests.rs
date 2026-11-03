@@ -11,9 +11,9 @@ use alloc::vec::Vec;
 
 use crate::{
     decode, decode_as, decode_fitted_as, decode_named, desktop_palette, find_named, open_native,
-    probe_as, sniff, DecodeError, DecodeLimits, FitBox, ImageFormat, IndexDepth, NativeDocument,
-    Pixels, RasterImage, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry, SpriteLayout,
-    SpriteMode, SpriteName, SpritePalette,
+    probe_as, recognise, sniff, DecodeError, DecodeLimits, FitBox, ImageFormat, IndexDepth,
+    NativeDocument, Pixels, RasterImage, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry,
+    SpriteLayout, SpriteMode, SpriteName, SpritePalette, RECOGNITION_HEAD,
 };
 
 /// Limits generous enough for every fixture here.
@@ -307,22 +307,120 @@ const WIMP: [[u8; 4]; 16] = [
 
 // ---------------------------------------------------------------- the area
 
+/// What a listing reading only the head of `bytes` recognises them as.
+fn recognised_from_head(bytes: &[u8]) -> Option<ImageFormat> {
+    let head = &bytes[..bytes.len().min(RECOGNITION_HEAD)];
+    recognise(head, bytes.len() as u64)
+}
+
 #[test]
-fn a_sprite_area_is_never_recognised_from_its_content() {
-    // The first word is a sprite count, so there is no signature to find and
-    // nothing may be guessed from one.
-    let bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+fn a_saved_sprite_area_is_recognised_by_the_length_it_states() {
+    let bytes = area(&[
+        Sprite::new(MODE_2, 1, 8, 1),
+        Sprite::new(MODE_16, 4, 3, 2).named(b"second"),
+    ]);
+    assert_eq!(sniff(&bytes), Some(ImageFormat::Sprite));
+    assert_eq!(recognised_from_head(&bytes), Some(ImageFormat::Sprite));
+    assert_eq!(
+        decode(&bytes, &limits()).map(|image| (image.width(), image.height())),
+        Ok((8, 1)),
+        "the sniffing decode reaches the area's largest sprite"
+    );
+    assert_eq!(
+        Sequence::open(&bytes, &limits()).map(|sequence| sequence.info().count()),
+        Ok(2)
+    );
+}
+
+#[test]
+fn an_area_with_an_extension_is_recognised_from_its_header_alone() {
+    let sprite = Sprite::new(MODE_2, 1, 8, 1).bytes();
+    let extension = [0u8; 64];
+    let first = 12 + extension.len();
+    let total = first + sprite.len();
+    let mut bytes = Vec::new();
+    for word in [1, first + 4, total + 4] {
+        bytes.extend_from_slice(&u32::try_from(word).expect("small").to_le_bytes());
+    }
+    bytes.extend_from_slice(&extension);
+    bytes.extend_from_slice(&sprite);
+    assert!(
+        first + 4 > RECOGNITION_HEAD,
+        "the first sprite lies past the head"
+    );
+    assert_eq!(recognised_from_head(&bytes), Some(ImageFormat::Sprite));
+    assert_eq!(sniff(&bytes), Some(ImageFormat::Sprite));
+    assert!(decode(&bytes, &limits()).is_ok());
+    let mut unaligned = bytes;
+    unaligned.push(0);
+    let stated = u32::try_from(unaligned.len()).expect("small") + 4;
+    unaligned[8..12].copy_from_slice(&stated.to_le_bytes());
+    assert_eq!(sniff(&unaligned), None, "an area ending off a word");
+}
+
+#[test]
+fn an_area_ending_anywhere_but_the_files_end_is_not_recognised() {
+    let whole = one(Sprite::new(MODE_2, 1, 8, 1));
+    let mut padded = whole.clone();
+    padded.extend_from_slice(&[0; 4]);
+    assert_eq!(sniff(&padded), None, "bytes past the area");
+    assert!(
+        decode_as(ImageFormat::Sprite, &padded, &limits()).is_ok(),
+        "a file whose type names it still opens"
+    );
+    let mut longer = whole.clone();
+    let stated = u32::try_from(whole.len()).expect("small") + 12;
+    longer[8..12].copy_from_slice(&stated.to_le_bytes());
+    assert_eq!(sniff(&longer), None, "an end past the file");
+    let mut shorter = whole;
+    shorter[8..12].copy_from_slice(&(stated - 16).to_le_bytes());
+    assert_eq!(sniff(&shorter), None, "an end before the file's");
+}
+
+#[test]
+fn a_header_no_area_could_have_is_not_recognised() {
+    let whole = one(Sprite::new(MODE_2, 1, 8, 1));
+    let with = |at: usize, value: u32| {
+        let mut bytes = whole.clone();
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        bytes
+    };
+    assert_eq!(sniff(&with(0, 0)), None, "no sprites");
+    assert_eq!(
+        sniff(&with(0, 2)),
+        None,
+        "more sprites than the area has room for"
+    );
+    assert_eq!(
+        sniff(&with(4, 12)),
+        None,
+        "a first sprite inside the header"
+    );
+    assert_eq!(sniff(&with(4, 18)), None, "a first sprite off a word");
+    assert_eq!(
+        sniff(&with(12, 40)),
+        None,
+        "a sprite shorter than its block"
+    );
+    assert_eq!(sniff(&with(12, 4096)), None, "a sprite past the area");
+    assert_eq!(sniff(&[]), None);
+    assert_eq!(sniff(&whole[..11]), None);
+}
+
+#[test]
+fn a_lone_sprite_must_fill_its_area() {
+    let mut bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+    bytes.extend_from_slice(&[0; 44]);
+    let stated = u32::try_from(bytes.len()).expect("small") + 4;
+    bytes[8..12].copy_from_slice(&stated.to_le_bytes());
     assert_eq!(sniff(&bytes), None);
+    let mut two = bytes;
+    two[0..4].copy_from_slice(&2u32.to_le_bytes());
     assert_eq!(
-        decode(&bytes, &limits()),
-        Err(DecodeError::UnknownFormat),
-        "a sniffing decode must not reach a format it cannot recognise"
+        recognised_from_head(&two),
+        Some(ImageFormat::Sprite),
+        "room after the first is a second sprite's, which the decoder validates"
     );
-    assert_eq!(
-        Sequence::open(&bytes, &limits()).err(),
-        Some(DecodeError::UnknownFormat)
-    );
-    assert!(decode_as(ImageFormat::Sprite, &bytes, &limits()).is_ok());
 }
 
 #[test]

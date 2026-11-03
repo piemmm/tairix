@@ -143,6 +143,7 @@
 #define TAIRIX_WRITE_REFUSAL_METADATA_PARTITION ((uint8_t)16u)
 #define TAIRIX_WRITE_REFUSAL_SEVERAL_PARTITIONS ((uint8_t)17u)
 #define TAIRIX_WRITE_REFUSAL_DAMAGED ((uint8_t)18u)
+#define TAIRIX_WRITE_REFUSAL_TRUNCATED ((uint8_t)19u)
 
 /* Driver input-event kind (uint8_t); distinct from the windowing TAIRIX_INPUT_KIND_*. */
 #define TAIRIX_INPUT_EVENT_KIND_KEY ((uint8_t)1u)

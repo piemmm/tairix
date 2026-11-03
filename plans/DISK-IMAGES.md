@@ -2,8 +2,10 @@
 
 Binding under `AGENTS.md`. A user double-clicks a disk-image file — an
 `.iso`, an Acorn or Amiga `.adf`, an `.adl`/`.adm`/`.ads`, an `.hdf` — and
-the volume it holds appears at `/Storage/<name>`, private to them, until they
-eject it or their login session ends. It consumes and never contradicts
+the volume it holds appears at `/Storage/<name>`, private to them, until the
+file manager's last window onto it closes while nothing else uses it — what
+the user's settings choose by default — or until they eject it or their login
+session ends. It consumes and never contradicts
 `plans/FSSERVE.md` (the attach, serve and detach the volume goes through),
 `plans/FOREIGN-MEDIA.md` (the disc formats), `docs/src/filesystem/drives.md`
 (`Storage:`, presentations) and `plans/FILES-INTERACTION.md` (activation).
@@ -16,7 +18,7 @@ eject it or their login session ends. It consumes and never contradicts
 | DI2 | `drivers/filesystem/affs`: OFS and FFS, international and directory-cache volumes read; DOS\0–\3 written; hard links read, made and promoted; soft links read and made | done |
 | DI3 | The kernel image attachment: `image_attach` over a held descriptor, the image block, the probe and its refusals, the per-principal identity, presentation and lock, owner eject, the login session's end, the backing volume's departure | done |
 | DI4 | The disk-image content types, `Activation::MountImage`, the floppy, disc and hard-disc icons | done |
-| DI5 | `files.app` and the desktop: mount on activation on a worker of their own (`tairix_browse::mount::MountWorker`), the window onto the volume, *Mount Read-Only*, *Eject* on the rail and in the menus | done |
+| DI5 | `files.app`: mount on activation on a worker of its own (`tairix_browse::mount::MountWorker`), the desktop's own opens handed to it, the window onto the volume, *Mount Read-Only*, *Eject* on the rail and in the menus | done |
 | DI6 | The `mount` bundle — `mount IMAGE [TARGET]` and the listing — and `unmount` of an owned image volume, by name or by its file's (closes D1014 for image sources) | done |
 | DI7 | The QEMU vertical (`tairix-test-images-qemu-aarch64`): an ADFS, an Amiga and an ISO 9660 image copied into a home, mounted with `mount`, read, written where writable and refused where not, ejected with `unmount`, and read back once mounted again | done |
 | DI8 | Writing directory-cache Amiga volumes (DOS\4/\5): keeping each directory's cache blocks in step | planned |
@@ -32,6 +34,8 @@ eject it or their login session ends. It consumes and never contradicts
 | DI18 | An incremental hardware-tree read: the nodes changed since a generation, so neither the copy under the tree's lock nor `devmgr`'s decode and match spans every image node in the system | planned |
 | DI19 | Bounce buffers sized by transfers, not volumes: staging borrowed from a pool reserved per nesting level, so memory follows the transfers in flight and no transfer waits on a buffer one above it holds | planned |
 | DI20 | Partitioned removable devices: the volume manager plans the partitions an Amiga Rigid Disk Block lays out on a device, as it plans a PC table's, rather than attaching none | planned |
+| DI21 | An image the user opened unmounted once no window shows it: `DetachMode::Idle`, the file manager's opened set, the `files.unmount_when_closed` setting | done |
+| DI22 | A per-attachment identity in the image attach reply and the idle detach, so an unmount the user did not ask for can only take the attachment the file manager made | planned |
 
 ## 1. What an image is
 
@@ -179,6 +183,11 @@ eject it or their login session ends. It consumes and never contradicts
   recovering, the node stays published and `devmgr`'s restart serves it again.
   A plain eject meanwhile detaches it as a stick's detach does, nothing being
   left to flush (`Writes::Gone`).
+- **An idle detach.** `DetachMode::Idle` is a plain detach a surface asks for
+  once the user has finished with a volume: refused `Busy` or `NotEmpty` while
+  anything holds it, which `DetachMode::left_in_use` reads as an answer rather
+  than a refusal, audited at `Info` rather than `Warn`. It never forces, and
+  never takes a lost volume.
 
 ## 5. The mount table
 
@@ -224,10 +233,13 @@ still listed in `/Storage` to everyone (DI12).
   `application/x-raw-disk-image`, the parent of both; their icons are the disc,
   floppy and hard-disc pictures. Activating any of them is
   `Activation::MountImage`.
-- `files.app` and the desktop pinboard carry a mount out on a worker of its
-  own, `tairix_browse::mount::MountWorker` over the runtime's one queued worker
+- `files.app` carries a mount out on a worker of its own,
+  `tairix_browse::mount::MountWorker` over the runtime's one queued worker
   (`tairix_rt::work::Worker`), since an attach waits for a driver: never on the
-  loop, and never behind the listings and pickers on their other workers. The
+  loop, and never behind the listings on its other workers. An image opened on
+  the desktop is handed to it (`OpenTarget::Image`, or `files --mount IMAGE`
+  when none is running), so one program attaches every image the user opens
+  and is the one to let it go. The
   image is opened read-write where the user may write it (read-only for *Mount
   Read-Only*); the volume opens in a window on `/Storage/<name>`, and a refusal
   is stated in an alert in the one wording `MountDone::shown` gives both. The
@@ -248,6 +260,28 @@ still listed in `/Storage` to everyone (DI12).
   never answered with the writable volume or taken up for the session; one
   of an image no path can name says why (`MountAct::read_only_of`), as Open
   does.
+- **Unmounted once closed (DI21).** A volume an attach of `files.app`'s made
+  (`MountDone::attached`: only a fresh `Attached`, never one already attached)
+  is noted in its opened set (`userland/apps/files/src/opened.rs`). Each turn
+  of the loop, where `files.unmount_when_closed` holds and a read of the
+  user's settings has said so, a noted volume no window shows, describes a
+  node of, is opening onto, or runs an operation reaching (a progress window,
+  or one still starting) is asked an idle detach (`EjectAsked::Finished`), one
+  at a time: no window is moved off it, and one a window has come to show by
+  the time it is located is withdrawn (`EjectDesk::withdraw`) and the places
+  it was found shown at are learned, so it is asked again once that window
+  leaves. No idle detach is asked while an attach is on its way, and an attach
+  asked for while one is waits for its answer, so the two never race. Found in
+  use, it is asked again at once when a child the file manager started exits
+  or a window shows it and leaves it again, and otherwise after a wait that
+  doubles from `FIRST_RETRY_NS` to `LONGEST_RETRY_NS`, on the loop's one-shot
+  deadline, since nothing says when a holder elsewhere lets go. A lost volume
+  is left for its owner's own *Eject*; one the user ejects, and one unmounted
+  some other way once the mount table no longer lists it, is forgotten. An
+  image the shell unmounts and mounts again before the mount table is re-read
+  keeps its identity, so the opened set would take that attachment for its
+  own; a per-attachment identity in the attach reply and the idle detach
+  closes that (DI22, planned).
 
 ## 8. The command line
 

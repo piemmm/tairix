@@ -932,6 +932,7 @@ fn a_volume_root_is_pictured_as_its_drive() {
             availability: tairix_abi::sysinfo::MountAvailability::Available,
             owner: None,
             volume_id: [0; 16],
+            read_only: false,
         },
     }));
     let mut scratch = String::new();

@@ -20,13 +20,15 @@ impl ServedFormat for Served {
 
     fn open<B: Block>(
         volume: B,
-        _read_only: bool,
+        read_only: bool,
         _budget: WritebackBudget,
     ) -> Result<Opened<Adfs<B>>, DriverError> {
+        let fs = Adfs::open(volume)?;
+        let write_refusal = if read_only { None } else { fs.write_refusal() };
         Ok(Opened {
-            fs: Adfs::open(volume)?,
+            fs,
             format: FormatName::Adfs,
-            write_refusal: None,
+            write_refusal,
         })
     }
 }

@@ -42,6 +42,7 @@ its address space and everything that grows with the picture off its loop.
 | PT32 | The sprite file window: a sprite area opens as a window of its sprites, each its thumbnail over its name, where sprites are made, renamed, copied, deleted and reordered | done |
 | PT33 | Sprite windows: a sprite opens in a window of its own, sixteen at most a choice, across sprite files, its edits its file's as they land | done |
 | PT34 | The palette bar: one row of wells, scrolled sideways only when they do not all fit | done |
+| PT35 | CMYK, JPEG-data and YCbCr sprites drawn as well as kept: today the decoder keeps them byte-exact and the sprite window shows the picture glyph; their pixel layouts are to be confirmed against real samples before they are read | planned |
 
 ## What it is
 
@@ -82,8 +83,12 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   in a grid that reflows to the window's width and scrolls down. A thumbnail is
   drawn on the queue's worker from the sprite as it stands and kept until the
   sprite or the side it is drawn at changes, asked for each round the window
-  lacks one; the paint draws what has landed at the side laid out, a plain
-  card meanwhile. A kept sprite is a card with its name, opening nothing. Its
+  lacks one; the paint draws what has landed at the side laid out, the
+  picture glyph meanwhile. A kept sprite is the glyph with its name, opening
+  nothing. Each cell is the shared `IconTile` (two name lines, the file
+  manager's large tile), sized by `TileLayout::width_for`/`height_for` so the
+  thumbnail side is the tile's own `icon_side`; a chosen sprite wears the
+  tile's selection mark. Its
   open size (`DocumentView::open_size`, in the theme and its faces at the
   reference scale) holds up to five by three cells and its band; what its
   band says goes at the next act. New picture as a sprite file, and the

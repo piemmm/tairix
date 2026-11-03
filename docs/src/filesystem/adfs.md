@@ -23,7 +23,10 @@ Every ADFS on-disc format is supported, for reading and writing:
   hard-disc volumes carry the checksummed boot block at `0xC00` with the
   embedded disc record; E-class volumes carry the record at the start of
   zone 0. Small objects may share a fragment through the share offset in
-  the low byte of an indirect disc address.
+  the low byte of an indirect disc address. The map is held twice, the
+  second copy straight after the first: the driver reads the first copy
+  whose every zone and cross-check holds, as `FileCore` does, and writes
+  both.
 - **Big directories** (E+, F+): the variable-length `SBPr`/`oven`
   format with a name heap and 255-byte names, growing in 2048-byte
   grains to the format's 4 MiB ceiling. The root's size lives in the
@@ -37,6 +40,28 @@ rather than serving suspect data. A disc record is admitted only when its
 zone spare leaves room for the zone header and zone 0's map bits hold the
 record and one whole fragment, so a forged geometry is refused before any
 zone is read.
+
+## Volumes served read-only
+
+Three kinds of volume are read but never written. The driver gives the
+kernel the reason as a `WriteRefusal`, and every change is refused with
+`ReadOnly` before anything is written:
+
+- **An image short of its disc** (`truncated`): a dump missing its final
+  tracks, its map recording more disc than the image holds. It is read
+  where it reaches. An object past the end fails its read, and nothing is
+  written, since an allocation could land past the end.
+- **Entries past an end marker** (`unsupported_feature`): some protected
+  discs pack a directory's entries at the end of its table, behind empty
+  slots, and seal it as though it were empty. Such entries are listed after
+  the live ones when the whole run stands in name order, and left out
+  otherwise. No check byte covers them, so the directory is never written
+  back.
+- **Map copies that disagree** (`unsupported_feature`): both copies check,
+  yet record different maps — the same discs record an empty disc in the
+  first copy and their files in the second. An object the first copy lacks
+  is read through the second, and nothing is written, since an allocation
+  from the first copy could land on what only the second records.
 
 ## RISC OS metadata
 
@@ -183,7 +208,10 @@ fragments a removal leaves allocated when the mount ends. A corruption
 suite damages every checksummed structure in turn (old-map sums, directory
 check bytes and sequence pairs, zone checks, the cross-check, the boot
 block, big-dir headers and heaps, entry pointers) and asserts the driver
-fails closed.
+fails closed. The recovery tests cover the read-only volumes above and the
+two map copies: every write leaves them identical, a first copy with a
+damaged zone is read past to the second, and two damaged copies are
+refused.
 `tests/fuzz_adfs_mount.rs` is the fuzz harness registered with
 `cargo xtask fuzz`: seed-logged byte sweeps over valid images of each
 map flavour plus PRNG mutations, half of them shaping the disc record's

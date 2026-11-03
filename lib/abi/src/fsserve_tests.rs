@@ -1024,13 +1024,16 @@ fn a_serve_frame_round_trips_and_refuses_what_it_cannot_name() {
         ServeFrame::decode(&good[..SERVE_FRAME_LEN - 1]),
         Err(Errno::LengthOutOfRange)
     );
+    // The first refusal code past the closed set.
+    let unnamed = WriteRefusal::Truncated.as_u8() + 1;
+    assert!(WriteRefusal::from_u8(unnamed).is_err());
     for (at, value) in [
         (0, 9),
         (2, 3),
         (3, 3),
         (4, 2),
         (5, 2),
-        (6, 19),
+        (6, unnamed),
         (7, 0),
         (7, 20),
     ] {

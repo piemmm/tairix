@@ -11,6 +11,12 @@
 //! crosses is the desktop's own folder, which the session names and the
 //! application already reaches.
 //!
+//! The same carrier takes the document a trusted save panel names to a folder
+//! (`plans/SAVE-DIALOG.md`): over the desktop the session resolves the folder
+//! itself, and over a window it offers the save to that window's application,
+//! which answers with a folder it opened itself. The panel then saves there
+//! under its own authority.
+//!
 //! A drag is the press that began it, carried on: it holds the pointer until
 //! that press comes up, and `Escape` or any other button ends it with nothing
 //! dropped. The plate naming what is carried floats beside the pointer the way
@@ -22,12 +28,18 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::{AlertSeverity, AlertSpec, DragItems, DropOperation, DropTarget};
+use tairix_abi::window_ipc::{
+    AlertSeverity, AlertSpec, DragItems, DropOperation, DropTarget, WindowEvent,
+};
 use tairix_abi::Errno;
 use tairix_browse::media::{name_endings, MediaType};
-use tairix_controls::Tooltip;
-use tairix_geometry::{Point, Rect};
-use tairix_theme::{CursorKind, Theme};
+use tairix_controls::{
+    paint_icon_slot, paint_surface_plate, plate_border, ArtworkTone, ChromeLayer, Tooltip,
+};
+use tairix_font::{BitmapFont, ELLIPSIS};
+use tairix_geometry::{Point, Rect, Scale};
+use tairix_icon::IconKind;
+use tairix_theme::{CursorKind, TextRole, Theme};
 use tairix_util::utf8::shown;
 use tairix_window::DragConclusion;
 use tairix_wm::{
@@ -40,10 +52,26 @@ use crate::shell::DesktopShell;
 /// *logical* pixels: clear of the cursor it follows.
 const PLATE_OFFSET: u32 = 14;
 
-/// How a carried drag ended: the window it began in, where it was dropped,
-/// and why the slot it was dropped on refused it, when one did.
+/// The side of the document picture a save's plate carries, in logical
+/// pixels.
+const SAVE_PLATE_ICON: u32 = 32;
+
+/// The widest a save's plate shows the document's name, in logical pixels.
+const SAVE_PLATE_NAME_MAX: u32 = 240;
+
+/// How a carried drag ended.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DragEnd {
+pub enum DragEnd {
+    /// An application's drag of its own items.
+    Items(ItemsEnd),
+    /// A save carried from the trusted picker's panel.
+    Save(SaveEnd),
+}
+
+/// How an application's drag ended: the window it began in, where it was
+/// dropped, and why the slot it was dropped on refused it, when one did.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemsEnd {
     /// The window-channel id of the window the drag began in.
     pub source: u64,
     /// Where it was dropped.
@@ -51,6 +79,94 @@ pub struct DragEnd {
     /// Why the application whose slot it was dropped on does not open it,
     /// for the desktop to say in that application's name.
     pub refused: Option<Box<DropRefusal>>,
+}
+
+/// How a carried save ended: where it was dropped, and the end the window it
+/// was last offered to is owed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SaveEnd {
+    /// Where the document goes.
+    pub dropped: SaveDrop,
+    /// The window last offered the save, to be told the offer ended.
+    pub offer: Option<OfferEnd>,
+}
+
+/// Where a carried save was dropped.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SaveDrop {
+    /// Nowhere that saves it.
+    Nothing,
+    /// On a window that had not yet said whether it takes the save.
+    Unanswered,
+    /// Into the desktop folder at this absolute path.
+    Folder(String),
+    /// On the window its offer numbered `serial` stood over, whose
+    /// application names the folder.
+    Offer {
+        /// The window dropped on.
+        window_id: u64,
+        /// The offer that stood there.
+        serial: u32,
+    },
+}
+
+/// The document a save drag carries: what its plate shows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SavedDocument {
+    /// The name it is saved under.
+    pub name: String,
+    /// Its format's picture.
+    pub icon: IconKind,
+}
+
+/// A save offered to the window under the pointer, at a point in it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SaveOffer {
+    /// The window offered it.
+    pub window_id: u64,
+    /// The offer's number.
+    pub serial: u32,
+    /// Window-local x.
+    pub x: u32,
+    /// Window-local y.
+    pub y: u32,
+}
+
+/// The end a window offered a save is owed: it left, or was dropped on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OfferEnd {
+    /// The window offered it.
+    pub window_id: u64,
+    /// The last offer made over it.
+    pub serial: u32,
+    /// Where on it the save was dropped, window-local, or `None` when it
+    /// left.
+    pub dropped: Option<(u32, u32)>,
+}
+
+impl SaveOffer {
+    /// The event that makes the offer.
+    #[must_use]
+    pub const fn event(self) -> WindowEvent {
+        WindowEvent::SaveOffered {
+            window_id: self.window_id,
+            serial: self.serial,
+            x: self.x,
+            y: self.y,
+        }
+    }
+}
+
+impl OfferEnd {
+    /// The event that tells the window.
+    #[must_use]
+    pub const fn event(self) -> WindowEvent {
+        WindowEvent::SaveOfferEnded {
+            window_id: self.window_id,
+            serial: self.serial,
+            dropped: self.dropped,
+        }
+    }
 }
 
 /// What a slot's application answers a drag with.
@@ -183,6 +299,15 @@ pub enum DragSurface {
         /// desktop cannot vouch for it.
         answer: Option<SlotAnswer>,
     },
+    /// A window a carried save is offered to, at a point in it.
+    Offer {
+        /// The window under the pointer.
+        window_id: u64,
+        /// Window-local x.
+        x: u32,
+        /// Window-local y.
+        y: u32,
+    },
     /// The desktop, on the folder at `folder`; `icon` is the pinboard icon
     /// standing for that folder, if one does.
     Desktop {
@@ -214,6 +339,15 @@ pub enum DragPlace {
     },
     /// One of the dragging application's own windows, at a point in it.
     Window {
+        /// The window under the pointer.
+        window_id: u64,
+        /// Window-local x.
+        x: u32,
+        /// Window-local y.
+        y: u32,
+    },
+    /// A window a carried save is offered to, at a point in it.
+    Offer {
         /// The window under the pointer.
         window_id: u64,
         /// Window-local x.
@@ -269,6 +403,7 @@ impl DragSurface {
             Self::Slot { index, .. } => DragPlace::Slot { index },
             Self::AppWindow { index, .. } => DragPlace::AppWindow { index },
             Self::Window { window_id, x, y } => DragPlace::Window { window_id, x, y },
+            Self::Offer { window_id, x, y } => DragPlace::Offer { window_id, x, y },
             Self::Desktop { icon, revision, .. } => DragPlace::Desktop { icon, revision },
         }
     }
@@ -280,15 +415,19 @@ impl DragSurface {
             (Self::Nothing, Self::Nothing) => true,
             (Self::Slot { index: a, .. }, Self::Slot { index: b, .. })
             | (Self::AppWindow { index: a, .. }, Self::AppWindow { index: b, .. }) => a == b,
-            (Self::Window { window_id: a, .. }, Self::Window { window_id: b, .. }) => a == b,
+            (Self::Window { window_id: a, .. }, Self::Window { window_id: b, .. })
+            | (Self::Offer { window_id: a, .. }, Self::Offer { window_id: b, .. }) => a == b,
             (Self::Desktop { folder: a, .. }, Self::Desktop { folder: b, .. }) => a == b,
             _ => false,
         }
     }
 
-    /// Whether the application is told about the drag here.
+    /// Whether an application is told about the drag here.
     const fn reported(&self) -> bool {
-        matches!(self, Self::Window { .. } | Self::Desktop { .. })
+        matches!(
+            self,
+            Self::Window { .. } | Self::Offer { .. } | Self::Desktop { .. }
+        )
     }
 }
 
@@ -303,11 +442,31 @@ pub enum DragStep {
     Held,
 }
 
-/// A report a carried drag owes the application it began in: taken once per
+/// What a carried drag owes the applications it concerns: taken once per
 /// batch of input ([`DesktopShell::take_drag_report`]), so a burst of motion
 /// costs one.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OwedReport {
+pub enum OwedReport {
+    /// Where an application's drag is, for the application it began in.
+    Items(ItemsReport),
+    /// The offers a carried save owes.
+    Save(SaveReport),
+}
+
+/// What a carried save owes: an end to the window it left, and an offer to the
+/// one it is over. Owed with neither when it only came to or left the
+/// desktop, whose folder the desktop lights itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SaveReport {
+    /// The window it left.
+    pub left: Option<OfferEnd>,
+    /// The window it is over, and where.
+    pub over: Option<SaveOffer>,
+}
+
+/// A report an application's drag owes the window it began in.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemsReport {
     /// The window the drag began in.
     pub source: u64,
     /// The report's number.
@@ -322,12 +481,32 @@ pub struct OwedReport {
 #[derive(Debug, Default)]
 pub(crate) struct DragCarrier {
     carried: Option<Carried>,
+    /// The number the seat last gave a report. A drag numbers its reports on
+    /// from it, so a late answer to an earlier drag never names one of this
+    /// drag's.
+    issued: u32,
+}
+
+/// What a carried drag holds.
+#[derive(Debug)]
+enum Cargo {
+    /// Items the application's window `source` began dragging, boxed so the
+    /// carrier is no larger than a save.
+    Items { source: u64, items: Box<DragItems> },
+    /// The document the trusted picker's save panel names.
+    Save {
+        /// The window-channel window the save is for.
+        requester: u64,
+        document: SavedDocument,
+        /// The window offered the save last and that offer's number, until
+        /// it is told the offer ended.
+        offered: Option<(u64, u32)>,
+    },
 }
 
 #[derive(Debug)]
 struct Carried {
-    source: u64,
-    items: DragItems,
+    cargo: Cargo,
     /// The compositor window of the plate naming what is carried.
     plate: Option<WindowId>,
     /// What the pointer is over.
@@ -343,10 +522,20 @@ struct Carried {
     owed: bool,
     /// What a drop here does, as the application last answered.
     shown: Option<DropOperation>,
+    /// Whether the place has answered since the pointer reached it.
+    answered: bool,
     shift: bool,
 }
 
 impl Carried {
+    /// Whether `serial` numbers a report made since the pointer reached the
+    /// place it is over, counting across the numbers' wrap: none has, until
+    /// the first report there.
+    const fn reported_here(&self, serial: u32) -> bool {
+        let made = self.serial.wrapping_sub(self.place_serial).wrapping_add(1);
+        serial.wrapping_sub(self.place_serial) < made
+    }
+
     /// The pointer shape the drag shows.
     const fn cursor(&self) -> CursorKind {
         match self.shown {
@@ -379,6 +568,37 @@ impl DesktopShell {
         wm: WindowId,
         items: DragItems,
     ) -> Result<(), Errno> {
+        let items = Box::new(items);
+        self.carry(compositor, wm, Cargo::Items { source, items })
+    }
+
+    /// Begin carrying the save the picker's panel, in its compositor window
+    /// `panel`, names for the window-channel window `requester`.
+    ///
+    /// # Errors
+    ///
+    /// As [`begin_drag`](Self::begin_drag), the press held in `panel`.
+    pub fn begin_save_drag(
+        &mut self,
+        compositor: &mut Compositor,
+        (panel, requester): (WindowId, u64),
+        document: SavedDocument,
+    ) -> Result<(), Errno> {
+        let cargo = Cargo::Save {
+            requester,
+            document,
+            offered: None,
+        };
+        self.carry(compositor, panel, cargo)
+    }
+
+    /// Carry `cargo` on from the press held in `wm`.
+    fn carry(
+        &mut self,
+        compositor: &mut Compositor,
+        wm: WindowId,
+        cargo: Cargo,
+    ) -> Result<(), Errno> {
         if self.drag_active() {
             return Err(Errno::AlreadyExists);
         }
@@ -389,22 +609,23 @@ impl DesktopShell {
         let at = self.router().pointer();
         let plate = place_plate(
             None,
-            &items,
+            &cargo,
             at,
             self.session().floating_theme(),
             compositor,
         );
         let shift = self.modifiers().shift;
+        let issued = self.drag.issued;
         self.drag.carried = Some(Carried {
-            source,
-            items,
+            cargo,
             plate,
             over: DragSurface::Nothing,
-            serial: 0,
-            place_serial: 1,
+            serial: issued,
+            place_serial: issued.wrapping_add(1),
             desktop_serial: None,
             owed: false,
             shown: None,
+            answered: false,
             shift,
         });
         self.hold_drag_cursor(compositor);
@@ -418,18 +639,13 @@ impl DesktopShell {
     /// coming up drops the drag where it is, and any other press ends it with
     /// nothing dropped.
     pub fn drag_pointer(&mut self, compositor: &mut Compositor, event: &InputEvent) -> DragStep {
-        let Some(carried) = self.drag.carried.as_ref() else {
+        if self.drag.carried.is_none() {
             return DragStep::Held;
-        };
+        }
         match *event {
             InputEvent::PointerMoved { to } => {
-                let (plate, items) = (carried.plate, carried.items);
                 self.track_pointer(to, compositor);
-                let theme = self.session().floating_theme();
-                let plate = place_plate(plate, &items, to, theme, compositor);
-                if let Some(carried) = self.drag.carried.as_mut() {
-                    carried.plate = plate;
-                }
+                self.place_drag_plate(compositor, to);
                 DragStep::Moved(to)
             }
             InputEvent::PointerReleased {
@@ -444,13 +660,24 @@ impl DesktopShell {
         }
     }
 
-    /// The window the carried drag began in and what it carries.
+    /// The window the carried drag began in and what it carries, for an
+    /// application's drag.
     #[must_use]
     pub fn drag_items(&self) -> Option<(u64, DragItems)> {
-        self.drag
-            .carried
-            .as_ref()
-            .map(|carried| (carried.source, carried.items))
+        match &self.drag.carried.as_ref()?.cargo {
+            Cargo::Items { source, items } => Some((*source, **items)),
+            Cargo::Save { .. } => None,
+        }
+    }
+
+    /// The window-channel window a carried save is for, which it is never
+    /// dropped on.
+    #[must_use]
+    pub fn save_source(&self) -> Option<u64> {
+        match self.drag.carried.as_ref()?.cargo {
+            Cargo::Save { requester, .. } => Some(requester),
+            Cargo::Items { .. } => None,
+        }
     }
 
     /// Whether the carried drag's pointer is already over `place`, so nothing
@@ -474,10 +701,18 @@ impl DesktopShell {
         let arrived = !carried.over.same_place(&next);
         let changed = next != carried.over;
         let left_reported = arrived && carried.over.reported();
+        let saving = matches!(carried.cargo, Cargo::Save { .. });
+        // The desktop takes a save itself, so arriving there accepts it at
+        // once and owes no application anything; the report owed only relights
+        // its folder.
         carried.owed |= next.reported() && changed || left_reported;
         if arrived {
-            carried.shown = None;
-            carried.place_serial = carried.serial.saturating_add(1);
+            carried.shown = match next {
+                DragSurface::Desktop { .. } if saving => Some(DropOperation::Copy),
+                _ => None,
+            };
+            carried.answered = false;
+            carried.place_serial = carried.serial.wrapping_add(1);
         }
         let lit = match &next {
             DragSurface::Slot {
@@ -507,7 +742,8 @@ impl DesktopShell {
             | InputEvent::KeyReleased { modifiers, .. }
             | InputEvent::ModifiersChanged { modifiers } => {
                 let carried = self.drag.carried.as_mut()?;
-                if carried.shift == modifiers.shift {
+                // A save is a save whatever is held.
+                if carried.shift == modifiers.shift || matches!(carried.cargo, Cargo::Save { .. }) {
                     return None;
                 }
                 carried.shift = modifiers.shift;
@@ -516,7 +752,8 @@ impl DesktopShell {
                 if carried.over.reported() {
                     carried.owed = true;
                     carried.shown = None;
-                    carried.place_serial = carried.serial.saturating_add(1);
+                    carried.answered = false;
+                    carried.place_serial = carried.serial.wrapping_add(1);
                     self.hold_drag_cursor(compositor);
                 }
                 None
@@ -533,12 +770,39 @@ impl DesktopShell {
             return None;
         }
         carried.owed = false;
-        carried.serial = carried.serial.saturating_add(1);
+        let source = match &mut carried.cargo {
+            Cargo::Items { source, .. } => *source,
+            Cargo::Save { offered, .. } => {
+                let over = match carried.over {
+                    DragSurface::Offer { window_id, x, y } => Some((window_id, x, y)),
+                    _ => None,
+                };
+                let left = offered
+                    .take_if(|(window, _)| over.is_none_or(|(now, ..)| now != *window))
+                    .map(|(window_id, serial)| OfferEnd {
+                        window_id,
+                        serial,
+                        dropped: None,
+                    });
+                let over = over.map(|(window_id, x, y)| {
+                    carried.serial = carried.serial.wrapping_add(1);
+                    *offered = Some((window_id, carried.serial));
+                    SaveOffer {
+                        window_id,
+                        serial: carried.serial,
+                        x,
+                        y,
+                    }
+                });
+                return Some(OwedReport::Save(SaveReport { left, over }));
+            }
+        };
+        carried.serial = carried.serial.wrapping_add(1);
         if matches!(carried.over, DragSurface::Desktop { .. }) {
             carried.desktop_serial = Some(carried.serial);
         }
-        Some(OwedReport {
-            source: carried.source,
+        Some(OwedReport::Items(ItemsReport {
+            source,
             serial: carried.serial,
             at: if carried.over.reported() {
                 carried.over.clone()
@@ -546,7 +810,7 @@ impl DesktopShell {
                 DragSurface::Nothing
             },
             shift: carried.shift,
-        })
+        }))
     }
 
     /// Take the application's answer to the report numbered `serial` for the
@@ -562,13 +826,40 @@ impl DesktopShell {
         let Some(carried) = self.drag.carried.as_mut() else {
             return false;
         };
-        let current = carried.source == source
+        let current = matches!(carried.cargo, Cargo::Items { source: from, .. } if from == source)
             && carried.over.reported()
-            && (carried.place_serial..=carried.serial).contains(&serial);
+            && carried.reported_here(serial);
         if !current {
             return false;
         }
         carried.shown = verdict;
+        carried.answered = true;
+        self.hold_drag_cursor(compositor);
+        true
+    }
+
+    /// Take the answer window `window_id`'s application gave the save offer
+    /// numbered `serial`: shown on the pointer while the save is still over
+    /// that window and the offer is the one standing there, and answering
+    /// whether it was.
+    pub fn save_offer_answered(
+        &mut self,
+        compositor: &mut Compositor,
+        window_id: u64,
+        serial: u32,
+        accepts: bool,
+    ) -> bool {
+        let Some(carried) = self.drag.carried.as_mut() else {
+            return false;
+        };
+        let current = matches!(carried.cargo, Cargo::Save { .. })
+            && matches!(carried.over, DragSurface::Offer { window_id: over, .. } if over == window_id)
+            && carried.reported_here(serial);
+        if !current {
+            return false;
+        }
+        carried.shown = accepts.then_some(DropOperation::Copy);
+        carried.answered = true;
         self.hold_drag_cursor(compositor);
         true
     }
@@ -601,32 +892,62 @@ impl DesktopShell {
         self.session_mut().taskbar_mut().set_drop_slot(None, scale);
     }
 
-    /// End a drag whose source window `window` has gone, with nothing to tell
-    /// it. A drag from any other window is left carried.
-    pub fn abort_drag_for(&mut self, compositor: &mut Compositor, window: u64) {
-        if self
-            .drag
-            .carried
-            .as_ref()
-            .is_some_and(|carried| carried.source == window)
-        {
-            let _ = self.end_drag(compositor, false);
+    /// Follow the window-channel window `window` going: a drag it began ends
+    /// with nothing to tell it, as does a save for it, and a save offered to it
+    /// forgets it. Answers the end a save leaves another window owed.
+    pub fn abort_drag_for(&mut self, compositor: &mut Compositor, window: u64) -> Option<OfferEnd> {
+        let carried = self.drag.carried.as_mut()?;
+        let ends = match &mut carried.cargo {
+            Cargo::Items { source, .. } => *source == window,
+            Cargo::Save {
+                requester, offered, ..
+            } => {
+                if offered.is_some_and(|(offered, _)| offered == window) {
+                    *offered = None;
+                }
+                *requester == window
+            }
+        };
+        if ends {
+            return match self.end_drag(compositor, false)? {
+                DragEnd::Save(end) => end.offer,
+                DragEnd::Items(_) => None,
+            };
         }
+        if matches!(carried.over, DragSurface::Offer { window_id, .. } if window_id == window) {
+            carried.over = DragSurface::Nothing;
+            carried.shown = None;
+            carried.answered = false;
+            self.hold_drag_cursor(compositor);
+        }
+        None
     }
 
     /// Paint the carried drag's plate afresh where the pointer is: the name it
     /// shows was drawn provisionally and its text has landed.
     pub fn redraw_drag_plate(&mut self, compositor: &mut Compositor) {
-        let Some(carried) = self.drag.carried.as_ref() else {
+        let Some(old) = self
+            .drag
+            .carried
+            .as_mut()
+            .map(|carried| carried.plate.take())
+        else {
             return;
         };
-        let (old, items) = (carried.plate, carried.items);
         if let Some(old) = old {
             compositor.remove(old);
         }
         let at = self.router().pointer();
+        self.place_drag_plate(compositor, at);
+    }
+
+    /// Show the carried drag's plate beside the pointer at `at`.
+    fn place_drag_plate(&mut self, compositor: &mut Compositor, at: Point) {
+        let Some(carried) = self.drag.carried.as_ref() else {
+            return;
+        };
         let theme = self.session().floating_theme();
-        let plate = place_plate(None, &items, at, theme, compositor);
+        let plate = place_plate(carried.plate, &carried.cargo, at, theme, compositor);
         if let Some(carried) = self.drag.carried.as_mut() {
             carried.plate = plate;
         }
@@ -638,6 +959,7 @@ impl DesktopShell {
     /// The slot it lit is latched dark for the caller's settle to paint.
     pub fn end_drag(&mut self, compositor: &mut Compositor, dropped: bool) -> Option<DragEnd> {
         let carried = self.drag.carried.take()?;
+        self.drag.issued = carried.serial;
         if let Some(plate) = carried.plate {
             compositor.remove(plate);
         }
@@ -645,6 +967,17 @@ impl DesktopShell {
         self.session_mut().taskbar_mut().set_drop_slot(None, scale);
         self.cursor_mut().hold(None);
         self.refresh_cursor(compositor);
+        let source = match carried.cargo {
+            Cargo::Items { source, .. } => source,
+            Cargo::Save { offered, .. } => {
+                return Some(DragEnd::Save(save_end(
+                    dropped,
+                    &carried.over,
+                    (carried.shown, carried.answered),
+                    offered,
+                )));
+            }
+        };
         let answer = match &carried.over {
             DragSurface::Slot { answer, .. } | DragSurface::AppWindow { answer, .. } => {
                 answer.as_ref()
@@ -675,11 +1008,11 @@ impl DesktopShell {
             }
             _ => DragConclusion::Nothing,
         };
-        Some(DragEnd {
-            source: carried.source,
+        Some(DragEnd::Items(ItemsEnd {
+            source,
             ended,
             refused,
-        })
+        }))
     }
 
     /// Show the shape the carried drag's verdict calls for, wherever the
@@ -693,6 +1026,37 @@ impl DesktopShell {
     }
 }
 
+/// How a carried save ended over `over`, showing `shown` and whether the
+/// place had answered, the offer `offered` standing: dropped on the desktop, it
+/// goes in the folder there; on a window whose application accepted the offer
+/// standing, in the folder it names; on one yet to answer, nowhere, for the
+/// panel to say so; and anywhere else, nowhere.
+fn save_end(
+    dropped: bool,
+    over: &DragSurface,
+    (shown, answered): (Option<DropOperation>, bool),
+    offered: Option<(u64, u32)>,
+) -> SaveEnd {
+    let (dropped, at) = match (dropped, over, shown, offered) {
+        (true, DragSurface::Desktop { folder, .. }, Some(_), _) => {
+            (SaveDrop::Folder(folder.clone()), None)
+        }
+        (true, &DragSurface::Offer { window_id, x, y }, Some(_), Some((offer, serial)))
+            if offer == window_id =>
+        {
+            (SaveDrop::Offer { window_id, serial }, Some((x, y)))
+        }
+        (true, DragSurface::Offer { .. }, None, _) if !answered => (SaveDrop::Unanswered, None),
+        _ => (SaveDrop::Nothing, None),
+    };
+    let offer = offered.map(|(window_id, serial)| OfferEnd {
+        window_id,
+        serial,
+        dropped: at,
+    });
+    SaveEnd { dropped, offer }
+}
+
 /// What the plate beside the pointer says: the one item's name, or how many
 /// are carried.
 fn plate_text(items: &DragItems) -> String {
@@ -703,13 +1067,13 @@ fn plate_text(items: &DragItems) -> String {
     }
 }
 
-/// Show the plate naming `items` beside the pointer at `at`: `plate` moved
-/// when it is still up, since what it says never changes, and painted anew
-/// when it is not. Answers the plate, or `None` when the heap will not give
-/// one — the drag is still carried, only unlabelled.
+/// Show the plate naming what `cargo` carries beside the pointer at `at`:
+/// `plate` moved when it is still up, since what it says never changes, and
+/// painted anew when it is not. Answers the plate, or `None` when the heap will
+/// not give one — the drag is still carried, only unlabelled.
 fn place_plate(
     plate: Option<WindowId>,
-    items: &DragItems,
+    cargo: &Cargo,
     at: Point,
     theme: &Theme,
     compositor: &mut Compositor,
@@ -721,17 +1085,76 @@ fn place_plate(
         compositor.move_window(plate, origin);
         return Some(plate);
     }
-    let tip = Tooltip::new(plate_text(items));
-    let (width, height) = tip.preferred_size(scale, theme);
-    let mut pixels = Surface::new(width, height)?;
-    tip.render(&mut pixels, Rect::new(0, 0, width, height), scale, theme);
+    let (pixels, radius) = match cargo {
+        Cargo::Items { items, .. } => {
+            let tip = Tooltip::new(plate_text(items));
+            let (width, height) = tip.preferred_size(scale, theme);
+            let mut pixels = Surface::new(width, height)?;
+            tip.render(&mut pixels, Rect::new(0, 0, width, height), scale, theme);
+            (
+                pixels,
+                scale.scale_length(theme.metrics().popup_corner_radius),
+            )
+        }
+        Cargo::Save { document, .. } => save_plate(document, scale, theme)?,
+    };
     let id = compositor.add_window(origin, pixels);
     compositor.set_pointer_catch(id, PointerCatch::None);
-    let radius = scale.scale_length(theme.metrics().popup_corner_radius);
     compositor.set_corners(id, Corners::painted(radius));
     compositor.set_casts_shadow(id, true);
     compositor.raise(id);
     Some(id)
+}
+
+/// The plate a save carries, and its corner radius: the document's picture
+/// and the name it is saved under, on the raised plate a dragged item's name
+/// is drawn on. `None` when the heap will not give one.
+fn save_plate(document: &SavedDocument, scale: Scale, theme: &Theme) -> Option<(Surface, u32)> {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let metrics = theme.metrics();
+    let border = plate_border(theme, scale);
+    let margin = border.saturating_add(scale.scale_length(metrics.control_inset).max(1));
+    let gap = scale.scale_length(metrics.control_gap);
+    let side = scale.scale_length(SAVE_PLATE_ICON);
+    let name = shown(&document.name);
+    let (fitted, elided) = font.elide_to_width(&name, scale.scale_length(SAVE_PLATE_NAME_MAX));
+    let mark = if elided { font.text_width(ELLIPSIS) } else { 0 };
+    let text_x = margin.saturating_add(side).saturating_add(gap);
+    let width = text_x
+        .saturating_add(font.text_width(fitted))
+        .saturating_add(mark)
+        .saturating_add(margin);
+    let height = margin
+        .saturating_mul(2)
+        .saturating_add(side.max(font.line_height()));
+    let radius = scale
+        .scale_length(metrics.popup_corner_radius)
+        .min(height / 2);
+    let mut pixels = Surface::new(width, height)?;
+    let palette = theme.palette();
+    let _ = paint_surface_plate(
+        &mut pixels,
+        (0, 0, width, height),
+        (radius, border),
+        theme,
+        (palette.surface_raised, ChromeLayer::Ground),
+    );
+    paint_icon_slot(
+        &mut pixels,
+        (margin, height.saturating_sub(side) / 2, side),
+        document.icon,
+        palette.accent.into(),
+        None,
+        ArtworkTone::FULL,
+    );
+    let ink = palette.on_surface.into();
+    let x = i32::try_from(text_x).unwrap_or(i32::MAX);
+    let y = i32::try_from(height.saturating_sub(font.line_height()) / 2).unwrap_or(0);
+    let pen = font.draw_text(&mut pixels, x, y, fitted, ink);
+    if elided {
+        font.draw_text(&mut pixels, pen, y, ELLIPSIS, ink);
+    }
+    Some((pixels, radius))
 }
 
 #[cfg(test)]

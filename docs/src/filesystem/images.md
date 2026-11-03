@@ -2,8 +2,9 @@
 
 A user opens a disk-image file — an `.iso`, an Acorn or Amiga `.adf`, an
 `.adl`/`.adm`/`.ads`, an `.hdf` — and the volume it holds appears at
-`/Storage/<name>`, private to them, until they eject it or their login
-session ends. The staged design is `plans/DISK-IMAGES.md`; the volume is
+`/Storage/<name>`, private to them, until the file manager's last window onto
+it closes while nothing else uses it (as the user's settings choose by
+default), or until they eject it or their login session ends. The staged design is `plans/DISK-IMAGES.md`; the volume is
 served from user space as every other volume is
 ([Volumes served from user space](./served.md)).
 
@@ -155,6 +156,11 @@ What differs is how it is read and written:
   the volume is recorded lost, and takes any other volume down as a plain
   detach, so a stale view never forces a healthy volume. Its audit says
   `forced`.
+- **Idle.** `DetachMode::Idle` is the plain detach a surface asks once the
+  user has finished with a volume: refused `Busy` or `NotEmpty` while
+  anything holds it, an answer `DetachMode::left_in_use` reads as "still in
+  use" and the audit records at `Info` rather than `Warn`. It never forces,
+  and never takes a lost volume.
 - **The login session's end.** The session notifier tells the volume service
   which sessions ended, and an image none of whose sessions is open comes to
   owe its detach. The notifier's tasks do it, as a forced detach would:
@@ -186,10 +192,12 @@ whole ([System Information API](../abi/sysinfo.md)).
   `application/x-cd-image`, `.adf`/`.adl`/`.adm`/`.ads` as
   `application/x-raw-floppy-disk-image` and `.hdf` as
   `application/x-raw-disk-image`, the parent of both; activating any is
-  `Activation::MountImage`. `files.app` and the desktop carry it out on a
-  worker of their own (`tairix_browse::mount::MountWorker`), since an attach
-  waits for a driver, and open a window on the volume; a refusal is stated in
-  an alert. *Mount Read-Only* and *Eject* are in `files.app`'s menus, and
+  `Activation::MountImage`. `files.app` carries it out on a worker of its own
+  (`tairix_browse::mount::MountWorker`), since an attach waits for a driver,
+  and opens a window on the volume; a refusal is stated in an alert. An image
+  opened on the desktop is handed to it — `OpenTarget::Image` for the running
+  file manager, `files --mount IMAGE` when none is — so one program attaches
+  every image the user opens. *Mount Read-Only* and *Eject* are in `files.app`'s menus, and
   *Eject* on the places rail. A lost volume has no rail row, and *Eject* on
   its catalog entry asks before letting what was unsaved go, then sends
   `DetachMode::Lost`. *Mount Read-Only* of an image mounted writable already
@@ -205,6 +213,22 @@ whole ([System Information API](../abi/sysinfo.md)).
   routed before the mount table was re-read can, and the eject is then refused
   as busy, saying so; a copy the app is running on it still does, as it
   should.
+- **Unmounted once closed.** A volume an attach of `files.app`'s made (a
+  fresh `Attached`, never one already attached) is noted, and once no window
+  shows it, describes a node on it, is opening onto it, or runs an operation
+  reaching it — where the `files.unmount_when_closed` setting holds, as it
+  does by default, and a read of the user's settings has said so — it is
+  asked `DetachMode::Idle`: a plain detach the kernel refuses `Busy` or
+  `NotEmpty` while anything still holds the volume, which the app takes as an
+  answer, not a refusal to state, and records as information rather than a
+  warning. One is asked at a time, never while an attach is on its way, and
+  an attach asked for meanwhile waits for its answer. No window is moved off
+  the volume for it, and one a window has come to show meanwhile is not asked
+  at all. One found in use is asked again at once when a program the app
+  started exits or a window shows it and leaves it again, and otherwise after
+  a wait that doubles from five seconds to five minutes, since nothing says
+  when a holder elsewhere lets go. A lost volume waits for its owner's own
+  *Eject*.
 - **`mount IMAGE [TARGET]`** mounts one from a terminal, and
   **`unmount NAME`** detaches it ([utilities](../userland/utilities.md)).
 

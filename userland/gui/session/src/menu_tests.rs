@@ -1264,6 +1264,28 @@ fn the_owners_death_answers_the_chain_dismissed() {
     assert!(!chain.is_open());
 }
 
+/// A save panel's menu goes with the pick when the window the pick is for
+/// does, rather than outliving it holding the seat; one the session opened
+/// for its own pick is no window's to take down.
+#[test]
+fn a_pickers_menu_goes_with_the_window_its_pick_is_for() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    let picker = ChainOwner::Picker {
+        for_window: Some(7),
+    };
+    open(&mut chain, picker, flat_model(), Point::new(40, 40), &g);
+    assert!(!chain.dismiss_owner(8));
+    assert!(chain.dismiss_owner(7));
+    assert!(!chain.is_open());
+
+    let own = ChainOwner::Picker { for_window: None };
+    open(&mut chain, own, flat_model(), Point::new(40, 40), &g);
+    assert!(!chain.dismiss_owner(7));
+    assert!(chain.is_open());
+}
+
 #[test]
 fn a_mode_change_under_the_gesture_dismisses_rather_than_re_placing() {
     let theme = theme();

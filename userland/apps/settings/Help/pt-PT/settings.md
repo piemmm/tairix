@@ -66,6 +66,19 @@ controlo — montar e desmontar cabem ao gestor de ficheiros e ao comando
 `mount` — e um volume cujo formato não tem uma capacidade fixa di-lo em vez de
 mostrar uma barra. O `df` reporta os mesmos números numa shell.
 
+**Files** define como funciona o gestor de ficheiros: onde se abre uma
+janela nova e como mostra e ordena o que lista, se mostra a coluna de locais e
+a barra de ferramentas, se as pastas ficam no topo, que extensões de nomes e
+que itens ficam ocultos, se uma imagem mostra o seu próprio conteúdo e uma
+pasta o que contém, se mover itens para o Lixo pergunta primeiro e se uma
+imagem de disco ou um arquivo que abriu é desmontado depois de fechadas as suas
+janelas. Uma linha surte efeito assim que é escolhida: onde se abre uma janela
+nova e se mostra a coluna de locais e a barra de ferramentas aplicam-se à
+próxima janela que abrir, e tudo o resto chega a todas as janelas do gestor de
+ficheiros de uma vez, embora uma janela mantenha uma visualização ou uma ordem
+que tenha escolhido nela pessoalmente. *Settings…* no menu do próprio gestor de
+ficheiros abre este painel.
+
 ## EXIT STATUS
 
 Zero após um fecho limpo; diferente de zero quando o canal de janela ou a

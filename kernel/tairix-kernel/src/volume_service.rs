@@ -1390,24 +1390,31 @@ impl RuntimeVolumeService {
         name: &str,
         cause: &'static str,
         errno: Errno,
+        mode: DetachMode,
     ) -> Errno {
-        Self::audit_event(
+        record(
             audit,
+            refusal_level(mode, errno),
             VOLUME_DETACH_REFUSED,
             DETACH_REFUSED,
             name,
-            Some(cause),
+            cause,
         );
         errno
     }
 
-    /// Audit a plain detach refused because descriptors hold `open` of the
-    /// volume's nodes, and hand back its errno.
-    fn refuse_open_nodes(audit: &'static (dyn Sink + Sync), name: &str, open: usize) -> Errno {
+    /// Audit a detach in `mode` refused because descriptors hold `open` of
+    /// the volume's nodes, and hand back its errno.
+    fn refuse_open_nodes(
+        audit: &'static (dyn Sink + Sync),
+        name: &str,
+        open: usize,
+        mode: DetachMode,
+    ) -> Errno {
         log(
             audit,
             &Event {
-                level: Level::Warn,
+                level: refusal_level(mode, Errno::Busy),
                 id: VOLUME_DETACH_REFUSED,
                 message: DETACH_REFUSED,
                 fields: &[
@@ -2005,6 +2012,7 @@ impl VolumeService for RuntimeVolumeService {
                 &name,
                 "no_mount_authority",
                 Errno::PermissionDenied,
+                request.mode,
             ));
         }
         self.detach_volume(&request.volume_id, request.mode, wiring.audit)
@@ -2228,7 +2236,7 @@ impl RuntimeVolumeService {
         audit: &'static (dyn Sink + Sync),
     ) -> Result<(), Errno> {
         let refuse = |name: &str, cause: &'static str, errno: Errno| -> Errno {
-            Self::refuse_detach(audit, name, cause, errno)
+            Self::refuse_detach(audit, name, cause, errno, mode)
         };
         self.retire_unused_devices();
         let Some((named, device)) = self.attached_device(id) else {
@@ -2295,7 +2303,7 @@ impl RuntimeVolumeService {
         let mut fs = driver.as_deref().map(DriverLock::lock);
         let open = settle_holds(nodes.as_deref(), fs.as_deref_mut(), force);
         if open != 0 && !force {
-            return Err(Self::refuse_open_nodes(audit, &name, open));
+            return Err(Self::refuse_open_nodes(audit, &name, open, mode));
         }
 
         // A surprise-removed volume never detaches implicitly: discarding
@@ -2410,6 +2418,16 @@ impl Forced {
                 revoked,
             }),
         }
+    }
+}
+
+/// The level a detach in `mode` refused with `errno` is recorded at: an idle
+/// detach that found its volume still in use was answered, not refused.
+fn refusal_level(mode: DetachMode, errno: Errno) -> Level {
+    if mode.left_in_use(errno) {
+        Level::Info
+    } else {
+        Level::Warn
     }
 }
 

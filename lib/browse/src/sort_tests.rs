@@ -27,6 +27,7 @@ fn volume_root(
             availability,
             owner: None,
             volume_id: [0; 16],
+            read_only: false,
         },
     }));
     root

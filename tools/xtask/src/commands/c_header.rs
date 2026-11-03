@@ -4182,7 +4182,8 @@ fn emit_detach_contract(out: &mut String) {
         out,
         "/* The frame volume_detach() takes: the {VOLUME_ID_LEN}-byte identity an attach\n\
          \x20* reply names, then one TAIRIX_VOLUME_DETACH_* mode byte. LOST forces a\n\
-         \x20* volume recorded lost and is PLAIN for any other. */"
+         \x20* volume recorded lost and is PLAIN for any other; IDLE is PLAIN, a volume\n\
+         \x20* still in use refused as one is but recorded as no warning. */"
     );
     let _ = writeln!(out, "#define TAIRIX_VOLUME_DETACH_LEN {VOLUME_DETACH_LEN}u");
     emit_u8_discriminants(out, "TAIRIX_VOLUME_DETACH", |raw| {
@@ -4190,6 +4191,7 @@ fn emit_detach_contract(out: &mut String) {
             DetachMode::Plain => "PLAIN",
             DetachMode::Force => "FORCE",
             DetachMode::Lost => "LOST",
+            DetachMode::Idle => "IDLE",
         })
     });
     out.push('\n');
@@ -6957,11 +6959,13 @@ mod tests {
             &h,
             &format!("#define TAIRIX_VOLUME_DETACH_LEN {VOLUME_DETACH_LEN}u"),
         );
-        for (name, mode) in [
+        let modes = [
             ("PLAIN", DetachMode::Plain),
             ("FORCE", DetachMode::Force),
             ("LOST", DetachMode::Lost),
-        ] {
+            ("IDLE", DetachMode::Idle),
+        ];
+        for (name, mode) in modes {
             let mut frame = [0; VOLUME_DETACH_LEN];
             VolumeDetachRequest {
                 volume_id: [9; VOLUME_ID_LEN],
@@ -6973,8 +6977,8 @@ mod tests {
         }
         assert_eq!(
             h.matches("#define TAIRIX_VOLUME_DETACH_").count(),
-            1 + 3,
-            "the length and the three modes"
+            1 + modes.len(),
+            "the length and every mode"
         );
     }
 

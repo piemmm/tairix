@@ -357,6 +357,7 @@ pub(crate) fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::SoundDevices => FADERS,
         IconKind::SoundEffects => NOTES,
         IconKind::Theme => PALETTE,
+        IconKind::FileManager => FOLDER,
         IconKind::Computer => COMPUTER,
         IconKind::Laptop => LAPTOP,
         IconKind::Server => SERVER,
@@ -845,6 +846,15 @@ const NOTES: &[Mark] = &[fill(&[
     circle(6.0, 17.6, 2.4),
     circle(15.8, 15.6, 2.4),
     Outline::Path("M7.6 17.6V6L19.4 3.4V15.6H17.8V6.4L9.2 8.3V17.6Z"),
+])];
+
+/// A folder, its tab raised and the edge of its front flap cut across it.
+const FOLDER: &[Mark] = &[cut(&[
+    Outline::Path(
+        "M3 6.4A2 2 0 0 1 5 4.4H9.3A1.6 1.6 0 0 1 10.5 4.9L12.1 6.6H19A2 2 0 0 1 21 8.6V17.6\
+         A2 2 0 0 1 19 19.6H5A2 2 0 0 1 3 17.6Z",
+    ),
+    Outline::Path("M3 9.4H21V10.8H3Z"),
 ])];
 
 /// A painter's palette, its thumb notch and four wells of paint.

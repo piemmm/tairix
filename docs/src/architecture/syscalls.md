@@ -137,9 +137,9 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  81 | `volume_detach` | `user_ptr` (request), `len`            | `errno`       | — (in-service: `CAP_FS_MOUNT`, or a network or disk-image volume's owner) | yes |
 |  82 | `shm_grant`    | `Handle` (region), `IpcEndpoint`        | `u64` (handle) | `CAP_SHM`      | yes   |
 |  83 | `call_peer_seat` | `IpcEndpoint`, `Handle` (ticket), `u64 seat` | `u64` (generation) | —     | no    |
-|  84 | `fs_attr_get`  | `u32 fd`, `user_ptr` (key), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+|  84 | `fs_attr_get`  | `u32 fd`, `user_ptr` (key), `len`, `user_ptr` (out), `len` | `u64` (bytes) | — (in-handler: `CAP_FS_ACCESS` of the identity a byte read through a readable descriptor acts as, else the caller's) | no |
 |  85 | `fs_attr_set`  | `u32 fd`, `user_ptr` (key), `len`, `user_ptr` (value), `len` | `errno` | `CAP_FS_ACCESS` | yes |
-|  86 | `fs_attr_list` | `u32 fd`, `u64 index`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+|  86 | `fs_attr_list` | `u32 fd`, `u64 index`, `user_ptr` (out), `len` | `u64` (bytes) | — (in-handler, as `fs_attr_get`) | no |
 |  87 | `fs_attr_remove` | `u32 fd`, `user_ptr` (key), `len` | `errno` | `CAP_FS_ACCESS` | yes |
 |  89 | `boot_facts_get` | `user_ptr` (out), `len`                | `u64` (bytes) | —             | no    |
 |  90 | `fd_grant`     | `u32 fd`, `u64 write_ceiling`, `*const ProcId recipient`, `usize len` | `u64` (handle) | `CAP_FS_ACCESS` | yes  |
@@ -455,7 +455,11 @@ The `fs_attr_*` family (nos. 84–87) is the extended-attribute surface — the
 `namespace.rest` store `lib/fsmeta` defines and `docs/src/filesystem/arxfs-spec.md`
 §21 specifies. Each acts on the node an open descriptor holds, so a caller
 opens the node (a resolve-only open suffices, `NO_FOLLOW` reaching a link
-itself) and every decision is made as the caller, whoever opened it. A
+itself). A change is decided as the caller, whoever opened it; a read or
+listing through a descriptor open for reading is decided as a byte read
+through it is, so a holder of a delegated document with no filesystem
+capability can read what type it is, and through any other descriptor as the
+caller. A
 descriptor on something other than a node is `OutOfRange`; on the catalog,
 which stores no attributes, a read or listing is `NotSupported` and a change
 `ReadOnly`. A key carries `1..=FS_ATTR_KEY_MAX` (255) bytes and a value at
@@ -580,10 +584,12 @@ next operation on that volume.
 **The descriptor decides the identity**, so every call operating a
 descriptor's contents is ungated at the dispatcher and applies the backing's
 own check in the handler: `fs_read`, `fs_write`, `fs_close`, `fs_stat`,
-`fs_truncate`, `fs_sync`, and `file_map`. The metadata calls that name a
-descriptor — `fs_set_mode` and `fs_set_owner` with `EMPTY_PATH`, and
-`fs_attr_*` — act as the caller instead, as `fchmod(2)` does, so a descriptor
-conferred at spawn never lends its opener's ownership. A descriptor the caller opened itself acts as the caller's own live
+`fs_truncate`, `fs_sync`, `file_map`, and the attribute reads `fs_attr_get`
+and `fs_attr_list` through a descriptor open for reading. The metadata
+changes that name a descriptor — `fs_set_mode` and `fs_set_owner` with
+`EMPTY_PATH`, `fs_attr_set` and `fs_attr_remove` — act as the caller instead,
+as `fchmod(2)` does, so a descriptor conferred at spawn never lends its
+opener's ownership. A descriptor the caller opened itself acts as the caller's own live
 identity, so a capability narrowed by `cap_delegate` stops working at its next
 call. One conferred at spawn or granted by `fd_grant` acts as the identity
 frozen into it then, and a grant carries its extent ceiling. Either way
@@ -693,7 +699,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
-| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_link`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_access`, `fs_chdir` (the path-taking calls), `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fd_grant`, and — enforced *in the handler* against the identity a node-backed descriptor acts as: the caller's own, or the one frozen into a conferred or granted descriptor — `fs_read`, `fs_write`, `fs_close`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_seek_region`, `fs_punch`, `fs_lock`, `fs_lock_query`, `file_map` |
+| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_link`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_access`, `fs_chdir` (the path-taking calls), `fs_attr_set`, `fs_attr_remove`, `fd_grant`, and — enforced *in the handler* against the identity a node-backed descriptor acts as: the caller's own, or the one frozen into a conferred or granted descriptor — `fs_read`, `fs_write`, `fs_close`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_seek_region`, `fs_punch`, `fs_lock`, `fs_lock_query`, `file_map`, and `fs_attr_get` and `fs_attr_list` — as that identity through a descriptor open for reading, as the caller's own otherwise; every attribute call is admitted before its key or value is copied in |
 | `CAP_FS_CHOWN`     | `fs_set_owner` (the privileged per-inode rule inside the VFS: reassigning the uid or setting a non-member gid; the coarse dispatch gate stays `CAP_FS_ACCESS`) |
 | `CAP_FS_SERVE`     | `volume_read`, `volume_write`, `volume_ctl`, `volume_serve` (each also needs the caller's grant on the volume it names), `fsserve_offer` (from an attested application alone), `fsserve_ctl` |
 | `CAP_TIME_SET`     | `wall_time_set`            |
@@ -1524,7 +1530,9 @@ table by repeating one call — a pending delegation conveys exactly one
 right, and these descriptors carry no position (every read names its own
 offset), so a second identical entry conveys nothing the first does not.
 Once redeemed the entry is consumed, so a later grant of the same file
-legitimately mints afresh. Distinct delegations are bounded too: a grantor may
+legitimately mints afresh. A location (`fd_grant_location`) is not merged so:
+each answers one request, and two answers naming the same folder must not share
+the handle the first redemption consumes. Distinct delegations are bounded too: a grantor may
 have at most `FD_GRANT_PENDING_MAX` pending to one recipient, and
 a fresh one past that is refused with `LimitExceeded` while the earlier ones
 stay redeemable. The bound is charged to the grantor, so one that leaves its

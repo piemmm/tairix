@@ -211,7 +211,9 @@ optional footnote beneath. Both compose the row chrome `ListRow` and `TableRow`
 draw — the leading pressure and selection rails, the activity seam, the
 trailing Signal Bead band, the focus ring — from the one shared recipe in the
 crate's paint core, so a change to how a selected or refused row reads cannot
-diverge between a list and a form. What a setting row never takes from that
+diverge between a list and a form. The focus ring is `paint_focus_ring`, which
+a surface drawn outside the crate wears too — the trusted picker's folder
+listing while it holds the keyboard. What a setting row never takes from that
 chrome is the pointer wash: a list row is the thing a reader picks, a setting
 row is not, so only the control in its slot lights under the pointer — a
 `ComboBox` field washing and pressing exactly as a button does.
@@ -1059,14 +1061,16 @@ A tile's geometry is its `TileLayout`, which the owner states: how many whole
 name lines the band under the picture holds. The band sits half an inset below
 the picture and half an inset above the tile's foot, and the picture takes the
 height that leaves, capped by the width — so a cell sized with
-`TileLayout::height_for(side, …)` draws exactly that picture, and a tile is only
-as tall as what it holds. `icon_side`, `label_lines` and `label_rect` read the
-one geometry the render lays out to, so an owner never re-derives it: the file
-manager and the desktop state two lines, the login chooser three, so a two-word
-display name is not elided. `TileLayout::beside()` arranges the tile the other
-way, its picture as tall as the name line and one line of name beside it, which
-is the file manager's small icons; every query reads that arrangement as it
-reads the stacked one.
+`TileLayout::height_for(side, …)` and at least `TileLayout::width_for(side, …)`
+wide draws exactly that picture, and a tile is only as tall as what it holds.
+`icon_side`, `label_lines` and `label_rect` read the one geometry the render
+lays out to, so an owner never re-derives it: the file manager and the desktop
+state two lines, the login chooser three, so a two-word display name is not
+elided; Paint's sprite file window sizes its cells this way for its
+thumbnails. `TileLayout::beside()` arranges the tile the other way, its picture
+as tall as the name line, never nearer than half an inset to either side, and
+one line of name beside it, which is the file manager's small icons; every
+query reads that arrangement as it reads the stacked one.
 
 The name is set in `TextRole::ItemLabel` and wraps rather than being cut.
 `paint_label` lays it out over the stated lines, each centred in the band's

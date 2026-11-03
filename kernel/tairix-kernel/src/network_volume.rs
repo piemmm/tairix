@@ -44,7 +44,8 @@ use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_sync::SpinLock;
 
 use super::{
-    mount_flags, record, record_retired, storage_path, take_down, UnavailableFs, Wiring, Writes,
+    mount_flags, record, record_retired, refusal_level, storage_path, take_down, UnavailableFs,
+    Wiring, Writes,
 };
 use crate::kernel_fs::KernelFs;
 use crate::system_mount::{publish_volume_identity, FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST};
@@ -487,7 +488,7 @@ impl NetworkVolumes {
             Err((cause, errno)) => {
                 record(
                     audit,
-                    Level::Warn,
+                    refusal_level(request.mode, errno),
                     NETWORK_DETACH_REFUSED,
                     DETACH_REFUSED,
                     &attached.name,

@@ -211,22 +211,65 @@ pub struct FixedDir {
     pub data: [u8; NEW_DIR_SIZE],
     /// Which fixed format the buffer holds.
     pub format: FixedFormat,
+    /// Whether the disc copy holds entries past its end marker. The check
+    /// byte does not cover them, so such a directory is never written back.
+    pub stranded: bool,
 }
 
 impl FixedDir {
-    /// Wrap and validate directory bytes.
+    /// Wrap and validate directory bytes, listing any entries left past the
+    /// end marker after the others when they continue the directory's order.
     ///
     /// # Errors
     ///
     /// [`DriverError::BadMagic`] if the markers, sequence bytes, end
     /// marker, or check byte are inconsistent.
     pub fn parse(data: &[u8; NEW_DIR_SIZE], format: FixedFormat) -> Result<Self, DriverError> {
-        let dir = Self {
+        let mut dir = Self {
             data: *data,
             format,
+            stranded: false,
         };
         dir.validate()?;
+        dir.adopt_stranded();
         Ok(dir)
+    }
+
+    /// Move the occupied slots past the end marker up behind the live
+    /// entries, when the whole run then stands in order; otherwise list
+    /// only what the end marker bounds.
+    fn adopt_stranded(&mut self) {
+        let count = self.count();
+        let mut adopted = Self {
+            data: self.data,
+            format: self.format,
+            stranded: true,
+        };
+        let mut live = count;
+        for index in count + 1..self.format.capacity() {
+            let at = ENTRIES_OFFSET + index * ENTRY_SIZE;
+            if self.data[at] == 0 {
+                continue;
+            }
+            let to = ENTRIES_OFFSET + live * ENTRY_SIZE;
+            adopted.data[to..to + ENTRY_SIZE].copy_from_slice(&self.data[at..at + ENTRY_SIZE]);
+            live += 1;
+        }
+        if live == count {
+            return;
+        }
+        self.stranded = true;
+        let entries_end = ENTRIES_OFFSET + self.format.capacity() * ENTRY_SIZE;
+        adopted.data[ENTRIES_OFFSET + live * ENTRY_SIZE..entries_end].fill(0);
+        // A fixed directory holds at most 77 entries.
+        let ordered = entries_in_order(u32::try_from(live).unwrap_or(u32::MAX), |index| {
+            Ok::<_, core::convert::Infallible>(adopted.entry(index as usize))
+        });
+        if ordered == Ok(true) {
+            let size = self.format.size();
+            adopted.data[size - 1] = adopted.check_byte();
+            self.data = adopted.data;
+        }
     }
 
     fn validate(&self) -> Result<(), DriverError> {
@@ -444,8 +487,9 @@ impl FixedDir {
         self.data[size - 1] = self.check_byte();
     }
 
-    /// Compute the directory check byte (the `ror13` accumulation).
-    fn check_byte(&self) -> u8 {
+    /// Compute the directory check byte (the `ror13` accumulation) over the
+    /// entries the end marker bounds and the footer.
+    pub fn check_byte(&self) -> u8 {
         let size = self.format.size();
         let used = ENTRIES_OFFSET + self.count() * ENTRY_SIZE;
         let mut check = accumulate_words(&self.data[..used], 0);
@@ -464,6 +508,7 @@ impl FixedDir {
         let mut dir = Self {
             data: [0; NEW_DIR_SIZE],
             format,
+            stranded: false,
         };
         let size = format.size();
         let marker = match format {

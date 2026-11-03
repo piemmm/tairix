@@ -14,12 +14,12 @@
 //! # Design
 //!
 //! [`decode`] and [`decode_fitted`] dispatch on the format [`sniff`]
-//! recognises from a byte signature: PNG ([`ImageFormat::Png`]), JPEG
+//! recognises from the content: PNG ([`ImageFormat::Png`]), JPEG
 //! ([`ImageFormat::Jpeg`]), GIF ([`ImageFormat::Gif`]), BMP
-//! ([`ImageFormat::Bmp`]), TIFF ([`ImageFormat::Tiff`]), and the icon and
-//! cursor containers ([`ImageFormat::Ico`]), each decoded by its own private
-//! module — BMP and ICO by one, because an icon's entries are the bitmaps
-//! BMP already reads.
+//! ([`ImageFormat::Bmp`]), TIFF ([`ImageFormat::Tiff`]), the icon and
+//! cursor containers ([`ImageFormat::Ico`]), and the rest, each decoded by
+//! its own private module — BMP and ICO by one, because an icon's entries are
+//! the bitmaps BMP already reads.
 //! [`ImageFormat`] stays closed and grows only with a real consumer, exactly
 //! as PNG was added for the icon pipeline, JPEG for the wallpaper masters,
 //! and the rest for the picture viewer. Being the one raster
@@ -28,19 +28,20 @@
 //! admitting it is that consumer's decision, and the icon pipeline
 //! deliberately admits only PNG and SVG.
 //!
-//! # Naming a format instead of sniffing it
+//! # Recognising a format, and naming one
 //!
-//! Only a format that carries a signature can be recognised from content, and
-//! a RISC OS sprite area ([`ImageFormat::Sprite`]) does not: its first word is
-//! the sprite count, and RISC OS types a file from its directory entry. So
-//! [`sniff`] never answers it and never guesses one from a structural
-//! coincidence — a heuristic there would be a false-positive machine, and one
-//! this crate would then act on. A caller that already knows the type instead
-//! names the format: [`probe_as`], [`decode_as`], and [`Sequence::open_as`]
-//! take an [`ImageFormat`] in place of the sniff, and the sniffing entry
-//! points are exactly [`sniff`] plus those. The named format's own parser
-//! still validates the bytes, so naming the wrong one is refused rather than
-//! misread.
+//! Every format but one opens with a signature. A RISC OS sprite area
+//! ([`ImageFormat::Sprite`]) opens with its sprite count instead, since RISC
+//! OS types a file from its directory entry; but a saved area states its own
+//! length, and a file is recognised as one only where that word is the file's
+//! own length — an identity the format defines, not a coincidence weighed —
+//! so a sprite file that lost its type to a foreign filesystem still opens
+//! ([`recognise`]). A caller that already knows the type names the format
+//! instead: [`probe_as`], [`decode_as`], and [`Sequence::open_as`] take an
+//! [`ImageFormat`] in place of the sniff, which also reaches a typed sprite
+//! file whose header recognition would turn down. The named format's own
+//! parser still validates the bytes, so naming the wrong one is refused
+//! rather than misread.
 //!
 //! # Sequences and pages
 //!
@@ -297,7 +298,7 @@ pub(crate) fn be_u32(data: &[u8], at: usize) -> Option<u32> {
 /// partially-decoded image.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecodeError {
-    /// [`sniff`] did not recognise any supported format's signature.
+    /// [`sniff`] did not recognise the content as any supported format.
     UnknownFormat,
     /// The declared width exceeded [`DecodeLimits::max_width`].
     WidthExceedsLimit,
@@ -1220,9 +1221,9 @@ pub enum ImageFormat {
     /// independent, named pictures, at every depth and mode word the format
     /// defines.
     ///
-    /// [`sniff`] never answers this, because a sprite area carries no
-    /// signature to recognise; a caller that knows the type names it
-    /// ([`probe_as`], [`decode_as`], [`Sequence::open_as`]).
+    /// It carries no signature, so [`recognise`] answers it only for a file
+    /// whose header states the file's own length; a caller that knows the
+    /// type names it ([`probe_as`], [`decode_as`], [`Sequence::open_as`]).
     Sprite,
     /// A TIFF 6.0 file: a chain of independent pages, each a grid of strips
     /// or tiles over the sample layout, colour interpretation, predictor,
@@ -1251,18 +1252,42 @@ const JPEG_SIGNATURE: [u8; 3] = [0xFF, 0xD8, 0xFF];
 /// with the reason, rather than being reported as no format at all.
 const GIF_SIGNATURE: [u8; 3] = *b"GIF";
 
-/// Identify the format of `bytes` from its leading signature, or `None` if
-/// no supported format is recognised.
-///
-/// Only a format that carries a signature can be recognised from content.
-/// [`ImageFormat::Sprite`] does not — a RISC OS sprite area opens with its
-/// sprite count, and RISC OS types a file from its directory entry — so this
-/// never answers it, and never guesses one from a structural coincidence. A
-/// caller holding a file whose type it already knows, from a filetype or a
-/// media type, names the format instead ([`probe_as`], [`decode_as`],
-/// [`Sequence::open_as`]).
+/// The most leading bytes [`recognise`] reads: every signature, and a sprite
+/// area's header with its first sprite's length word, lie within them.
+pub const RECOGNITION_HEAD: usize = ora::SIGNATURE_LEN;
+
+// The longest signature sets the head; an area's first sprite's length word
+// follows its header at the earliest.
+const _: () = assert!(sprite::AREA_HEADER_LEN as usize + 4 <= RECOGNITION_HEAD);
+
+/// Identify the format of `bytes`, a whole file, from its content, or `None`
+/// if no supported format is recognised: [`recognise`] over all of it.
 #[must_use]
 pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
+    recognise(bytes, bytes.len() as u64)
+}
+
+/// Identify the format of a file `length` bytes long whose first bytes are
+/// `head`: a signature at its start, else a sprite area whose header states
+/// `length` as the area's own end, or `None`.
+///
+/// Nothing past [`RECOGNITION_HEAD`] is read, so a caller holding only a
+/// document's opening bytes and one holding all of it agree on every file. A
+/// `head` shorter than that and than the file recognises nothing, since an
+/// answer from fewer bytes could differ from [`sniff`]'s. The answer only
+/// names the parser to try: the named format's own parser still validates
+/// every byte.
+#[must_use]
+pub fn recognise(head: &[u8], length: u64) -> Option<ImageFormat> {
+    if head.len() < RECOGNITION_HEAD && (head.len() as u64) < length {
+        return None;
+    }
+    let head = head.get(..RECOGNITION_HEAD).unwrap_or(head);
+    signature(head).or_else(|| sprite::recognised(head, length).then_some(ImageFormat::Sprite))
+}
+
+/// The format whose signature `bytes` opens with.
+fn signature(bytes: &[u8]) -> Option<ImageFormat> {
     if bytes.starts_with(&PNG_SIGNATURE) {
         return Some(ImageFormat::Png);
     }
@@ -1341,18 +1366,19 @@ impl ImageInfo {
 ///
 /// # Errors
 ///
-/// [`DecodeError::UnknownFormat`] for an unrecognised signature, and
-/// otherwise whichever header refusal the format's own parser raises.
+/// [`DecodeError::UnknownFormat`] for content [`sniff`] does not recognise,
+/// and otherwise whichever header refusal the format's own parser raises.
 pub fn probe(bytes: &[u8]) -> Result<ImageInfo, DecodeError> {
     probe_as(sniff(bytes).ok_or(DecodeError::UnknownFormat)?, bytes)
 }
 
-/// Read `bytes`' header as `format`, rather than as whichever format its
-/// signature names.
+/// Read `bytes`' header as `format`, rather than as whichever format
+/// [`sniff`] recognises.
 ///
-/// This is how a caller reaches a format [`sniff`] cannot recognise, and how
-/// one that already knows the type — from a RISC OS filetype, a media type,
-/// or the name a file was picked by — skips guessing at it. The format's own
+/// This is how a caller reaches a typed document [`sniff`] does not
+/// recognise — a sprite area whose header does not state the file's length —
+/// and how one that already knows the type — from a RISC OS filetype, a media
+/// type, or the name a file was picked by — skips guessing at it. The format's own
 /// parser still validates the bytes, so naming the wrong one is refused
 /// rather than misread. See [`probe`] for what a probe does and does not
 /// guarantee.
@@ -1433,10 +1459,10 @@ impl FitBox {
 /// Decode `bytes` into a [`RasterImage`] at its natural (full) size,
 /// honouring `limits`.
 ///
-/// The format is chosen by [`sniff`]; an unrecognised signature is refused
-/// as [`DecodeError::UnknownFormat`] before any format-specific parsing
-/// runs. See the crate documentation for the bounds and fail-closed policy
-/// every format decoder follows.
+/// The format is chosen by [`sniff`]; content it does not recognise is
+/// refused as [`DecodeError::UnknownFormat`] before any format-specific
+/// parsing runs. See the crate documentation for the bounds and fail-closed
+/// policy every format decoder follows.
 ///
 /// # Errors
 ///
@@ -1450,10 +1476,10 @@ pub fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, Decode
 }
 
 /// Decode `bytes` as `format` at its natural (full) size, rather than as
-/// whichever format its signature names.
+/// whichever format [`sniff`] recognises.
 ///
-/// This is how a caller reaches a format [`sniff`] cannot recognise (see
-/// [`probe_as`]). Where the named format is a container of independent
+/// This is how a caller reaches a typed document [`sniff`] does not
+/// recognise (see [`probe_as`]). Where the named format is a container of independent
 /// pictures, this answers the largest, which for an icon file is the picture
 /// it is at its best size and for a sprite area is the only choice that
 /// never silently answers a thumbnail; [`Sequence::open_as`] is how a caller
@@ -1528,9 +1554,9 @@ pub fn decode_as(
 /// however small the box; a box that does not reduce the picture is
 /// [`decode`].
 ///
-/// The format is chosen by [`sniff`]; an unrecognised signature is refused
-/// as [`DecodeError::UnknownFormat`] before any format-specific parsing
-/// runs.
+/// The format is chosen by [`sniff`]; content it does not recognise is
+/// refused as [`DecodeError::UnknownFormat`] before any format-specific
+/// parsing runs.
 ///
 /// # Errors
 ///
@@ -1549,7 +1575,8 @@ pub fn decode_fitted(
 }
 
 /// [`decode_fitted`] of `bytes` as `format`, rather than as whichever format
-/// its signature names: how a format [`sniff`] cannot recognise is reached.
+/// [`sniff`] recognises: how a typed document it does not recognise is
+/// reached.
 ///
 /// # Errors
 ///
@@ -1988,8 +2015,9 @@ impl<B: AsRef<[u8]>> Sequence<B> {
     ///
     /// # Errors
     ///
-    /// [`DecodeError::UnknownFormat`] for an unrecognised signature, a limit
-    /// refusal for a geometry the caller will not allow, and otherwise
+    /// [`DecodeError::UnknownFormat`] for content [`sniff`] does not
+    /// recognise, a limit refusal for a geometry the caller will not allow, and
+    /// otherwise
     /// whichever structural refusal the format's own parser raises.
     pub fn open(bytes: B, limits: &DecodeLimits) -> Result<Self, DecodeError> {
         let format = sniff(bytes.as_ref()).ok_or(DecodeError::UnknownFormat)?;
@@ -1997,12 +2025,11 @@ impl<B: AsRef<[u8]>> Sequence<B> {
     }
 
     /// Prepare to decode `bytes`' entries as `format`, rather than as
-    /// whichever format its signature names.
+    /// whichever format [`sniff`] recognises.
     ///
-    /// This is how a caller reaches a format [`sniff`] cannot recognise (see
-    /// [`probe_as`]) — for a RISC OS sprite area it is the only door, since
-    /// a container of an application's whole icon set is a sequence rather
-    /// than a picture.
+    /// This is how a caller reaches every entry of a typed document [`sniff`]
+    /// does not recognise (see [`probe_as`]): a sprite area whose header does
+    /// not state the file's length.
     ///
     /// # Errors
     ///
@@ -2381,6 +2408,29 @@ mod tests {
         // The version is the decoder's business, so a recognisably-GIF file
         // with an unknown one reaches it and is refused with the reason.
         assert_eq!(sniff(b"GIF99a"), Some(ImageFormat::Gif));
+    }
+
+    /// A head of fewer bytes than recognition reads, from a longer file,
+    /// recognises nothing rather than an answer the whole file may not give.
+    #[test]
+    fn a_head_shorter_than_recognition_reads_recognises_nothing() {
+        let mut bytes = super::PNG_SIGNATURE.to_vec();
+        bytes.resize(super::RECOGNITION_HEAD + 10, 0);
+        let length = bytes.len() as u64;
+        assert_eq!(
+            super::recognise(&bytes[..super::RECOGNITION_HEAD], length),
+            Some(ImageFormat::Png)
+        );
+        assert_eq!(
+            super::recognise(&bytes[..super::RECOGNITION_HEAD - 1], length),
+            None
+        );
+        // A file no longer than its head is read whole.
+        let short = &bytes[..super::PNG_SIGNATURE.len()];
+        assert_eq!(
+            super::recognise(short, short.len() as u64),
+            Some(ImageFormat::Png)
+        );
     }
 
     #[test]

@@ -3041,11 +3041,13 @@ pub trait SyscallHandlers {
     /// holds into the caller's `value_out` buffer, returning the value's byte
     /// count (the `fgetxattr(2)` shape).
     ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`], that the pointers are non-null
-    /// `UserPtr`s, and bounded `key_len` to `1..=FS_ATTR_KEY_MAX`. The key
-    /// grammar and the per-inode read-permission rule are the secured
-    /// VFS's, applied in the handler's filesystem service.
+    /// The dispatcher has already checked that the pointers are non-null
+    /// `UserPtr`s and bounded `key_len` to `1..=FS_ATTR_KEY_MAX`. Like
+    /// [`fs_stat`](Self::fs_stat) it applies no capability gate: the handler
+    /// applies [`CapabilityId::FS_ACCESS`] against the identity a read
+    /// through the descriptor acts as. The key grammar and the per-inode
+    /// read-permission rule are the secured VFS's, applied in the handler's
+    /// filesystem service.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_attr_get(
@@ -3085,9 +3087,9 @@ pub trait SyscallHandlers {
     /// open descriptor `fd` holds into the caller's `key_out` buffer,
     /// returning the key's byte count or `0` past the end.
     ///
-    /// The dispatcher has already checked [`CapabilityId::FS_ACCESS`] and
-    /// the pointer. Read permission and the visibility filtering are the
-    /// secured VFS's.
+    /// The dispatcher has already checked the pointer; the capability gate is
+    /// the handler's, as for [`fs_attr_get`](Self::fs_attr_get). Read
+    /// permission and the visibility filtering are the secured VFS's.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_attr_list(
@@ -8490,9 +8492,10 @@ mod tests {
     }
 
     #[test]
-    fn fs_attr_calls_require_the_filesystem_capability() {
-        // The coarse CAP_FS_ACCESS gate refuses every attr call before the
-        // handler is reached, exactly as the path-taking fs calls.
+    fn fs_attr_changes_require_the_filesystem_capability_and_reads_reach_their_handler() {
+        // A change is refused before the handler without CAP_FS_ACCESS, as
+        // the path-taking calls are. A read is gated in the handler instead,
+        // as `fs_stat` is, against the identity the descriptor acts as.
         let sink = RecordingSink::new();
         let caps = build_caps(&[], &sink);
         let ctx = CallerContext {
@@ -8507,12 +8510,10 @@ mod tests {
         args.0[2] = 9;
         args.0[3] = 0x3000;
         args.0[4] = 64;
-        for n in [SyscallNumber::FS_ATTR_GET, SyscallNumber::FS_ATTR_SET] {
-            assert_eq!(
-                d.dispatch(&ctx, u64::from(n.as_u16()), args),
-                Err(Errno::PermissionDenied)
-            );
-        }
+        assert_eq!(
+            d.dispatch(&ctx, u64::from(SyscallNumber::FS_ATTR_SET.as_u16()), args),
+            Err(Errno::PermissionDenied)
+        );
         // The shorter shapes, with their trailing slots zero.
         let mut remove_args = RawArgs::ZERO;
         remove_args.0[0] = 4;
@@ -8526,20 +8527,25 @@ mod tests {
             ),
             Err(Errno::PermissionDenied)
         );
+        assert_eq!(h.last(), None);
+
+        assert!(d
+            .dispatch(&ctx, u64::from(SyscallNumber::FS_ATTR_GET.as_u16()), args)
+            .is_ok());
+        assert_eq!(h.last(), Some("fs_attr_get"));
         let mut list_args = RawArgs::ZERO;
         list_args.0[0] = 4;
         list_args.0[1] = 0;
         list_args.0[2] = 0x2000;
         list_args.0[3] = 64;
-        assert_eq!(
-            d.dispatch(
+        assert!(d
+            .dispatch(
                 &ctx,
                 u64::from(SyscallNumber::FS_ATTR_LIST.as_u16()),
                 list_args
-            ),
-            Err(Errno::PermissionDenied)
-        );
-        assert_eq!(h.last(), None);
+            )
+            .is_ok());
+        assert_eq!(h.last(), Some("fs_attr_list"));
     }
 
     #[test]

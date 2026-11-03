@@ -70,8 +70,9 @@ desktop as one record — the desktop's extent in physical pixels and the
 output's it is resampled onto (`plans/DISPLAY.md` D11), the UI scale as a
 percentage of the reference density, the active appearance and its theme axes,
 the double-click interval every surface pairs presses under, the text the user
-chose, the machine's own time zone, and the rate the desktop composes frames
-at — and it reaches an application two ways:
+chose, the machine's own time zone, the rate the desktop composes frames at,
+and a generation that moves when the file manager's settings in the desktop's
+document change — and it reaches an application two ways:
 
 - `WindowRequest::QueryDesktop`, wrapped as `WindowClient::desktop`, is a
   read-only request an app issues **before** it creates its first window, so

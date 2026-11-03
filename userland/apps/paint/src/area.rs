@@ -4,8 +4,9 @@
 //! own (PT33).
 //!
 //! Thumbnails are drawn on the queue's worker from the sprite as it stands and
-//! kept until it changes; a paint draws what has landed and a plain card
-//! meanwhile, so it reads nothing.
+//! kept until it changes; a paint draws what has landed and the picture glyph
+//! meanwhile, so it reads nothing. Each sprite is drawn as the file manager
+//! draws a file, through the shared icon tile.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -19,10 +20,11 @@ use tairix_abi::window_ipc::{
     AppMenu, AppMenuItemId, AppMenuSymbol as S, CursorShape, SaveEndings,
 };
 use tairix_controls::{
-    fill_area, withheld, Keystroke, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation,
-    ScrollRange,
+    fill_area, withheld, ControlState, IconTile, Keystroke, ScrollAction, ScrollBar, ScrollModel,
+    ScrollOrientation, ScrollRange, SelectionState, TileLayout,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{
     ClickKind, DoubleClickTracker, InputEvent, Key, Modifiers, NamedKey, PointerButton,
 };
@@ -48,10 +50,12 @@ use tairix_image::SpriteName;
 /// A thumbnail's side, in logical pixels.
 const THUMB: u32 = 64;
 
-/// Room around a thumbnail within its cell, and between cells, in logical
-/// pixels.
-const PAD: u32 = 6;
+/// Room between cells, in logical pixels.
 const GAP: u32 = 6;
+
+/// How a sprite's cell divides: its thumbnail above two lines of its name, as
+/// a file's large tile does in the file manager.
+const TILE: TileLayout = TileLayout::new(2);
 
 /// Most thumbnails one job draws, so the sprites in view land first and a
 /// large file never holds the queue for long.
@@ -137,11 +141,9 @@ pub struct AreaLayout {
     /// A cell's width and height.
     cell: (u32, u32),
     thumb: u32,
-    pad: u32,
     gap: u32,
     columns: usize,
     rows: usize,
-    name_height: u32,
 }
 
 impl AreaLayout {
@@ -229,29 +231,6 @@ impl AreaLayout {
         let last = ((offset + self.grid.height) / pitch.max(1) + 1) as usize * columns;
         first.min(count)..last.min(count)
     }
-
-    /// The thumbnail's square within a cell at `cell`.
-    #[must_use]
-    pub fn thumb_rect(&self, cell: Rect) -> Rect {
-        Rect::new(
-            cell.left().saturating_add_unsigned(self.pad),
-            cell.top().saturating_add_unsigned(self.pad),
-            self.thumb,
-            self.thumb,
-        )
-    }
-
-    /// The name's band within a cell at `cell`.
-    #[must_use]
-    pub fn name_rect(&self, cell: Rect) -> Rect {
-        Rect::new(
-            cell.left(),
-            cell.top()
-                .saturating_add_unsigned(self.pad * 2 + self.thumb),
-            cell.width,
-            self.name_height,
-        )
-    }
 }
 
 /// A thumbnail as it landed: the sprite's content revision and the side it
@@ -294,6 +273,9 @@ pub struct AreaView {
     next_job: u64,
     /// The side thumbnails are drawn at, as last laid out.
     side: u32,
+    /// The picture glyph a sprite shows until its thumbnail lands, drawn
+    /// once for that side rather than on every paint.
+    placeholder: Option<Surface>,
     /// The sprites in view, as last laid out, drawn first.
     in_view: Range<usize>,
     /// Every sprite near the view has its thumbnail at the side drawn, so
@@ -350,6 +332,7 @@ impl AreaView {
             asked: None,
             next_job: 0,
             side: 0,
+            placeholder: None,
             in_view: 0..0,
             fresh: false,
             seen: 0,
@@ -477,11 +460,9 @@ impl AreaView {
         faces: Faces,
     ) -> AreaLayout {
         let gap = scale.scale_length(GAP).max(1);
-        let pad = scale.scale_length(PAD).max(1);
         let thumb = scale.scale_length(THUMB).max(1);
-        let name_height = faces.label.line_height().max(1);
         let status_height = faces.status.line_height().max(1) + gap * 2;
-        let cell = (thumb + pad * 2, thumb + pad * 3 + name_height);
+        let cell = cell_size(thumb, scale, theme);
         let window = Rect::new(0, 0, width, height);
         let status = Rect::new(
             0,
@@ -518,11 +499,9 @@ impl AreaView {
             status,
             cell,
             thumb,
-            pad,
             gap,
             columns,
             rows,
-            name_height,
         }
     }
 
@@ -530,9 +509,7 @@ impl AreaView {
     #[must_use]
     pub fn min_size(theme: &Theme, scale: Scale, faces: Faces) -> (u32, u32) {
         let gap = scale.scale_length(GAP).max(1);
-        let pad = scale.scale_length(PAD).max(1);
-        let thumb = scale.scale_length(THUMB).max(1);
-        let cell = (thumb + pad * 2, thumb + pad * 3 + faces.label.line_height());
+        let cell = cell_size(scale.scale_length(THUMB).max(1), scale, theme);
         let bar = bar_breadth(scale, theme);
         (
             cell.0 + gap * 2 + bar,
@@ -552,10 +529,7 @@ impl AreaView {
                 .clamp(1, OPEN_CELLS.1 as usize),
         )
         .unwrap_or(1);
-        let cell = (
-            THUMB + PAD * 2,
-            THUMB + PAD * 3 + faces.label.line_height().max(1),
-        );
+        let cell = cell_size(THUMB, Scale::ONE, theme);
         let band = faces.status.line_height().max(1) + GAP * 2;
         (
             columns * (cell.0 + GAP) + GAP + bar_breadth(Scale::ONE, theme),
@@ -580,6 +554,9 @@ impl AreaView {
         if layout.thumb != self.side || in_view != self.in_view || generation != self.seen {
             self.fresh = false;
             self.seen = generation;
+        }
+        if layout.thumb != self.side {
+            self.placeholder = tairix_icon::builtin_picture(IconKind::Image, layout.thumb);
         }
         self.side = layout.thumb;
         self.in_view = in_view;
@@ -1522,6 +1499,14 @@ fn bar_breadth(scale: Scale, theme: &Theme) -> u32 {
     scale.scale_length(theme.metrics().scrollbar_breadth).max(1)
 }
 
+/// The cell that draws a `thumb`-pixel thumbnail exactly, and its name.
+fn cell_size(thumb: u32, scale: Scale, theme: &Theme) -> (u32, u32) {
+    (
+        TILE.width_for(thumb, scale, theme),
+        TILE.height_for(thumb, scale, theme),
+    )
+}
+
 impl SavedDocument for AreaView {
     type Snapshot = Snapshot;
 
@@ -1580,7 +1565,7 @@ pub fn render_area(
             if withheld(surface, cell) {
                 continue;
             }
-            render_cell(surface, view, layout, index, cell, theme, faces);
+            render_cell(surface, view, layout, (index, cell), scale, theme);
         }
     }
     if !layout.bar.is_empty() && !withheld(surface, layout.bar) {
@@ -1622,68 +1607,39 @@ pub fn render_area(
     }
 }
 
-/// One sprite's cell: its plate, chosen or not, its thumbnail or a card, and
-/// its name.
+/// Sprite `index`'s cell at `cell`, drawn as the file manager draws a file:
+/// its thumbnail, or the picture glyph until one lands, over its name.
 fn render_cell(
     surface: &mut Surface,
     view: &AreaView,
     layout: &AreaLayout,
-    index: usize,
-    cell: Rect,
+    (index, cell): (usize, Rect),
+    scale: Scale,
     theme: &Theme,
-    faces: Faces,
 ) {
-    let palette = theme.palette();
     let id = view.document.ids()[index];
     let entry = &view.document.entries()[index];
-    let chosen = view.is_chosen(id);
-    if chosen {
-        fill_area(surface, cell, Color::from(palette.selection_fill));
+    let mut state = ControlState::idle();
+    if view.is_chosen(id) {
+        state.selection = SelectionState::Selected;
     }
-    let square = layout.thumb_rect(cell);
-    match (entry, view.thumbnail(id, layout.thumb)) {
-        (Entry::Picture(_), Some(thumb)) => surface.blit(square.left(), square.top(), thumb),
-        _ => fill_area(surface, square, Color::from(palette.surface_raised)),
-    }
-    if view.focused && view.cursor == Some(id) {
-        let ring = Color::from(palette.accent);
-        let (left, top, width, height) = (cell.left(), cell.top(), cell.width, cell.height);
-        for edge in [
-            Rect::new(left, top, width, 1),
-            Rect::new(
-                left,
-                top.saturating_add_unsigned(height.saturating_sub(1)),
-                width,
-                1,
-            ),
-            Rect::new(left, top, 1, height),
-            Rect::new(
-                left.saturating_add_unsigned(width.saturating_sub(1)),
-                top,
-                1,
-                height,
-            ),
-        ] {
-            fill_area(surface, edge, ring);
-        }
-    }
-    let band = layout.name_rect(cell);
-    let font = faces.label;
-    let mut name = String::new();
-    if let Some(sprite) = entry.name() {
-        let _ = core::fmt::Write::write_fmt(&mut name, format_args!("{sprite}"));
-    }
-    let fitted = font.truncate_to_width(&name, band.width);
-    let width = font.text_width(fitted);
-    let x = band
-        .left()
-        .saturating_add_unsigned(band.width.saturating_sub(width) / 2);
-    let colour = if chosen {
-        palette.on_accent
-    } else {
-        palette.on_surface
-    };
-    font.draw_text(surface, x, band.top(), fitted, Color::from(colour));
+    state.focus.focused = view.focused && view.cursor == Some(id);
+    let picture = matches!(entry, Entry::Picture(_))
+        .then(|| view.thumbnail(id, layout.thumb))
+        .flatten()
+        .map(IconPicture::coloured)
+        .or_else(|| {
+            view.placeholder
+                .as_ref()
+                .map(|glyph| IconPicture::builtin(IconKind::Image, glyph))
+        });
+    IconTile::new(
+        entry.name().map(ToString::to_string).unwrap_or_default(),
+        IconKind::Image,
+    )
+    .with_layout(TILE)
+    .with_state(state)
+    .render(surface, cell, scale, theme, picture);
 }
 
 #[cfg(test)]

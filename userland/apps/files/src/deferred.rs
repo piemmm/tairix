@@ -266,6 +266,9 @@ pub enum ReadKind {
     Settle,
     /// A document the user opened: what they are waiting for.
     Open,
+    /// The folder a save was dropped on, which the desktop waits for, the
+    /// save panel saying so.
+    Save,
     /// A listing navigated to.
     List,
     /// The network catalogue a window shows, or is on its way to, waited on
@@ -273,6 +276,9 @@ pub enum ReadKind {
     Network,
     /// A shown folder's changes: what the user sees is wrong until they land.
     Drain,
+    /// The settings the desktop published anew: every window shows the old
+    /// ones until they land.
+    Settings,
     /// A node to describe: a Properties window shows nothing until it lands.
     Properties,
     /// A drive window's reading, watched live.
@@ -294,14 +300,16 @@ pub enum ReadKind {
 /// waiting. Nothing starves, since each kind is finite and refilled only by
 /// the user asking again or, for a folder's changes, by a watch the kernel
 /// paces.
-pub const READ_ORDER: [ReadKind; 14] = [
+pub const READ_ORDER: [ReadKind; 16] = [
     ReadKind::Write,
     ReadKind::Locate,
     ReadKind::Settle,
     ReadKind::Open,
+    ReadKind::Save,
     ReadKind::List,
     ReadKind::Network,
     ReadKind::Drain,
+    ReadKind::Settings,
     ReadKind::Properties,
     ReadKind::Drive,
     ReadKind::Artwork,
@@ -384,6 +392,13 @@ impl<A, P, D> EjectDesk<A, P, D> {
     /// The next eject located, for its windows to be taken off its volume.
     pub fn take_located(&mut self) -> Option<(A, P)> {
         self.located.pop_front()
+    }
+
+    /// Give up `act`, taken located and never to be carried out: its room is
+    /// free again.
+    pub fn withdraw(&mut self, act: A) {
+        drop(act);
+        self.held = self.held.saturating_sub(1);
     }
 
     /// Queue `act` to be carried out, in the room it took as it was admitted.

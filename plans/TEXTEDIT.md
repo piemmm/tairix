@@ -109,7 +109,8 @@ text view shows.
   else the system's own; picking the set already listed lists nothing again.
   Showing Code closes the find bar, as nothing it does reaches code.
 - **Data.** A picture — any format `tairix_image` recognises, by its media
-  type or its opening signature — or a signed manifest — a program's (`RXM1`)
+  type or its opening bytes (a signature, or a sprite area's header stating
+  the file's own length) — or a signed manifest — a program's (`RXM1`)
   or a bundle's `AppInfo`, by its magic — opens read-only as a report of its
   structure, then the whole file as a hex dump. A picture's report lists the
   container's records in file order with their offsets and lengths and what
@@ -223,8 +224,10 @@ answers, never a parser.
 ## The picker's Save mode
 
 `PickFile` carries a purpose: Open, or Save with a suggested leaf name and the
-name endings the requester can write. Save shows a name field and a Save button
-in the session's own window, refuses an ending the requester cannot write and
+name endings the requester can write. Save shows the session's Save panel
+(`plans/SAVE-DIALOG.md`) — the name, *Where*, *Format*, the folders on request,
+and the document's picture to drag to a folder — refuses an ending the
+requester cannot write and
 gives a name with none the first, confirms a replacement, and concludes by
 opening the chosen path write-only under the
 session's authority: created exclusively and never through a link when new,

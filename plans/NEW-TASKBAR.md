@@ -866,7 +866,7 @@ What now stands:
   then a rule and *Quit* last. An application supplies only the middle, so it
   cannot place the two ends and cannot get them wrong; `appbar::info_and_quit`
   names the commonest case (the convention's two rows and nothing else) that
-  `viewer`, `widgets`, `datetime`, and the ordinary file manager share, and
+  `viewer`, `widgets` and `datetime` share, and
   `terminal` composes its *New window* row through the same builder. Each
   passes the `AppBarClick` its slot answers with. A submenu row is refused there
   rather than drawn childless — a flat list cannot express parented children,

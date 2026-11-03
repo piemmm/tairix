@@ -25,11 +25,10 @@ use tairix_abi::driver::display::{DamageList, DisplayMode};
 use tairix_abi::input::KeyInput;
 use tairix_abi::window_ipc::{
     encode_screensaver_reply, AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape,
-    DialogModality, DragItems, DropOperation, HandOverDocument, HandOverOutcome, LayerDepth,
+    DialogModality, DragItems, DropOperation, HandOverOutcome, HandOverTarget, LayerDepth,
     MenuRefusal, PickPurpose, PointerAction, PreviewSubject, SystemTask, TerrainPlate, ToolOver,
     WindowEvent, WindowRegion, WINDOW_SCREENSAVER_REPLY_MAX,
 };
-use tairix_abi::zone::ZoneName;
 use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
 use tairix_browse::DirectorySource;
 use tairix_controls::{ChainModel, PlatePlacement, RowIcon, WindowSizeState};
@@ -130,8 +129,8 @@ pub const RAISE_REFUSED: EventId = EventId(20_020);
 pub const RAISE_REFUSED_MESSAGE: &str = "window raise refused";
 
 /// Event id of a hand-over that reached a running instance but may bring
-/// nothing forward, because the user was not working in the caller or the
-/// seat was held.
+/// nothing forward, because the user was neither working in the caller nor
+/// had just made a gesture at it, or the seat was held.
 pub const HAND_OVER_WITHHELD: EventId = EventId(20_021);
 
 /// The exact message [`HAND_OVER_WITHHELD`] is emitted with.
@@ -144,6 +143,21 @@ pub const REVEAL_REFUSED: EventId = EventId(20_027);
 
 /// The exact message [`REVEAL_REFUSED`] is emitted with.
 pub const REVEAL_REFUSED_MESSAGE: &str = "document reveal refused";
+
+/// Event id of the folder a window named for a save dropped on it, refused:
+/// the window was not the caller's, its folder could not be reached, or no
+/// save waits on that drop.
+pub const SAVE_INTO_REFUSED: EventId = EventId(20_033);
+
+/// The exact message [`SAVE_INTO_REFUSED`] is emitted with.
+pub const SAVE_INTO_REFUSED_MESSAGE: &str = "dropped save's folder refused";
+
+/// Event id of the folder a window named for a save dropped on it, taken: the
+/// session saves the document there on the user's behalf.
+pub const SAVE_INTO_TAKEN: EventId = EventId(20_034);
+
+/// The exact message [`SAVE_INTO_TAKEN`] is emitted with.
+pub const SAVE_INTO_TAKEN_MESSAGE: &str = "dropped save's folder taken";
 
 /// Event id of an application's own window brought forward with the keyboard
 /// on its request: it is at the front of the stack, moved there or already
@@ -1301,14 +1315,21 @@ impl ShellWindowHost<'_> {
     }
 
     /// What a hand-over `caller` asked for may bring forward: one raise, while
-    /// the user is working in one of the caller's windows and nothing holds
-    /// the seat.
-    fn hand_over_activation(&self, caller: ProcId) -> Activation {
+    /// nothing holds the seat and the user is working in one of the caller's
+    /// windows or holds the activation a gesture at it minted (an icon-bar
+    /// choice, an alert's answer), which `desk` spends here.
+    ///
+    /// Only a user's gesture mints one, it is spent once, and it is void once
+    /// the keyboard moves, so it lends no more than the caller's own raise.
+    fn hand_over_activation(&self, desk: &mut dyn HandOverDesk, caller: ProcId) -> Activation {
+        if self.seat_held || self.shell.drag_active() {
+            return Activation::Withheld;
+        }
         let focus = self.focused_window();
         let working = focus.is_some_and(|window| {
             self.windows.owner_of(window) == Some(caller) && self.windows.worked_in(window)
         });
-        if working && !self.seat_held && !self.shell.drag_active() {
+        if working || desk.spend_activation(caller, focus) {
             Activation::Granted { focus }
         } else {
             Activation::Withheld
@@ -1334,6 +1355,46 @@ impl ShellWindowHost<'_> {
                         value: FieldValue::Str(reason),
                     },
                 ],
+            },
+        );
+    }
+
+    /// Record what became of the folder `caller` named for a dropped save:
+    /// taken, or refused for `reason`. The folder's path is the user's, and
+    /// stays out of the record.
+    fn note_save_into(&self, caller: ProcId, outcome: Result<(), &'static str>) {
+        let caller = self.apps.attested_identity(caller);
+        let caller = Field {
+            key: "caller",
+            value: FieldValue::Str(caller.as_ref().map_or("", |app| app.name.as_str())),
+        };
+        let (level, id, message, reason) = match outcome {
+            Ok(()) => (
+                tairix_log::Level::Info,
+                SAVE_INTO_TAKEN,
+                SAVE_INTO_TAKEN_MESSAGE,
+                None,
+            ),
+            Err(reason) => (
+                tairix_log::Level::Warn,
+                SAVE_INTO_REFUSED,
+                SAVE_INTO_REFUSED_MESSAGE,
+                Some(reason),
+            ),
+        };
+        let reason = reason.map(|reason| Field {
+            key: "reason",
+            value: FieldValue::Str(reason),
+        });
+        let fields = [Some(caller), reason];
+        let fields: Vec<Field<'_>> = fields.into_iter().flatten().collect();
+        tairix_log::log(
+            self.shell.audit(),
+            &tairix_log::Event {
+                level,
+                id,
+                message,
+                fields: &fields,
             },
         );
     }
@@ -2139,8 +2200,12 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // conclusion is (or could be) delivered.
         self.picker
             .abort_for(window_id, self.shell, self.compositor);
-        // So does a drag it began, with no one left to tell.
-        self.shell.abort_drag_for(self.compositor, window_id);
+        // So does a drag it began, with no one left to tell, and a save for
+        // it; a window another save was offered to hears the offer end once
+        // the engine lets go.
+        if let Some(end) = self.shell.abort_drag_for(self.compositor, window_id) {
+            self.windows.owed.push(end.event());
+        }
         // Retiring a layer surface is an ordinary close, so the feeds stop
         // here rather than needing a teardown path of their own.
         let was_layer = self.windows.layers.closed(window_id);
@@ -2258,8 +2323,9 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // The engine already validated ownership and the per-window
         // single-pending rule; the slot brings the UI up under the
         // session's authority, refusing fail-closed when it cannot.
+        let over = self.windows.wm_id(window_id);
         self.picker
-            .begin(window_id, purpose, self.shell, self.compositor)
+            .begin((window_id, over), purpose, self.shell, self.compositor)
     }
 
     fn focused_window(&self) -> Option<u64> {
@@ -2331,12 +2397,67 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         Ok(())
     }
 
+    fn save_offer_answered(
+        &mut self,
+        window_id: u64,
+        serial: u32,
+        accepts: bool,
+    ) -> Result<(), Errno> {
+        // An answer to an offer the pointer has moved on from is not shown.
+        self.shell
+            .save_offer_answered(self.compositor, window_id, serial, accepts);
+        Ok(())
+    }
+
+    fn save_into(
+        &mut self,
+        caller: ProcId,
+        window_id: u64,
+        serial: u32,
+        location: u64,
+    ) -> Result<(), Errno> {
+        // Read before anything is decided, which consumes it whatever follows,
+        // so a refusal leaves nothing pending for the caller's life.
+        let located = (location != 0).then(|| self.relay.locate(location, caller));
+        if self.windows.owner_of(window_id) != Some(caller) {
+            self.note_save_into(caller, Err("not the caller's window"));
+            return Err(Errno::NotFound);
+        }
+        let folder = match located {
+            Some(Ok(folder)) => Some(folder),
+            Some(Err(err)) => {
+                self.note_save_into(caller, Err("the folder could not be reached"));
+                self.picker.save_folder_answered(
+                    (window_id, serial),
+                    None,
+                    self.shell,
+                    self.compositor,
+                )?;
+                return Err(err);
+            }
+            None => None,
+        };
+        let named = folder.is_some();
+        let answered = self.picker.save_folder_answered(
+            (window_id, serial),
+            folder,
+            self.shell,
+            self.compositor,
+        );
+        match answered {
+            Ok(()) if named => self.note_save_into(caller, Ok(())),
+            Ok(()) => {}
+            Err(_) => self.note_save_into(caller, Err("no save waits on that drop")),
+        }
+        answered
+    }
+
     fn hand_over_requested(
         &mut self,
         desk: &mut dyn HandOverDesk,
         caller: ProcId,
         run_path: &str,
-        document: Option<&HandOverDocument>,
+        target: &HandOverTarget,
     ) -> Result<HandOverOutcome, Errno> {
         // The same funnel the desktop's own launches take, so a launcher that
         // is not the desktop cannot get a second instance of a bundle that
@@ -2349,15 +2470,19 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         let one_instance = self.apps.runs_one_instance(bundle);
         // The grant is redeemed only as the caller's own, so a caller naming
         // a delegation somebody else minted to the session gets nothing.
-        let target = document.map(|doc| LaunchTarget::Document {
-            name: &doc.name,
-            authority: DocumentAuthority::Delegated {
-                grant: doc.grant,
-                from: caller,
-            },
-            writable: doc.writable,
-        });
-        let activation = self.hand_over_activation(caller);
+        let launch = match target {
+            HandOverTarget::Bare => None,
+            HandOverTarget::Document(doc) => Some(LaunchTarget::Document {
+                name: &doc.name,
+                authority: DocumentAuthority::Delegated {
+                    grant: doc.grant.get(),
+                    from: caller,
+                },
+                writable: doc.writable,
+            }),
+            HandOverTarget::Pane(pane) => Some(LaunchTarget::Pane(pane.as_str())),
+        };
+        let activation = self.hand_over_activation(desk, caller);
         if activation == Activation::Withheld && running.is_some() {
             let caller = self.apps.attested_identity(caller);
             tairix_log::log(
@@ -2386,14 +2511,14 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             host: self,
             activation,
         };
-        match resolve_launch(&mut reach, running, one_instance, target) {
+        match resolve_launch(&mut reach, running, one_instance, launch) {
             Launch::Reused { .. } => Ok(HandOverOutcome::Reached),
             // Nothing took it, so the caller launches the bundle itself — and
             // with a document that is the only thing that still shows it. The
             // grant it sent was for the session to hand on, so it is consumed.
             Launch::Spawn => {
-                if let Some(document) = document {
-                    self.relay.decline(document.grant, caller);
+                if let HandOverTarget::Document(document) = target {
+                    self.relay.decline(document.grant.get(), caller);
                 }
                 Ok(HandOverOutcome::NotRunning)
             }
@@ -2432,7 +2557,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             .unwrap_or(tairix_abi::FILES_RUN_PATH);
         let running = self.apps.resident(bundle);
         let one_instance = self.apps.runs_one_instance(bundle);
-        let activation = self.hand_over_activation(caller);
+        let activation = self.hand_over_activation(desk, caller);
         let mut reach = DeskReach {
             desk,
             host: self,
@@ -2478,7 +2603,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
     }
 
     fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
-        desktop_info(self.compositor, self.shell.machine_zone())
+        desktop_info(self.compositor, self.shell)
     }
 
     fn wallpaper_catalog(&mut self) -> &[WallpaperName] {
@@ -2631,10 +2756,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 /// carries. The query is refused rather than answered with a plausible
 /// guess, so an application never lays itself out to a screen that is not
 /// there.
-pub fn desktop_info(
-    compositor: &Compositor,
-    machine_zone: Option<ZoneName>,
-) -> Result<DesktopInfo, Errno> {
+pub fn desktop_info(compositor: &Compositor, shell: &DesktopShell) -> Result<DesktopInfo, Errno> {
     let screen = compositor.screen_rect();
     let output = compositor.mode();
     let scale = u16::try_from(compositor.scale().percent()).map_err(|_| Errno::OutOfRange)?;
@@ -2650,8 +2772,9 @@ pub fn desktop_info(
             )
             .with_double_click(compositor.double_click())?
             .with_text(DesktopText::new(fonts.ui_family(), fonts.base_size_px()).ok())
-            .with_machine_zone(machine_zone)
-            .with_refresh(compositor.refresh_rate()),
+            .with_machine_zone(shell.machine_zone())
+            .with_refresh(compositor.refresh_rate())
+            .with_settings_generation(shell.settings_generation()),
     )
 }
 
@@ -2659,7 +2782,7 @@ pub fn desktop_info(
 mod tests {
     use super::*;
     use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
-    use tairix_abi::window_ipc::DocumentName;
+    use tairix_abi::window_ipc::{DocumentName, HandOverDocument};
     use tairix_reclaim::{PressureBand, ReportedPressure};
     use tairix_taskbar::TaskbarConfig;
     use tairix_window::WindowHost;
@@ -2708,12 +2831,16 @@ mod tests {
     struct RecordingSlot {
         begun: alloc::vec::Vec<u64>,
         aborted: alloc::vec::Vec<u64>,
+        /// The dropped save the slot awaits a folder for, and every folder
+        /// it was told.
+        awaits: Option<(u64, u32)>,
+        folders: alloc::vec::Vec<((u64, u32), Option<String>)>,
     }
 
     impl crate::picker::PickerSlot for RecordingSlot {
         fn begin(
             &mut self,
-            for_window: u64,
+            (for_window, _): (u64, Option<WindowId>),
             _purpose: &PickPurpose,
             _shell: &mut DesktopShell,
             _compositor: &mut Compositor,
@@ -2729,6 +2856,20 @@ mod tests {
             _compositor: &mut Compositor,
         ) {
             self.aborted.push(window_id);
+        }
+
+        fn save_folder_answered(
+            &mut self,
+            dropped: (u64, u32),
+            folder: Option<String>,
+            _shell: &mut DesktopShell,
+            _compositor: &mut Compositor,
+        ) -> Result<(), Errno> {
+            if self.awaits != Some(dropped) {
+                return Err(Errno::NotFound);
+            }
+            self.folders.push((dropped, folder));
+            Ok(())
         }
     }
 
@@ -2837,6 +2978,9 @@ mod tests {
         takes: bool,
         /// The window each application most recently opened, if a test says.
         recent: alloc::vec::Vec<(ProcId, u64)>,
+        /// The activation an application holds unspent, and where the
+        /// keyboard was when it was minted, if a test says.
+        unspent: Option<(ProcId, Option<u64>)>,
     }
 
     impl HandOverDesk for RecordingDesk {
@@ -2866,6 +3010,16 @@ mod tests {
                 .iter()
                 .find(|(held, _)| *held == app)
                 .map(|(_, id)| *id)
+        }
+
+        fn spend_activation(&mut self, app: ProcId, focus: Option<u64>) -> bool {
+            match self.unspent.take() {
+                Some((holder, minted)) if holder == app => minted == focus,
+                held => {
+                    self.unspent = held;
+                    false
+                }
+            }
         }
     }
 
@@ -2917,12 +3071,12 @@ mod tests {
     }
 
     /// The document the caller hands over: read-write, as its grant 31.
-    fn holiday() -> HandOverDocument {
-        HandOverDocument {
+    fn holiday() -> HandOverTarget {
+        HandOverTarget::Document(HandOverDocument {
             name: tairix_abi::window_ipc::DocumentName::new("holiday.png").expect("a valid name"),
-            grant: 31,
+            grant: core::num::NonZeroU64::new(31).expect("a handle"),
             writable: true,
-        }
+        })
     }
 
     /// A broker stand-in recording which programs it was asked about; the
@@ -3221,8 +3375,8 @@ mod tests {
             }
         }
 
-        /// Ask the session to hand `document` over for [`caller`].
-        fn ask(&mut self, document: Option<&HandOverDocument>) -> Result<HandOverOutcome, Errno> {
+        /// Ask the session to hand `target` over for [`caller`].
+        fn ask(&mut self, target: &HandOverTarget) -> Result<HandOverOutcome, Errno> {
             let run_path = alloc::format!("{HAND_OVER_BUNDLE}/Run");
             let mut host = ShellWindowHost {
                 shell: &mut self.shell,
@@ -3239,7 +3393,7 @@ mod tests {
                 clipboard: &mut self.clipboard,
                 authorise: None,
             };
-            host.hand_over_requested(&mut self.desk, caller(), &run_path, document)
+            host.hand_over_requested(&mut self.desk, caller(), &run_path, target)
         }
 
         /// Open and show window `id` for `owner`, which takes the keyboard.
@@ -3264,11 +3418,6 @@ mod tests {
         }
     }
 
-    /// A hand-over lends the instance it reaches one raise only while the user
-    /// is working in one of the caller's windows and nothing holds the seat:
-    /// one from a window that has the keyboard but nothing from the user, or
-    /// from an application with no window at all, still reaches the instance
-    /// but brings nothing forward.
     /// Apps hear the keyboard move the way it moved, lost before gained, and
     /// hear nothing when it did not: a window raised from its slot takes it
     /// from the one that had it, a press on the desktop takes it from all.
@@ -3283,16 +3432,21 @@ mod tests {
         assert!(reports(None, None).is_empty());
     }
 
+    /// With no gesture's activation to spend, a hand-over lends the instance
+    /// it reaches one raise only while the user is working in one of the
+    /// caller's windows and nothing holds the seat: one from a window that has
+    /// the keyboard but nothing from the user, or from an application with no
+    /// window at all, still reaches the instance but brings nothing forward.
     #[test]
     fn a_hand_over_lends_a_raise_only_from_the_window_the_user_works_in() {
         let mut bench = HandOverBench::with_resident();
-        assert_eq!(bench.ask(Some(&holiday())), Ok(HandOverOutcome::Reached));
+        assert_eq!(bench.ask(&holiday()), Ok(HandOverOutcome::Reached));
         bench.open(caller(), 9);
-        assert_eq!(bench.ask(Some(&holiday())), Ok(HandOverOutcome::Reached));
+        assert_eq!(bench.ask(&holiday()), Ok(HandOverOutcome::Reached));
         bench.work_in(9);
-        assert_eq!(bench.ask(Some(&holiday())), Ok(HandOverOutcome::Reached));
+        assert_eq!(bench.ask(&holiday()), Ok(HandOverOutcome::Reached));
         bench.seat_held = true;
-        assert_eq!(bench.ask(Some(&holiday())), Ok(HandOverOutcome::Reached));
+        assert_eq!(bench.ask(&holiday()), Ok(HandOverOutcome::Reached));
         assert_eq!(
             bench.desk.activations,
             [
@@ -3305,6 +3459,43 @@ mod tests {
         assert_eq!(bench.desk.handed.len(), 4, "every document still arrived");
     }
 
+    /// A hand-over spends the activation a gesture at its caller minted, so a
+    /// row chosen on the caller's icon-bar menu brings forward what it hands
+    /// over to: once, only while the keyboard is where the gesture found it,
+    /// and never over a held seat.
+    #[test]
+    fn a_hand_over_spends_the_activation_a_gesture_at_its_caller_minted() {
+        let mut bench = HandOverBench::with_resident();
+        bench.open(resident(), 5);
+        let focus = Some(5);
+        bench.desk.unspent = Some((caller(), focus));
+        assert_eq!(bench.ask(&holiday()), Ok(HandOverOutcome::Reached));
+        assert_eq!(bench.desk.unspent, None, "spent by its first use");
+        assert_eq!(bench.ask(&holiday()), Ok(HandOverOutcome::Reached));
+        bench.desk.unspent = Some((caller(), None));
+        assert_eq!(bench.ask(&holiday()), Ok(HandOverOutcome::Reached));
+        bench.desk.unspent = Some((resident(), focus));
+        assert_eq!(bench.ask(&holiday()), Ok(HandOverOutcome::Reached));
+        bench.desk.unspent = Some((caller(), focus));
+        bench.seat_held = true;
+        assert_eq!(bench.ask(&holiday()), Ok(HandOverOutcome::Reached));
+        assert_eq!(
+            bench.desk.unspent,
+            Some((caller(), focus)),
+            "a held seat spends nothing"
+        );
+        assert_eq!(
+            bench.desk.activations,
+            [
+                Activation::Granted { focus },
+                Activation::Withheld,
+                Activation::Withheld,
+                Activation::Withheld,
+                Activation::Withheld,
+            ]
+        );
+    }
+
     /// An instance reachable only by raising its window is reached, not
     /// raised, when the hand-over may bring nothing forward: the caller is
     /// told it is running rather than starting a second one.
@@ -3314,14 +3505,20 @@ mod tests {
         bench.open(resident(), 5);
         bench.open(caller(), 9);
         bench.desk.recent.push((resident(), 5));
-        assert_eq!(bench.ask(None), Ok(HandOverOutcome::Reached));
+        assert_eq!(
+            bench.ask(&HandOverTarget::Bare),
+            Ok(HandOverOutcome::Reached)
+        );
         assert_eq!(
             bench.host().focused_window(),
             Some(9),
             "nothing came forward"
         );
         bench.work_in(9);
-        assert_eq!(bench.ask(None), Ok(HandOverOutcome::Reached));
+        assert_eq!(
+            bench.ask(&HandOverTarget::Bare),
+            Ok(HandOverOutcome::Reached)
+        );
         assert_eq!(bench.host().focused_window(), Some(5));
     }
 
@@ -3330,7 +3527,7 @@ mod tests {
     #[test]
     fn a_hand_over_with_nothing_running_delegates_nothing_and_consumes_the_grant() {
         let mut bench = HandOverBench::new();
-        assert_eq!(bench.ask(Some(&holiday())), Ok(HandOverOutcome::NotRunning));
+        assert_eq!(bench.ask(&holiday()), Ok(HandOverOutcome::NotRunning));
         assert!(bench.relay.relayed.is_empty(), "nothing was delegated");
         assert!(bench.desk.handed.is_empty());
         assert_eq!(
@@ -3347,7 +3544,7 @@ mod tests {
     #[test]
     fn a_hand_over_relays_a_document_to_the_resident_instance() {
         let mut bench = HandOverBench::with_resident();
-        assert_eq!(bench.ask(Some(&holiday())), Ok(HandOverOutcome::Reached));
+        assert_eq!(bench.ask(&holiday()), Ok(HandOverOutcome::Reached));
         assert_eq!(
             bench.relay.relayed,
             [(
@@ -3384,10 +3581,7 @@ mod tests {
     fn a_hand_over_nothing_takes_delegates_nothing() {
         let mut refused = HandOverBench::with_resident();
         refused.relay.mints = None;
-        assert_eq!(
-            refused.ask(Some(&holiday())),
-            Ok(HandOverOutcome::NotRunning)
-        );
+        assert_eq!(refused.ask(&holiday()), Ok(HandOverOutcome::NotRunning));
         assert_eq!(
             refused.relay.relayed.len(),
             1,
@@ -3402,10 +3596,7 @@ mod tests {
         // not be taken back, so none is minted.
         let mut unreachable = HandOverBench::with_resident();
         unreachable.desk.takes = false;
-        assert_eq!(
-            unreachable.ask(Some(&holiday())),
-            Ok(HandOverOutcome::NotRunning)
-        );
+        assert_eq!(unreachable.ask(&holiday()), Ok(HandOverOutcome::NotRunning));
         assert!(
             unreachable.relay.relayed.is_empty(),
             "nothing was minted for it"
@@ -3423,12 +3614,36 @@ mod tests {
     #[test]
     fn a_bare_hand_over_asks_for_the_default_and_relays_nothing() {
         let mut bench = HandOverBench::with_resident();
-        assert_eq!(bench.ask(None), Ok(HandOverOutcome::NotRunning));
+        assert_eq!(
+            bench.ask(&HandOverTarget::Bare),
+            Ok(HandOverOutcome::NotRunning)
+        );
         assert_eq!(bench.desk.defaults, [resident()]);
         assert!(
             bench.relay.relayed.is_empty(),
             "a bare launch names no document"
         );
+    }
+
+    /// A pane reaches the live instance as a place to show and confers
+    /// nothing; with no instance the caller starts one with the pane as its
+    /// operand, and nothing was relayed or consumed for it.
+    #[test]
+    fn a_pane_hand_over_reaches_the_instance_and_delegates_nothing() {
+        let pane =
+            HandOverTarget::Pane(tairix_abi::window_ipc::PaneName::new("files").expect("a pane"));
+        let mut bench = HandOverBench::with_resident();
+        assert_eq!(bench.ask(&pane), Ok(HandOverOutcome::Reached));
+        assert_eq!(
+            bench.desk.handed,
+            [(resident(), OpenEntry::Pane(String::from("files")))]
+        );
+        assert!(bench.relay.relayed.is_empty() && bench.relay.declined.is_empty());
+
+        let mut idle = HandOverBench::new();
+        assert_eq!(idle.ask(&pane), Ok(HandOverOutcome::NotRunning));
+        assert!(idle.desk.handed.is_empty());
+        assert!(idle.relay.relayed.is_empty() && idle.relay.declined.is_empty());
     }
 
     /// The one seat rule every chain resolves through, whichever direction it
@@ -4020,6 +4235,57 @@ mod tests {
         assert_eq!(bench.relay.located.len(), 3, "every location was consumed");
     }
 
+    impl HandOverBench {
+        /// Answer, as [`caller`], the save dropped on `window` and numbered 3
+        /// with `location`.
+        fn save_into(&mut self, window: u64, location: u64) -> Result<(), Errno> {
+            self.host().save_into(caller(), window, 3, location)
+        }
+    }
+
+    /// A dropped save's folder reaches the picker only from the owner of the
+    /// window it was dropped on, and only for the drop it awaits; the
+    /// location is read, and so consumed, whatever the answer.
+    #[test]
+    fn a_dropped_saves_folder_reaches_the_picker_only_from_the_windows_owner() {
+        let mut bench = HandOverBench::new();
+        bench.open(resident(), 5);
+        bench.open(caller(), 9);
+        bench.picker.awaits = Some((9, 3));
+        bench.relay.location = Some("/Users/ada/Home/Documents");
+        assert_eq!(
+            bench.save_into(5, 41),
+            Err(Errno::NotFound),
+            "not the caller's"
+        );
+        assert!(bench.picker.folders.is_empty());
+        assert_eq!(bench.save_into(9, 42), Ok(()));
+        assert_eq!(bench.save_into(9, 0), Ok(()), "a zero location declines");
+        bench.relay.location = None;
+        assert_eq!(bench.save_into(9, 43), Err(Errno::PermissionDenied));
+        assert_eq!(
+            bench.picker.folders,
+            [
+                ((9, 3), Some(String::from("/Users/ada/Home/Documents"))),
+                ((9, 3), None),
+                ((9, 3), None),
+            ],
+            "a folder that cannot be located declines"
+        );
+        bench.picker.awaits = None;
+        bench.relay.location = Some("/Users/ada/Home/Documents");
+        assert_eq!(
+            bench.save_into(9, 44),
+            Err(Errno::NotFound),
+            "no drop awaits it"
+        );
+        assert_eq!(
+            bench.relay.located,
+            [41, 42, 43, 44].map(|location| (location, caller())),
+            "every location was consumed"
+        );
+    }
+
     /// A window's first screensaver picture after the list was read to its
     /// end says the catalogue reached a chooser, once per listing: a
     /// wallpaper's picture and a second screensaver's say nothing.
@@ -4143,10 +4409,16 @@ mod tests {
         bench.open(resident(), 5);
         bench.desk.recent.push((resident(), 5));
         bench.open(caller(), 9);
-        assert_eq!(bench.ask(None), Ok(HandOverOutcome::Reached));
+        assert_eq!(
+            bench.ask(&HandOverTarget::Bare),
+            Ok(HandOverOutcome::Reached)
+        );
         assert_eq!(count(&AUDIT.withheld), 1);
         bench.work_in(9);
-        assert_eq!(bench.ask(None), Ok(HandOverOutcome::Reached));
+        assert_eq!(
+            bench.ask(&HandOverTarget::Bare),
+            Ok(HandOverOutcome::Reached)
+        );
         assert_eq!(count(&AUDIT.withheld), 1, "a raise lent is not withheld");
 
         assert_eq!(bench.host().raise_requested(9), Ok(()));

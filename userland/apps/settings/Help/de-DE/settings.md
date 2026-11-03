@@ -77,6 +77,20 @@ Dateimanagers und des Befehls `mount` —, und ein Datenträger, dessen Format
 keine feste Kapazität kennt, sagt das, statt einen Balken zu zeigen. `df` meldet
 dieselben Zahlen in einer Shell.
 
+**Files** legt fest, wie der Dateimanager arbeitet: wo sich ein neues Fenster
+öffnet und wie es anzeigt und ordnet, was es auflistet, ob es die Orte-Leiste
+und die Werkzeugleiste zeigt, ob Ordner oben bleiben, welche Namensendungen und
+welche Einträge ausgeblendet sind, ob ein Bild seinen eigenen Inhalt zeigt und
+ein Ordner, was er enthält, ob vor dem Verschieben von Einträgen in den
+Papierkorb nachgefragt wird und ob ein Datenträgerabbild oder Archiv, das Sie
+geöffnet haben, ausgehängt wird, sobald seine Fenster geschlossen sind. Eine
+Zeile wirkt sofort, wenn Sie sie wählen: Wo sich ein neues Fenster öffnet und ob
+es die Orte-Leiste und die Werkzeugleiste zeigt, gilt für das nächste Fenster,
+das Sie öffnen, und alles andere erreicht alle Dateimanager-Fenster zugleich;
+ein Fenster behält jedoch eine Anzeige oder eine Reihenfolge, die Sie selbst
+darin gewählt haben. *Settings…* im eigenen Menü des Dateimanagers öffnet diesen
+Bereich.
+
 ## EXIT STATUS
 
 Null nach einem saubereren Schließen; ungleich null, wenn der Fensterkanal oder

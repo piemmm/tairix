@@ -4,14 +4,14 @@ files — navegador gráfico del sistema de archivos
 
 ## SYNOPSIS
 
-`files [--desktop] [ruta] [-h | -?]`
+`files --desktop [--mount] [ruta] [-h | -?]`
 
 ## DESCRIPTION
 
-Abre una ventana de escritorio que lista el sistema de archivos, empezando
-por la carpeta que `ruta` nombra en la línea de órdenes — o, si nombra un
-archivo, por la carpeta que contiene ese archivo, con el archivo
-seleccionado — o, si no se nombra ninguna, por la carpeta que elija la
+El gestor de archivos propio del escritorio, que lista el sistema de
+archivos en ventanas. Una ventana se abre en la carpeta que se le pide — o,
+para un archivo, en la carpeta que contiene ese archivo, con el archivo
+seleccionado — o, si no se nombra ninguna, en la carpeta que elija la
 configuración: la carpeta `Home` del usuario que lo inicia, salvo que este
 elija su carpeta `Desktop` o los volúmenes conectados (su directorio
 personal si esa carpeta no puede listarse). El título de la ventana nombra
@@ -21,13 +21,14 @@ de un directorio es un listado ordinario, sujeto a permisos, bajo la
 identidad del usuario que lo inicia: un directorio ilegible se rechaza,
 nunca se adivina.
 
-El escritorio inicia el explorador por usted y lo mantiene en la barra de
-iconos: el menú de su ranura lista sus propios lugares y todo lo montado, y
-elegir uno abre allí una ventana; *Red* y *Configuración…* van al final. Un
-clic en la ranura abre una donde indique la configuración. Pedir una carpeta
-que ya tiene ventana trae esa ventana al frente en lugar de abrir otra. Esa
-copia no tiene fila *Salir*: forma parte del escritorio, y cerrar sus
-ventanas simplemente la retira.
+El escritorio inicia el gestor de archivos con la sesión y lo mantiene en la
+barra de iconos, y este nunca termina: el menú de su ranura lista sus propios
+lugares y todo lo montado, y elegir uno abre allí una ventana; *Red* y
+*Configuración…* van al final. Un clic en la ranura abre una donde indique la
+configuración. Pedir una carpeta que ya tiene ventana trae esa ventana al
+frente en lugar de abrir otra. El menú no tiene fila *Salir*: el gestor de
+archivos forma parte del escritorio, cerrar sus ventanas simplemente lo
+retira y, si alguna vez se detiene, el escritorio vuelve a iniciarlo.
 
 *Red*, en el menú de la ranura justo encima de *Configuración…*, abre una
 ventana con los ordenadores de la red local que comparten archivos. Cada uno
@@ -43,10 +44,10 @@ cada ordenador, así que un nombre nunca prueba qué ordenador está mirando.
 Conectarse a los recursos compartidos de un ordenador no está disponible en
 este sistema, y abrir uno lo indica.
 
-Iniciado desde un shell por su ruta, `/System/Components/files.app`,
-es en cambio una aplicación ordinaria: una ventana, y termina
-cuando usted la cierra. En cualquier caso requiere una sesión gráfica en
-marcha: sin ella el canal de ventanas es inalcanzable, y el explorador
+Solo se ejecuta tal como lo inicia el escritorio: iniciado de cualquier otro
+modo — desde un shell por su ruta, `/System/Components/files.app` — se niega
+a ejecutarse, indicando el motivo en el flujo de error estándar. Requiere una
+sesión gráfica en marcha: sin ella el canal de ventanas es inalcanzable, e
 informa del rechazo en el flujo de error estándar y termina.
 
 La ventana se maneja con el teclado: `Abajo` y `Arriba` mueven la selección,
@@ -110,10 +111,16 @@ todo* y *Borrar selección*, y por último *Pegar*. Un clic derecho en un
 espacio vacío borra la selección, así que el submenú del elemento aparece
 atenuado.
 
-Abrir una imagen de disco — un archivo `.iso`, `.adf`, `.hdf` y similares —
-la monta para usted en `/Storage`, con escritura donde tanto el archivo como
-su formato la permiten, y abre su ventana; *Montar solo lectura* la monta,
-en cambio, en solo lectura. Sigue montada hasta que la expulse o termine su
+Abrir una imagen de disco o un archivo comprimido — un archivo `.iso`,
+`.adf`, `.hdf`, `.zip` y similares — lo monta para usted en `/Storage`, con
+escritura donde tanto el archivo como su formato la permiten, y abre su
+ventana; *Montar solo lectura* lo monta, en cambio, en solo lectura. Abrir
+uno en el escritorio hace lo mismo. Cuando ya ninguna ventana lo muestra,
+se desmonta de nuevo, de modo que `/Storage` solo contiene lo que está en
+uso; si otra cosa lo sigue usando — por ejemplo, un documento de ese volumen
+abierto en otra aplicación —, permanece montado y se vuelve a intentar
+desmontarlo cuando aquello pueda haberlo liberado. La configuración puede,
+en cambio, mantener montado lo que abra hasta que lo expulse o termine su
 sesión. *Expulsar* retira un volumen que usted montó, desde su icono o desde
 su fila en la columna de lugares, cuyo propio menú contextual contiene
 *Abrir* y *Expulsar*; sus ventanas en él pasan antes a `/Storage`. Si un
@@ -140,14 +147,16 @@ arriba sea cual sea el orden elegido, salvo que la configuración las coloque
 entre los archivos.
 
 *Configuración…* en el menú de la ranura de la barra de iconos, o `Ctrl+,`,
-abre la configuración del explorador: dónde se abre una ventana nueva, cómo
-muestra y ordena sus elementos, y si muestra la columna de lugares y la
+abre la configuración del explorador en la aplicación Configuración, bajo
+*Archivos*: dónde se abre una ventana nueva, cómo muestran y ordenan las
+ventanas sus elementos, y si una nueva muestra la columna de lugares y la
 barra de herramientas; si las carpetas quedan arriba; qué sufijos de nombre
 y qué elementos se ocultan; si una imagen muestra su propio contenido y una
-carpeta lo que contiene; y si mover elementos a la Papelera pide
-confirmación antes. *Restaurar valores predeterminados* restablece todos los
-ajustes. Un cambio se aplica a todas las ventanas a la vez y se recuerda;
-una ventana ya abierta conserva la vista y el orden que tiene.
+carpeta lo que contiene; si mover elementos a la Papelera pide confirmación
+antes; y si una imagen de disco o un archivo comprimido que usted abrió se
+desmonta una vez cerradas sus ventanas. Un cambio se aplica a todas las
+ventanas a la vez y se recuerda; una ventana conserva una vista o un orden
+que usted mismo haya elegido en ella.
 
 `Alt+Enter` abre la ventana de *información* del elemento seleccionado,
 igual que *Obtener información…* en su submenú del menú contextual. Es una ventana propia,
@@ -178,18 +187,21 @@ operando se rechaza de plano en lugar de ignorarse.
 
 ## OPTIONS
 
-- `--desktop` — ejecutarse como el componente de gestor de archivos propio
-  del escritorio: una ranura permanente en la barra de iconos que ofrece sus
-  lugares y los volúmenes montados, ninguna ventana hasta que se pida una, y
-  ninguna forma de salir. La sesión de escritorio pasa esta opción al
-  arrancar; nombrar una `ruta` junto a ella se rechaza, porque un componente
-  no abre ninguna ventana en la que ponerla.
+- `--desktop` — ejecutarse como el gestor de archivos propio del escritorio:
+  una ranura permanente en la barra de iconos que ofrece sus lugares y los
+  volúmenes montados, y ninguna forma de salir. La sesión de escritorio pasa
+  esta opción siempre que inicia el gestor de archivos, que solo se ejecuta
+  con ella; una `ruta` junto a ella abre allí una ventana.
+- `--mount` — abrir `ruta` como imagen de disco o archivo comprimido, igual
+  que al abrirlo en una ventana: se monta para usted y se abre su ventana, y
+  se vuelve a desmontar una vez cerradas sus ventanas, según indique la
+  configuración. Requiere una `ruta`.
 - `-h, -?` — mostrar la ayuda corta de esta orden y salir.
 
 ## EXIT STATUS
 
-Cero tras un cierre limpio, o tras mostrarse la ayuda corta; `2` cuando
-la línea de órdenes no se entendió; por lo demás, distinto de cero
-cuando el canal de ventana, la región de fotogramas compartida o el
-listado inicial del directorio fue rechazado (el motivo se indica por
-el flujo de error estándar).
+No termina mientras el escritorio está en marcha. Cero tras mostrarse la
+ayuda corta; `2` cuando la línea de órdenes no se entendió o no nombró
+`--desktop`; por lo demás, distinto de cero cuando se rechazó el canal de
+ventana o la región de fotogramas compartida (el motivo se indica por el
+flujo de error estándar).

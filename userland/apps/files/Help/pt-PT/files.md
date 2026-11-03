@@ -4,14 +4,14 @@ files — navegador gráfico do sistema de ficheiros
 
 ## SYNOPSIS
 
-`files [--desktop] [path] [-h | -?]`
+`files --desktop [--mount] [path] [-h | -?]`
 
 ## DESCRIPTION
 
-Abre uma janela do ambiente de trabalho que lista o sistema de ficheiros,
-a começar pela pasta que `path` indica na linha de comandos — ou, se
-indicar um ficheiro, pela pasta que contém esse ficheiro, com o ficheiro
-selecionado — ou, se nenhum for indicado, pela pasta que as definições
+O gestor de ficheiros do próprio ambiente de trabalho, que lista o sistema
+de ficheiros em janelas. Uma janela abre-se na pasta que lhe é pedida — ou,
+para um ficheiro, na pasta que contém esse ficheiro, com o ficheiro
+selecionado — ou, se nada for indicado, na pasta que as definições
 escolherem: a pasta `Home` do utilizador que o inicia, a menos que este
 tenha escolhido a sua pasta `Desktop` ou o armazenamento ligado (o seu
 diretório pessoal, se essa pasta não puder ser listada). O título da
@@ -21,14 +21,15 @@ tema ativo. Cada leitura de um diretório é uma listagem normal, sujeita a
 permissões, com a identidade do utilizador que o inicia: um diretório
 ilegível é recusado, nunca adivinhado.
 
-O ambiente de trabalho inicia o explorador por si e mantém-no na barra de
-ícones: o menu do seu lugar lista os seus próprios locais e tudo o que
-estiver montado, e escolher um abre lá uma janela; *Rede* e *Definições…*
-são as últimas linhas. Um clique no lugar abre uma na pasta que as
-definições escolherem. Pedir uma pasta que já tem uma janela traz essa
-janela para a frente, em vez de abrir outra. Esta instância não tem a linha
-*Sair* — faz parte do ambiente de trabalho, e fechar as suas janelas apenas
-a arruma.
+O ambiente de trabalho inicia o gestor de ficheiros com a sessão e mantém-no
+na barra de ícones, e este nunca termina: o menu do seu lugar lista os seus
+próprios locais e tudo o que estiver montado, e escolher um abre lá uma
+janela; *Rede* e *Definições…* são as últimas linhas. Um clique no lugar abre
+uma na pasta que as definições escolherem. Pedir uma pasta que já tem uma
+janela traz essa janela para a frente, em vez de abrir outra. O menu não tem
+a linha *Sair* — o gestor de ficheiros faz parte do ambiente de trabalho,
+fechar as suas janelas apenas o arruma e, se alguma vez parar, o ambiente de
+trabalho volta a iniciá-lo.
 
 *Rede*, no menu do lugar logo acima de *Definições…*, abre uma janela com os
 computadores da rede local que partilham ficheiros. Cada um é listado com o
@@ -44,11 +45,12 @@ computador, por isso um nome nunca prova que computador está a ver. A
 ligação às partilhas de um computador não está disponível neste sistema, e
 abrir um di-lo.
 
-Iniciado a partir de uma shell pelo seu caminho,
-`/System/Components/files.app`, é antes uma aplicação normal: uma janela,
-e termina quando a fecha. Em qualquer dos casos, precisa de uma sessão
-gráfica em curso: sem ela, o canal de janelas fica inalcançável, e o
-explorador comunica a recusa no fluxo de erro padrão e termina.
+Só funciona tal como o ambiente de trabalho o inicia: iniciado de qualquer
+outra forma — a partir de uma shell pelo seu caminho,
+`/System/Components/files.app` — recusa-se a arrancar, indicando o motivo no
+fluxo de erro padrão. Precisa de uma sessão gráfica em curso: sem ela, o
+canal de janelas fica inalcançável, e comunica a recusa no fluxo de erro
+padrão e termina.
 
 A janela é conduzida pelo teclado: `Baixo` e `Cima` movem a seleção, `Enter`
 abre o diretório selecionado e `Backspace` sobe ao diretório superior. `F5`
@@ -107,10 +109,16 @@ Seguem-se *Novo*, depois *Selecionar tudo* e *Limpar seleção*, e por fim
 *Colar*. Um clique com o botão direito num espaço vazio limpa a seleção,
 pelo que o submenu do item fica a cinzento.
 
-Abrir uma imagem de disco — um ficheiro `.iso`, `.adf`, `.hdf` e afins —
-monta-a para si em `/Storage`, gravável onde tanto o ficheiro como o seu
-formato o permitem, e abre a sua janela; *Montar só de leitura* monta-a,
-em vez disso, só de leitura. Fica montada até a ejetar ou a sua sessão
+Abrir uma imagem de disco ou um arquivo — um ficheiro `.iso`, `.adf`,
+`.hdf`, `.zip` e afins — monta-o para si em `/Storage`, gravável onde tanto
+o ficheiro como o seu formato o permitem, e abre a sua janela;
+*Montar só de leitura* monta-o, em vez disso, só de leitura. Abrir um no
+ambiente de trabalho faz o mesmo. Quando já nenhuma janela o mostra, é
+desmontado de novo, de modo que `/Storage` contém apenas o que está em uso;
+se outra coisa ainda o estiver a usar — um documento dele aberto noutra
+aplicação, por exemplo —, fica montado, e volta-se a tentar desmontá-lo
+assim que isso o possa ter libertado. As definições podem, em vez disso,
+manter montado o que abrir até o ejetar ou a sua sessão
 terminar. *Ejetar* retira um volume que montou, a partir do seu ícone ou da
 sua linha na barra de locais, cujo menu de contexto próprio contém *Abrir*
 e *Ejetar*; as suas janelas nele passam primeiro para `/Storage`. Um volume
@@ -136,14 +144,15 @@ pastas ficam no topo seja qual for a ordem escolhida, a menos que as
 definições as coloquem entre os ficheiros.
 
 *Definições…* no menu do lugar na barra de ícones, ou `Ctrl+,`, abre as
-definições do explorador: onde se abre uma janela nova, como mostra e
-ordena os seus itens e se mostra a coluna de locais e a barra de
-ferramentas; se as pastas ficam no topo; que extensões de nomes e que itens
-ficam ocultos; se uma imagem mostra o seu próprio conteúdo e uma pasta o
-que contém; e se mover itens para o Lixo pergunta primeiro. *Restaurar
-predefinições* repõe todas as definições. Uma alteração aplica-se a todas
-as janelas de uma vez e fica memorizada; uma janela já aberta mantém a
-visualização e a ordem que tem.
+definições do explorador na aplicação Definições, em *Ficheiros*: onde se
+abre uma janela nova, como as janelas mostram e ordenam os seus itens e se
+uma nova mostra a coluna de locais e a barra de ferramentas; se as pastas
+ficam no topo; que extensões de nomes e que itens ficam ocultos; se uma
+imagem mostra o seu próprio conteúdo e uma pasta o que contém; se mover
+itens para o Lixo pergunta primeiro; e se uma imagem de disco ou um arquivo
+que abriu é desmontado depois de fechadas as suas janelas. Uma alteração
+aplica-se a todas as janelas de uma vez e fica memorizada; uma janela mantém
+uma visualização ou uma ordem que tenha escolhido nela pessoalmente.
 
 `Alt+Enter` abre a janela de *informações* do item selecionado, tal como
 *Obter informações…* no seu submenu do menu de contexto. É uma janela própria, pelo que
@@ -175,18 +184,21 @@ segundo operando é recusado de todo em vez de ignorado.
 
 ## OPTIONS
 
-- `--desktop` — executar como o componente de gestor de ficheiros do próprio
-  ambiente de trabalho: um lugar permanente na barra de ícones que oferece os
-  seus locais e os volumes montados, nenhuma janela até que uma seja pedida,
-  e nenhuma forma de sair. A sessão do ambiente de trabalho passa esta opção
-  no arranque; nomear um `path` junto dela é recusado, porque um componente
-  não abre nenhuma janela onde o pôr.
+- `--desktop` — executar como o gestor de ficheiros do próprio ambiente de
+  trabalho: um lugar permanente na barra de ícones que oferece os seus locais
+  e os volumes montados, e nenhuma forma de sair. A sessão do ambiente de
+  trabalho passa esta opção sempre que inicia o gestor de ficheiros, que só
+  funciona com ela; um `path` junto dela abre lá uma janela.
+- `--mount` — abrir `path` como imagem de disco ou arquivo, tal como acontece
+  ao abri-lo numa janela: é montado para si e a sua janela abre-se, e é
+  desmontado de novo depois de fechadas as suas janelas, conforme indicam
+  as definições. Esta opção precisa de um `path`.
 - `-h, -?` — mostrar a ajuda curta deste próprio comando e sair.
 
 ## EXIT STATUS
 
-Zero após um fecho limpo, ou depois de mostrada a ajuda curta; `2`
-quando a linha de comandos não foi compreendida; caso contrário,
-diferente de zero quando o canal de janela, a região de fotogramas
-partilhada ou a listagem inicial do diretório foi recusada (o motivo é
-indicado no fluxo de erro padrão).
+Não termina enquanto o ambiente de trabalho estiver em execução. Zero
+depois de mostrada a ajuda curta; `2` quando a linha de comandos não foi
+compreendida ou não indicou `--desktop`; caso contrário, diferente de zero
+quando o canal de janela ou a região de fotogramas partilhada foi recusada
+(o motivo é indicado no fluxo de erro padrão).

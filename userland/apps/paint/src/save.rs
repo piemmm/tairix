@@ -243,10 +243,6 @@ pub enum SaveRefusal {
     /// A sprite kept as its bytes is not a whole number of words, so no
     /// sprite after it could be written where RISC OS reads it.
     KeptSpriteOffWord(SpriteName),
-    /// A sprite file nothing could open again: neither its name, by `.spr` or
-    /// the `,ff9` file type, nor the filetype its volume records says it
-    /// holds sprites.
-    SpritesUnnamed,
 }
 
 impl core::fmt::Display for SaveRefusal {
@@ -269,9 +265,6 @@ impl core::fmt::Display for SaveRefusal {
                 f,
                 "The sprite {name} is damaged and cannot be written back: delete it to save"
             ),
-            Self::SpritesUnnamed => {
-                f.write_str("A sprite file can only be opened again if it is named .spr")
-            }
         }
     }
 }
@@ -354,11 +347,6 @@ pub fn writable_as(
     let format = named.unwrap_or_else(|| natural(entries, origin));
     match format {
         SaveFormat::Sprites => {
-            // A sprite area carries no signature, so its name is how it is
-            // known.
-            if named.is_none() {
-                return Err(SaveRefusal::SpritesUnnamed);
-            }
             let damaged = entries.iter().find_map(|entry| match entry {
                 Entry::Kept(kept) if !opaque_sprite_writes_back(&kept.bytes) => Some(kept.name),
                 _ => None,

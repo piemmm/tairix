@@ -67,6 +67,20 @@ controllo — montare e smontare spettano al gestore di file e al comando
 `mount` — e un volume il cui formato non ha una capacità fissa lo dice
 anziché mostrare una barra. `df` riporta le stesse cifre in una shell.
 
+**Files** imposta il modo in cui funziona il gestore di file: dove si apre una
+nuova finestra e come mostra e ordina ciò che elenca, se mostra la colonna dei
+luoghi e la barra degli strumenti, se le cartelle restano in cima, quali
+estensioni dei nomi e quali voci sono nascoste, se un'immagine mostra il
+proprio contenuto e una cartella ciò che contiene, se spostare delle voci nel
+Cestino chiede prima conferma e se un'immagine disco o un archivio aperto viene
+smontato una volta chiuse le sue finestre. Una riga ha effetto non appena viene
+scelta: dove si apre una nuova finestra e se mostra la colonna dei luoghi e la
+barra degli strumenti valgono per la prossima finestra che viene aperta, e tutto
+il resto raggiunge tutte le finestre del gestore di file contemporaneamente,
+anche se una finestra mantiene una visualizzazione o un ordine scelti
+personalmente in essa. *Settings…* nel menu del gestore di file stesso apre
+questo pannello.
+
 ## EXIT STATUS
 
 Zero dopo una chiusura pulita; diverso da zero quando il canale della finestra

@@ -73,9 +73,10 @@ tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
 # The sound settings registry the Sound Effects pane reads the session's
 # answer with and renders its changes in, and which sounds a user decides.
 tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0" }
-# The shared wrapping tile-grid geometry the Wallpaper pane's gallery lays
-# its pictures out with — the same one the file manager's icon view and the
-# desktop's own icon column use, so no second grid exists.
+# The file manager's settings registry the Files pane reads its rows from and
+# renders its applies into, and the pane name the file manager hands over.
+# The registry is the file manager's, kept in the session's document —
+# Settings only asks.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 # The one System Information API client every surface reads the machine
 # through: the ungated mount-table walk the Storage pane lists, and the

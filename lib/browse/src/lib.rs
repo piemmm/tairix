@@ -149,6 +149,7 @@ pub mod network;
 pub mod open_with;
 pub mod owner_edit;
 pub mod places;
+pub mod preferences;
 pub mod presentation;
 pub mod probes;
 pub mod progress;
@@ -202,6 +203,7 @@ pub use owner_edit::{validate_owner, OwnerChange, OwnerError};
 pub use places::{
     bare_open_places, Place, PlaceKind, Places, Volume, VolumeFacts, FIXED_LABELS, MAX_PLACE_LABEL,
 };
+pub use preferences::{FilerKey, FilerPreferences, Start, SETTINGS_PANE, SORT_KEYS};
 pub use presentation::{HiddenEndings, Pictures, Presentation};
 pub use probes::Probes;
 pub use progress::{ProgressModel, ProgressOp, Reading, Subject, Tally};

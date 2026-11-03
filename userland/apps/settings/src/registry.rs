@@ -25,6 +25,7 @@ use tairix_icon::IconKind;
 use crate::accounts::ACCOUNT_FACTS;
 use crate::effects::EFFECTS_FACTS;
 use crate::facts::{ABOUT_FACTS, CLOCK_FACTS};
+use crate::files::FilesSetting;
 use crate::form::{Action, Composition, Setting};
 use crate::machine::MachineSetting;
 use crate::network::{ADDRESSING_FACTS, RESOLVER_FACTS};
@@ -51,6 +52,8 @@ pub enum Category {
     /// A desktop theme: an appearance, a picture and an accent palette chosen
     /// together.
     Theme,
+    /// The file manager: how its windows open and show what they list.
+    Files,
     /// The attached screens.
     Displays,
     /// When the screen locks.
@@ -111,6 +114,8 @@ pub enum Pane {
     Wallpaper,
     /// The desktop theme in effect, and the themes to choose among.
     Theme,
+    /// The file manager's settings.
+    Files,
     /// The attached screens' modes, arrangement and scale.
     Displays,
     /// When the screen locks, and locking it now.
@@ -698,6 +703,24 @@ const WALLPAPER_SETTINGS: &[&str] = &[
     Chooser::Wallpaper.label(),
 ];
 
+/// The Files pane's settings, as its rows label them.
+const FILES_SETTINGS: &[&str] = &[
+    FilesSetting::Start.label(),
+    FilesSetting::Places.label(),
+    FilesSetting::Toolbar.label(),
+    FilesSetting::View.label(),
+    FilesSetting::SortBy.label(),
+    FilesSetting::Order.label(),
+    FilesSetting::FoldersFirst.label(),
+    FilesSetting::HideAppEndings.label(),
+    FilesSetting::HideKnownEndings.label(),
+    FilesSetting::HiddenItems.label(),
+    FilesSetting::Thumbnails.label(),
+    FilesSetting::FolderContents.label(),
+    FilesSetting::ConfirmTrash.label(),
+    FilesSetting::UnmountWhenClosed.label(),
+];
+
 /// Every category, in sidebar order, with its panes.
 ///
 /// The single definition of the whole surface. The order is the reading order
@@ -792,6 +815,20 @@ pub const CATEGORIES: &[CategoryRow] = &[
                         and accent palettes for a theme to choose among.",
             },
             settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Files,
+        label: "Files",
+        icon: IconKind::FileManager,
+        group: Group::Look,
+        panes: &[PaneRow {
+            pane: Pane::Files,
+            name: tairix_browse::SETTINGS_PANE,
+            title: "Files",
+            icon: None,
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Files)),
+            settings: FILES_SETTINGS,
         }],
     },
     CategoryRow {

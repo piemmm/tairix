@@ -558,7 +558,7 @@ impl View {
             document
                 .copy_range(0..document.len().min(HEAD_LEN), &mut head)
                 .ok()
-                .and_then(|()| Display::of(&head, &name, recorded))
+                .and_then(|()| Display::of(&head, document.len() as u64, &name, recorded))
         };
         Self {
             editor,

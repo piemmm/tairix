@@ -13,6 +13,8 @@ use crate::hex::HexLayout;
 /// signature either reads, with room to spare.
 pub const HEAD_LEN: usize = 64;
 
+const _: () = assert!(HEAD_LEN >= tairix_image::RECOGNITION_HEAD);
+
 /// A window's read-only display of its document.
 #[derive(Debug)]
 pub enum Display {
@@ -23,13 +25,14 @@ pub enum Display {
 }
 
 impl Display {
-    /// The display a document called `name`, whose volume records `recorded`
-    /// as its filetype, opening with `head` offers, if any, shown at once.
+    /// The display a document `length` bytes long called `name`, whose
+    /// volume records `recorded` as its filetype, opening with `head` offers,
+    /// if any, shown at once.
     #[must_use]
-    pub fn of(head: &[u8], name: &str, recorded: Option<Filetype>) -> Option<Self> {
+    pub fn of(head: &[u8], length: u64, name: &str, recorded: Option<Filetype>) -> Option<Self> {
         CodeDisplay::of(head)
             .map(Self::Code)
-            .or_else(|| DataDisplay::of(head, name, recorded).map(Self::Data))
+            .or_else(|| DataDisplay::of(head, length, name, recorded).map(Self::Data))
     }
 
     /// Whether the window shows its document this way.

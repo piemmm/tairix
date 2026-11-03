@@ -466,7 +466,11 @@ impl ImageRenderService {
             .filter(Document::is_complete)
             .ok_or(IconRefusal::MalformedRequest)?
             .into_bytes();
-        let format = tairix_image::sniff(&bytes).ok_or(IconRefusal::UnsupportedFormat)?;
+        // A sprite area is recognised by no signature and holds many
+        // pictures, so it is not the one picture a thumbnail shows.
+        let format = tairix_image::sniff(&bytes)
+            .filter(|format| *format != ImageFormat::Sprite)
+            .ok_or(IconRefusal::UnsupportedFormat)?;
         let (limits, fit) = (view_limits(), FitBox::new(side, side));
         let refused = |err: DecodeError| icon_decode_refusal(&err);
         let peak =
@@ -3246,8 +3250,8 @@ pub enum ViewFormat {
     Bmp,
     /// Windows icon or cursor: a directory of entries.
     Ico,
-    /// RISC OS sprite area, which carries no signature and is reached only
-    /// by being named.
+    /// RISC OS sprite area, which carries no signature: recognised by the
+    /// length its header states, or named.
     Sprite,
     /// Tag Image File Format: a document of pages.
     Tiff,
@@ -3431,10 +3435,9 @@ impl ImageRenderService {
             .filter(|document| document.is_complete())
             .ok_or(ViewRefusal::NoDocument)?;
         self.view = None;
-        // Nothing in the raster sniff order opens with `<` or whitespace,
-        // so a document no signature names is either the vector format or
-        // nothing this service reads — and a sprite area, which carries no
-        // signature either, is reached only by being named.
+        // Nothing the raster sniff recognises opens with `<` or whitespace,
+        // so a document it does not recognise is either the vector format or
+        // nothing this service reads.
         let vector = match format {
             Some(format) => format.raster().is_none(),
             None => tairix_image::sniff(&held.bytes).is_none(),
@@ -3854,12 +3857,12 @@ const fn view_decode_refusal(err: &DecodeError) -> ViewRefusal {
 /// Open the document already uploaded to the worker, answering what it
 /// declares about its entries.
 ///
-/// `format` names the format to read the document as, in place of reading
-/// its own signature. That is how a caller reaches a format
-/// [`tairix_image::sniff`] cannot recognise — a RISC OS sprite area carries
-/// no signature at all, so naming it is the only door — and the named
-/// format's own parser still validates the bytes, so naming the wrong one
-/// is refused rather than misread.
+/// `format` names the format to read the document as, in place of
+/// recognising it from its content. That is how a caller reaches a typed
+/// document [`tairix_image::sniff`] does not recognise — a RISC OS sprite area
+/// whose header does not state the file's length — and the named format's
+/// own parser still validates the bytes, so naming the wrong one is refused
+/// rather than misread.
 ///
 /// The document is sent first with [`send_document`], or streamed with
 /// [`upload_document`] by a caller that does not hold it whole. Opening takes the bytes from the worker's upload

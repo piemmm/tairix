@@ -315,6 +315,7 @@ pub const ICON_KINDS: [IconKind; core::mem::variant_count::<IconKind>()] = [
     IconKind::ArchiveArcFs,
     IconKind::TextCsv,
     IconKind::TextMakefile,
+    IconKind::FileManager,
 ];
 
 /// A source of on-disk SVG icon assets, one per [`IconKind`].

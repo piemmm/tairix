@@ -2335,20 +2335,49 @@ A pick has a purpose. `PickPurpose::Open` chooses an existing file,
 delegated as the requester is handed any document: read-write where its
 signed manifest edits documents and the user may write the file, read-only
 otherwise, and `FilePicked` says which. `PickPurpose::Save { suggested,
-endings }` chooses where a
-document goes: the picker adds a name field, offering `suggested`, and
-Save/Cancel beneath its listing. `endings` (`SaveEndings`: at most eight,
-each a `.` or `,` and up to seven ASCII letters or digits, matched without
-regard to case) are what the requester can write: a name ending otherwise is
-refused in the field, and one with no ending at all takes the first, so a name
-the save would refuse never becomes an empty file; none holds the name to
-nothing. A name no entry shows is created
-exclusively, a name that already names a file is replaced only after the
-user answers the question put in the field, a name naming a folder goes
-into it, and the chosen file is delegated write-only with the session's own
-reach. The session opens the file on its file worker, never on the loop that
-owes the user a frame, and the picker stays up until that open is answered,
-so a refused save is stated where the user made it. After `FilePicked` the
+endings }` chooses where a document goes, in the **Save panel**
+(`plans/SAVE-DIALOG.md`): a dialog of the requesting window holding the
+document's picture on a plate, its name — `suggested`, the stem selected so
+typing keeps the ending — *Where* (the folder it goes in) and, when the
+requester writes more than one ending, *Format*, labelled down one edge, a
+status line under them for progress and refusals, and *Show Folders*, *Cancel*
+and *Save* in the band along the foot. *Where* and *Format* open session menus
+(`ChainOwner::Picker`, taken down with the pick when the window it is for
+goes): *Where* the folder shown, the user's own places and the last save's
+folder; *Format* each ending by its type's name. *Show Folders* opens the
+shared `lib/browse` listing above the panel — half an open's height, or what
+the work area leaves — growing the dialog upward so the panel stays where it
+was, and adds *New Folder*, which names a folder in the name field (*Save*
+reading *Create*), makes it on the file worker and goes into it; `Escape` or
+*Cancel* goes back to the document's name, while the folder is being made too.
+The panel's picture and the listing's draw through the session's artwork, as
+the file manager's do, and the plate and the buttons light under the pointer.
+`Tab` and `Shift+Tab` walk every control, the listing wearing the Focus Ring
+while it holds the keyboard; `Enter` or `Space` presses the button or opens
+the menu the keyboard is on; in the listing `Up` and `Down` move the
+selection, `Enter` goes into a folder or takes a file's name, and `Backspace`
+climbs; and `Ctrl+Shift+N` names a new folder while the folders show.
+`endings` (`SaveEndings`: at most eight, each a `.` or `,` and up to seven
+ASCII letters or digits, matched without regard to case) are what the requester
+can write: a name ending otherwise is refused in the field, and one with no
+ending at all takes the first, so a name the save would refuse never becomes an
+empty file; none holds the name to nothing. A name no entry shows is created
+exclusively, a name that already names a file is replaced only after the user
+answers the question the picker puts in an alert of its own, a name naming a
+folder goes into it, a name a folder or a link already holds where no listing
+showed it is refused rather than replaced, and the chosen file is delegated
+write-only with the session's own reach. The session opens the file on its
+file worker, never on the loop that owes the user a frame, and the picker stays
+up until that open is answered, so a refused save is stated where the user made
+it.
+
+The panel's picture is the document itself: a press on it carried past the
+drag slop is a **save drag** on the seat's one drag carrier, its plate showing
+the picture and the name. Dropped on the desktop, the document is saved into
+the folder there — a folder icon's or the `Desktop` folder — and dropped on an
+application's window, into the folder that application names in answer to the
+save offer below; anywhere else it saves nothing. Either way the save is the
+panel's own, the replace question included. After `FilePicked` the
 app may pull the chosen file's name once with `TakePickedName` — a title for
 a document its delegation cannot name. A pick concludes only through
 `WindowServer::conclude_pick`, which records that name; delivered as a plain
@@ -2362,12 +2391,39 @@ carried on, so it cannot begin anywhere else. Only the file's *name*, the
 filetype its volume records and the count cross: the session matches them
 against each slot's declared types as the pointer
 passes, lighting a slot that takes it, and the dragging application keeps the
-file. The drag concludes with one `WindowEvent::DragEnded { dropped }`;
-dropped on a taker, `TakeDropTarget` yields that application's entry binary
+file. The drag concludes with one `WindowEvent::DragEnded { window_id, site }`;
+dropped on a taker (`DropSite::Application`), `TakeDropTarget` yields that
+application's entry binary
 and whether it edits its documents, and the dragging application opens the
 file for it exactly as its own "Open With" would. So no path and no authority
 reaches the session, and nothing is opened on an application's word. Like a
 pick, a drag concludes only through `WindowServer::conclude_drag`.
+
+A save drag is **offered** to the window under the pointer:
+`WindowEvent::SaveOffered { window_id, serial, x, y }`, numbered, at a
+window-local point inside the window, which its owner answers with
+`SaveOfferAnswer { window_id, serial, accepts }` — shown on the pointer only
+while that offer still stands there. `WindowEvent::SaveOfferEnded { window_id,
+serial, dropped }` says the offer left the window or, with `dropped` the
+window-local point, was dropped on it — the point carried so the answer
+depends on no offer the owner missed; dropped, the owner answers once with
+`SaveInto { window_id, serial, location }`, a
+`fd_grant_location` handle of a folder it opened itself minted to the session,
+or zero to decline. The session creates the file under its own authority, so it
+redeems the location bound to the window's attested owner — one any other
+process minted is refused — and consumes every location whatever it answers;
+each folder taken or refused is on the audit trail (`SAVE_INTO_TAKEN` 20034,
+`SAVE_INTO_REFUSED` 20033, the caller and the reason but never the path).
+Offers are numbered across the seat's drags, so a late answer to a save the
+user gave up on is never taken for the next one's. A drop waits for its answer
+with the panel saying so and *Cancel* still heard, so nothing is timed; the
+window closing ends the wait, and a drop the window could not be told of — the
+name refused, the window gone or held by an alert — ends it at once. A save
+the user cancels after its file was made takes the file back, removing the
+name only while it still names that file. The file manager answers for its
+folder tiles and its listings, lighting the tile under the pointer, and
+declines what stores nothing or may not be written: the root view, the storage
+catalog and a folder on a read-only volume.
 
 A **window of another application** takes a drop exactly as that
 application's slot does: the session finds the window's attested owner among

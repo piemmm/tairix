@@ -88,7 +88,7 @@ use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::{
     GroupId, GroupRecord, IdentityTableBuilder, ProcessId, UserId, UserRecord,
 };
-use tairix_log::{Event, FieldValue, Sink};
+use tairix_log::{Event, FieldValue, Level, Sink};
 use tairix_reclaim::{FreeMemorySource, MemoryPressure, Unpressured};
 
 use crate::hwtree_store::HwTreeStore;
@@ -101,10 +101,11 @@ use crate::volume_service::{RuntimeVolumeService, UnavailableFs, VOLUME_SERVICE}
 use tairix_kernel_core::callreg::EndpointVanishObserver as _;
 use tairix_kernel_core::VolumeService as _;
 
-/// One audited decision: its event id, the volume it names, its cause, and
-/// the counts it carries.
+/// One audited decision: its event id, its level, the volume it names, its
+/// cause, and the counts it carries.
 struct Audit {
     id: u32,
+    level: Level,
     volume: Option<String>,
     texts: Vec<(String, String)>,
     counts: Vec<(String, u64)>,
@@ -134,6 +135,7 @@ impl Sink for Recorded {
             .collect();
         let audit = Audit {
             id: event.id.0,
+            level: event.level,
             volume: texts
                 .iter()
                 .find(|(key, _)| key == "volume")
@@ -150,6 +152,17 @@ static SINK: Recorded = Recorded(Mutex::new(Vec::new()));
 /// The causes of every `id` event audited for `volume`, in order.
 fn audited(id: u32, volume: &str) -> Vec<Option<String>> {
     audited_text(id, volume, "cause")
+}
+
+/// The level of every `id` event audited for `volume`, in order.
+fn audited_levels(id: u32, volume: &str) -> Vec<Level> {
+    SINK.0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|audit| audit.id == id && audit.volume.as_deref() == Some(volume))
+        .map(|audit| audit.level)
+        .collect()
 }
 
 /// The `key` text of every `id` event audited for `volume`, in order.
@@ -3977,6 +3990,16 @@ fn a_held_descriptor_holds_its_volume_attached_scenario(
     );
     first.outcome.expect("the volume attaches");
     let held = Descriptor::open(0, "/Storage/held1/hello.txt", OpenFlags::READ).expect("opens");
+    let idle = VolumeDetachRequest {
+        volume_id: identity,
+        mode: DetachMode::Idle,
+    };
+    assert_eq!(VOLUME_SERVICE.detach(&idle, &admin()), Err(Errno::Busy));
+    assert_eq!(
+        audited_levels(DETACH_REFUSED, "held1"),
+        [Level::Info],
+        "an idle detach that found the volume in use is answered, not a warning"
+    );
     let plain = VolumeDetachRequest {
         volume_id: identity,
         mode: DetachMode::Plain,
@@ -3984,11 +4007,19 @@ fn a_held_descriptor_holds_its_volume_attached_scenario(
     assert_eq!(VOLUME_SERVICE.detach(&plain, &admin()), Err(Errno::Busy));
     assert_eq!(
         audited(DETACH_REFUSED, "held1"),
-        [Some(String::from("nodes_open"))]
+        [
+            Some(String::from("nodes_open")),
+            Some(String::from("nodes_open"))
+        ]
+    );
+    assert_eq!(
+        audited_levels(DETACH_REFUSED, "held1"),
+        [Level::Info, Level::Warn],
+        "the user's own detach is still a refusal"
     );
     assert_eq!(
         audited_count(DETACH_REFUSED, "held1", "open_nodes"),
-        [Some(1)]
+        [Some(1), Some(1)]
     );
     let mut buf = [0u8; 16];
     let n = held.read(0, &mut buf).expect("the refusal changed nothing");

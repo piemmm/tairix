@@ -12,14 +12,22 @@ use alloc::vec::Vec;
 use tairix_abi::Errno;
 use tairix_browse::{BrowseError, Unnamable};
 
-use super::{
-    listing_refusal, parse, unlistable_reason, Command, Ladder, Role, Start, UsageError, USAGE,
-};
+use tairix_browse::mount::MOUNT_SWITCH;
+use tairix_window::DESKTOP_ROLE_SWITCH;
 
-/// The [`Start`] a command line produced, or the test's own failure text when
-/// it was a usage error or the short help.
+use super::{listing_refusal, parse, unlistable_reason, Command, Ladder, Start, UsageError, USAGE};
+
+/// `args` as the session spells them: the desktop-role switch, then `args`.
+fn from_desktop<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    core::iter::once(DESKTOP_ROLE_SWITCH)
+        .chain(args.iter().copied())
+        .collect()
+}
+
+/// The [`Start`] the session's command line ending in `args` produced, or the
+/// test's own failure text when it was a usage error or the short help.
 fn start_of(args: &[&str]) -> Start {
-    match parse(args) {
+    match parse(&from_desktop(args)) {
         Ok(Command::Open(start)) => start,
         other => panic!("expected an open command, got {other:?}"),
     }
@@ -156,7 +164,7 @@ fn a_control_character_in_the_argument_is_refused_and_escaped_when_stated() {
 #[test]
 fn a_second_operand_is_refused_rather_than_ignored() {
     assert_eq!(
-        parse(&["/Users/ada", "/System"]),
+        parse(&from_desktop(&["/Users/ada", "/System"])),
         Err(UsageError::ExtraOperand("/System".to_string()))
     );
     assert_eq!(
@@ -186,7 +194,7 @@ fn a_refused_option_is_worded_as_getopt_words_it() {
 
 #[test]
 fn a_long_option_may_be_abbreviated() {
-    assert_eq!(start_of(&["--desk"]).role, Role::Desktop);
+    assert_eq!(parse(&["--desk"]), Ok(Command::Open(Start::default())));
     assert_eq!(parse(&["--he"]), Ok(Command::Help));
 }
 
@@ -204,46 +212,85 @@ fn the_reserved_short_help_switches_win_wherever_they_appear() {
     // The banner names the operand and the switches, so a usage refusal tells
     // the caller the whole grammar.
     assert!(USAGE.contains("[path]"));
-    assert!(USAGE.contains(tairix_window::DESKTOP_ROLE_SWITCH));
+    assert!(USAGE.contains(DESKTOP_ROLE_SWITCH));
+    assert!(USAGE.contains(MOUNT_SWITCH));
     assert!(USAGE.contains("-h"));
 }
 
+/// The file manager runs only as the session starts it: nothing a caller can
+/// spell without the one shared switch runs it, which is what keeps the
+/// desktop's own instance the only one.
 #[test]
-fn the_ordinary_role_is_the_default_and_the_switch_is_the_only_way_into_the_other() {
-    // Nothing a caller can spell reaches the component role except the one
-    // shared switch, which is what keeps the desktop's own instance unique.
-    assert_eq!(start_of(&[]).role, Role::Window);
-    assert_eq!(start_of(&["/Users/ada"]).role, Role::Window);
-    assert_eq!(
-        start_of(&[tairix_window::DESKTOP_ROLE_SWITCH]).role,
-        Role::Desktop
-    );
-    // The switch is an option, so `--` puts it out of reach: past the end of
-    // options it is an operand, and one that is not a path at that.
-    let after_end = start_of(&["--", tairix_window::DESKTOP_ROLE_SWITCH]);
-    assert_eq!(after_end.role, Role::Window);
-    assert!(after_end.refused.is_some());
+fn a_command_line_without_the_desktop_switch_is_refused() {
+    for args in [
+        &[][..],
+        &["/Users/ada"][..],
+        &[MOUNT_SWITCH, "/Users/ada/wb.adf"][..],
+        // Past the end of options the switch is an operand, so `--` puts it
+        // out of reach.
+        &["--", DESKTOP_ROLE_SWITCH][..],
+    ] {
+        assert_eq!(parse(args), Err(UsageError::NotByDesktop), "{args:?}");
+    }
+    assert!(UsageError::NotByDesktop.to_string().contains("desktop"));
+    assert_eq!(parse(&["-h"]), Ok(Command::Help), "help needs no switch");
 }
 
+/// At bring-up the session names nothing and no window opens; starting the
+/// file manager again to show a place, it names the place, in either order.
 #[test]
-fn a_component_takes_no_starting_location() {
-    // It opens no window until one is asked for, so a location names nothing.
-    // Refused outright rather than dropped, in either order.
+fn the_session_names_what_the_file_manager_shows_as_it_starts() {
+    let bare = start_of(&[]);
+    assert_eq!(bare, Start::default());
+    assert!(!bare.shows_at_start(), "bring-up opens no window");
+    let shown = start_of(&["/Users/ada"]);
     assert_eq!(
-        parse(&[tairix_window::DESKTOP_ROLE_SWITCH, "/Users/ada"]),
-        Err(UsageError::LocationInDesktopRole("/Users/ada".to_string()))
+        shown.location,
+        Some(vec!["Users".to_string(), "ada".to_string()])
     );
+    assert!(shown.shows_at_start());
     assert_eq!(
-        parse(&["/Users/ada", tairix_window::DESKTOP_ROLE_SWITCH]),
-        Err(UsageError::LocationInDesktopRole("/Users/ada".to_string()))
+        parse(&["/Users/ada", DESKTOP_ROLE_SWITCH]),
+        Ok(Command::Open(shown))
     );
-    let refusal = UsageError::LocationInDesktopRole("/Users/ada".to_string()).to_string();
-    assert!(refusal.contains("/Users/ada"));
-    assert!(refusal.contains(tairix_window::DESKTOP_ROLE_SWITCH));
-    // And it starts nowhere: no location, and nothing refused to report.
-    let component = start_of(&[tairix_window::DESKTOP_ROLE_SWITCH]);
-    assert_eq!(component.location, None);
-    assert_eq!(component.refused, None);
+    assert!(
+        start_of(&["/Users/../ada"]).shows_at_start(),
+        "a refused place opens among the user's own files"
+    );
+    assert!(
+        !start_of(&[MOUNT_SWITCH, "/Users/ada/wb.adf"]).shows_at_start(),
+        "an image's window opens once it is attached"
+    );
+}
+
+/// `--mount` makes the operand an image to attach and show: an accepted one
+/// opens no window of its own, a refused one opens at the user's files saying
+/// why, and it is never a starting location.
+#[test]
+fn a_mount_names_an_image_to_attach_and_opens_no_place_of_its_own() {
+    let start = start_of(&[MOUNT_SWITCH, "//Users//ada/wb.adf"]);
+    assert_eq!(start.image.as_deref(), Some("/Users/ada/wb.adf"));
+    assert_eq!((start.location, start.refused), (None, None));
+    assert_eq!(
+        start_of(&["/Users/ada/wb.adf", "--mou"]).image.as_deref(),
+        Some("/Users/ada/wb.adf"),
+        "in either order, and by any unambiguous prefix"
+    );
+    let refused = start_of(&[MOUNT_SWITCH, "/Users/ada/../wb.adf"]);
+    assert_eq!((refused.image, refused.location), (None, None));
+    let reason = refused.refused.expect("a traversal states its reason");
+    assert!(reason.starts_with("disk image"), "{reason}");
+    assert!(reason.contains("\"..\""), "{reason}");
+    assert_eq!(
+        parse(&from_desktop(&[MOUNT_SWITCH])),
+        Err(UsageError::NoImage)
+    );
+    assert!(UsageError::NoImage.to_string().contains(MOUNT_SWITCH));
+    assert_eq!(
+        start_of(&["/Users/ada/wb.adf"]).image,
+        None,
+        "a plain operand is a place"
+    );
 }
 
 #[test]

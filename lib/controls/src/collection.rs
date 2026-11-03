@@ -43,12 +43,13 @@ use crate::button::{Button, ButtonAction};
 use crate::damage;
 use crate::paint::{
     bead_band, centre_x, centred_in, dominant_color, draw_outline, foreground, grab_after,
-    heavy_contrast, icon_slot_side, inset, key_activation, line_budget, paint_bead, paint_chevron,
-    paint_count_badge, paint_drop_target, paint_emphasised, paint_icon_slot, paint_row, paint_run,
-    paint_surface_plate, plate_border, plate_corner, plate_frame_inset, pointer_activation,
-    press_latch, rail_thickness, resolve_bead, role_font, route_pointer, row_content_span,
-    run_width, seam_thickness, seam_width, surface_rect, text_plate_height, to_i32, withheld,
-    ArtworkTone, BeadShape, ChevronDir, ChromeLayer, PlateInterior, TextAlign, TextBlock,
+    ground_fill, heavy_contrast, icon_slot_side, inset, key_activation, line_budget, paint_bead,
+    paint_chevron, paint_count_badge, paint_drop_target, paint_emphasised, paint_focus_ring,
+    paint_icon_slot, paint_row, paint_run, paint_surface_plate, plate_border, plate_corner,
+    plate_frame_inset, pointer_activation, press_latch, rail_thickness, resolve_bead, role_font,
+    route_pointer, row_content_span, run_width, seam_thickness, seam_width, surface_rect,
+    text_plate_height, to_i32, withheld, ArtworkTone, BeadShape, ChevronDir, ChromeLayer,
+    PlateInterior, TextAlign, TextBlock,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -1421,10 +1422,39 @@ impl TableHeader {
         let Some((content_x, content_w)) = row_content_span(scale, theme, x, w, h) else {
             return;
         };
-        for (i, &(cx, cw)) in column_spans(content_x, content_w, columns, self.columns.len())
-            .iter()
-            .enumerate()
-        {
+        let spans = column_spans(content_x, content_w, columns, self.columns.len());
+        if spans.is_empty() {
+            return;
+        }
+        let palette = theme.palette();
+        // A heading band of its own, a hairline under it parting it from the
+        // rows it names.
+        surface.fill_rect(
+            x,
+            y,
+            w,
+            h,
+            ground_fill(theme, palette.surface_raised, ChromeLayer::Inlay).into(),
+        );
+        let hairline = scale.scale_length(1).clamp(1, h);
+        surface.fill_rect(
+            x,
+            y.saturating_add(h - hairline),
+            w,
+            hairline,
+            palette.border.into(),
+        );
+        let divider = h / 4;
+        for &(cx, _) in spans.iter().skip(1) {
+            surface.fill_rect(
+                cx,
+                y.saturating_add(divider),
+                hairline,
+                h.saturating_sub(divider.saturating_mul(2)),
+                palette.border.into(),
+            );
+        }
+        for (i, &(cx, cw)) in spans.iter().enumerate() {
             let Some(column) = self.columns.get(i) else {
                 break;
             };
@@ -1551,15 +1581,7 @@ impl TableHeader {
 
         // The keyboard focus ring, distinct from the sort emphasis above.
         if focused {
-            draw_outline(
-                surface,
-                x,
-                y,
-                w,
-                h,
-                plate_border(theme, scale).max(1),
-                Color::from(palette.rim_active),
-            );
+            paint_focus_ring(surface, (x, y, w, h), scale, theme);
         }
     }
 
@@ -2560,15 +2582,7 @@ impl IconTile {
         // mark takes to arrive would read as a border flickering under the
         // pointer. Presence follows selection, never the mark's strength.
         if self.state.focus.focused && !self.wears_selection_mark() {
-            draw_outline(
-                surface,
-                x,
-                y,
-                w,
-                h,
-                plate_border(theme, scale).max(1),
-                Color::from(palette.rim_active),
-            );
+            paint_focus_ring(surface, (x, y, w, h), scale, theme);
         }
     }
 
@@ -2766,9 +2780,11 @@ impl TileParts {
 /// Stacked, the band sits a half inset below the picture and a half inset
 /// above the tile's foot, and the picture takes the height that leaves, capped
 /// by the width. Beside, the picture stands at the tile's leading edge as tall
-/// as the tile allows, and one line of name runs from it to the trailing edge,
-/// left-aligned and centred on the picture. Either way a cell sized with
-/// [`height_for`](Self::height_for) draws exactly the picture it was sized
+/// as the tile allows, never closer than a half inset to either side, and one
+/// line of name runs from it to the trailing edge, left-aligned and centred on
+/// the picture. Either way a cell sized with
+/// [`height_for`](Self::height_for), and at least
+/// [`width_for`](Self::width_for) wide, draws exactly the picture it was sized
 /// for. The one statement of the tile's geometry: the side an owner rasterises
 /// artwork at, the band a rename field is laid over, and the pixels the tile
 /// paints all read it.
@@ -2826,6 +2842,19 @@ impl TileLayout {
                 .max(self.band_height(scale, theme))
                 .saturating_add(gap.saturating_mul(2)),
         }
+    }
+
+    /// The narrowest tile that draws a `side`-pixel picture: the picture and
+    /// the inset either side of it, stacked, or the half inset either side,
+    /// beside, with no room left for the name.
+    #[must_use]
+    pub fn width_for(self, side: u32, scale: Scale, theme: &Theme) -> u32 {
+        let (pad, gap) = tile_insets(scale, theme);
+        let inset = match self.arrangement {
+            Arrangement::Stacked(_) => pad,
+            Arrangement::Beside => gap,
+        };
+        side.saturating_add(inset.saturating_mul(2))
     }
 
     /// The pixel side of the square picture a tile occupying `bounds` draws.
@@ -3049,7 +3078,9 @@ impl TileLayout {
         let (x, y, w, h) = surface_rect(bounds)?;
         let (pad, gap) = tile_insets(scale, theme);
         if self.arrangement == Arrangement::Beside {
-            let side = h.checked_sub(gap.saturating_mul(2))?.min(w);
+            let side = h
+                .checked_sub(gap.saturating_mul(2))?
+                .min(w.checked_sub(gap.saturating_mul(2))?);
             return (side > 0).then(|| (x.saturating_add(gap), y.saturating_add(gap), side));
         }
         let avail_w = w.checked_sub(pad.saturating_mul(2))?;

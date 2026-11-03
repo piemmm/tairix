@@ -4,7 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
-use tairix_abi::window_ipc::{PointerAction, ToolOver, WindowEvent, WindowSizeState};
+use tairix_abi::window_ipc::{DragAt, PointerAction, ToolOver, WindowEvent, WindowSizeState};
 use tairix_abi::Errno;
 
 use crate::holdback::{Delivery, HoldBack, HOLD_BACK_CAPACITY};
@@ -798,4 +798,88 @@ fn a_tool_windows_move_end_is_never_shed() {
     }
     assert_eq!(held.depth(MAILBOX, Some(WINDOW)), HOLD_BACK_CAPACITY);
     assert_eq!(drain_events(&mut held)[0], tool_moved(WINDOW, 1, true));
+}
+
+fn drag_over(window_id: u64, serial: u32) -> WindowEvent {
+    WindowEvent::DragOver {
+        window_id,
+        serial,
+        at: DragAt::Window { x: serial, y: 1 },
+        shift: false,
+    }
+}
+
+fn offered(window_id: u64, serial: u32) -> WindowEvent {
+    WindowEvent::SaveOffered {
+        window_id,
+        serial,
+        x: serial,
+        y: 1,
+    }
+}
+
+/// A drag's reports and a save's offers are numbered, and only the newest is
+/// worth an answer, so a run of each folds to it: a long drag over a slow
+/// window holds one report, not one per batch of motion.
+#[test]
+fn a_run_of_drag_reports_or_save_offers_folds_to_the_newest() {
+    let mut held = HoldBack::new();
+    let last = u32::try_from(HOLD_BACK_CAPACITY * 2).expect("the hold-back capacity is small");
+    for serial in 1..=last {
+        hold(&mut held, drag_over(WINDOW, serial));
+    }
+    assert_eq!(drain_events(&mut held), [drag_over(WINDOW, last)]);
+    for serial in 1..=3 {
+        hold(&mut held, offered(WINDOW, serial));
+    }
+    hold(&mut held, typed(WINDOW));
+    hold(&mut held, offered(WINDOW, 4));
+    assert_eq!(
+        drain_events(&mut held),
+        [offered(WINDOW, 3), typed(WINDOW), offered(WINDOW, 4)],
+        "a key between them is an occurrence the run does not fold across"
+    );
+}
+
+/// The end of a save offer carries where it was dropped, so it withdraws the
+/// offers still held and is itself always owed.
+#[test]
+fn a_save_offers_end_withdraws_the_offers_held_before_it() {
+    let mut held = HoldBack::new();
+    hold(&mut held, offered(WINDOW, 1));
+    hold(&mut held, typed(WINDOW));
+    hold(&mut held, offered(WINDOW, 2));
+    let ended = WindowEvent::SaveOfferEnded {
+        window_id: WINDOW,
+        serial: 2,
+        dropped: Some((2, 1)),
+    };
+    hold(&mut held, ended);
+    assert_eq!(drain_events(&mut held), [typed(WINDOW), ended]);
+
+    let left = |serial| WindowEvent::SaveOfferEnded {
+        window_id: WINDOW,
+        serial,
+        dropped: None,
+    };
+    hold(&mut held, left(3));
+    hold(&mut held, ended);
+    hold(&mut held, left(5));
+    assert_eq!(
+        drain_events(&mut held),
+        [left(5)],
+        "a later end supersedes every one before it: the pick they ended is over"
+    );
+    let dropped = |serial| WindowEvent::SaveOfferEnded {
+        window_id: WINDOW,
+        serial,
+        dropped: Some((2, 1)),
+    };
+    hold(&mut held, dropped(6));
+    hold(&mut held, dropped(8));
+    assert_eq!(
+        drain_events(&mut held),
+        [dropped(8)],
+        "a drop held for a pick given up on is never answered"
+    );
 }

@@ -434,9 +434,9 @@ fn what_runs_is_each_attested_slot_and_each_child_launched_from_a_bundle() {
         slot(2, None),
     ];
     let mut launched = LaunchTable::new();
-    launched.record(7, "Calc", "/System/Applications/calc.app/Run");
-    launched.record(8, "Write", "/System/Applications/write.app/Run");
-    launched.record(9, "a program", "/System/Commands/ls");
+    launched.record(7, "Calc", "/System/Applications/calc.app/Run", 0);
+    launched.record(8, "Write", "/System/Applications/write.app/Run", 0);
+    launched.record(9, "a program", "/System/Commands/ls", 0);
     assert_eq!(
         running_bundles(&strip, &launched),
         BTreeSet::from([

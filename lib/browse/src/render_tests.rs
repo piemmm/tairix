@@ -38,6 +38,7 @@ fn facts(free: Option<u64>, availability: MountAvailability) -> VolumeFacts {
         availability,
         owner: None,
         volume_id: [0; 16],
+        read_only: false,
     }
 }
 

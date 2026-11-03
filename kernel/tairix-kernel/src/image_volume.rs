@@ -64,8 +64,8 @@ use tairix_sync::SpinLock;
 use tairix_util::fallible::concatenated;
 
 use super::{
-    mount_flags, reattach, record, record_retired, records_owners, storage_path, take_down,
-    volume_node, GivenUp, RuntimeVolumeService, Wiring, Writes,
+    mount_flags, reattach, record, record_retired, records_owners, refusal_level, storage_path,
+    take_down, volume_node, GivenUp, RuntimeVolumeService, Wiring, Writes,
 };
 use crate::hwtree_node_ids::IMAGE_VOLUMES_NODE_ID;
 use crate::served_volume::{Granted, ServedVolume};
@@ -1578,7 +1578,7 @@ impl RuntimeVolumeService {
         match claimed {
             // A refusal leaves it owed, unclaimed, as its claim lets go.
             Some(claimed) => {
-                let _ = self.detach_claimed(audit, claimed, false, "abandoned");
+                let _ = self.detach_claimed(audit, claimed, DetachMode::Plain, "abandoned");
             }
             None => self.abandon(volume),
         }
@@ -1648,7 +1648,7 @@ impl RuntimeVolumeService {
             Err(entry) => self.retire_served(Some(&entry.served), image_node(entry.node)),
             Ok((claimed, cause)) => {
                 // A failure leaves it stuck, owed, as its claim lets go.
-                let _ = self.detach_claimed(wiring.audit, claimed, true, cause);
+                let _ = self.detach_claimed(wiring.audit, claimed, DetachMode::Force, cause);
             }
         }
         true
@@ -2078,8 +2078,7 @@ impl RuntimeVolumeService {
             }
             Claimed::of(self, entry, by, since)
         };
-        let force = mode.forces(claimed.writes == Writes::Lost);
-        self.detach_claimed(audit, claimed, force, cause)
+        self.detach_claimed(audit, claimed, mode, cause)
     }
 
     /// Detach `claimed`, for `cause`, as [`Self::detach_image`] does.
@@ -2087,7 +2086,7 @@ impl RuntimeVolumeService {
         &self,
         audit: &'static (dyn Sink + Sync),
         claimed: Claimed<'_>,
-        force: bool,
+        mode: DetachMode,
         cause: &'static str,
     ) -> Result<(), Errno> {
         let Claimed {
@@ -2097,10 +2096,11 @@ impl RuntimeVolumeService {
             name,
             writes,
         } = claimed;
+        let force = mode.forces(writes == Writes::Lost);
         let refused = |why: &'static str, errno: Errno| {
             record(
                 audit,
-                Level::Warn,
+                refusal_level(mode, errno),
                 IMAGE_DETACH_REFUSED,
                 DETACH_REFUSED,
                 name.as_str(),

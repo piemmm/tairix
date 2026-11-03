@@ -10,6 +10,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 
 use tairix_abi::{BundleId, Errno};
+use tairix_browse::FilerPreferences;
 use tairix_controls::{ScrollModel, ScrollRange};
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconArtwork;
@@ -40,6 +41,9 @@ use tairix_abi::zone::ZoneName;
 pub(crate) struct Answered<'a> {
     /// The desktop's own settings document.
     pub(crate) settings: &'a DesktopSettings,
+    /// The file manager's settings, from the same document, or `None` while
+    /// they have not been read.
+    pub(crate) files: Option<&'a FilerPreferences>,
     /// The cursor sets the desktop answered with.
     pub(crate) cursor_sets: &'a [CursorSetId],
     /// The shipped pictures the desktop answered with.
@@ -92,6 +96,7 @@ impl Answered<'_> {
     fn documents(&self) -> Documents<'_> {
         Documents {
             settings: self.settings,
+            files: self.files,
             cursor_sets: self.cursor_sets,
             catalog: self.catalog,
             savers: self.savers,
@@ -246,6 +251,15 @@ impl Body {
             Self::Form(form) => form.adopt(settings),
             // None reads the desktop's document: one states the registry's
             // own words, the others the machine's volumes and readings.
+            Self::Statement | Self::Volumes(_) | Self::Facts(_) => {}
+        }
+    }
+
+    /// Adopt the file manager's settings the session now holds, or `None`
+    /// where they could not be read.
+    pub(crate) fn adopt_files(&mut self, files: Option<&FilerPreferences>) {
+        match self {
+            Self::Form(form) => form.adopt_files(files),
             Self::Statement | Self::Volumes(_) | Self::Facts(_) => {}
         }
     }

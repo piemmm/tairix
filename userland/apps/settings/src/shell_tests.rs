@@ -2266,6 +2266,212 @@ fn a_choice_refused_before_it_was_asked_reverts_to_what_was_answered() {
     );
 }
 
+/// A choice on the Files pane posts the file manager's keys alone, through
+/// its own apply, and touches nothing of the desktop's own document.
+#[test]
+fn a_files_choice_posts_the_file_managers_keys_alone() {
+    let theme = theme();
+    let mut shell = shell_at(Location {
+        category: Category::Files,
+        pane: Pane::Files,
+    });
+    assert!(shell.adopt_files(Some(tairix_browse::FilerPreferences::default())));
+    shell.focus_content_for_test(WIDE, Scale::ONE, &theme);
+    let mut sink = damage();
+    press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    press(&mut shell, Key::Named(NamedKey::Down), &theme, &mut sink);
+    let chosen = press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    assert_eq!(chosen.document(), None, "no desktop document is posted");
+    let ShellOutcome::ApplyFiles(document) = chosen else {
+        panic!("a Files choice applies the file manager's settings: {chosen:?}");
+    };
+    assert!(document.contains("files.start = desktop"), "{document}");
+    assert!(
+        document.lines().all(|line| line.starts_with("files.")),
+        "only the file manager's own keys: {document}"
+    );
+    assert_eq!(
+        shell
+            .form_for_test()
+            .and_then(crate::form::Form::files)
+            .map(|files| files.start),
+        Some(tairix_browse::Start::Desktop)
+    );
+}
+
+/// What the session answers for the file manager's settings is what the
+/// Files rows show, and a refused choice goes back to it.
+#[test]
+fn a_refused_files_choice_reverts_to_what_the_store_holds() {
+    let theme = theme();
+    let mut shell = shell_at(Location {
+        category: Category::Files,
+        pane: Pane::Files,
+    });
+    let answered = tairix_browse::FilerPreferences {
+        unmount_when_closed: false,
+        ..tairix_browse::FilerPreferences::default()
+    };
+    let shown = |shell: &Shell| {
+        shell
+            .form_for_test()
+            .and_then(crate::form::Form::files)
+            .copied()
+    };
+    assert!(shell.adopt_files(Some(answered)));
+    assert_eq!(shown(&shell), Some(answered));
+    shell.focus_content_for_test(WIDE, Scale::ONE, &theme);
+    let mut sink = damage();
+    press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    press(&mut shell, Key::Named(NamedKey::Down), &theme, &mut sink);
+    press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    assert_ne!(shown(&shell), Some(answered));
+    assert!(
+        shell.adopt_files(Some(answered)),
+        "the store's account of a refusal puts the row back"
+    );
+    assert_eq!(shown(&shell), Some(answered));
+}
+
+/// With nothing read of the file manager's settings the Files rows offer no
+/// choice, so nothing is posted from values nobody read; the pane asks for a
+/// reading, and the one that lands makes them choosable.
+#[test]
+fn unread_files_rows_post_nothing_until_a_reading_lands() {
+    let theme = theme();
+    let mut shell = shell_at(Location {
+        category: Category::Files,
+        pane: Pane::Files,
+    });
+    assert!(shell.files_wanted(), "the pane asks for its reading");
+    assert!(rows(&shell)
+        .iter()
+        .all(|row| matches!(row.control(), tairix_controls::FieldControl::Unmeasured(_))));
+    shell.focus_content_for_test(WIDE, Scale::ONE, &theme);
+    let mut sink = damage();
+    press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    press(&mut shell, Key::Named(NamedKey::Down), &theme, &mut sink);
+    let chosen = press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    assert!(!matches!(chosen, ShellOutcome::ApplyFiles(_)), "{chosen:?}");
+
+    assert!(shell.adopt_files(Some(tairix_browse::FilerPreferences::default())));
+    assert!(!shell.files_wanted());
+    assert!(rows(&shell)
+        .iter()
+        .all(|row| matches!(row.control(), tairix_controls::FieldControl::Combo(_))));
+}
+
+/// A Files choice is the newest the rows asked for: the pane built again
+/// before its answer lands shows it rather than the reading it replaced, an
+/// answer confirming it rebuilds nothing, and the next choice carries it.
+#[test]
+fn a_files_choice_outlives_a_rebuild_before_its_answer() {
+    let theme = theme();
+    let files = Location {
+        category: Category::Files,
+        pane: Pane::Files,
+    };
+    let mut shell = shell_at(files);
+    assert!(shell.adopt_files(Some(tairix_browse::FilerPreferences::default())));
+    shell.focus_content_for_test(WIDE, Scale::ONE, &theme);
+    let mut sink = damage();
+    press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    press(&mut shell, Key::Named(NamedKey::Down), &theme, &mut sink);
+    let chosen = press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    assert!(matches!(chosen, ShellOutcome::ApplyFiles(_)), "{chosen:?}");
+
+    let elsewhere = Location {
+        category: Category::Appearance,
+        pane: Pane::Appearance,
+    };
+    shell.go_to_for_test(elsewhere, WIDE, Scale::ONE, &theme, &mut sink);
+    shell.go_to_for_test(files, WIDE, Scale::ONE, &theme, &mut sink);
+    let asked = tairix_browse::FilerPreferences {
+        start: tairix_browse::Start::Desktop,
+        ..tairix_browse::FilerPreferences::default()
+    };
+    assert_eq!(
+        shell
+            .form_for_test()
+            .and_then(crate::form::Form::files)
+            .copied(),
+        Some(asked),
+        "the rows show what they asked for, not the reading it replaced"
+    );
+    assert!(
+        !shell.adopt_files(Some(asked)),
+        "an answer confirming the choice rebuilds nothing"
+    );
+    let next = shell
+        .form_mut_for_test()
+        .map(|form| form.choose_for_test(0, 1, 0));
+    let Some(crate::form::FormOutcome::ApplyFiles(document)) = next else {
+        panic!("turning the rail on applies the file manager's settings: {next:?}");
+    };
+    assert!(document.contains("files.start = desktop"), "{document}");
+    assert!(document.contains("files.places = true"), "{document}");
+}
+
+/// A Files answer with a newer apply behind it predates the rows and changes
+/// nothing; one taken but then unread leaves them on what they asked for; one
+/// refused and unread takes their choices away until a reading lands, which
+/// the pane asks for when it next comes on show.
+#[test]
+fn a_files_answer_is_adopted_only_when_it_is_the_newest_and_was_read() {
+    let theme = theme();
+    let files = Location {
+        category: Category::Files,
+        pane: Pane::Files,
+    };
+    let mut shell = shell_at(files);
+    let held = tairix_browse::FilerPreferences::default();
+    let other = tairix_browse::FilerPreferences {
+        places: true,
+        ..held
+    };
+    let shown = |shell: &Shell| {
+        shell
+            .form_for_test()
+            .and_then(crate::form::Form::files)
+            .copied()
+    };
+    let refused = tairix_wallpaper::ApplyOutcome::Refused(String::from("refused"));
+    let taken = tairix_wallpaper::ApplyOutcome::Applied;
+    assert!(shell.adopt_files(Some(held)));
+    assert!(!shell.adopt_files_answer(true, &refused, Some(other)));
+    assert!(!shell.adopt_files_answer(false, &taken, None));
+    assert_eq!(shown(&shell), Some(held));
+    assert!(shell.adopt_files_answer(false, &refused, Some(other)));
+    assert_eq!(shown(&shell), Some(other));
+    assert!(shell.adopt_files_answer(false, &refused, None));
+    assert_eq!(shown(&shell), None);
+    assert!(!shell.files_wanted(), "not read again on the spot");
+    let mut sink = damage();
+    let elsewhere = Location {
+        category: Category::Appearance,
+        pane: Pane::Appearance,
+    };
+    shell.go_to_for_test(elsewhere, WIDE, Scale::ONE, &theme, &mut sink);
+    shell.go_to_for_test(files, WIDE, Scale::ONE, &theme, &mut sink);
+    assert!(shell.files_wanted());
+}
+
+/// Choosing the value a Files row already holds asks nothing of the session.
+#[test]
+fn choosing_the_files_value_held_posts_nothing() {
+    let theme = theme();
+    let mut shell = shell_at(Location {
+        category: Category::Files,
+        pane: Pane::Files,
+    });
+    assert!(shell.adopt_files(Some(tairix_browse::FilerPreferences::default())));
+    shell.focus_content_for_test(WIDE, Scale::ONE, &theme);
+    let mut sink = damage();
+    press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    let chosen = press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    assert!(!matches!(chosen, ShellOutcome::ApplyFiles(_)), "{chosen:?}");
+}
+
 /// The pointer pair is a real control now, so both rows must draw a choice
 /// list rather than the statement that stood where they are.
 #[test]
@@ -2650,6 +2856,7 @@ fn a_composed_panes_settings_are_the_labels_its_rows_actually_draw() {
         (Pane::Screensaver, Composition::Screensaver),
         (Pane::LockScreen, Composition::LockScreen),
         (Pane::Language, Composition::Language),
+        (Pane::Files, Composition::Files),
     ] {
         let row = pane.locate().expect("a located pane").1;
         assert_eq!(row.settings, composition.labels().as_slice(), "{pane:?}");

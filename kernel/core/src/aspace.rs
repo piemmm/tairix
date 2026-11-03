@@ -3255,7 +3255,11 @@ impl AddressSpaceRegistry {
 
     /// Mint `recipient` a one-shot handle telling `location`, where one of
     /// `grantor`'s descriptors points (`fd_grant_location`), under
-    /// [`Self::mint_fd_delegation`]'s handle discipline and bound.
+    /// [`Self::mint_fd_delegation`]'s bound.
+    ///
+    /// Each is a handle of its own, though an identical one is pending: a
+    /// location answers one request, so two answers naming the same folder
+    /// must not share the handle the first redemption consumes.
     ///
     /// # Errors
     ///
@@ -3269,12 +3273,6 @@ impl AddressSpaceRegistry {
         location: FileLocation,
     ) -> Result<u64, Errno> {
         let entry = self.fd_delegations.entry(recipient).or_default();
-        if let Some(handle) = existing_handle(&entry.by_handle, |held| {
-            held.between(instance, grantor, grantor_instance)
-                && matches!(&held.conveys, Conveyed::Location(told) if *told == location)
-        }) {
-            return Ok(handle);
-        }
         Self::mint_pending(
             entry,
             PendingFdDelegation {
@@ -3286,18 +3284,15 @@ impl AddressSpaceRegistry {
         )
     }
 
-    /// Record `pending` in a recipient's table, which held no delegation
-    /// conveying the same.
+    /// Record `pending` in a recipient's table, within the per-grantor bound
+    /// that keeps a grantor repeating one call from growing it without limit.
     ///
-    /// A delegation still pending conveys exactly one right: "open this node
-    /// as this frozen identity", or "know where it is". Re-granting it while
-    /// the first is unredeemed adds nothing — descriptors here carry no
-    /// position (every read names its own offset), so a second identical
-    /// descriptor would be indistinguishable from the first — and letting it
-    /// append would let a grantor grow the recipient's kernel-side table
-    /// without limit by repeating one call, so the callers hand back the
-    /// pending handle instead. Once redeemed the entry is consumed, so a later
-    /// grant of the same file legitimately mints afresh.
+    /// A file delegation still pending conveys exactly one right, "open this
+    /// node as this frozen identity", so its caller hands back an identical
+    /// pending one rather than mint another: descriptors here carry no
+    /// position (every read names its own offset), so a second would be
+    /// indistinguishable from the first. Once redeemed the entry is consumed,
+    /// so a later grant of the same file legitimately mints afresh.
     fn mint_pending(
         entry: &mut TaskFdDelegations,
         pending: PendingFdDelegation,

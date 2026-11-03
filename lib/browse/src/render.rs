@@ -288,10 +288,10 @@ pub fn list_header_rect<S: DirectorySource>(
 /// real icon through: for every grid tile the renderer classifies the entry to
 /// an [`IconKind`] — naming the bundle itself as well when the entry is one —
 /// and asks `artwork` for a pre-rasterised surface at the tile's icon slot,
-/// falling back to the built-in glyph when it returns `None`. The list view is
-/// text-only and never consults it. A caller with no artwork cache passes
-/// [`NoArtwork`](tairix_icon::NoArtwork), which always returns `None` (every
-/// tile then draws its built-in glyph).
+/// falling back to the built-in glyph when it returns `None`; the list view's
+/// rows ask it alike, at their own side. A caller with no artwork cache
+/// passes [`NoArtwork`](tairix_icon::NoArtwork), which always returns `None`
+/// (every tile then draws its built-in glyph).
 ///
 /// The window's own ground is `theme`'s surface on its ground: solid on an
 /// opaque theme, and the translucent glass on a frosted one.

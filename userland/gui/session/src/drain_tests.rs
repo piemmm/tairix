@@ -20,7 +20,7 @@ use tairix_window::DragConclusion;
 use tairix_wm::{Compositor, InputEvent, InputResponse, Point};
 
 use crate::clipboard::SessionClipboard;
-use crate::drag::{DragEnd, DragPlace, DragSurface, OwedReport, SlotAnswer};
+use crate::drag::{DragEnd, DragPlace, DragSurface, ItemsEnd, OwedReport, SlotAnswer};
 use crate::drain::{
     adopt_unlocks, drain_authorising, drain_away, drain_locked, Routed, Seat, SeatDrain,
     SeatRouter, SeatWake,
@@ -436,11 +436,11 @@ fn a_carried_drag_is_the_drains_until_its_press_comes_up() {
     );
     assert_eq!(
         program.drags,
-        [DragEnd {
+        [DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Application(alloc::boxed::Box::new(editor())),
             refused: None,
-        }]
+        })]
     );
     assert!(!desk.shell.drag_active());
     assert_eq!(
@@ -527,11 +527,11 @@ fn a_drag_ends_with_nothing_dropped_off_a_taker_or_on_escape() {
     let _ = desk.wake(&mut pointer, &mut keyboard(&[]), &mut program);
     assert_eq!(
         program.drags,
-        [DragEnd {
+        [DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: None,
-        }],
+        })],
         "the slot claims nothing"
     );
 
@@ -549,11 +549,11 @@ fn a_drag_ends_with_nothing_dropped_off_a_taker_or_on_escape() {
     );
     assert_eq!(
         program.drags,
-        [DragEnd {
+        [DragEnd::Items(ItemsEnd {
             source: 9,
             ended: DragConclusion::Nothing,
             refused: None,
-        }]
+        })]
     );
     assert!(program.reports.is_empty(), "a slot is never reported");
 }

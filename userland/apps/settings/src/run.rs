@@ -68,10 +68,11 @@ mod program {
     };
     use tairix_abi::{Errno, ProcId};
     use tairix_abi::{NoticeTopic, WaitSetOp, WaitSourceKind};
-    use tairix_appconf::Registry;
+    use tairix_appconf::{Document, Registry};
     use tairix_appdata::RtHost;
     use tairix_audio::live::{live_captures, RtAudio};
     use tairix_audio::stream::{devices, set_control, ControlQueue, DeviceControl};
+    use tairix_browse::FilerPreferences;
     use tairix_controls::zone::{self, Minute};
     use tairix_controls::{Keystroke, PlaceDialog, PlaceOutcome, PressTiming};
     use tairix_geometry::{Rect, Region, Scale};
@@ -93,7 +94,9 @@ mod program {
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
     use tairix_tz::ZoneInfo;
     use tairix_users::{Salt, SALT_LEN};
-    use tairix_wallpaper::{ApplyOutcome, CatalogItem, DesktopSettings, PINBOARD_PUBLISHER};
+    use tairix_wallpaper::{
+        ApplyOutcome, ApplyTo, CatalogItem, DesktopSettings, PINBOARD_PUBLISHER,
+    };
     use tairix_window::app::{self, AppWindow, Fitted, Wake, WindowPane, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, scroll_input_events,
@@ -162,45 +165,51 @@ mod program {
     /// status has come back.
     const COOLING_TOKEN: u64 = app::FIRST_APP_TOKEN + 10;
 
+    /// The wait-set token of the file manager's applier: the desktop session
+    /// has answered an apply of the file manager's settings. Its own desk,
+    /// so neither apply evicts the other's answer.
+    const FILES_TOKEN: u64 = app::FIRST_APP_TOKEN + 11;
+
+    /// The wait-set token of the file manager's settings reader: a reading
+    /// of what the desktop publishes of them has landed.
+    const FILES_READ_TOKEN: u64 = app::FIRST_APP_TOKEN + 12;
+
     /// How often the Raspberry Pi pane re-reads the cooling service while it
     /// is on show: the temperature moves on its own.
     const COOLING_REFRESH_NS: u64 = 2_000_000_000;
 
-    /// The desktop settings in effect for the launching user, so every
-    /// composed row opens on what the desktop is actually drawn with.
+    /// The desktop session's settings document for the launching user, or
+    /// `None`, stated on `stderr`, where it could not be read.
     ///
-    /// Read from the desktop session's **published** app-data scope, which
-    /// is the sanctioned channel one application reaches another's values
-    /// through: this program names the publisher and nothing else, so the
-    /// request shape it sends cannot ask for the session's private
-    /// settings. It never writes them — an application publishes only its
-    /// own scope — so a change is a request the session decides on.
-    ///
-    /// A desktop that has published **nothing** means the documented
-    /// defaults and is not an error: a fresh account has never applied a
-    /// setting. Anything else that stops the document being used says so on
-    /// `stderr` rather than showing values the user cannot account for.
-    fn settings_in_effect() -> DesktopSettings {
-        let document = match tairix_appdata::read_published(&mut RtHost, PINBOARD_PUBLISHER) {
-            Ok(document) => document,
+    /// Its **published** app-data scope: the one channel an application
+    /// reaches another's values through, so the request cannot name the
+    /// session's private settings. A desktop that has published nothing
+    /// answers the empty document, which is the documented defaults.
+    fn published() -> Option<Document> {
+        match tairix_appdata::read_published(&mut RtHost, PINBOARD_PUBLISHER) {
+            Ok(document) => Some(document),
             Err(err) => {
                 app::report(
                     APP_NAME,
-                    format_args!(
-                        "the desktop's settings could not be read ({err:?}); showing the \
-                     defaults"
-                    ),
+                    format_args!("the desktop's settings could not be read ({err:?})"),
                 );
-                return DesktopSettings::default();
+                None
             }
-        };
-        let (settings, refused) = DesktopSettings::load(&document);
+        }
+    }
+
+    /// The settings `R` `document` holds — the desktop's own or the file
+    /// manager's — each value this build does not accept stated and left at
+    /// its default.
+    fn in_effect<R: Registry>(document: &Document) -> R {
+        let (settings, refused) = R::load(document);
         for key in refused {
             app::report(
                 APP_NAME,
                 format_args!(
-                    "the desktop publishes a `{key}` this build does not accept; showing \
-                 its default"
+                    "the desktop publishes a `{}` this build does not accept; showing \
+                 its default",
+                    R::name(key)
                 ),
             );
         }
@@ -215,23 +224,45 @@ mod program {
     /// a disk commit — and freeze it again on every further choice. The loop
     /// encodes the document (in memory, and refusable on the spot), submits,
     /// and adopts the answer on the wake it nudges.
-    type Applier = tairix_rt::work::Worker<(), PinboardDocument, Applied>;
+    type Applier = tairix_rt::work::Worker<(), PinboardDocument, Applied<DesktopSettings>>;
 
-    /// What an apply answered, and the settings the rows are to show for it.
-    struct Applied {
+    /// The file manager's applier, as [`Applier`] is the desktop's.
+    type FilesApplier = tairix_rt::work::Worker<(), PinboardDocument, Applied<FilerPreferences>>;
+
+    /// What an apply answered, and the settings `R` the rows are to show for
+    /// it.
+    struct Applied<R> {
         outcome: ApplyOutcome,
-        /// What the store holds once the session answered; `None` for an
-        /// apply refused before it was asked, which changed nothing.
-        in_effect: Option<DesktopSettings>,
+        /// What the store holds once the session answered; `None` where it
+        /// could not be read, or for an apply refused before it was asked.
+        in_effect: Option<R>,
     }
 
-    /// The worker's body: the shared apply client's one round trip, then the
-    /// store's own account of what it holds.
-    fn send_apply(_: &mut (), document: &mut PinboardDocument) -> Applied {
+    /// The desktop applier's body: the shared apply client's one round trip,
+    /// then the store's own account of what it holds.
+    fn send_apply(_: &mut (), document: &mut PinboardDocument) -> Applied<DesktopSettings> {
         Applied {
-            outcome: tairix_wallpaper::apply(*document),
-            in_effect: Some(settings_in_effect()),
+            outcome: tairix_wallpaper::apply(ApplyTo::Desktop, *document),
+            in_effect: published().as_ref().map(in_effect),
         }
+    }
+
+    /// The file manager's applier's body, as [`send_apply`] is the
+    /// desktop's.
+    fn send_files_apply(_: &mut (), document: &mut PinboardDocument) -> Applied<FilerPreferences> {
+        Applied {
+            outcome: tairix_wallpaper::apply(ApplyTo::Files, *document),
+            in_effect: published().as_ref().map(in_effect),
+        }
+    }
+
+    /// The file manager's settings read alone, for Files rows that hold none:
+    /// an apply's answer brings their reading otherwise.
+    type FilesReader = tairix_rt::work::Worker<(), (), Option<FilerPreferences>>;
+
+    /// The file manager's settings reader's body.
+    fn read_files(_: &mut (), (): &mut ()) -> Option<FilerPreferences> {
+        published().as_ref().map(in_effect)
     }
 
     /// The mount walk: the system mount table, read through the one shared
@@ -1014,12 +1045,46 @@ mod program {
         }
     }
 
+    /// The file manager's settings reader's client half: one reading at a
+    /// time, as every reading desk holds.
+    struct FilesRead<'a> {
+        worker: &'a FilesReader,
+        pending: bool,
+    }
+
+    impl FilesRead<'_> {
+        /// Ask for a reading if the Files rows want one and none is
+        /// outstanding, answering whether anything on screen changed.
+        fn request(&mut self, shell: &mut Shell) -> bool {
+            if self.pending || !shell.files_wanted() {
+                return false;
+            }
+            if self.worker.submit(()) {
+                return self.settle(shell);
+            }
+            self.pending = true;
+            false
+        }
+
+        /// Adopt a landed reading, answering whether the rows changed.
+        fn settle(&mut self, shell: &mut Shell) -> bool {
+            let Some(files) = self.worker.collect() else {
+                return false;
+            };
+            self.pending = false;
+            shell.adopt_files(files)
+        }
+    }
+
     /// Ask the desktop session to adopt `document`, off the event loop.
     ///
     /// A document this program cannot even encode is refused here, where it
     /// costs nothing; everything else goes to the worker and is answered on
     /// a later wake.
-    fn submit_apply(applier: &Applier, document: &str) -> Option<Applied> {
+    fn submit_apply<R: Send + 'static>(
+        applier: &tairix_rt::work::Worker<(), PinboardDocument, Applied<R>>,
+        document: &str,
+    ) -> Option<Applied<R>> {
         match PinboardDocument::new(document) {
             // With no worker the call was made on this thread and its answer
             // is already on the desk.
@@ -1039,18 +1104,32 @@ mod program {
     /// durable value is what the store answered with, read on the worker, so
     /// a refusal puts the row back rather than leaving a value on screen the
     /// next login would not restore.
-    fn adopt_apply(shell: &mut Shell, Applied { outcome, in_effect }: Applied) {
+    fn adopt_apply(shell: &mut Shell, Applied { outcome, in_effect }: Applied<DesktopSettings>) {
         report_apply(&outcome);
-        match in_effect {
-            Some(settings) => shell.adopt_settings(settings),
-            None => shell.revert_settings(),
+        match (in_effect, outcome) {
+            (Some(settings), _) => shell.adopt_settings(settings),
+            // Taken, so the rows already show what the store holds of them.
+            (None, ApplyOutcome::Applied) => {}
+            (None, _) => shell.revert_settings(),
         }
+    }
+
+    /// Adopt what the desktop answered of the file manager's settings, as
+    /// [`adopt_apply`] does its own, answering whether the Files rows were
+    /// rebuilt; `behind` where a newer apply was already on its way.
+    fn adopt_files_apply(
+        shell: &mut Shell,
+        behind: bool,
+        Applied { outcome, in_effect }: Applied<FilerPreferences>,
+    ) -> bool {
+        report_apply(&outcome);
+        shell.adopt_files_answer(behind, &outcome, in_effect)
     }
 
     /// State an apply the desktop did not make.
     fn report_apply(outcome: &ApplyOutcome) {
         match outcome {
-            ApplyOutcome::Applied | ApplyOutcome::Applying => {}
+            ApplyOutcome::Applied => {}
             ApplyOutcome::Refused(reason) => {
                 app::report(
                     APP_NAME,
@@ -1512,6 +1591,9 @@ mod program {
         /// The reader chose a setting: ask the desktop to adopt it, then
         /// re-read what it holds.
         Apply(String),
+        /// The reader chose one of the file manager's settings: likewise,
+        /// through the file manager's own apply.
+        ApplyFiles(String),
         /// The reader asked for a system task: ask the desktop to perform it.
         Authorise(Box<SystemTask>),
         /// The desktop said what came of the task it was asked for.
@@ -1650,12 +1732,15 @@ mod program {
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::FolderPicked { .. }
             | WindowEvent::DragOver { .. }
-            | WindowEvent::DragEnded { .. } => Acted::Idle,
+            | WindowEvent::DragEnded { .. }
+            | WindowEvent::SaveOffered { .. }
+            | WindowEvent::SaveOfferEnded { .. } => Acted::Idle,
         }
     }
 
     /// Drain every target the desktop queued for this instance and show the
-    /// last pane it named, answering whether the window moved.
+    /// last pane it named, answering whether the window moved; a pane shown
+    /// brings the window forward under the activation the hand-over lent.
     ///
     /// One event may cover several targets, and another may arrive while
     /// this drain is running, so it loops until the queue answers empty. A
@@ -1685,7 +1770,7 @@ mod program {
                         );
                     }
                 }
-                Ok(Some(Target::Path(path))) => {
+                Ok(Some(Target::Path(path) | Target::Image(path))) => {
                     app::report(
                         APP_NAME,
                         format_args!(
@@ -1703,13 +1788,24 @@ mod program {
                         ),
                     );
                 }
-                Ok(None) => return moved,
+                Ok(None) => break,
                 Err(err) => {
                     app::report(APP_NAME, format_args!("cannot take an open target: {err}"));
-                    return moved;
+                    break;
                 }
             }
         }
+        if moved {
+            if let Some(id) = surface.window.window_id() {
+                if let Err(err) = surface.window.client().activate_window(id) {
+                    app::report(
+                        APP_NAME,
+                        format_args!("the window could not be brought forward ({err})"),
+                    );
+                }
+            }
+        }
+        moved
     }
 
     /// What the loop does with what the shell concluded.
@@ -1718,6 +1814,7 @@ mod program {
             ShellOutcome::Idle => Acted::Idle,
             ShellOutcome::Changed => Acted::Changed,
             ShellOutcome::Apply(document) => Acted::Apply(document),
+            ShellOutcome::ApplyFiles(document) => Acted::ApplyFiles(document),
             ShellOutcome::Authorise(task) => Acted::Authorise(task),
             ShellOutcome::LockScreen => Acted::LockScreen,
             ShellOutcome::ChooseZone => Acted::ChooseZone,
@@ -1750,6 +1847,7 @@ mod program {
                 matches!(
                     outcome,
                     ShellOutcome::Apply(_)
+                        | ShellOutcome::ApplyFiles(_)
                         | ShellOutcome::Authorise(_)
                         | ShellOutcome::LockScreen
                         | ShellOutcome::ChooseZone
@@ -1858,6 +1956,10 @@ mod program {
     struct Desks<'a> {
         /// The desktop apply an immediate row posts.
         applier: &'a Applier,
+        /// The file manager's apply a Files row posts.
+        files: &'a FilesApplier,
+        /// The file manager's settings, read for Files rows that hold none.
+        files_read: FilesRead<'a>,
         /// The mount-table walk the Storage pane lists.
         mounts: MountWalk<'a>,
         /// The machine's configuration and facts the General panes state.
@@ -1884,6 +1986,11 @@ mod program {
         fn of(workers: &'a Workers) -> Self {
             Self {
                 applier: &workers.applier,
+                files: &workers.files,
+                files_read: FilesRead {
+                    worker: &workers.files_read,
+                    pending: false,
+                },
                 mounts: MountWalk {
                     worker: &workers.mounts,
                     pending: false,
@@ -1930,6 +2037,9 @@ mod program {
         /// desks that only read are left to stop.
         fn see_out(&mut self) {
             while let Some(Applied { outcome, .. }) = self.applier.wait() {
+                report_apply(&outcome);
+            }
+            while let Some(Applied { outcome, .. }) = self.files.wait() {
                 report_apply(&outcome);
             }
             self.sound.see_out();
@@ -2147,7 +2257,8 @@ mod program {
     ///
     /// An answer lands a new set of rows, so the pane is redrawn rather than
     /// the one row a choice reported — but for the cooling service's, which
-    /// lands every two seconds and reports the rows it moved.
+    /// lands every two seconds and reports the rows it moved, and a Files
+    /// answer that rebuilt nothing.
     fn adopt_answers(
         surface: &mut SettingsWindow,
         shell: &mut Shell,
@@ -2160,6 +2271,20 @@ mod program {
             adopt_apply(shell, applied);
             landed = true;
         }
+        // Every landed answer is taken and only the last adopted, and that
+        // only with no newer apply on its way, so whatever order they land in
+        // the newest is the one that stands.
+        let mut newest = None;
+        while let Some(applied) = desks.files.collect() {
+            if let Some(older) = newest.replace(applied) {
+                landed |= adopt_files_apply(shell, true, older);
+            }
+        }
+        if let Some(applied) = newest {
+            let behind = desks.files.outstanding();
+            landed |= adopt_files_apply(shell, behind, applied);
+        }
+        landed |= desks.files_read.settle(shell);
         landed |= desks.mounts.settle(shell);
         landed |= desks.machine.settle(shell);
         landed |= desks.network.settle(shell);
@@ -2332,16 +2457,20 @@ mod program {
                 }
                 Carried::Answered
             }
-            Acted::Apply(document) => {
-                // Submitted, not awaited: the answer arrives on the wake
-                // the worker nudges. With no worker to serve it the call
-                // was made here and its answer is already in hand.
-                let applied = submit_apply(desks.applier, document);
-                let landed = applied.is_some();
-                if let Some(applied) = applied {
-                    adopt_apply(shell, applied);
-                }
-                Carried::answered_if(landed)
+            // Submitted, not awaited: the answer arrives on the wake the
+            // worker nudges. With no worker to serve it the call was made here
+            // and its answer is already in hand.
+            Acted::Apply(document) => Carried::answered_if(
+                submit_apply(desks.applier, document)
+                    .map(|applied| adopt_apply(shell, applied))
+                    .is_some(),
+            ),
+            Acted::ApplyFiles(document) => {
+                let behind = desks.files.outstanding();
+                Carried::answered_if(
+                    submit_apply(desks.files, document)
+                        .is_some_and(|applied| adopt_files_apply(shell, behind, applied)),
+                )
             }
             Acted::Sound { device_id, control } => {
                 Carried::answered_if(desks.sound.ask(shell, *device_id, *control))
@@ -2411,6 +2540,7 @@ mod program {
     ) -> bool {
         desks.cooling.request(shell, seat, damage);
         let landed = [
+            desks.files_read.request(shell),
             desks.mounts.request(shell),
             desks.machine.request(shell),
             desks.network.request(shell),
@@ -3030,12 +3160,14 @@ mod program {
 
     /// Every worker desk this window runs, started and owned together.
     ///
-    /// One desk per kind of work rather than one shared desk: the eight
-    /// carry different jobs and a latest-wins desk would let any of them
-    /// evict another's answer. Each would otherwise stall the window for a
-    /// round trip.
+    /// One desk per kind of work rather than one shared desk: they carry
+    /// different jobs and a latest-wins desk would let any of them evict
+    /// another's answer. Each would otherwise stall the window for a round
+    /// trip.
     struct Workers {
         applier: Arc<Applier>,
+        files: Arc<FilesApplier>,
+        files_read: Arc<FilesReader>,
         mounts: Arc<Mounts>,
         machine: Arc<Machine>,
         network: Arc<Network>,
@@ -3102,6 +3234,16 @@ mod program {
                     (set, APPLY_TOKEN),
                     "apply",
                 ),
+                files: started(
+                    FilesApplier::new(send_files_apply, (), tairix_rt::sync::WorkerWake::create()),
+                    (set, FILES_TOKEN),
+                    "file-manager apply",
+                ),
+                files_read: started(
+                    FilesReader::new(read_files, (), tairix_rt::sync::WorkerWake::create()),
+                    (set, FILES_READ_TOKEN),
+                    "file-manager-readings",
+                ),
                 mounts: started(
                     Mounts::new(read_mounts, (), tairix_rt::sync::WorkerWake::create()),
                     (set, MOUNTS_TOKEN),
@@ -3144,9 +3286,11 @@ mod program {
         }
 
         /// Each desk's wake and the token it is watched under.
-        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64); 10] {
+        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64); 12] {
             [
                 (self.applier.wake(), APPLY_TOKEN),
+                (self.files.wake(), FILES_TOKEN),
+                (self.files_read.wake(), FILES_READ_TOKEN),
                 (self.mounts.wake(), MOUNTS_TOKEN),
                 (self.machine.wake(), MACHINE_TOKEN),
                 (self.network.wake(), NETWORK_TOKEN),
@@ -3208,6 +3352,8 @@ mod program {
         /// individually, in the one place that owns them all.
         fn drop(&mut self) {
             self.applier.stop();
+            self.files.stop();
+            self.files_read.stop();
             self.mounts.stop();
             self.machine.stop();
             self.network.stop();
@@ -3299,15 +3445,21 @@ mod program {
         // them.
         let board = tairix_procinfo::platform_compatible(&IpcTransport)
             .map_or_else(|_| Board::default(), |platform| Board::of(&platform));
+        // One read: both registries the rows show are in the one document.
+        let document = published();
+        let settings = document
+            .as_ref()
+            .map_or_else(DesktopSettings::default, in_effect);
         // An empty registry would leave the window nothing to show at all, so
         // it ends fail-loud rather than opening a blank frame.
-        let Some(mut shell) = Shell::new(settings_in_effect(), board) else {
+        let Some(mut shell) = Shell::new(settings, board) else {
             return app::fail(
                 APP_NAME,
                 EXIT_CHANNEL_LOST,
                 "the settings registry holds no categories",
             );
         };
+        shell.adopt_files(document.as_ref().map(in_effect));
         let workers = match Workers::started(binding.set()) {
             Ok(workers) => workers,
             Err(code) => return code,

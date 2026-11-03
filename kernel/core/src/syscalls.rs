@@ -691,6 +691,16 @@ struct CarveTerms {
     hand_over: bool,
 }
 
+/// Whether an attribute call reads a node's attributes or changes them, which
+/// decides the identity it acts as.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum AttrCall {
+    /// `fs_attr_get` and `fs_attr_list`.
+    Read,
+    /// `fs_attr_set` and `fs_attr_remove`.
+    Change,
+}
+
 /// The node a filesystem-backed descriptor is bound to and the identity every
 /// operation on it acts as.
 ///
@@ -754,7 +764,8 @@ impl<'a> NodeAuthority<'a> {
         }
     }
 
-    /// `handle` as a metadata operation acts on it: as the caller, whatever
+    /// `handle` as a metadata change, or an attribute read through a
+    /// descriptor not open for reading, acts on it: as the caller, whatever
     /// identity the descriptor carries, so a child handed a descriptor cannot
     /// change the node with its opener's rights, but still a grant — barred
     /// from the owner's exemption and bounded by its ceiling.
@@ -4884,14 +4895,22 @@ where
             .map_err(crate::fs::VfsError::to_errno)
     }
 
-    /// Run `op` on the node the descriptor `fd` holds as an attribute call
-    /// acts on it ([`NodeAuthority::as_caller`]). The catalog stores no
-    /// attributes and answers `on_catalog`.
+    /// Run `op` on the node the descriptor `fd` holds as an attribute call of
+    /// kind `call` acts on it, once that authority is admitted, so nothing of
+    /// the caller's is copied in or staged for a call it may not make. The
+    /// catalog stores no attributes.
+    ///
+    /// A read through a descriptor open for reading acts as a byte read
+    /// through it does ([`NodeAuthority::of`]): a document's type is read as
+    /// its bytes are, so a holder handed one with no filesystem capability of
+    /// its own can still tell what it is. A change, and a read through a
+    /// descriptor not open for reading, act as the caller
+    /// ([`NodeAuthority::as_caller`]).
     fn with_attr_node<R>(
         &self,
         caller: &CallerContext<'_>,
         fd: u32,
-        on_catalog: Errno,
+        call: AttrCall,
         op: impl FnOnce(&NodeHandle, &Acting<'_>) -> Result<R, Errno>,
     ) -> Result<R, Errno> {
         let entry = self
@@ -4901,13 +4920,21 @@ where
             .ok_or(Errno::NotFound)?;
         if let OpenBacking::Catalog(catalog) = &entry.backing {
             admit_catalog(caller, catalog)?;
-            return Err(on_catalog);
+            return Err(match call {
+                AttrCall::Read => Errno::NotSupported,
+                AttrCall::Change => Errno::ReadOnly,
+            });
         }
         // A resource, pipe or pty carries no attributes of a node.
         let handle = entry.node().ok_or(Errno::OutOfRange)?;
-        let authority = NodeAuthority::as_caller(handle, caller);
+        let authority = match call {
+            AttrCall::Read if entry.flags.is_read() => {
+                NodeAuthority::of(&entry, caller).ok_or(Errno::OutOfRange)?
+            }
+            AttrCall::Read | AttrCall::Change => NodeAuthority::as_caller(handle, caller),
+        };
         authority.admit()?;
-        op(handle, &authority.acting())
+        op(authority.handle, &authority.acting())
     }
 
     /// Copy a symbolic-link target of `len` bytes from the caller's address
@@ -14197,16 +14224,19 @@ where
         value_out_len: usize,
     ) -> SyscallResult {
         // The key grammar and the read-permission rule are the secured VFS's,
-        // applied under the caller's attested identity.
-        let key = self.copy_attr_key_in(caller, key, key_len)?;
-        // Stage at most the fixed value bound: no stored value can exceed
-        // it, and a smaller caller buffer must be reported as too small by
-        // the service (never truncated), so the stage mirrors the caller's
-        // own capacity up to that bound.
-        let mut stage =
-            filled(value_out_len.min(FS_ATTR_VALUE_MAX), 0u8).ok_or(Errno::OutOfMemory)?;
-        let read = self.with_attr_node(caller, fd, Errno::NotSupported, |handle, who| {
-            self.filesystem.attr_get_node(handle, who, &key, &mut stage)
+        // applied under the identity a read through the descriptor acts as.
+        let (stage, read) = self.with_attr_node(caller, fd, AttrCall::Read, |handle, who| {
+            let name = self.copy_attr_key_in(caller, key, key_len)?;
+            // Stage at most the fixed value bound: no stored value can exceed
+            // it, and a smaller caller buffer must be reported as too small by
+            // the service (never truncated), so the stage mirrors the caller's
+            // own capacity up to that bound.
+            let mut stage =
+                filled(value_out_len.min(FS_ATTR_VALUE_MAX), 0u8).ok_or(Errno::OutOfMemory)?;
+            let read = self
+                .filesystem
+                .attr_get_node(handle, who, &name, &mut stage)?;
+            Ok((stage, read))
         })?;
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(value_out), &stage[..read])
@@ -14231,11 +14261,11 @@ where
         if value_len > FS_ATTR_VALUE_MAX {
             return Err(Errno::LengthOutOfRange);
         }
-        let key = self.copy_attr_key_in(caller, key, key_len)?;
-        let mut payload = filled(value_len, 0u8).ok_or(Errno::OutOfMemory)?;
-        self.copy_in_user(caller, value, &mut payload)?;
-        self.with_attr_node(caller, fd, Errno::ReadOnly, |handle, who| {
-            self.filesystem.attr_set_node(handle, who, &key, &payload)
+        self.with_attr_node(caller, fd, AttrCall::Change, |handle, who| {
+            let name = self.copy_attr_key_in(caller, key, key_len)?;
+            let mut payload = filled(value_len, 0u8).ok_or(Errno::OutOfMemory)?;
+            self.copy_in_user(caller, value, &mut payload)?;
+            self.filesystem.attr_set_node(handle, who, &name, &payload)
         })?;
         Ok(0)
     }
@@ -14250,12 +14280,15 @@ where
     ) -> SyscallResult {
         // Read permission and the visibility filtering are the secured VFS's;
         // `0` is the end-of-list answer (a real key is never empty).
-        let mut stage = filled(key_out_len.min(FS_ATTR_KEY_MAX), 0u8).ok_or(Errno::OutOfMemory)?;
-        let Some(read) = self.with_attr_node(caller, fd, Errno::NotSupported, |handle, who| {
-            self.filesystem
-                .attr_list_node(handle, who, index, &mut stage)
-        })?
-        else {
+        let (stage, read) = self.with_attr_node(caller, fd, AttrCall::Read, |handle, who| {
+            let mut stage =
+                filled(key_out_len.min(FS_ATTR_KEY_MAX), 0u8).ok_or(Errno::OutOfMemory)?;
+            let read = self
+                .filesystem
+                .attr_list_node(handle, who, index, &mut stage)?;
+            Ok((stage, read))
+        })?;
+        let Some(read) = read else {
             return Ok(0);
         };
         match self.with_caller_aspace(caller, |space, physmap| {
@@ -14274,9 +14307,9 @@ where
         key: u64,
         key_len: usize,
     ) -> SyscallResult {
-        let key = self.copy_attr_key_in(caller, key, key_len)?;
-        self.with_attr_node(caller, fd, Errno::ReadOnly, |handle, who| {
-            self.filesystem.attr_remove_node(handle, who, &key)
+        self.with_attr_node(caller, fd, AttrCall::Change, |handle, who| {
+            let name = self.copy_attr_key_in(caller, key, key_len)?;
+            self.filesystem.attr_remove_node(handle, who, &name)
         })?;
         Ok(0)
     }
@@ -47317,6 +47350,53 @@ mod tests {
         );
     }
 
+    /// Two grants of one location are two handles, each told once: a location
+    /// answers one request, so the second answer naming the same folder is not
+    /// the handle the first one's redemption consumed.
+    #[test]
+    fn two_grants_of_one_location_are_told_apart() {
+        let rig = GrantRig::new(b"/f");
+        let gctx = rig.grantor();
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let h = rig.handlers(fs);
+        let mut page = grant_page(b"");
+        page.extend_from_slice(rig.grantor_caps.proc_id().as_bytes());
+        let grantor_at = grant_addr(page.len() - PROC_ID_LEN);
+        let out = grant_addr(page.len());
+        let same_user = GrantHolder {
+            uid: 1000,
+            granted: &[CapabilityId::FS_ACCESS],
+            ..GRANT_RECIPIENT
+        };
+        let reader_caps = rig.holder(
+            &same_user,
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            &page,
+        );
+        let reader = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &reader_caps,
+        };
+        let fd = u32::try_from(
+            h.fs_open(&gctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
+                .expect("grantor opens"),
+        )
+        .unwrap();
+        let first = h
+            .fd_grant_location(&gctx, fd, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .expect("a location mints");
+        let second = h
+            .fd_grant_location(&gctx, fd, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .expect("a second mints");
+        assert_ne!(first, second, "each answer its own handle");
+        for told in [first, second] {
+            assert_eq!(
+                h.fd_redeem_location(&reader, told, grantor_at, PROC_ID_LEN, out, 64),
+                Ok(2)
+            );
+        }
+    }
+
     /// A location and a file delegation are each redeemed only as what they
     /// are, and a delegated descriptor's location is reached as the identity
     /// the delegation captured rather than as whoever holds it; what is
@@ -47588,6 +47668,92 @@ mod tests {
             Authority::Frozen(frozen)
                 if frozen.uid == 1000 && frozen.caps.contains(CapabilityId::FS_ACCESS)
         ));
+    }
+
+    /// A delegation's holder reads its node's attributes — a document's
+    /// filetype among them — as it reads the bytes, under the grantor's
+    /// identity, but changes none: a change acts as the holder, which holds
+    /// no capability. A descriptor not open for reading reads none either.
+    #[test]
+    fn delegated_descriptor_reads_attributes_under_the_grantor_and_changes_none() {
+        const KEY_AT: usize = 0x50;
+        const OUT: u64 = 0x1100;
+        let key = b"user.demo";
+
+        let rig = GrantRig::new(b"/blob");
+        let gctx = rig.grantor();
+        let mut page = grant_page(b"/blob");
+        page.extend_from_slice(key);
+        let recipient_caps = rig.holder(
+            &GRANT_RECIPIENT,
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            &page,
+        );
+        let rctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &recipient_caps,
+        };
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let h = rig.handlers(fs);
+        let delegate = |flags: OpenFlags, ceiling: u64| {
+            let fd = u32::try_from(
+                h.fs_open(&gctx, FD_CWD, 0x1000, "/blob".len(), flags, 0)
+                    .expect("the grantor opens"),
+            )
+            .unwrap();
+            let handle = h
+                .fd_grant(
+                    &gctx,
+                    fd,
+                    ceiling,
+                    grant_addr(GRANT_RECIPIENT_AT),
+                    PROC_ID_LEN,
+                )
+                .expect("the delegation mints");
+            u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap()
+        };
+        let key_at = grant_addr(KEY_AT);
+
+        let read = delegate(OpenFlags::READ, 0);
+        assert_eq!(
+            h.fs_attr_get(&rctx, read, key_at, key.len(), OUT, 64),
+            Ok(2),
+            "a capability-less holder reads the attribute of what it was handed"
+        );
+        assert_eq!(
+            h.fs_attr_list(&rctx, read, 0, OUT, 64),
+            Ok(key.len() as u64)
+        );
+        assert!(
+            fs.calls()
+                .iter()
+                .any(|c| c == "attr_get uid=1000 path=/blob key=user.demo"),
+            "the read ran under the grantor's identity: {:?}",
+            fs.calls()
+        );
+        assert_eq!(
+            h.fs_attr_set(&rctx, read, key_at, key.len(), key_at, 2),
+            Err(Errno::PermissionDenied),
+            "a change acts as the holder"
+        );
+        assert_eq!(
+            h.fs_attr_remove(&rctx, read, key_at, key.len()),
+            Err(Errno::PermissionDenied)
+        );
+
+        let write_only = delegate(OpenFlags::WRITE, 64);
+        assert_eq!(
+            h.fs_attr_get(&rctx, write_only, key_at, key.len(), OUT, 64),
+            Err(Errno::PermissionDenied),
+            "a descriptor not open for reading reads as its holder"
+        );
+        assert!(
+            !fs.calls()
+                .iter()
+                .any(|c| c.starts_with("attr_set") || c.starts_with("attr_remove")),
+            "no change reached the service: {:?}",
+            fs.calls()
+        );
     }
 
     /// `call_peer_seat` answers only while the ticket is in service, only
@@ -57220,6 +57386,90 @@ mod tests {
                 ),
             ],
             "every call reached the service with the attested uid and copied-in arguments"
+        );
+    }
+
+    /// A descriptor the caller opened itself acts as the caller's live
+    /// identity, so once the caller no longer holds the filesystem capability
+    /// even a readable one of its own reads no attribute — and every attribute
+    /// call is refused before its key is copied in, so an unmapped key reads as
+    /// the refusal, never as a fault.
+    #[test]
+    fn an_own_descriptor_reads_no_attribute_once_its_opener_loses_the_filesystem_capability() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            b"/Users/bob/notesuser.demo",
+        );
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+        let fd = u32::try_from(
+            h.fs_open(
+                &ctx,
+                FD_CWD,
+                0x1000,
+                "/Users/bob/notes".len(),
+                OpenFlags::READ,
+                0,
+            )
+            .expect("open"),
+        )
+        .unwrap();
+        let (key, key_len) = (0x1010, "user.demo".len());
+        assert_eq!(h.fs_attr_get(&ctx, fd, key, key_len, 0x1100, 64), Ok(2));
+
+        let narrowed = make_caps_record(2, &[], sink);
+        let nctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &narrowed,
+        };
+        assert_eq!(
+            h.fs_attr_get(&nctx, fd, key, key_len, 0x1100, 64),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.fs_attr_list(&nctx, fd, 0, 0x1100, 64),
+            Err(Errno::PermissionDenied)
+        );
+        let unmapped = 0xdead_0000;
+        assert_eq!(
+            h.fs_attr_get(&nctx, fd, unmapped, key_len, 0x1100, 64),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.fs_attr_set(&nctx, fd, unmapped, key_len, unmapped, 2),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.fs_attr_remove(&nctx, fd, unmapped, key_len),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            fs.calls().len(),
+            2,
+            "nothing past the open and the first read reached the service: {:?}",
+            fs.calls()
         );
     }
 

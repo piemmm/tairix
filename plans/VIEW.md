@@ -220,23 +220,25 @@ What "complete" means, per format:
   decode for `!Sprites22`/`!Sprites` icon loading, so this decoder has a
   second planned consumer and belongs in the shared crate.
 
-### A format with no signature is named, never guessed
+### A format with no signature is recognised by the length it states
 
 A RISC OS sprite area carries no magic number — its first word is the sprite
-count, and RISC OS types a file from its directory entry, not its content — so
-`sniff` cannot recognise one and **must not try**. A structural-plausibility
-heuristic would be a false-positive machine, and one the crate would then act
-on; both planned consumers already know the type without it (the emulator
-loads `!Sprites22`/`!Sprites` by name and filetype, and `lib/browse::media`
-maps `.spr`, `,ff9` and a recorded filetype of `&FF9` to
-`image/x-riscos-sprite`, the viewer reading the last through the document's
-descriptor with `tairix_browse::recorded_filetype_of`).
+count, and RISC OS types a file from its directory entry, not its content. A
+type is the first answer: `lib/browse::media` maps `.spr`, `,ff9` and a
+recorded filetype of `&FF9` to `image/x-riscos-sprite`, the viewer reading the
+last through the document's descriptor with
+`tairix_browse::recorded_filetype_of`, an attribute read a capability-less
+holder makes as the grant's authority, as it reads the bytes. A file copied to
+a foreign filesystem loses its type, though, and a saved area states its own
+end: `tairix_image::recognise` answers a sprite area only where its header's
+free offset is the file's own length, with a count, a word-aligned first
+sprite and room for every control block — an identity the format defines, not
+a plausibility weighed — reading no more than `RECOGNITION_HEAD` bytes.
 
-So `ImageFormat::Sprite` exists — the crate must be able to *name* what it
-decoded — and `sniff` never answers it. The caller that knows the type reaches
-the decoder through `probe_as` / `decode_as` / `Sequence::open_as`, which take
-the format in place of the sniff; the sniffing entry points are exactly those
-plus `sniff`, so there is one dispatch table rather than two. The named
+The caller that knows the type names the format through `probe_as` /
+`decode_as` / `Sequence::open_as`, which also reaches a typed sprite area
+whose header recognition turns down; the sniffing entry points are exactly
+those plus `sniff`, so there is one dispatch table rather than two. The named
 format's own parser still validates the bytes, so naming the wrong one is
 refused rather than misread.
 

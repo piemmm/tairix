@@ -10,13 +10,13 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport};
 
 use tairix_abi::window_ipc::{
-    AppBar, AppMenuIconView, AppMenuItemId, AppMenuRowView, APP_MENU_LABEL_MAX, APP_MENU_MAX_ROWS,
+    AppBar, AppMenuIconView, AppMenuItemId, AppMenuRowView, AppMenuSymbol, APP_MENU_LABEL_MAX,
+    APP_MENU_MAX_ROWS,
 };
 use tairix_browse::{Places, Volume};
 
 use super::{
-    component_declaration, is_network, is_settings, place_of, window_declaration, CLOSING_ROWS,
-    DESKTOP_SLOT_CLICK, WINDOW_SLOT_CLICK,
+    component_declaration, is_network, is_settings, place_of, CLOSING_ROWS, DESKTOP_SLOT_CLICK,
 };
 use crate::test_fs::mounted;
 
@@ -99,20 +99,11 @@ impl AppMenuRowKind {
     }
 }
 
-/// Both roles keep their slot with every window closed, so a click on it
-/// must be able to bring one back — an ordinary file manager by being asked
-/// only when it has none, a component every time.
+/// The slot stays with every window closed, so a click on it must be able to
+/// bring one back.
 #[test]
-fn each_roles_slot_can_always_produce_a_window() {
-    assert!(
-        WINDOW_SLOT_CLICK.opens_when_windowless(),
-        "an ordinary file manager left on the bar with no window is reopened from its slot"
-    );
+fn the_slot_can_always_produce_a_window() {
     assert!(DESKTOP_SLOT_CLICK.opens_when_windowless());
-    assert_ne!(
-        WINDOW_SLOT_CLICK, DESKTOP_SLOT_CLICK,
-        "only the component takes the click away from a window it could raise"
-    );
 }
 
 #[test]
@@ -306,17 +297,20 @@ fn an_empty_rail_still_offers_the_network_and_settings() {
     assert_eq!(skipped, 0);
 }
 
+/// The desktop's file manager never quits, so its menu never offers *Quit*,
+/// and *Network* and *Settings…* answer with ids no place uses.
 #[test]
-fn an_ordinary_file_manager_offers_the_network_and_settings_between_the_convention_s_ends() {
-    let bar = window_declaration(7).expect("the rows fit");
-    assert_eq!(bar.click, WINDOW_SLOT_CLICK);
-    assert_eq!(
-        item_labels(&bar),
-        [
-            NETWORK.to_string(),
-            SETTINGS.to_string(),
-            tairix_window::QUIT_LABEL.to_string()
-        ]
+fn the_file_manager_never_offers_quit() {
+    let places = Places::new(&home(), &[]);
+    let (bar, _) = component_declaration(7, &places).expect("the rows fit");
+    assert!(
+        bar.menu.rows().all(|(row, _)| !matches!(
+            row,
+            AppMenuRowView::Item(item)
+                if item.symbol == AppMenuSymbol::Quit || item.label == tairix_window::QUIT_LABEL
+        )),
+        "{:?}",
+        item_labels(&bar)
     );
     let id_of = |label: &str| {
         bar.menu
@@ -330,7 +324,10 @@ fn an_ordinary_file_manager_offers_the_network_and_settings_between_the_conventi
     let (network, settings) = (id_of(NETWORK), id_of(SETTINGS));
     assert!(is_settings(settings) && !is_network(settings));
     assert!(is_network(network) && !is_settings(network));
-    assert!(!tairix_window::is_quit(settings) && !tairix_window::is_quit(network));
+    assert_eq!(
+        place_of(settings).filter(|&index| index < APP_MENU_MAX_ROWS),
+        None
+    );
     assert_eq!(
         place_of(network).filter(|&index| index < APP_MENU_MAX_ROWS),
         None

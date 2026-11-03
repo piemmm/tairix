@@ -275,6 +275,13 @@ picture with the density its file states. A TIFF holds any number of pages,
 and its Pages menu goes to, adds, duplicates, deletes and reorders them; a page
 has no name.
 
+A file is read as the format its name or its recorded RISC OS filetype names
+where that is a sprite area, and otherwise as its content says. A sprite area
+carries no signature, but its header states the area's end: a file whose
+header gives the file's own length is read as one, so a sprite file that lost
+its type on a foreign filesystem still opens, and a sprite file saved under a
+name with no ending opens again.
+
 ## Sprite files
 
 A sprite file — read as one, typed &FF9 by its volume, or made as one by New
@@ -283,8 +290,10 @@ files — opens as a small window of its sprites, as RISC OS Paint shows one:
 each sprite's thumbnail, at the shape its mode gives its pixels, over its name,
 in a grid that reflows to the window's width and scrolls down. A thumbnail is
 drawn on a worker from the sprite as it stands and drawn again when the sprite
-or the window's scale changes; until it lands the sprite shows as a plain
-card, and a sprite the editor cannot read is always one. The window opens
+or the window's scale changes; until it lands the sprite shows the picture
+glyph, and a sprite the editor cannot read always does. Each sprite is drawn
+as the file manager draws a file, through the same tile, so a chosen sprite
+wears the file manager's selection mark over the window's ground. The window opens
 sized to its sprites, at most five across and three down, with room for its
 theme's text. A press chooses a sprite, Ctrl adds or takes
 one, Shift chooses the run from the last one pressed, and the arrows, Page Up,

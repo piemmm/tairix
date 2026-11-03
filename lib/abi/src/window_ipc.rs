@@ -171,13 +171,33 @@ pub struct HandOverDocument {
     /// The document's own file name, for a title. Empty when unknown.
     pub name: DocumentName,
     /// The `fd_grant` handle the caller minted **to the session**, from a
-    /// descriptor it opened itself. Never zero.
-    pub grant: u64,
+    /// descriptor it opened itself; zero is no handle, and on the wire means
+    /// no document.
+    pub grant: core::num::NonZeroU64,
     /// Whether that descriptor is open read-write, so the session relays it
     /// with the grantor's own reach rather than read-only. The kernel refuses
     /// a relay whose claim is false, so a wrong claim fails the hand-over
     /// rather than widening anything.
     pub writable: bool,
+}
+
+/// A place inside an application, as a [`WindowRequest::HandOverLaunch`]
+/// hands one to its live instance and an [`OpenTarget::Pane`] delivers it.
+pub type PaneName = BoundedText<1, WINDOW_PANE_NAME_MAX>;
+
+/// What a [`WindowRequest::HandOverLaunch`] hands a bundle's live instance.
+// A document carries its name inline, so boxing it would force an allocation
+// into an ABI decode type; a target lives only as long as its request.
+#[allow(clippy::large_enum_variant)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum HandOverTarget {
+    /// Nothing: the instance is asked for its icon-bar default.
+    Bare,
+    /// A document the caller opened.
+    Document(HandOverDocument),
+    /// A place inside the application, which a fresh instance takes as its
+    /// one operand instead.
+    Pane(PaneName),
 }
 
 /// What became of a [`WindowRequest::HandOverLaunch`].
@@ -2784,6 +2804,35 @@ pub enum WindowRequest {
         /// The report that named the folder.
         serial: u32,
     },
+    /// Answer the [`WindowEvent::SaveOffered`] numbered `serial` over window
+    /// `window_id`: whether a drop there saves the document into a folder the
+    /// caller names. Shown on the pointer while the offer still describes
+    /// where it is.
+    SaveOfferAnswer {
+        /// The window the offer is over.
+        window_id: u64,
+        /// The offer being answered.
+        serial: u32,
+        /// Whether a drop there saves the document.
+        accepts: bool,
+    },
+    /// Answer the drop [`WindowEvent::SaveOfferEnded`] numbered `serial`
+    /// reported on window `window_id`, once: `location` is a
+    /// `fd_grant_location` handle the caller minted to the session from a
+    /// folder it opened itself, naming where the document is saved; zero
+    /// declines.
+    ///
+    /// The session creates the file under its own authority, so the folder
+    /// must be one the caller reaches: one minted by any other process is
+    /// refused. The session consumes the location whatever it answers.
+    SaveInto {
+        /// The window the document was dropped on.
+        window_id: u64,
+        /// The drop being answered.
+        serial: u32,
+        /// The folder, or zero to decline.
+        location: u64,
+    },
     /// Set window `window_id`'s backdrop-blur radius, in **logical** pixels
     /// (at most [`WINDOW_BACKDROP_BLUR_MAX_PX`]): the compositor blurs
     /// whatever is already composited behind the window's rectangle before
@@ -3080,8 +3129,8 @@ pub enum WindowRequest {
     HandOverLaunch {
         /// The bundle entry-point path whose live instance is wanted.
         run_path: BundleRunPath,
-        /// The document to hand that instance, or `None` for a bare launch.
-        document: Option<HandOverDocument>,
+        /// What to hand that instance.
+        target: HandOverTarget,
     },
     /// Show the user, in the file manager, the document behind the caller's
     /// window `window_id`: the folder holding it, raised where a window
@@ -3361,6 +3410,10 @@ const OP_REVEAL_DOCUMENT: u16 = 44;
 const OP_QUERY_SCREENSAVER: u16 = 45;
 /// Wire operation discriminant of [`WindowRequest::TakeAuthorisedOutput`].
 const OP_TAKE_AUTHORISED_OUTPUT: u16 = 43;
+/// Wire operation discriminant of [`WindowRequest::SaveOfferAnswer`].
+const OP_SAVE_OFFER_ANSWER: u16 = 46;
+/// Wire operation discriminant of [`WindowRequest::SaveInto`].
+const OP_SAVE_INTO: u16 = 47;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -3429,6 +3482,14 @@ const DRAG_VERDICT_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 5;
 /// Encoded size of a [`WindowRequest::QueryDragSpot`]: the header, the window,
 /// and the serial.
 const QUERY_DRAG_SPOT_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 4;
+/// Encoded size of a [`WindowRequest::SaveOfferAnswer`]: the header, the
+/// window, the serial, and the answer.
+const SAVE_OFFER_ANSWER_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 5;
+/// Byte offset of a [`WindowRequest::SaveInto`]'s location; its serial follows.
+const SAVE_INTO_LOCATION_OFFSET: usize = WINDOW_ID_WIRE_LEN;
+/// Encoded size of a [`WindowRequest::SaveInto`]: the header, the window, the
+/// location, and the serial.
+const SAVE_INTO_WIRE_LEN: usize = SAVE_INTO_LOCATION_OFFSET + 12;
 /// Byte offset of the frame-layout block [`WindowRequest::Create`],
 /// [`WindowRequest::CreatePopup`] and [`WindowRequest::Resize`] share
 /// verbatim ([`FrameLayout::write_to`] / [`read_frame_layout`]).
@@ -3530,12 +3591,15 @@ const HAND_OVER_PATH_LEN_OFFSET: usize = HAND_OVER_GRANT_OFFSET + 8;
 /// Byte offset of the document name's length.
 const HAND_OVER_NAME_LEN_OFFSET: usize = HAND_OVER_PATH_LEN_OFFSET + 2;
 /// Byte offset of the hand-over's flags: bit 0 says the document is open
-/// read-write, and every other bit is zero.
+/// read-write, bit 1 that the name is a pane rather than a document's, and
+/// every other bit is zero.
 const HAND_OVER_FLAGS_OFFSET: usize = HAND_OVER_NAME_LEN_OFFSET + 2;
 /// Byte offset of the run path's bytes.
 const HAND_OVER_PATH_OFFSET: usize = HAND_OVER_FLAGS_OFFSET + 1;
 /// [`HAND_OVER_FLAGS_OFFSET`] bit: the document is open read-write.
 const HAND_OVER_WRITABLE: u8 = 1;
+/// [`HAND_OVER_FLAGS_OFFSET`] bit: the name is a pane of the application.
+const HAND_OVER_PANE: u8 = 2;
 
 /// Encoded size of a [`WindowRequest::HandOverLaunch`] naming a `path`-byte
 /// run path and a `name`-byte document name.
@@ -3888,6 +3952,8 @@ impl WindowRequest {
             }
             Self::DragVerdict { .. } => DRAG_VERDICT_WIRE_LEN,
             Self::QueryDragSpot { .. } => QUERY_DRAG_SPOT_WIRE_LEN,
+            Self::SaveOfferAnswer { .. } => SAVE_OFFER_ANSWER_WIRE_LEN,
+            Self::SaveInto { .. } => SAVE_INTO_WIRE_LEN,
             Self::PickFile { purpose, .. } => pick_file_wire_len(
                 purpose.suggested_len_byte() as usize,
                 purpose.endings().wire_len(),
@@ -3899,12 +3965,13 @@ impl WindowRequest {
             Self::RevealDocument { .. } => REVEAL_DOCUMENT_WIRE_LEN,
             Self::HandOverLaunch {
                 ref run_path,
-                ref document,
+                ref target,
             } => hand_over_wire_len(
                 run_path.len_u16() as usize,
-                match document {
-                    Some(doc) => doc.name.len_byte() as usize,
-                    None => 0,
+                match target {
+                    HandOverTarget::Bare => 0,
+                    HandOverTarget::Document(doc) => doc.name.len_byte() as usize,
+                    HandOverTarget::Pane(pane) => pane.len_byte() as usize,
                 },
             ),
             Self::Resize { .. } => RESIZE_WIRE_LEN,
@@ -4011,6 +4078,8 @@ impl WindowRequest {
             Self::TakeDropTarget { .. } => OP_TAKE_DROP_TARGET,
             Self::DragVerdict { .. } => OP_DRAG_VERDICT,
             Self::QueryDragSpot { .. } => OP_QUERY_DRAG_SPOT,
+            Self::SaveOfferAnswer { .. } => OP_SAVE_OFFER_ANSWER,
+            Self::SaveInto { .. } => OP_SAVE_INTO,
             Self::Resize { .. } => OP_RESIZE,
             Self::SetTitle { .. } => OP_SET_TITLE,
             Self::SetSizing { .. } => OP_SET_SIZING,
@@ -4043,6 +4112,35 @@ impl WindowRequest {
             Self::CloseAlert { .. } => OP_CLOSE_ALERT,
             Self::Authorise { .. } => OP_AUTHORISE,
             Self::TakeAuthorisedOutput { .. } => OP_TAKE_AUTHORISED_OUTPUT,
+        }
+    }
+
+    /// Write the operands of a [`WindowRequest::CreateDialog`].
+    fn write_dialog_operands(&self, out: &mut [u8]) {
+        if let Self::CreateDialog {
+            owner_window_id,
+            shm_handle,
+            event_endpoint,
+            frame_count,
+            width_px,
+            height_px,
+            stride_bytes,
+            format,
+            modality,
+            title,
+        } = *self
+        {
+            let layout = FrameLayout {
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+            };
+            write_surface_operands(out, shm_handle, event_endpoint, &layout);
+            put_u64(out, DIALOG_OWNER_OFFSET, owner_window_id);
+            out[DIALOG_MODALITY_OFFSET] = modality.wire();
+            encode_title(out, DIALOG_TITLE_LEN_OFFSET, &title);
         }
     }
 
@@ -4119,30 +4217,7 @@ impl WindowRequest {
             Self::CreatePopup { .. } | Self::CreateTool { .. } => {
                 self.write_transient_operands(out);
             }
-            Self::CreateDialog {
-                owner_window_id,
-                shm_handle,
-                event_endpoint,
-                frame_count,
-                width_px,
-                height_px,
-                stride_bytes,
-                format,
-                modality,
-                title,
-            } => {
-                let layout = FrameLayout {
-                    frame_count,
-                    width_px,
-                    height_px,
-                    stride_bytes,
-                    format,
-                };
-                write_surface_operands(out, shm_handle, event_endpoint, &layout);
-                put_u64(out, DIALOG_OWNER_OFFSET, owner_window_id);
-                out[DIALOG_MODALITY_OFFSET] = modality.wire();
-                encode_title(out, DIALOG_TITLE_LEN_OFFSET, &title);
-            }
+            Self::CreateDialog { .. } => self.write_dialog_operands(out),
             Self::Resize { .. } => self.write_resize_operands(out),
             Self::Present { .. } => self.write_present_operands(out),
             Self::Close { window_id }
@@ -4171,7 +4246,9 @@ impl WindowRequest {
             Self::PickFile { .. }
             | Self::BeginDrag { .. }
             | Self::DragVerdict { .. }
-            | Self::QueryDragSpot { .. } => write_transfer_operands(self, out),
+            | Self::QueryDragSpot { .. }
+            | Self::SaveOfferAnswer { .. }
+            | Self::SaveInto { .. } => write_transfer_operands(self, out),
             Self::OpenLayer { .. } | Self::PlaceLayer { .. } => self.write_layer_operands(out),
             Self::TakeMenuText { window_id, open_id } => {
                 put_u64(out, 8, window_id);
@@ -4194,8 +4271,8 @@ impl WindowRequest {
             }
             Self::HandOverLaunch {
                 ref run_path,
-                ref document,
-            } => write_hand_over_operands(out, run_path, document.as_ref()),
+                ref target,
+            } => write_hand_over_operands(out, run_path, target),
             // The header-only operations: each names the caller, whose
             // identity the kernel attests, or the seat's own read-only
             // store, so none carries an operand.
@@ -4512,9 +4589,8 @@ impl WindowRequest {
                 Ok(Self::Close { window_id })
             }
             OP_PICK_FILE | OP_TAKE_PICKED_NAME | OP_TAKE_PICKED_FILE | OP_BEGIN_DRAG
-            | OP_TAKE_DROP_TARGET | OP_DRAG_VERDICT | OP_QUERY_DRAG_SPOT => {
-                read_transfer_request(op, bytes)
-            }
+            | OP_TAKE_DROP_TARGET | OP_DRAG_VERDICT | OP_QUERY_DRAG_SPOT | OP_SAVE_OFFER_ANSWER
+            | OP_SAVE_INTO => read_transfer_request(op, bytes),
             OP_TAKE_TERRAIN => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
                 let window_id = nonzero_id(read_u64(bytes, 8))?;
@@ -4697,29 +4773,29 @@ fn read_preview_screensaver(bytes: &[u8]) -> Result<WindowRequest, Errno> {
 /// Write a [`WindowRequest::HandOverLaunch`]'s operands into the already-
 /// headed frame `out`.
 ///
-/// A hand-over with no document writes a zero grant handle and a zero name
-/// length, which is the same thing said twice on purpose: the decoder reads
-/// the handle, so a document is present exactly when the handle is non-zero
-/// and a zero-length name never has to mean "absent".
-fn write_hand_over_operands(
-    out: &mut [u8],
-    run_path: &BundleRunPath,
-    document: Option<&HandOverDocument>,
-) {
+/// A hand-over with no document writes a zero grant handle, so a document is
+/// present exactly when the handle is non-zero and a zero-length name never
+/// has to mean "absent"; a pane is named in the name's place, its own flag
+/// saying so.
+fn write_hand_over_operands(out: &mut [u8], run_path: &BundleRunPath, target: &HandOverTarget) {
     let path = run_path.as_str().as_bytes();
-    put_u64(out, HAND_OVER_GRANT_OFFSET, document.map_or(0, |d| d.grant));
-    put_u16(out, HAND_OVER_PATH_LEN_OFFSET, run_path.len_u16());
-    let name = document.map_or(&[][..], |d| d.name.as_str().as_bytes());
-    put_u16(
-        out,
-        HAND_OVER_NAME_LEN_OFFSET,
-        u16::from(document.map_or(0, |d| d.name.len_byte())),
-    );
-    out[HAND_OVER_FLAGS_OFFSET] = if document.is_some_and(|d| d.writable) {
-        HAND_OVER_WRITABLE
-    } else {
-        0
+    let (grant, (name, name_len), flags) = match target {
+        HandOverTarget::Bare => (0, (&[][..], 0), 0),
+        HandOverTarget::Document(doc) => (
+            doc.grant.get(),
+            (doc.name.as_str().as_bytes(), doc.name.len_byte()),
+            if doc.writable { HAND_OVER_WRITABLE } else { 0 },
+        ),
+        HandOverTarget::Pane(pane) => (
+            0,
+            (pane.as_str().as_bytes(), pane.len_byte()),
+            HAND_OVER_PANE,
+        ),
     };
+    put_u64(out, HAND_OVER_GRANT_OFFSET, grant);
+    put_u16(out, HAND_OVER_PATH_LEN_OFFSET, run_path.len_u16());
+    put_u16(out, HAND_OVER_NAME_LEN_OFFSET, u16::from(name_len));
+    out[HAND_OVER_FLAGS_OFFSET] = flags;
     out[HAND_OVER_PATH_OFFSET..HAND_OVER_PATH_OFFSET + path.len()].copy_from_slice(path);
     let name_at = HAND_OVER_PATH_OFFSET + path.len();
     out[name_at..name_at + name.len()].copy_from_slice(name);
@@ -4780,6 +4856,24 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
             put_u64(out, 8, window_id);
             put_u32(out, WINDOW_ID_WIRE_LEN, serial);
         }
+        WindowRequest::SaveOfferAnswer {
+            window_id,
+            serial,
+            accepts,
+        } => {
+            put_u64(out, 8, window_id);
+            put_u32(out, WINDOW_ID_WIRE_LEN, serial);
+            out[WINDOW_ID_WIRE_LEN + 4] = u8::from(accepts);
+        }
+        WindowRequest::SaveInto {
+            window_id,
+            serial,
+            location,
+        } => {
+            put_u64(out, 8, window_id);
+            put_u64(out, SAVE_INTO_LOCATION_OFFSET, location);
+            put_u32(out, SAVE_INTO_LOCATION_OFFSET + 8, serial);
+        }
         _ => {}
     }
 }
@@ -4803,6 +4897,23 @@ fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> 
             Ok(WindowRequest::QueryDragSpot {
                 window_id: nonzero_id(read_u64(bytes, 8))?,
                 serial: read_u32(bytes, WINDOW_ID_WIRE_LEN),
+            })
+        }
+        OP_SAVE_OFFER_ANSWER => {
+            exact_len(bytes, SAVE_OFFER_ANSWER_WIRE_LEN)?;
+            Ok(WindowRequest::SaveOfferAnswer {
+                window_id: nonzero_id(read_u64(bytes, 8))?,
+                serial: read_u32(bytes, WINDOW_ID_WIRE_LEN),
+                accepts: flag_at(bytes, WINDOW_ID_WIRE_LEN + 4)?,
+            })
+        }
+        // A zero location is the decline, so only the window must name one.
+        OP_SAVE_INTO => {
+            exact_len(bytes, SAVE_INTO_WIRE_LEN)?;
+            Ok(WindowRequest::SaveInto {
+                window_id: nonzero_id(read_u64(bytes, 8))?,
+                serial: read_u32(bytes, SAVE_INTO_LOCATION_OFFSET + 8),
+                location: read_u64(bytes, SAVE_INTO_LOCATION_OFFSET),
             })
         }
         _ => {
@@ -4911,11 +5022,16 @@ fn read_hand_over(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         return Err(Errno::LengthOutOfRange);
     }
     exact_len(bytes, hand_over_wire_len(path_len, name_len))?;
-    // A document is present exactly when a handle names one, so a name or
-    // a writable claim without a grant is a frame that does not mean what it
-    // says.
+    // A document is present exactly when a handle names one, and a pane
+    // exactly when its flag does, so a name, a writable claim or a pane
+    // beside a grant is a frame that does not mean what it says.
     let flags = bytes[HAND_OVER_FLAGS_OFFSET];
-    if flags & !HAND_OVER_WRITABLE != 0 || (grant == 0 && (name_len != 0 || flags != 0)) {
+    let pane = flags == HAND_OVER_PANE;
+    let malformed = flags & !(HAND_OVER_WRITABLE | HAND_OVER_PANE) != 0
+        || (pane && (grant != 0 || name_len == 0 || name_len > WINDOW_PANE_NAME_MAX))
+        || (!pane && grant == 0 && (name_len != 0 || flags != 0))
+        || (grant != 0 && flags & HAND_OVER_PANE != 0);
+    if malformed {
         return Err(Errno::OutOfRange);
     }
     let mut path_bytes = [0u8; HAND_OVER_RUN_PATH_MAX];
@@ -4924,22 +5040,24 @@ fn read_hand_over(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         u16::try_from(path_len).map_err(|_| Errno::LengthOutOfRange)?,
         &path_bytes,
     )?;
-    let document = if grant == 0 {
-        None
-    } else {
+    let name = &bytes[HAND_OVER_PATH_OFFSET + path_len..][..name_len];
+    let name_len = u8::try_from(name_len).map_err(|_| Errno::LengthOutOfRange)?;
+    let target = if pane {
+        let mut name_bytes = [0u8; WINDOW_PANE_NAME_MAX];
+        name_bytes[..name.len()].copy_from_slice(name);
+        HandOverTarget::Pane(PaneName::from_wire(name_len, &name_bytes)?)
+    } else if let Some(grant) = core::num::NonZeroU64::new(grant) {
         let mut name_bytes = [0u8; crate::FS_NAME_MAX];
-        name_bytes[..name_len]
-            .copy_from_slice(&bytes[HAND_OVER_PATH_OFFSET + path_len..][..name_len]);
-        Some(HandOverDocument {
-            name: DocumentName::from_wire(
-                u8::try_from(name_len).map_err(|_| Errno::LengthOutOfRange)?,
-                &name_bytes,
-            )?,
+        name_bytes[..name.len()].copy_from_slice(name);
+        HandOverTarget::Document(HandOverDocument {
+            name: DocumentName::from_wire(name_len, &name_bytes)?,
             grant,
             writable: flags & HAND_OVER_WRITABLE != 0,
         })
+    } else {
+        HandOverTarget::Bare
     };
-    Ok(WindowRequest::HandOverLaunch { run_path, document })
+    Ok(WindowRequest::HandOverLaunch { run_path, target })
 }
 
 /// Decode the operands of a [`WindowRequest::Present`]: the window, the
@@ -5939,20 +6057,25 @@ pub fn decode_terrain_reply<'a>(
 
 /// What the desktop has queued for an application to open.
 ///
-/// Three forms, because three things can be handed over and they are not
-/// the same kind of thing. A **path** names a file or folder and confers
+/// Four forms, because four things can be handed over and they are not the
+/// same kind of thing. A **path** names a file or folder and confers
 /// nothing: the application opens it under its own authority, exactly as it
-/// would an argument. A **document** is a file that has *already* been
-/// opened by whoever handed it over, reachable through a one-shot
-/// delegation — which is the only form an application holding no filesystem
-/// capability at all can act on. A **pane** names a place *inside* the
-/// application: it is neither authority nor a file, just a name the
-/// application resolves against its own closed set of places, and one it
-/// does not recognise leaves it showing whatever it already showed.
+/// would an argument. An **image** is a path too, naming a disk image or
+/// archive the user opened, whose volume the file manager attaches and shows.
+/// A **document** is a file that has *already* been opened by whoever handed
+/// it over, reachable through a one-shot delegation — which is the only form
+/// an application holding no filesystem capability at all can act on. A
+/// **pane** names a place *inside* the application: it is neither authority
+/// nor a file, just a name the application resolves against its own closed
+/// set of places, and one it does not recognise leaves it showing whatever it
+/// already showed.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum OpenTarget<'a> {
     /// A path the user named. Bounded by [`crate::FS_PATH_MAX`].
     Path(&'a [u8]),
+    /// A disk image or archive the user opened, to be attached and shown.
+    /// Bounded by [`crate::FS_PATH_MAX`], and confers nothing.
+    Image(&'a [u8]),
     /// A document already opened for this application.
     Document {
         /// Its own file name, for a title. Empty when the hand-over did not
@@ -6464,6 +6587,8 @@ const OPEN_TARGET_KIND_DOCUMENT: u16 = 2;
 const OPEN_TARGET_KIND_PANE: u16 = 3;
 /// Wire kind of an [`OpenTarget::Document`] open read-write.
 const OPEN_TARGET_KIND_WRITABLE_DOCUMENT: u16 = 4;
+/// Wire kind of an [`OpenTarget::Image`].
+const OPEN_TARGET_KIND_IMAGE: u16 = 5;
 
 /// Encode a [`WindowRequest::TakeOpenTarget`] outcome into `out`, answering
 /// the number of bytes written.
@@ -6485,6 +6610,7 @@ pub fn encode_open_target_reply(
         Err(err) => return refuse(out, err),
         Ok(None) => (OPEN_TARGET_KIND_EMPTY, &[][..], 0),
         Ok(Some(OpenTarget::Path(path))) => (OPEN_TARGET_KIND_PATH, path, 0),
+        Ok(Some(OpenTarget::Image(path))) => (OPEN_TARGET_KIND_IMAGE, path, 0),
         Ok(Some(OpenTarget::Document {
             name,
             grant,
@@ -6510,8 +6636,7 @@ pub fn encode_open_target_reply(
     }
     // An empty path or pane name is not a target and a zero handle names no
     // delegation; any of them would be an answer the puller could not act on.
-    if ((kind == OPEN_TARGET_KIND_PATH || kind == OPEN_TARGET_KIND_PANE) && text.is_empty())
-        || (document && grant == 0)
+    if (!document && kind != OPEN_TARGET_KIND_EMPTY && text.is_empty()) || (document && grant == 0)
     {
         return refuse(out, Errno::OutOfRange);
     }
@@ -6550,7 +6675,7 @@ pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<OpenTarget<'_>>, 
     let grant = read_u64(bytes, OPEN_TARGET_REPLY_GRANT_OFFSET);
     let bound = match kind {
         OPEN_TARGET_KIND_EMPTY => 0,
-        OPEN_TARGET_KIND_PATH => crate::FS_PATH_MAX,
+        OPEN_TARGET_KIND_PATH | OPEN_TARGET_KIND_IMAGE => crate::FS_PATH_MAX,
         OPEN_TARGET_KIND_DOCUMENT | OPEN_TARGET_KIND_WRITABLE_DOCUMENT => crate::FS_NAME_MAX,
         OPEN_TARGET_KIND_PANE => WINDOW_PANE_NAME_MAX,
         _ => return Err(Errno::OutOfRange),
@@ -6562,6 +6687,7 @@ pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<OpenTarget<'_>>, 
     match kind {
         OPEN_TARGET_KIND_EMPTY if grant == 0 => Ok(None),
         OPEN_TARGET_KIND_PATH if grant == 0 && len != 0 => Ok(Some(OpenTarget::Path(text))),
+        OPEN_TARGET_KIND_IMAGE if grant == 0 && len != 0 => Ok(Some(OpenTarget::Image(text))),
         OPEN_TARGET_KIND_DOCUMENT | OPEN_TARGET_KIND_WRITABLE_DOCUMENT if grant != 0 => {
             Ok(Some(OpenTarget::Document {
                 name: text,
@@ -7602,6 +7728,10 @@ const EV_TOOL_MOVED: u16 = 23;
 const EV_ALERT_CLOSED: u16 = 25;
 /// Wire event discriminant of [`WindowEvent::Authorised`].
 const EV_AUTHORISED: u16 = 26;
+/// Wire event discriminant of [`WindowEvent::SaveOffered`].
+const EV_SAVE_OFFERED: u16 = 27;
+/// Wire event discriminant of [`WindowEvent::SaveOfferEnded`].
+const EV_SAVE_OFFER_ENDED: u16 = 28;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -7763,6 +7893,33 @@ pub enum WindowEvent {
         window_id: u64,
         /// Where it was dropped.
         site: DropSite,
+    },
+    /// A document being saved through the trusted picker is held over the
+    /// window at a window-local point, for its application to answer with a
+    /// [`WindowRequest::SaveOfferAnswer`] whether a drop there saves it into a
+    /// folder the application names. Numbered in the order the session makes
+    /// them, so an answer names the one it decided.
+    SaveOffered {
+        /// The window the document is held over.
+        window_id: u64,
+        /// The offer's number.
+        serial: u32,
+        /// Window-local x.
+        x: u32,
+        /// Window-local y.
+        y: u32,
+    },
+    /// The save offer numbered `serial` left the window, or was dropped on it
+    /// at a window-local point, which the application answers once with a
+    /// [`WindowRequest::SaveInto`] naming the folder there: the point is
+    /// carried, so the answer depends on no offer the application missed.
+    SaveOfferEnded {
+        /// The window the offer was over.
+        window_id: u64,
+        /// The last offer made over it.
+        serial: u32,
+        /// Where it was dropped, `(x, y)`, or `None` when it left.
+        dropped: Option<(u32, u32)>,
     },
     /// A [`WindowRequest::RenderPreview`] concluded.
     ///
@@ -8194,6 +8351,8 @@ impl WindowEvent {
             | Self::FolderPicked { window_id, .. }
             | Self::DragOver { window_id, .. }
             | Self::DragEnded { window_id, .. }
+            | Self::SaveOffered { window_id, .. }
+            | Self::SaveOfferEnded { window_id, .. }
             | Self::PreviewRendered { window_id, .. }
             | Self::Minimized { window_id }
             | Self::Resized { window_id, .. }
@@ -8251,6 +8410,23 @@ impl WindowEvent {
                 serial, at, shift, ..
             } => write_drag_over(&mut out, serial, at, shift),
             Self::DragEnded { site, .. } => write_drop_site(&mut out, site),
+            Self::SaveOffered { serial, x, y, .. } => {
+                put_u16(&mut out, 6, EV_SAVE_OFFERED);
+                put_u32(&mut out, SAVE_EVENT_SERIAL_OFFSET, serial);
+                put_u32(&mut out, SAVE_EVENT_X_OFFSET, x);
+                put_u32(&mut out, SAVE_EVENT_Y_OFFSET, y);
+            }
+            Self::SaveOfferEnded {
+                serial, dropped, ..
+            } => {
+                put_u16(&mut out, 6, EV_SAVE_OFFER_ENDED);
+                put_u32(&mut out, SAVE_EVENT_SERIAL_OFFSET, serial);
+                if let Some((x, y)) = dropped {
+                    out[SAVE_EVENT_DROPPED_OFFSET] = 1;
+                    put_u32(&mut out, SAVE_EVENT_DROP_X_OFFSET, x);
+                    put_u32(&mut out, SAVE_EVENT_DROP_X_OFFSET + 4, y);
+                }
+            }
             Self::ToolMoved { over, ended, .. } => write_tool_moved(&mut out, over, ended),
             Self::Key { key, .. } => {
                 put_u16(&mut out, 6, EV_KEY);
@@ -8342,14 +8518,16 @@ impl WindowEvent {
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole event.
-    /// * [`Errno::BadMagic`] — wrong magic, a dirty reserved tail, or a
-    ///   malformed embedded key record.
+    /// * [`Errno::BadMagic`] — wrong magic, a dirty reserved tail, a
+    ///   malformed embedded key record, or a save offer's end stating a drop
+    ///   point while saying nothing was dropped.
     /// * [`Errno::AbiVersionUnsupported`] — not `window-v1`.
     /// * [`Errno::OutOfRange`] — an event kind, focus flag, pointer
-    ///   action, button, menu outcome, or refusal reason outside the closed
-    ///   set, a zero window id on a window-scoped event, a non-zero one on
-    ///   an application-scoped event, a zero menu row or open id, or a
-    ///   menu outcome stating a field its own case does not carry.
+    ///   action, button, menu outcome, refusal reason, or a save offer's end's
+    ///   dropped flag outside the closed set, a zero window id on a
+    ///   window-scoped event, a non-zero one on an application-scoped event,
+    ///   a zero menu row or open id, or a menu outcome stating a field its own
+    ///   case does not carry.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -8385,6 +8563,7 @@ impl WindowEvent {
                 window_id,
                 site: read_drop_site(bytes)?,
             }),
+            EV_SAVE_OFFERED | EV_SAVE_OFFER_ENDED => read_save_offer_event(kind, window_id, bytes),
             EV_KEY => {
                 event_reserved_zero(bytes, 16 + KeyInput::WIRE_LEN)?;
                 let key = KeyInput::from_bytes(&bytes[16..16 + KeyInput::WIRE_LEN])?;
@@ -8495,6 +8674,54 @@ const DRAG_AT_WINDOW: u8 = 1;
 const DRAG_AT_DESKTOP: u8 = 2;
 /// [`DropSite::Application`].
 const DROP_AT_APPLICATION: u8 = 3;
+
+/// Byte offset of a save offer event's serial.
+const SAVE_EVENT_SERIAL_OFFSET: usize = 16;
+/// Byte offset of a [`WindowEvent::SaveOffered`]'s window-local x, then y.
+const SAVE_EVENT_X_OFFSET: usize = 20;
+/// Byte offset of its window-local y.
+const SAVE_EVENT_Y_OFFSET: usize = 24;
+/// Byte offset of a [`WindowEvent::SaveOfferEnded`]'s dropped flag.
+const SAVE_EVENT_DROPPED_OFFSET: usize = 20;
+/// Byte offset of the point it was dropped at, x then y.
+const SAVE_EVENT_DROP_X_OFFSET: usize = 24;
+
+/// Decode a save offer, or its end: every byte its case does not carry is
+/// zero.
+fn read_save_offer_event(kind: u16, window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    let serial = read_u32(bytes, SAVE_EVENT_SERIAL_OFFSET);
+    if kind == EV_SAVE_OFFERED {
+        event_reserved_zero(bytes, SAVE_EVENT_Y_OFFSET + 4)?;
+        return Ok(WindowEvent::SaveOffered {
+            window_id,
+            serial,
+            x: read_u32(bytes, SAVE_EVENT_X_OFFSET),
+            y: read_u32(bytes, SAVE_EVENT_Y_OFFSET),
+        });
+    }
+    event_reserved_zero(bytes, SAVE_EVENT_DROP_X_OFFSET + 8)?;
+    if bytes[SAVE_EVENT_DROPPED_OFFSET + 1..SAVE_EVENT_DROP_X_OFFSET]
+        .iter()
+        .any(|&b| b != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    let point = (
+        read_u32(bytes, SAVE_EVENT_DROP_X_OFFSET),
+        read_u32(bytes, SAVE_EVENT_DROP_X_OFFSET + 4),
+    );
+    let dropped = match bytes[SAVE_EVENT_DROPPED_OFFSET] {
+        1 => Some(point),
+        0 if point == (0, 0) => None,
+        0 => return Err(Errno::BadMagic),
+        _ => return Err(Errno::OutOfRange),
+    };
+    Ok(WindowEvent::SaveOfferEnded {
+        window_id,
+        serial,
+        dropped,
+    })
+}
 
 /// Refuse a drag event whose padding between its flags and its point is not
 /// zero.
@@ -8960,43 +9187,45 @@ mod tests {
         AppMenuEntryText, AppMenuIconView, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
         AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, AppMenuSymbol,
         BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems,
-        DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth,
-        MenuOutcome, MenuRefusal, OpenTarget, PickPurpose, PinchPhase, PointerAction, SaveEndings,
-        TerrainPlate, TooltipText, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest,
-        WindowSizeState, WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN,
-        APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ASSET_MAX,
-        APP_MENU_ENTRY_MAX, APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX,
-        APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
-        APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_ENTRY_SELECTED_OFFSET,
-        APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ASSET, APP_MENU_ROW_FLAG_ENABLED,
-        APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
-        APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET, APP_MENU_ROW_WIRE_LEN,
-        APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET, CLIPBOARD_MAX_BYTES,
-        CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
-        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_COUNT_OFFSET, DRAG_EVENT_KIND_OFFSET,
-        DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET, DRAG_EVENT_WINDOW_OFFSET,
-        DRAG_EVENT_X_OFFSET, DRAG_FILETYPE_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET, DRAG_TYPED,
-        DROP_TARGET_REPLY_FLAGS_OFFSET, HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET,
-        HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET,
-        HAND_OVER_RUN_PATH_MAX, HAND_OVER_WRITABLE, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH,
-        MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET,
-        MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET,
-        MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET, NAME_LIST_COUNT_OFFSET,
-        NAME_LIST_NAMES_OFFSET, OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET,
-        OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET,
-        OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET,
-        PICK_NAME_LEN_OFFSET, PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN,
-        PINCH_MODIFIERS_OFFSET, PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_RECT_LEN,
-        PRESENT_WIRE_LEN, PREVIEW_EVENT_OUTCOME_OFFSET, PREVIEW_EVENT_SIZE_OFFSET,
-        PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN,
-        QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET,
-        RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN, REVEAL_DOCUMENT_WIRE_LEN, SAVE_ENDINGS_MAX,
-        SAVE_ENDING_MAX, SCROLLED_MODIFIERS_OFFSET, SET_CLIPBOARD_KIND_OFFSET,
-        SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET,
-        SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN,
-        SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET,
-        SET_TOOLTIP_WIRE_LEN, SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT,
-        SIZING_MIN_WIDTH, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
+        DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, HandOverTarget,
+        LayerDepth, MenuOutcome, MenuRefusal, OpenTarget, PaneName, PickPurpose, PinchPhase,
+        PointerAction, SaveEndings, TerrainPlate, TooltipText, WallpaperEntry, WindowEvent,
+        WindowRegion, WindowRequest, WindowSizeState, WindowSizing, WindowTitle,
+        APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
+        APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ASSET_MAX, APP_MENU_ENTRY_MAX, APP_MENU_KIND_SEPARATOR,
+        APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS,
+        APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX, APP_MENU_ROW_ENTRY_LEN_OFFSET,
+        APP_MENU_ROW_ENTRY_SELECTED_OFFSET, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ASSET,
+        APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
+        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET,
+        APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET,
+        CLIPBOARD_MAX_BYTES, CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN,
+        DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_COUNT_OFFSET,
+        DRAG_EVENT_KIND_OFFSET, DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET,
+        DRAG_EVENT_WINDOW_OFFSET, DRAG_EVENT_X_OFFSET, DRAG_FILETYPE_OFFSET, DRAG_FLAGS_OFFSET,
+        DRAG_NAME_OFFSET, DRAG_TYPED, DROP_TARGET_REPLY_FLAGS_OFFSET, HAND_OVER_FLAGS_OFFSET,
+        HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PANE,
+        HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX, HAND_OVER_WRITABLE, LAYER_OPEN_DEPTH,
+        LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET,
+        MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY,
+        MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET,
+        NAME_LIST_COUNT_OFFSET, NAME_LIST_NAMES_OFFSET, OPEN_LAYER_WIRE_LEN,
+        OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET,
+        OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET,
+        PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_LEN_OFFSET, PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET,
+        PICK_PURPOSE_OPEN, PINCH_MODIFIERS_OFFSET, PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN,
+        PRESENT_RECT_LEN, PRESENT_WIRE_LEN, PREVIEW_EVENT_OUTCOME_OFFSET,
+        PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET,
+        QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET,
+        RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN,
+        REVEAL_DOCUMENT_WIRE_LEN, SAVE_ENDINGS_MAX, SAVE_ENDING_MAX, SAVE_EVENT_DROPPED_OFFSET,
+        SAVE_EVENT_DROP_X_OFFSET, SAVE_EVENT_Y_OFFSET, SCROLLED_MODIFIERS_OFFSET,
+        SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET,
+        SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET,
+        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
+        SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
+        SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
+        TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
         WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN,
         WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
         WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
@@ -9515,6 +9744,20 @@ mod tests {
             window_id: 9,
             serial: u32::MAX,
         });
+        for accepts in [false, true] {
+            visit(WindowRequest::SaveOfferAnswer {
+                window_id: 9,
+                serial: 4,
+                accepts,
+            });
+        }
+        for location in [0, u64::MAX] {
+            visit(WindowRequest::SaveInto {
+                window_id: 9,
+                serial: u32::MAX,
+                location,
+            });
+        }
     }
 
     fn sample_create_dialog(modality: super::DialogModality) -> WindowRequest {
@@ -9554,32 +9797,38 @@ mod tests {
     fn each_reach_request(visit: &mut impl FnMut(WindowRequest)) {
         visit(WindowRequest::HandOverLaunch {
             run_path: sample_run_path(),
-            document: None,
+            target: HandOverTarget::Bare,
         });
         visit(WindowRequest::HandOverLaunch {
             run_path: sample_run_path(),
-            document: Some(HandOverDocument {
+            target: HandOverTarget::Document(HandOverDocument {
                 name: DocumentName::new("holiday.png").expect("a valid name"),
-                grant: 7,
+                grant: core::num::NonZeroU64::new(7).expect("a handle"),
                 writable: false,
             }),
         });
         visit(WindowRequest::HandOverLaunch {
             run_path: BundleRunPath::new(&"p".repeat(HAND_OVER_RUN_PATH_MAX))
                 .expect("the widest path"),
-            document: Some(HandOverDocument {
+            target: HandOverTarget::Document(HandOverDocument {
                 name: DocumentName::new(&"n".repeat(crate::FS_NAME_MAX)).expect("the widest name"),
-                grant: u64::MAX,
+                grant: core::num::NonZeroU64::new(u64::MAX).expect("a handle"),
                 writable: true,
             }),
         });
         visit(WindowRequest::HandOverLaunch {
             run_path: sample_run_path(),
-            document: Some(HandOverDocument {
+            target: HandOverTarget::Document(HandOverDocument {
                 name: DocumentName::new("").expect("an unnamed document"),
-                grant: 1,
+                grant: core::num::NonZeroU64::new(1).expect("a handle"),
                 writable: false,
             }),
+        });
+        visit(WindowRequest::HandOverLaunch {
+            run_path: sample_run_path(),
+            target: HandOverTarget::Pane(
+                PaneName::new(&"p".repeat(WINDOW_PANE_NAME_MAX)).expect("the widest pane"),
+            ),
         });
         visit(WindowRequest::RevealDocument {
             window_id: 3,
@@ -11885,6 +12134,112 @@ mod tests {
     }
 
     #[test]
+    fn every_save_offer_event_round_trips() {
+        let events = [
+            WindowEvent::SaveOffered {
+                window_id: 4,
+                serial: 0,
+                x: 0,
+                y: 0,
+            },
+            WindowEvent::SaveOffered {
+                window_id: u64::MAX,
+                serial: u32::MAX,
+                x: u32::MAX,
+                y: 1,
+            },
+            WindowEvent::SaveOfferEnded {
+                window_id: 4,
+                serial: 3,
+                dropped: None,
+            },
+            WindowEvent::SaveOfferEnded {
+                window_id: 4,
+                serial: u32::MAX,
+                dropped: Some((u32::MAX, 0)),
+            },
+        ];
+        for event in events {
+            assert_eq!(WindowEvent::from_bytes(&event.to_le_bytes()), Ok(event));
+        }
+    }
+
+    #[test]
+    fn a_save_offer_event_carrying_what_its_case_does_not_is_refused() {
+        let ended = WindowEvent::SaveOfferEnded {
+            window_id: 4,
+            serial: 1,
+            dropped: Some((2, 3)),
+        }
+        .to_le_bytes();
+        let mut flag = ended;
+        flag[SAVE_EVENT_DROPPED_OFFSET] = 2;
+        assert_eq!(WindowEvent::from_bytes(&flag), Err(Errno::OutOfRange));
+        let mut padded = ended;
+        padded[SAVE_EVENT_DROPPED_OFFSET + 1] = 1;
+        assert_eq!(WindowEvent::from_bytes(&padded), Err(Errno::BadMagic));
+        let mut past = ended;
+        past[SAVE_EVENT_DROP_X_OFFSET + 8] = 1;
+        assert_eq!(WindowEvent::from_bytes(&past), Err(Errno::BadMagic));
+        let mut left_placed = WindowEvent::SaveOfferEnded {
+            window_id: 4,
+            serial: 1,
+            dropped: None,
+        }
+        .to_le_bytes();
+        left_placed[SAVE_EVENT_DROP_X_OFFSET] = 1;
+        assert_eq!(
+            WindowEvent::from_bytes(&left_placed),
+            Err(Errno::BadMagic),
+            "a point beside an offer that left is refused"
+        );
+        let mut offered = WindowEvent::SaveOffered {
+            window_id: 4,
+            serial: 1,
+            x: 2,
+            y: 3,
+        }
+        .to_le_bytes();
+        offered[SAVE_EVENT_Y_OFFSET + 4] = 1;
+        assert_eq!(WindowEvent::from_bytes(&offered), Err(Errno::BadMagic));
+        let mut unaddressed = ended;
+        unaddressed[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            WindowEvent::from_bytes(&unaddressed),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_save_answer_is_one_flag_and_a_save_into_needs_only_a_window() {
+        let answer = WindowRequest::SaveOfferAnswer {
+            window_id: 9,
+            serial: 1,
+            accepts: true,
+        };
+        let mut bytes = answer.frame();
+        bytes[WINDOW_ID_WIRE_LEN + 4] = 2;
+        assert_eq!(WindowRequest::from_bytes(&bytes), Err(Errno::OutOfRange));
+        let declined = WindowRequest::SaveInto {
+            window_id: 9,
+            serial: 2,
+            location: 0,
+        };
+        let len = declined.wire_len();
+        assert_eq!(WindowRequest::from_bytes(&declined.frame()), Ok(declined));
+        let mut unaddressed = declined.frame();
+        unaddressed[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&unaddressed),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&declined.frame()[..len - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
     fn a_drag_spot_reply_round_trips_and_refuses_a_frame_that_misstates_it() {
         let mut out = [0u8; WINDOW_DRAG_SPOT_REPLY_MAX];
         let mut widest = "d".repeat(crate::FS_PATH_MAX - 1);
@@ -12915,7 +13270,7 @@ mod tests {
     fn a_hand_over_carries_a_bundle_path_and_an_optional_document() {
         let bare = WindowRequest::HandOverLaunch {
             run_path: sample_run_path(),
-            document: None,
+            target: HandOverTarget::Bare,
         };
         assert_eq!(
             bare.wire_len(),
@@ -12930,15 +13285,15 @@ mod tests {
         // zero-length name with a grant is the legitimate unnamed document.
         let named = WindowRequest::HandOverLaunch {
             run_path: sample_run_path(),
-            document: Some(HandOverDocument {
+            target: HandOverTarget::Document(HandOverDocument {
                 name: DocumentName::new("holiday.png").expect("a valid name"),
-                grant: 7,
+                grant: core::num::NonZeroU64::new(7).expect("a handle"),
                 writable: false,
             }),
         };
         let mut claims = WindowRequest::HandOverLaunch {
             run_path: sample_run_path(),
-            document: None,
+            target: HandOverTarget::Bare,
         }
         .frame();
         claims[HAND_OVER_FLAGS_OFFSET] = HAND_OVER_WRITABLE;
@@ -12948,11 +13303,34 @@ mod tests {
             "writable with no document"
         );
         let mut unknown = named.frame();
-        unknown[HAND_OVER_FLAGS_OFFSET] = 2;
+        unknown[HAND_OVER_FLAGS_OFFSET] = 4;
         assert_eq!(
             WindowRequest::from_bytes(&unknown),
             Err(Errno::OutOfRange),
             "a flag no one defined"
+        );
+        let mut both = named.frame();
+        both[HAND_OVER_FLAGS_OFFSET] = HAND_OVER_PANE;
+        assert_eq!(
+            WindowRequest::from_bytes(&both),
+            Err(Errno::OutOfRange),
+            "a pane beside a delegation names neither"
+        );
+        let pane = WindowRequest::HandOverLaunch {
+            run_path: sample_run_path(),
+            target: HandOverTarget::Pane(PaneName::new("files").expect("a pane")),
+        };
+        assert_eq!(
+            pane.wire_len(),
+            hand_over_wire_len("/System/Applications/view.app/Run".len(), "files".len())
+        );
+        assert_eq!(WindowRequest::from_bytes(&pane.frame()), Ok(pane));
+        let mut opened_pane = pane.frame();
+        opened_pane[HAND_OVER_FLAGS_OFFSET] = HAND_OVER_PANE | HAND_OVER_WRITABLE;
+        assert_eq!(
+            WindowRequest::from_bytes(&opened_pane),
+            Err(Errno::OutOfRange),
+            "a pane is not a file to open read-write"
         );
         let mut stripped = named.frame();
         put_u64(&mut stripped, HAND_OVER_GRANT_OFFSET, 0);
@@ -13109,6 +13487,37 @@ mod tests {
         );
         put_u16(&mut out, 4, 9);
         assert_eq!(decode_open_target_reply(&out[..n]), Err(Errno::OutOfRange));
+    }
+
+    /// An image is a path to attach and show: it confers nothing, carries no
+    /// grant, is bounded as a path is, and an empty one is not a target.
+    #[test]
+    fn an_image_target_round_trips_as_a_path_of_its_own_kind() {
+        let mut out = [0u8; WINDOW_OPEN_TARGET_REPLY_MAX];
+        let image = b"/Users/ada/Home/Workbench.adf";
+        let n = encode_open_target_reply(&mut out, Ok(Some(OpenTarget::Image(image))));
+        assert_eq!(
+            decode_open_target_reply(&out[..n]),
+            Ok(Some(OpenTarget::Image(image))),
+            "never read back as the folder path of the same bytes"
+        );
+        let n = encode_open_target_reply(&mut out, Ok(Some(OpenTarget::Image(b""))));
+        assert_eq!(decode_open_target_reply(&out[..n]), Err(Errno::OutOfRange));
+        let n = encode_open_target_reply(
+            &mut out,
+            Ok(Some(OpenTarget::Image(&[b'p'; crate::FS_PATH_MAX + 1]))),
+        );
+        assert_eq!(
+            decode_open_target_reply(&out[..n]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let n = encode_open_target_reply(&mut out, Ok(Some(OpenTarget::Image(image))));
+        put_u64(&mut out, super::OPEN_TARGET_REPLY_GRANT_OFFSET, 7);
+        assert_eq!(
+            decode_open_target_reply(&out[..n]),
+            Err(Errno::OutOfRange),
+            "an image carries no delegation"
+        );
     }
 
     /// A pane confers nothing and names a place, so it carries no grant

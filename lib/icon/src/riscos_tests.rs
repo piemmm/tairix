@@ -305,7 +305,11 @@ fn the_boot_files_sprites_come_first_each_at_its_finest() {
     let mut sprites = Sprites::default();
     let picture =
         application_picture(&mut files, &mut sprites, APP, SIDE).expect("the application's sprite");
-    assert_eq!(picture.frame(), Some(Rect::new(1, 1, SIDE - 2, SIDE - 2)));
+    assert_eq!(
+        picture.frame(),
+        None,
+        "an application's sprite is an icon, never framed as a thumbnail is"
+    );
     assert_eq!(
         opened(&files),
         ["/!Boot", "/Themes/Icons11", "/Themes/Icons22"]

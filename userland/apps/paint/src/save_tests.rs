@@ -105,8 +105,8 @@ fn a_document_of_several_entries_is_written_only_as_a_tiff_or_a_sprite_area() {
     );
     assert_eq!(
         format_for("both", None, two.entries(), two.origin()),
-        Err(SaveRefusal::SpritesUnnamed),
-        "a sprite file nothing could open again"
+        Ok(SaveFormat::Sprites),
+        "a sprite file named nothing opens again by its content"
     );
     let sprites = tairix_abi::fs::Filetype::new(0xFF9);
     assert_eq!(
@@ -605,7 +605,8 @@ fn a_file_is_written_back_only_as_what_it_was_read_as() {
     );
     assert_eq!(
         write_back("Sprites", None, &typed),
-        Err(NotWrittenBack::Refused(SaveRefusal::SpritesUnnamed))
+        Ok(()),
+        "a sprite area recognised by its content is written back over itself"
     );
 }
 

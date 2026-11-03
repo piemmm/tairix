@@ -66,6 +66,10 @@ dropped is a category the surface then has to lie about.
 | **DS28** | Displays — the desktop's Resolution over the output's own modes, applied at once behind the session's Keep/Revert trial | DS3, `plans/DISPLAY.md` D11 | DS28 | done |
 | **DS29** | Sound Effects — the user's own sound choices (the switch, the theme and one volume, then one chooser per event of what it plays: its theme's sound, a chosen file, none, or a pick), read and changed through the desktop session's pinboard sound requests, a file chosen in the session's own picker; the Sound category's two panes, *Output & Input* and *Sound Effects* | DS27, `plans/SOUND.md` SND23 | §2; `plans/SOUND.md` SND23 | done |
 | **DS30** | Raspberry Pi — a board-conditional category shown only where `PLATFORM_COMPATIBLE` names a Raspberry Pi: the CPU fan's `cooling.fan.*` policy staged over `system.conf` and applied through the one `configure` run, beside the cooling service's live `thermal-v1` reading, asked on a worker every two seconds while the pane is on show | DS6, `plans/COOLING.md` CL6 | §2; `plans/COOLING.md` CL7 | done |
+| **DS31** | Files — the file manager's settings (`tairix_browse::FilerPreferences`, `files.*`) on an immediate pane of their own, posted through `PinboardRequest::ApplyFiles` on a desk of their own and reached by the file manager's *Settings…* through `tairix_browse::SETTINGS_PANE` | DS3, `plans/NEW-FILEMANAGER.md` FM23 | DS31 | done |
+| **DS32** | A desktop row posts only what its choice changed, follows `settings_generation`, and adopts only its newest answer: today an immediate pane posts its whole key group from the reading it opened on, so a later choice there puts back a key another writer moved since (the backdrop menu's `icons`/`sort` under Wallpaper), and its desk adopts every answer as Files no longer does | DS3, DS31 | DS32 | planned |
+| **DS33** | The session re-reads a settings store it could not read on a backoff of its own, rather than only when the next change is asked, and answers an ask a later one displaced with the outcome of the job that carried its values, never `Busy` for a change that was published | DS3 | DS33 | planned |
+| **DS34** | Settings hygiene: a reading never rebuilds the form while a choice list is open on another row; one `pick`/`set` pair (`machine.rs` repeats `form.rs`'s); one reading-desk client half for the mount, machine, network, account and files readers; refusals stated in words, not `Errno` debug names | DS3 | DS34 | planned |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -418,6 +422,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | General → Date & Time | `WallClockReading`, read in the user's zone and region from the delegated zone store | the elevated Date & Time dialog (launched), which asks the settings service for network time and the zone | refusal stated, clock untouched; no store reads UTC |
 | Appearance | the session's published settings document; the font store's families (`FontRequest::Families`) | session apply (merged over what it holds) | apply refused, stated on `stderr`, row reverts |
 | Wallpaper | session's published settings document; the store catalog and each preview served by the session | session apply (merged) | apply refused, stated; a preview that did not arrive draws its placeholder |
+| Files | the file manager's keys in the session's published settings document | the session's file-manager apply (`ApplyFiles`, merged) | apply refused, stated on `stderr`, row reverted |
 | Theme | — | — (no theme model, §3) | pane states absence |
 | Displays | `DesktopInfo`: the desktop's size and the output's, whose modes the Resolution row offers (`tairix_geometry::desktop_modes`) | session apply (`resolution`), held by the session's Keep/Revert trial until it is answered | a trial reverted or refused answers the apply so, stated on `stderr`, and the row shows what the store holds |
 | Lock Screen | the session's published settings document (`lock.after_min`) | session apply; *Lock Now* is the `LockScreen` window request | apply refused, stated; a refused lock stated on its row |
@@ -1873,6 +1878,28 @@ What it guarantees:
   reached, never a disclosing category's first pane.
 - **Theme** states its absence (§3) and names where the appearance and the
   picture are set today.
+
+### DS31 — Files
+
+The file manager keeps no settings store of its own: its registry
+(`tairix_browse::FilerPreferences`, every key under `files.`) lives in the
+desktop session's document, published with the desktop's own. The pane's
+fourteen rows (`userland/apps/settings/src/files.rs`, `FilesSetting`, grouped
+New windows, Items, Names, Icons, Trash, Disk images and archives) are
+immediate. A choice renders the `files.*` keys alone and posts them as
+`PinboardRequest::ApplyFiles` (`tairix_wallpaper::apply(ApplyTo::Files, ..)`)
+on a desk of their own (`FILES_TOKEN`), since a latest-wins desk shared with
+the desktop's apply would let one evict the other's answer; the session merges
+it over what it holds (`merge_admitting`) and answers once its publisher has
+written the store, and the rows adopt the published document's reading of
+them, a refusal reverting the row. A choice is the newest the rows asked for
+until its answer lands, and an answer with a newer apply behind it is only
+stated. Until a reading has landed the rows offer nothing, and the pane reads
+one on a desk of its own (`FILES_READ_TOKEN`) whenever it comes on show
+holding none. The category sits in *Look* after Theme,
+its badge `IconKind::FileManager`, its pane named by
+`tairix_browse::SETTINGS_PANE` so the file manager's *Settings…* reaches it by
+hand-over or launch.
 
 ---
 

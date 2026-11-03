@@ -2393,6 +2393,8 @@ mod program {
                 | WindowEvent::FolderPicked { .. }
                 | WindowEvent::DragOver { .. }
                 | WindowEvent::DragEnded { .. }
+                | WindowEvent::SaveOffered { .. }
+                | WindowEvent::SaveOfferEnded { .. }
                 | WindowEvent::PreviewRendered { .. }
                 | WindowEvent::Pinch { .. } => {}
             }

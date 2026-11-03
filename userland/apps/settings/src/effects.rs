@@ -283,7 +283,7 @@ pub(crate) fn groups(reading: Option<&EffectsReading>) -> (Vec<FieldGroup>, Vec<
                 "SOUND EFFECTS",
                 alloc::vec![FieldRow::new(
                     "Sounds",
-                    FieldControl::Unmeasured(String::from("not read yet")),
+                    FieldControl::Unmeasured(String::from(crate::machine::UNREAD)),
                 )],
             )],
             alloc::vec![Vec::new()],

@@ -4,12 +4,12 @@ files — graphical filesystem browser
 
 ## SYNOPSIS
 
-`files [--desktop] [path] [-h | -?]`
+`files --desktop [--mount] [path] [-h | -?]`
 
 ## DESCRIPTION
 
-Opens a desktop window listing the filesystem, starting at the folder
-`path` names on the command line — or, when it names a file, at the folder
+The desktop's own file manager, which lists the filesystem in windows. A
+window opens at the folder it is asked for — or, for a file, at the folder
 holding that file, with the file selected — or, when none is named, at the
 folder the settings choose: the launching user's `Home` folder unless they
 choose their `Desktop` or the attached storage (their home directory if that
@@ -19,13 +19,14 @@ theme's accent colour. Every directory read is an ordinary
 permission-checked listing under the launching user's identity: an
 unreadable directory is refused, never guessed at.
 
-The desktop starts the browser for you and keeps it on the icon bar: its
-slot's menu lists your own places and whatever is mounted, and choosing one
-opens a window there; *Network* and *Settings…* come last. A click on the
-slot opens one where the settings choose. Asking for a folder that already
-has a window brings that window to the front rather than opening another.
-That copy has no *Quit* row — it is part of the desktop, and closing its
-windows simply puts it away.
+The desktop starts the file manager with the session and keeps it on the
+icon bar, and it never quits: its slot's menu lists your own places and
+whatever is mounted, and choosing one opens a window there; *Network* and
+*Settings…* come last. A click on the slot opens one where the settings
+choose. Asking for a folder that already has a window brings that window to
+the front rather than opening another. The menu has no *Quit* row — the file
+manager is part of the desktop, closing its windows simply puts it away, and
+should it ever stop, the desktop starts it again.
 
 *Network*, on the slot's menu just above *Settings…*, opens a window onto
 the computers on the local network that share files. Each is listed with its
@@ -40,10 +41,10 @@ the network are chosen by whoever runs each computer, so a name is never
 proof of which computer you are looking at. Connecting to a computer's
 shares is not available on this system, and opening one says so.
 
-Started from a shell by its path, `/System/Components/files.app`, it is an
-ordinary application instead: one window, and it ends when you close it.
-Either way it requires a running graphical session: without one, the window
-channel is unreachable and the browser reports the refusal on the standard
+It runs only as the desktop starts it: started any other way — from a shell
+by its path, `/System/Components/files.app` — it refuses, stating why on the
+standard error stream. It requires a running graphical session: without one,
+the window channel is unreachable and it reports the refusal on the standard
 error stream and exits.
 
 The window is driven with the keyboard: `Down` and `Up` move the
@@ -100,16 +101,20 @@ and says why. *New* follows it, then *Select All* and *Clear Selection*, and
 *Paste* last. A right-click on empty space clears the selection, so the
 item's submenu is greyed.
 
-Opening a disk image — an `.iso`, `.adf`, `.hdf` and the like — mounts it
-for you in `/Storage`, writable where both the file and its format allow it,
-and opens its window; *Mount Read-Only* mounts it read-only instead. It stays
-mounted until you eject it or your login session ends. *Eject* takes off a
-volume you mounted, from its icon or from its row in the places rail, whose
-own right-click menu holds *Open* and *Eject*; your windows on it move to
-`/Storage` first. A volume that went away — its disk removed, or its server
-lost — before all you wrote to it was saved leaves the rail but keeps its
-icon in `/Storage`, and what was not saved is lost; *Eject* on that icon asks
-before letting it go.
+Opening a disk image or archive — an `.iso`, `.adf`, `.hdf`, `.zip` and the
+like — mounts it for you in `/Storage`, writable where both the file and its
+format allow it, and opens its window; *Mount Read-Only* mounts it read-only
+instead. Opening one on the desktop does the same. Once no window shows it
+any more it is unmounted again, so `/Storage` holds only what is in use; if
+something else is still using it — a document from it open in another
+application, say — it stays, and is tried again once that may have let go.
+The settings can keep what you open mounted instead, until you eject it or
+your login session ends. *Eject* takes off a volume you mounted, from its
+icon or from its row in the places rail, whose own right-click menu holds
+*Open* and *Eject*; your windows on it move to `/Storage` first. A volume
+that went away — its disk removed, or its server lost — before all you wrote
+to it was saved leaves the rail but keeps its icon in `/Storage`, and what
+was not saved is lost; *Eject* on that icon asks before letting it go.
 
 The right-click menu's *New* submenu makes a folder, or an empty document of
 each kind an installed editor writes, and opens its name for editing.
@@ -126,13 +131,14 @@ second press reverses the order. Folders stay on top whichever order is
 chosen, unless the settings place them among the files.
 
 *Settings…* on the icon-bar slot's menu, or `Ctrl+,`, opens the browser's
-settings: where a new window opens, how it shows and orders its items, and
-whether it shows the places rail and the toolbar; whether folders stay on top;
-which name endings and which items are hidden; whether a picture shows its
-own content and a folder what it holds; and whether moving items to the Trash
-asks first. *Restore defaults* puts every setting back. A change applies to
-every window at once and is remembered; a window already open keeps the
-display and order it has.
+settings in the Settings application, under *Files*: where a new window
+opens, how windows show and order their items, and whether a new one shows
+the places rail and the toolbar; whether folders stay on top; which name
+endings and which items are hidden; whether a picture shows its own content
+and a folder what it holds; whether moving items to the Trash asks first; and
+whether a disk image or archive you opened is unmounted once its windows are
+closed. A change applies to every window at once and is remembered; a window
+keeps a display or an order you chose in it yourself.
 
 `Alt+Enter` opens the selected item's *Info* window, as does *Get Info…* on
 its right-click submenu. It is a window of its own, so several can
@@ -161,16 +167,20 @@ A second operand is refused outright rather than ignored.
 
 ## OPTIONS
 
-- `--desktop` — run as the desktop's own file-manager component: a
-  permanent icon-bar slot offering your places and the mounted volumes,
-  no window until one is asked for, and no way to quit. The desktop
-  session passes this at bring-up; naming a `path` alongside it is
-  refused, because a component opens no window to put one in.
+- `--desktop` — run as the desktop's own file manager: a permanent
+  icon-bar slot offering your places and the mounted volumes, and no way
+  to quit. The desktop session passes this whenever it starts the file
+  manager, which runs only with it; a `path` alongside it opens a window
+  there.
+- `--mount` — open `path` as a disk image or archive, as opening it in a
+  window does: it is mounted for you and its window opens, and it is
+  unmounted again once its windows are closed, as the settings say. It
+  needs a `path`.
 - `-h, -?` — show this command's own short help and exit.
 
 ## EXIT STATUS
 
-Zero after a clean close, or after the short help was shown; `2` when
-the command line was not understood; otherwise non-zero when the window
-channel, the shared frame region, or the initial directory listing was
-refused (the reason is stated on the standard error stream).
+It does not exit while the desktop runs. Zero after the short help was
+shown; `2` when the command line was not understood or named no
+`--desktop`; otherwise non-zero when the window channel or the shared frame
+region was refused (the reason is stated on the standard error stream).

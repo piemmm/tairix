@@ -22,7 +22,7 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::fs::{DirEntries, DirEntry, FileKind, FS_PATH_MAX};
+use tairix_abi::fs::{DirEntries, DirEntry, FileKind, FS_PATH_MAX, STORAGE_CATALOG, SYSTEM_VIEW};
 use tairix_abi::window_ipc::WINDOW_TITLE_MAX;
 use tairix_abi::Errno;
 use tairix_font::ELLIPSIS;
@@ -375,6 +375,20 @@ pub fn absolute_path(components: &[String]) -> Result<String, Errno> {
         return Err(Errno::LengthOutOfRange);
     }
     Ok(path)
+}
+
+/// Whether a file can be made in the folder `components` name: anywhere but
+/// the root view and the catalog of attached volumes, neither of which is
+/// stored on a volume, and the system's own tree, which only the installer
+/// and the updater write.
+#[must_use]
+pub fn stores_files(components: &[String]) -> bool {
+    match components {
+        [] => false,
+        [first, ..] if first == SYSTEM_VIEW => false,
+        [only] => only != STORAGE_CATALOG,
+        _ => true,
+    }
 }
 
 /// Map one packed `fs_readdir` stream onto the browser's [`Entry`] list.

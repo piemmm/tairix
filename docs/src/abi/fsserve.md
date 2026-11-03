@@ -167,3 +167,5 @@ does at `volume_serve`.
   it held writes it had not published: that one stays, reporting
   `UnavailableLost`, until its owner detaches it with `force`, or with
   `DetachMode::Lost`, which forces only a volume still lost.
+  `DetachMode::Idle` is a plain detach whose `Busy` or `NotEmpty` refusal is
+  the answer "still in use" rather than a failure, audited at `Info`.

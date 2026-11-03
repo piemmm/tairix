@@ -378,9 +378,7 @@ mod program {
     /// the identity of whoever opened it.
     ///
     /// `name` is what to call it, and is empty where the hand-off could not
-    /// name it. The viewer then states what it knows and invents nothing, and
-    /// a RISC OS sprite area (which no signature can identify) is reached by an
-    /// unnamed hand-off only where its volume records its filetype. A
+    /// name it. The viewer then states what it knows and invents nothing. A
     /// delegation that cannot be taken over hands the name back, to say which
     /// document it was.
     fn delegated(handle: u64, name: String) -> Result<Source, String> {
@@ -410,8 +408,8 @@ mod program {
     /// to let the decoder sniff it.
     ///
     /// Only the one format that carries no signature is named: a RISC OS
-    /// sprite area's first word is its sprite count, so nothing in the file
-    /// can identify it and its name or filetype is the only door. Every other
+    /// sprite area's first word is its sprite count, so a typed one whose
+    /// header does not state its own length still opens as one. Every other
     /// format is recognised from its bytes, which is stronger than trusting a
     /// file name — a document named `.png` that is a JPEG opens as the JPEG it
     /// is.
@@ -1504,6 +1502,8 @@ mod program {
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
+            | WindowEvent::SaveOffered { .. }
+            | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::PreviewRendered { .. } => Acted::Idle,
         }
     }
@@ -1651,7 +1651,7 @@ mod program {
                 // Honest, and unreachable from the desktop, which hands this
                 // viewer a descriptor precisely because it holds no
                 // filesystem authority to open a name with.
-                Target::Path(path) => {
+                Target::Path(path) | Target::Image(path) => {
                     app::report(
                         APP_NAME,
                         format_args!(
