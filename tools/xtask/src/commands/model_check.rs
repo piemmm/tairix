@@ -17,8 +17,9 @@
 //!
 //! - a *subject* task whose authority evolves under `derive` /
 //!   `delegate` / `revoke` (mirroring `kernel/sec::TaskCapabilities`), and
-//! - a capability-checked *port* under `send` / `recv` / `destroy`
-//!   (mirroring `kernel/ipc::Port`).
+//! - a capability-checked *port* with a lane per sender under `send` / `recv`
+//!   / `destroy` (mirroring `kernel/ipc::Port`): two senders, each bounded by
+//!   its own depth and served in turn.
 //!
 //! The formal narrative — the state, the transition relation, and the
 //! invariants, in TLA+-style pseudocode — lives in
@@ -162,8 +163,11 @@ const MAX_LEN: u8 = 2;
 /// The largest payload length the model draws (one past `MAX_LEN`, so the
 /// oversize/`size_ok == false` branch is always reached).
 const MAX_LEN_DRAWN: u8 = 3;
-/// The port mailbox depth, mirroring `kernel/ipc`'s `MAILBOX_CAPACITY`.
-const CAPACITY: usize = 2;
+/// The senders the model drives: two are enough to show that one sender's
+/// traffic never costs another its room or its turn.
+const SENDERS: usize = 2;
+/// Each sender's lane depth at the port, mirroring `Port`'s per-sender bound.
+const DEPTH: usize = 2;
 
 /// One accepted message, recording the *genuine* authorisation facts that
 /// held when the port accepted it — independently of the policy decision, so
@@ -188,12 +192,14 @@ pub struct CapIpcState {
     effective: u8,
     /// Whether the port has been destroyed.
     closed: bool,
-    /// The port mailbox, FIFO.
-    queue: Vec<Msg>,
+    /// Each sender's lane, oldest message first.
+    lanes: [Vec<Msg>; SENDERS],
+    /// The senders with a message waiting, the next to be served first.
+    turn: Vec<usize>,
 }
 
-/// The capability + IPC model. The production instance has both fault
-/// switches off; the tests flip one at a time to prove the checker rejects a
+/// The capability + IPC model. The production instance has every fault
+/// switch off; the tests flip one at a time to prove the checker rejects a
 /// model that breaks an invariant (the verifier is the oracle).
 pub struct CapIpcModel {
     /// Fault injection: make `delegate` *widen* the effective set (breaks
@@ -202,16 +208,43 @@ pub struct CapIpcModel {
     /// Fault injection: make `send` ignore the capability check (breaks IPC
     /// fail-closed). Off in production.
     ignore_caps_on_send: bool,
+    /// Fault injection: bound every lane by one total they share, as ports
+    /// once did (breaks room-isolation). Off in production.
+    shared_depth: bool,
 }
 
 impl CapIpcModel {
-    /// The faithful model: both fault switches off.
+    /// The faithful model: every fault switch off.
     #[must_use]
     pub fn production() -> Self {
         Self {
             widen_on_delegate: false,
             ignore_caps_on_send: false,
+            shared_depth: false,
         }
+    }
+
+    /// `send(sender, sender_caps, len)` from `state`: the fail-closed
+    /// precedence of `Port::send` — closed → caps → size → the sender's own
+    /// depth — and, once accepted, the sender joins the turn order.
+    fn send(&self, state: &CapIpcState, sender: usize, sender_caps: u8, len: u8) -> CapIpcState {
+        let caps_ok = REQUIRED_SEND & !sender_caps == 0;
+        let size_ok = len <= MAX_LEN;
+        let held = if self.shared_depth {
+            state.lanes.iter().map(Vec::len).sum()
+        } else {
+            state.lanes[sender].len()
+        };
+        let policy_caps_ok = caps_ok || self.ignore_caps_on_send;
+        let accept = !state.closed && policy_caps_ok && size_ok && held < DEPTH;
+        let mut next = state.clone();
+        if accept {
+            next.lanes[sender].push(Msg { caps_ok, size_ok });
+            if !next.turn.contains(&sender) {
+                next.turn.push(sender);
+            }
+        }
+        next
     }
 }
 
@@ -229,7 +262,8 @@ impl Model for CapIpcModel {
                     manifest,
                     effective: user_grant & manifest,
                     closed: false,
-                    queue: Vec::new(),
+                    lanes: [const { Vec::new() }; SENDERS],
+                    turn: Vec::new(),
                 });
             }
         }
@@ -263,38 +297,42 @@ impl Model for CapIpcModel {
             out.push((format!("revoke({mask:02b})"), next));
         }
 
-        // send(sender_caps, len): the fail-closed precedence of `Port::send`
-        // — closed → caps → size → capacity.
-        for sender_caps in 0..SUBSET_COUNT {
-            for len in 0..=MAX_LEN_DRAWN {
-                let caps_ok = REQUIRED_SEND & !sender_caps == 0;
-                let size_ok = len <= MAX_LEN;
-                let capacity_ok = state.queue.len() < CAPACITY;
-                let policy_caps_ok = caps_ok || self.ignore_caps_on_send;
-                let accept = !state.closed && policy_caps_ok && size_ok && capacity_ok;
-                let mut next = state.clone();
-                if accept {
-                    next.queue.push(Msg { caps_ok, size_ok });
+        for sender in 0..SENDERS {
+            for sender_caps in 0..SUBSET_COUNT {
+                for len in 0..=MAX_LEN_DRAWN {
+                    out.push((
+                        format!("send(sender={sender},caps={sender_caps:02b},len={len})"),
+                        self.send(state, sender, sender_caps, len),
+                    ));
                 }
-                out.push((format!("send(caps={sender_caps:02b},len={len})"), next));
             }
         }
 
-        // recv: dequeue the head if any (mirrors `Port::recv`).
+        // recv: take the oldest message of the sender whose turn it is; a
+        // sender with more waiting goes to the back (mirrors `Port::recv`).
         {
             let mut next = state.clone();
-            if !next.queue.is_empty() {
-                next.queue.remove(0);
+            if let Some(&sender) = next.turn.first() {
+                next.turn.remove(0);
+                if !next.lanes[sender].is_empty() {
+                    next.lanes[sender].remove(0);
+                }
+                if !next.lanes[sender].is_empty() {
+                    next.turn.push(sender);
+                }
             }
             out.push(("recv".to_string(), next));
         }
 
-        // destroy: close the port and drain in-flight messages (mirrors
+        // destroy: close the port and drain every lane (mirrors
         // `Port::destroy`).
         {
             let mut next = state.clone();
             next.closed = true;
-            next.queue.clear();
+            for lane in &mut next.lanes {
+                lane.clear();
+            }
+            next.turn.clear();
             out.push(("destroy".to_string(), next));
         }
 
@@ -308,16 +346,35 @@ impl Model for CapIpcModel {
             return Err("no-ambient-authority: effective ⊄ user_grant ∩ manifest".to_string());
         }
         // IPC fail-closed: a queued message was authorised and sized.
-        if s.queue.iter().any(|m| !m.caps_ok || !m.size_ok) {
+        if s.lanes.iter().flatten().any(|m| !m.caps_ok || !m.size_ok) {
             return Err("ipc-fail-closed: an unauthorised/oversize message was queued".to_string());
         }
-        // Mailbox capacity bound.
-        if s.queue.len() > CAPACITY {
-            return Err("mailbox-capacity: queue exceeded the declared depth".to_string());
+        if s.lanes.iter().any(|lane| lane.len() > DEPTH) {
+            return Err("lane-depth: a sender's lane exceeded the declared depth".to_string());
         }
         // A destroyed port holds no messages.
-        if s.closed && !s.queue.is_empty() {
+        if s.closed && (s.lanes.iter().any(|lane| !lane.is_empty()) || !s.turn.is_empty()) {
             return Err("closed-port-drained: a closed port still held messages".to_string());
+        }
+        // The turn order names exactly the senders with something waiting,
+        // each once, so none is served twice in a round and none is skipped.
+        let waiting = (0..SENDERS).filter(|&sender| !s.lanes[sender].is_empty());
+        let mut turn = s.turn.clone();
+        turn.sort_unstable();
+        if !turn.iter().copied().eq(waiting) {
+            return Err("turn-exact: the turn order and the waiting senders disagree".to_string());
+        }
+        // Room isolation: a capable sender below its own depth is admitted,
+        // however full every other lane is.
+        for sender in 0..SENDERS {
+            if !s.closed && s.lanes[sender].len() < DEPTH {
+                let next = self.send(s, sender, REQUIRED_SEND, 0);
+                if next.lanes[sender].len() != s.lanes[sender].len() + 1 {
+                    return Err(
+                        "room-isolation: a sender below its depth was refused room".to_string()
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -335,21 +392,53 @@ impl Model for CapIpcModel {
         if post.effective & !pre.effective != 0 {
             return Err("authority-monotone: a transition widened the effective set".to_string());
         }
-        // Fail-closed admission: if a message was appended, the port was open,
-        // had spare capacity, and the message was genuinely authorised.
-        if post.queue.len() > pre.queue.len() {
-            if pre.closed {
-                return Err("fail-closed-admission: accepted a send on a closed port".to_string());
-            }
-            if pre.queue.len() >= CAPACITY {
-                return Err("fail-closed-admission: accepted a send past capacity".to_string());
-            }
-            match post.queue.last() {
-                Some(m) if m.caps_ok && m.size_ok => {}
-                _ => {
+        // Fail-closed admission: a message appended to a lane found the port
+        // open, room in that sender's own lane, and the message genuinely
+        // authorised.
+        for sender in 0..SENDERS {
+            if post.lanes[sender].len() > pre.lanes[sender].len() {
+                if pre.closed {
                     return Err(
-                        "fail-closed-admission: accepted an unauthorised/oversize send".to_string(),
-                    )
+                        "fail-closed-admission: accepted a send on a closed port".to_string()
+                    );
+                }
+                if pre.lanes[sender].len() >= DEPTH {
+                    return Err("fail-closed-admission: accepted a send past its depth".to_string());
+                }
+                match post.lanes[sender].last() {
+                    Some(m) if m.caps_ok && m.size_ok => {}
+                    _ => {
+                        return Err(
+                            "fail-closed-admission: accepted an unauthorised/oversize send"
+                                .to_string(),
+                        )
+                    }
+                }
+            }
+        }
+        // Served in turn: on an open port a message leaves only from the lane
+        // whose turn it was, one at a time, and a sender with more waiting
+        // goes to the back of the order.
+        if !post.closed {
+            let front = pre.turn.first().copied();
+            let mut taken = 0;
+            for sender in 0..SENDERS {
+                let left = pre.lanes[sender]
+                    .len()
+                    .saturating_sub(post.lanes[sender].len());
+                if left > 0 && Some(sender) != front {
+                    return Err("served-in-turn: a message left out of turn".to_string());
+                }
+                taken += left;
+            }
+            if taken > 1 {
+                return Err("served-in-turn: one receive took more than one message".to_string());
+            }
+            if let (1, Some(sender)) = (taken, front) {
+                if !post.lanes[sender].is_empty() && post.turn.last() != Some(&sender) {
+                    return Err(
+                        "served-in-turn: a sender with more waiting kept the front".to_string()
+                    );
                 }
             }
         }
@@ -497,7 +586,7 @@ mod tests {
     fn checker_catches_a_widening_delegate() {
         let broken = CapIpcModel {
             widen_on_delegate: true,
-            ignore_caps_on_send: false,
+            ..CapIpcModel::production()
         };
         let cx = check(&broken).expect_err("widening delegate must be rejected");
         assert!(
@@ -512,8 +601,8 @@ mod tests {
     #[test]
     fn checker_catches_a_leaky_port() {
         let broken = CapIpcModel {
-            widen_on_delegate: false,
             ignore_caps_on_send: true,
+            ..CapIpcModel::production()
         };
         let cx = check(&broken).expect_err("a port that skips the cap check must be rejected");
         assert!(
@@ -522,6 +611,23 @@ mod tests {
             "unexpected invariant: {}",
             cx.invariant
         );
+    }
+
+    /// One total the lanes share is the lock-out the per-sender bound removed:
+    /// a sender that fills the port refuses every other.
+    #[test]
+    fn checker_catches_a_port_whose_senders_share_one_depth() {
+        let broken = CapIpcModel {
+            shared_depth: true,
+            ..CapIpcModel::production()
+        };
+        let cx = check(&broken).expect_err("a shared depth must be rejected");
+        assert!(
+            cx.invariant.starts_with("room-isolation"),
+            "unexpected invariant: {}",
+            cx.invariant
+        );
+        assert!(!cx.trace.is_empty());
     }
 
     #[test]

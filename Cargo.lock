@@ -3442,7 +3442,9 @@ dependencies = [
  "proptest",
  "tairix-abi",
  "tairix-caps",
+ "tairix-collections",
  "tairix-fuzzseed",
+ "tairix-hash",
  "tairix-kernel-mem",
  "tairix-kernel-sec",
  "tairix-log",
@@ -3545,6 +3547,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-kernel-mem",
  "tairix-log",
+ "tairix-sync",
  "tairix-util",
 ]
 
@@ -9096,6 +9099,7 @@ dependencies = [
  "tairix-abi",
  "tairix-buildcfg",
  "tairix-display",
+ "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-input",
  "tairix-parallel",

@@ -545,7 +545,7 @@ fn install_echo_server(sys: &Subsystems) -> Arc<AtomicU64> {
         CallEndpointLimits {
             max_request: 8,
             max_reply: 8,
-            capacity: 8,
+            per_sender: 8,
         },
         tairix_abi::RLIMIT_INFINITY,
         &SERIAL_SINK,
@@ -575,13 +575,13 @@ fn install_echo_server(sys: &Subsystems) -> Arc<AtomicU64> {
                 match body_endpoint.recv_call(8) {
                     RecvCall::Received(call) => {
                         tairix_kernel_core::waitq::SERVE_WAITQ.deregister(id);
-                        let poster =
+                        let woken =
                             match body_endpoint.reply(call.ticket, &call.request, &SERIAL_SINK) {
-                                Ok(poster) => poster,
+                                Ok(woken) => woken,
                                 Err(_) => qemu_exit::exit_failure(FAIL_SERVER),
                             };
                         body_replies.fetch_add(1, Ordering::Relaxed);
-                        tairix_kernel_core::waitq::call_wake_task(poster);
+                        tairix_kernel_core::waitq::call_woken(&woken);
                     }
                     RecvCall::Empty => {
                         yielder.park();

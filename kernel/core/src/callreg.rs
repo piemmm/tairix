@@ -402,7 +402,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 &sink,
@@ -461,8 +461,15 @@ mod tests {
             CapabilitySet::empty(),
             &NullSink,
         );
-        ep.post(&caller, 0, b"q", u64::MAX, &NullSink)
-            .expect("posted");
+        ep.post(
+            &caller,
+            0,
+            b"q",
+            u64::MAX,
+            tairix_abi::RLIMIT_INFINITY,
+            &NullSink,
+        )
+        .expect("posted");
         assert!(ep.has_pending());
 
         cancel_posted_by(poster, &NullSink);
@@ -514,7 +521,7 @@ mod tests {
         let limits = CallEndpointLimits {
             max_request: 64,
             max_reply: 64,
-            capacity: 4,
+            per_sender: 4,
         };
         Arc::new(
             CallEndpoint::create(

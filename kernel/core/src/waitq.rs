@@ -1344,6 +1344,23 @@ pub fn call_wake_task(task: TaskId) {
     }
 }
 
+/// Wake every thread a call endpoint named once its locks were released: the
+/// threads a call's end concerns and those waiting for the room it freed. A
+/// poster with no scheduler identity is reached only by the broadcast.
+pub fn call_woken(woken: &tairix_kernel_ipc::Woken) {
+    let mut broadcast = false;
+    for task in woken.tasks() {
+        if task == 0 {
+            broadcast = true;
+        } else {
+            call_wake_task(task);
+        }
+    }
+    if broadcast {
+        call_wake();
+    }
+}
+
 /// The wait-queue holding senders parked on a `PortRoom` wait-set member —
 /// a task that has a message a full mailbox refused and waits for the
 /// receiver to free a slot rather than dropping the message or polling for
@@ -1356,28 +1373,11 @@ pub fn call_wake_task(task: TaskId) {
 /// room.
 pub static PORT_ROOM_WAITQ: WaitQueue = WaitQueue::new();
 
-/// Wake every parked sender because a port whose room they may be waiting
-/// on was torn down; each re-scans and observes that its destination has
-/// gone (the peek reports a vanished port ready, so the woken sender fails
-/// its send closed instead of parking on a mailbox that can never drain).
-/// A fail-safe no-op before the arch hook is installed.
-///
-/// A broadcast, because a destroyed port takes its own record of who was
-/// waiting with it; the blast radius is the small set of senders currently
-/// holding an undeliverable message. Every ordinary drain uses the targeted
-/// [`port_room_wake_task`] instead, so a busy mailbox never wakes an
-/// unrelated waiter.
-pub fn port_room_wake() {
-    if let Some(arch) = wait_arch() {
-        PORT_ROOM_WAITQ.wake_all(arch);
-    }
-}
-
 /// Wake exactly the sender `task` parked on [`PORT_ROOM_WAITQ`] because the
-/// mailbox *it* is waiting on freed a slot (the port records its room
-/// waiters, so the drain names them). A sender that is not parked is
-/// running and will retry on its own, so the miss is benign. A fail-safe
-/// no-op before the arch hook is installed.
+/// mailbox *it* is waiting on freed a slot or went away (the port records its
+/// room waiters, so a drain or a teardown names them and no other). A sender
+/// that is not parked is running and will retry on its own, so the miss is
+/// benign. A fail-safe no-op before the arch hook is installed.
 pub fn port_room_wake_task(task: TaskId) {
     if let Some(arch) = wait_arch() {
         let _ = PORT_ROOM_WAITQ.wake_task(arch, task);

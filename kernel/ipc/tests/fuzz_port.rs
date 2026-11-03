@@ -157,7 +157,7 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
             let size_ok = payload.len() <= effective_max;
             let capacity_ok = expected.len() < MAILBOX_CAPACITY;
 
-            let result = port.send(&sender, &payload, &sink);
+            let result = port.send(&sender, &payload, tairix_abi::RLIMIT_INFINITY, &sink);
             if !caps_ok {
                 assert_eq!(
                     result,
@@ -236,7 +236,10 @@ fn fuzz_closed_port_fails_closed_for_any_sender() {
         let sender = task_with(7, &caps_of(CAP_UNIVERSE), &sink);
         let len = (rng.next_u64() % 129) as usize;
         let payload = vec![0u8; len];
-        assert_eq!(port.send(&sender, &payload, &sink), Err(Errno::NotFound));
+        assert_eq!(
+            port.send(&sender, &payload, tairix_abi::RLIMIT_INFINITY, &sink),
+            Err(Errno::NotFound)
+        );
         assert!(port.is_empty());
     }
 }

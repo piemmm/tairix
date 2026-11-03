@@ -73,11 +73,11 @@ const CALL_TOKEN: u64 = 1;
 /// Wait-set token for "the device interrupt fired".
 const IRQ_TOKEN: u64 = 2;
 
-/// Outstanding-call capacity of the device-channel endpoint. The stack
-/// issues one control request at a time (it blocks on the reply); a small
-/// queue absorbs a doorbell racing the previous reply — a fail-closed
-/// memory bound.
-const ENDPOINT_CAPACITY: usize = 4;
+/// Calls the stack may hold at the device-channel endpoint at once. It issues
+/// one control request at a time (it blocks on the reply); the room beyond
+/// that absorbs a doorbell racing the previous reply — a fail-closed memory
+/// bound.
+const ENDPOINT_DEPTH: usize = 4;
 
 /// The device channel, served restricted-sender to holders of `CAP_NET_RAW`.
 /// The tools that open echo sockets hold it too, so every call is also
@@ -87,7 +87,7 @@ const CHANNEL: DeviceChannel = DeviceChannel {
     gate: CapabilityId::NET_RAW,
     max_request: NET_CHANNEL_MAX_REQUEST,
     max_reply: NET_CHANNEL_MAX_REPLY,
-    capacity: ENDPOINT_CAPACITY,
+    per_sender: ENDPOINT_DEPTH,
 };
 
 /// Device doorbells one wake may drive before returning to the wait set.

@@ -88,14 +88,14 @@ mod program {
             );
         };
         let mut request = [0u8; IRQLINE_MAX_REQUEST];
-        // A consumer waits on each line at most once at a time, so the queue
-        // needs no more than a call per line.
+        // A consumer waits on each line at most once at a time, so one that
+        // owns every line holds no more than a call per line.
         let service = Service::bind(
             Endpoint {
                 id: endpoint,
                 request: &mut request,
                 max_reply: IRQLINE_MAX_REPLY,
-                capacity: LINES,
+                per_sender: LINES,
             },
             &[DeviceWake::Irq(own_line)],
         );

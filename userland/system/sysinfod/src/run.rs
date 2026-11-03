@@ -87,8 +87,9 @@ mod program {
     };
     use tairix_util::fallible::read_snapshot;
 
-    /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
-    const CAPACITY: usize = 8;
+    /// Calls one caller may hold at the endpoint (a fail-closed memory bound,
+    /// paid by that caller): one per calling thread.
+    const CALLER_DEPTH: usize = 8;
 
     /// Read one whole scalar domain (`KernelMemory`/`Identity`/`Uptime`) into
     /// an owned buffer via a single `sysinfo_introspect` call.
@@ -829,7 +830,7 @@ mod program {
             &empty,
             SYSINFO_MAX_REQUEST,
             SYSINFO_MAX_REPLY,
-            CAPACITY,
+            CALLER_DEPTH,
         );
         if bound != 0 {
             // Could not publish the endpoint (already bound, or no registry):

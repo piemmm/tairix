@@ -103,7 +103,7 @@ mod program {
         bring_up_controller_diagnostic, derive_controller_resources, BringupPhase, ControllerHost,
     };
     use tairix_drv_bus_usb::domain::{ControllerDomainEvent, ControllerHealth, Retries};
-    use tairix_drv_bus_usb::interfaces::{Interfaces, Note, Seam, UrbBuffer, ENDPOINT_CAPACITY};
+    use tairix_drv_bus_usb::interfaces::{Interfaces, Note, Seam, UrbBuffer, ENDPOINT_DEPTH};
     use tairix_drv_bus_usb::serve::{urb_failure_level, UrbReply};
     use tairix_drvrt::exit::{end, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
@@ -615,7 +615,7 @@ mod program {
             &recv_caps,
             USB_REQUEST_MAX_LEN,
             USB_REPLY_MAX_LEN,
-            ENDPOINT_CAPACITY,
+            ENDPOINT_DEPTH,
         ) == 0
     }
 

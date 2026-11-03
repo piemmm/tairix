@@ -91,10 +91,10 @@ mod program {
     /// ten-million-poll spin it replaces measured on metal.
     const REPLY_WINDOW_NS: u64 = 4_000_000_000;
 
-    /// Bound on the number of in-flight requests the endpoint queues. The
-    /// service answers each request before receiving the next, so a small
-    /// capacity suffices; it is a queue bound, not a hardware capacity.
-    const ENDPOINT_CAPACITY: usize = 4;
+    /// Requests one caller may have in flight at the endpoint. The service
+    /// answers each request before receiving the next, so a caller needs few;
+    /// a queue bound, not a hardware capacity.
+    const ENDPOINT_DEPTH: usize = 4;
 
     /// The inbox interrupt the host bound, and the clock the reply deadlines
     /// run on.
@@ -199,7 +199,7 @@ mod program {
             &recv_caps,
             mailbox_ipc::REQUEST_LEN,
             mailbox_ipc::REPLY_LEN,
-            ENDPOINT_CAPACITY,
+            ENDPOINT_DEPTH,
         ) != 0
         {
             return end(DriverExit::NoService, &[]);

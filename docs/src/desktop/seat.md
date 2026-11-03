@@ -67,7 +67,11 @@ that does not (or no longer) exist.
   minted lease's generation (`>= 1`) — the client-visible handle the
   present right is derived from (Stage D4 below). A seat held by another
   task refuses the claim with `Errno::SeatBusy`; a repeat acquire by the
-  holder is surfaced as `Errno::AlreadyExists`.
+  holder is surfaced as `Errno::AlreadyExists`. While a process holds any
+  seat's display, every thread of it runs in the scheduler's `High` band, so
+  the session the user is looking at keeps its frames however busy the
+  applications under it are; a release, a revocation or an unplugged display
+  drops it back to the level its principal set (`sched_set_priority`).
 - `display_release` (`abi-v1` 24, `CAP_DISPLAY`) is owner-checked: a
   caller that does not hold the seat is refused with
   `Errno::SeatNotOwner` (`Errno::SeatRevoked` once, after an

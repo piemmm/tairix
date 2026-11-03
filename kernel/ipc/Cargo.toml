@@ -12,11 +12,11 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# Stage 2.5 dependency rules (issue brief): kernel/ipc may depend only on
-# kernel/{sync, mem, sched, sec} and lib/{abi, caps, log} (plus `lib/util`
-# for the formatters extracted out of `kernel/sec` in this same stage). Nothing
-# more is needed.
 tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
+# The per-sender lanes, the calls in service and the room waiters are found by
+# hash, so no lookup grows with the number of senders an endpoint has.
+tairix-collections = { path = "../../lib/collections", version = "=0.0.0" }
+tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0" }
 tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }

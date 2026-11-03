@@ -36,19 +36,12 @@ them, so it lives here once and both consumers link it.
   shared window directly, playing the serving driver.
 - `RtBlkCall::new(endpoint)` — the production transport: the granted
   endpoint called through `tairix_rt::call_within` with the caller's own
-  per-request deadline, parking on a `CallReply` wait-set rather than a busy
-  poll, so a wedged device fails a transfer closed at its deadline instead of
-  parking the caller forever.
+  per-request deadline, the posted transfer awaited alone, so a wedged device
+  fails a transfer closed at its deadline instead of parking the caller
+  forever, and no transfer wakes for another's answer.
 
 ## Design
 
-- **Each transport waits on its own set.** A transport parks on a wait-set of
-  its own, holding only its endpoint's `CallReply` member and closed when the
-  transport drops. The kernel keeps a member whose endpoint has ended ready,
-  as the sign that it ended, so a set shared across a multi-device consumer
-  would leave every other device's transfers spinning on a removed device's
-  member; and a set closed with its transport costs nothing past it, however
-  often a long-lived consumer such as the RAID composer reconnects.
 - Everything a served device reports is untrusted: the geometry is
   validated at connect time before any consumer sees it, every reply frame
   is decoded fail-closed, and a transfer never reads more bytes out of the

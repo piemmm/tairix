@@ -103,7 +103,7 @@ fn destroy_during_in_flight_send_never_leaks_a_message() {
                 while !start.load(Ordering::Acquire) {
                     std::hint::spin_loop();
                 }
-                port.send(&sender_task, b"race", &*sink)
+                port.send(&sender_task, b"race", tairix_abi::RLIMIT_INFINITY, &*sink)
             })
         };
 
@@ -247,7 +247,8 @@ fn end_to_end_port_shmem_and_notification() {
     .unwrap();
 
     let client = task_with(2, &[CapabilityId::NET_RAW]);
-    port.send(&client, b"ping", &sink).unwrap();
+    port.send(&client, b"ping", tairix_abi::RLIMIT_INFINITY, &sink)
+        .unwrap();
     let mapping = shm.map(&client, &sink).unwrap();
     mapping
         .with_bytes_mut(|b| b.copy_from_slice(b"0123456789abcdef"))
@@ -270,7 +271,10 @@ fn end_to_end_port_shmem_and_notification() {
     // Tear-down: destroy + revoke; subsequent operations fail closed.
     port.destroy(&sink);
     shm.revoke(&sink);
-    assert_eq!(port.send(&client, b"x", &sink), Err(Errno::NotFound));
+    assert_eq!(
+        port.send(&client, b"x", tairix_abi::RLIMIT_INFINITY, &sink),
+        Err(Errno::NotFound)
+    );
     assert!(mapping.as_bytes().is_none());
 
     let ids = sink.ids();

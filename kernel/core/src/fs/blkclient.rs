@@ -318,9 +318,16 @@ impl BlkClient {
         let deadline_abs = wait_arch().map_or(NO_DEADLINE, |_| {
             issued_ns.saturating_add(self.meter.budget().deadline_ns)
         });
-        let ticket =
-            self.endpoint
-                .post(&self.caps, poster, &frame[..len], deadline_abs, self.audit)?;
+        // The kernel's own client: its depth at the driver bounds it, and the
+        // bytes are not a user principal's to budget.
+        let ticket = self.endpoint.post(
+            &self.caps,
+            poster,
+            &frame[..len],
+            deadline_abs,
+            tairix_abi::RLIMIT_INFINITY,
+            self.audit,
+        )?;
         // Only now is the attempt genuinely outstanding to the device: a
         // refused post never reached it and must not read as queue occupancy
         // or as busy time.
@@ -652,7 +659,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: u32::try_from(BLK_REQUEST_LEN).unwrap(),
                     max_reply: u32::try_from(BLK_COMPLETION_LEN).unwrap(),
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 &SINK,
@@ -803,7 +810,7 @@ mod tests {
                         }
                     }
                 };
-                endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
+                let _ = endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
                 served += 1;
             }
         })
@@ -991,7 +998,7 @@ mod tests {
                             }
                             let mut reply = [0u8; BLK_COMPLETION_LEN];
                             let len = BlkCompletion::default().encode(&mut reply).unwrap();
-                            endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
+                            let _ = endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
                         });
                         client.flush().expect("flush");
                     });
@@ -1192,7 +1199,7 @@ mod tests {
                         },
                     },
                 };
-                endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
+                let _ = endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
                 served += 1;
             }
         })

@@ -19,9 +19,9 @@ const ENCODER_ABANDONED: EventId = EventId(24_801);
 const ENCODER_MOVED: EventId = EventId(24_802);
 const ENCODER_REFUSED: EventId = EventId(24_803);
 
-/// The one engine an encoder serves makes one call at a time beside its
-/// posted wait; the queue's bound is containment, not capacity.
-const ENDPOINT_CAPACITY: usize = 4;
+/// Calls the one engine an encoder serves may hold at once: one call at a
+/// time beside its posted wait, so the bound is containment, not capacity.
+const ENDPOINT_DEPTH: usize = 4;
 
 /// Event sources one encoder's driver waits on: its own and its audio's,
 /// with the audio channel's endpoint between them.
@@ -84,7 +84,7 @@ fn run<S: Supplier>(supplier: &mut S, endpoint: u64, wakes: &[DeviceWake]) -> i3
             id: endpoint,
             request: &mut request,
             max_reply: ENCODER_MAX_REPLY,
-            capacity: ENDPOINT_CAPACITY,
+            per_sender: ENDPOINT_DEPTH,
         },
         wakes,
     );

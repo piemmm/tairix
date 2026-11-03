@@ -177,6 +177,7 @@ const NUM_CALL_REPLY: u64 = SyscallNumber::CALL_REPLY.as_u16() as u64;
 const NUM_CALL_POST: u64 = SyscallNumber::CALL_POST.as_u16() as u64;
 const NUM_CALL_REAP: u64 = SyscallNumber::CALL_REAP.as_u16() as u64;
 const NUM_CALL_CANCEL: u64 = SyscallNumber::CALL_CANCEL.as_u16() as u64;
+const NUM_CALL_AWAIT: u64 = SyscallNumber::CALL_AWAIT.as_u16() as u64;
 const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
 const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
@@ -481,21 +482,22 @@ pub extern "C" fn sys_ipc_recv(
 
 /// `port_bind`: bind an asynchronous IPC message port owned by the
 /// calling task (`SyscallNumber::PORT_BIND`) — the receive half of
-/// `tairix_sys_ipc_send`/`tairix_sys_ipc_recv`. `max_payload` and `capacity`
-/// are bounds the kernel re-checks, the port's worst case is charged to the
-/// caller's `ipc-queue-bytes` limit, a reserved well-known id requires
+/// `tairix_sys_ipc_send`/`tairix_sys_ipc_recv`. `max_payload` and `per_sender`
+/// (the messages one sender may have queued) are bounds the kernel re-checks,
+/// each queued message is charged to its sender's `ipc-queue-bytes` limit, a
+/// reserved well-known id requires
 /// `TAIRIX_CAP_IPC_BIND_PRIVILEGED`, and an id already bound is refused. The
 /// port is torn down by [`sys_port_unbind`] or when its owner exits. Returns a
 /// `TAIRIX_E_*` code.
 #[must_use]
 #[export_name = "tairix_sys_port_bind"]
-pub extern "C" fn sys_port_bind(endpoint: u64, max_payload: usize, capacity: usize) -> i32 {
+pub extern "C" fn sys_port_bind(endpoint: u64, max_payload: usize, per_sender: usize) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; every
     // argument is a plain scalar the kernel validates.
     unsafe {
         ret_i32(raw_syscall(
             NUM_PORT_BIND,
-            [endpoint, max_payload as u64, capacity as u64, 0, 0, 0],
+            [endpoint, max_payload as u64, per_sender as u64, 0, 0, 0],
         ))
     }
 }
@@ -2217,9 +2219,11 @@ pub extern "C" fn sys_ipc_call(
 ///
 /// `send_caps` and `recv_caps` each point at a 32-byte `tairix_capability_set_t`
 /// wire image (the capability a caller must hold to post, and the capability
-/// this task must hold to receive/reply). Binding a restricted-sender
-/// endpoint requires `TAIRIX_CAP_IPC_BIND_PRIVILEGED`. Returns a `TAIRIX_E_*` code
-/// (`0` on success).
+/// this task must hold to receive/reply), and `per_sender` bounds the calls
+/// one caller may have waiting on the server, each charged to that caller.
+/// Binding a
+/// restricted-sender endpoint requires `TAIRIX_CAP_IPC_BIND_PRIVILEGED`.
+/// Returns a `TAIRIX_E_*` code (`0` on success).
 #[must_use]
 #[export_name = "tairix_sys_call_create"]
 pub extern "C" fn sys_call_create(
@@ -2228,7 +2232,7 @@ pub extern "C" fn sys_call_create(
     recv_caps: *mut c_void,
     max_request: usize,
     max_reply: usize,
-    capacity: usize,
+    per_sender: usize,
 ) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates both `CapabilitySet`
     // pointers against the caller's address space before reading them.
@@ -2241,7 +2245,7 @@ pub extern "C" fn sys_call_create(
                 ptr_arg(recv_caps),
                 max_request as u64,
                 max_reply as u64,
-                capacity as u64,
+                per_sender as u64,
             ],
         ))
     }
@@ -2361,6 +2365,30 @@ pub extern "C" fn sys_call_reap(
     unsafe {
         raw_syscall(
             NUM_CALL_REAP,
+            [endpoint, ticket, ptr_arg(reply), reply_cap as u64, 0, 0],
+        )
+    }
+}
+
+/// `call_await`: await the reply to a request posted with
+/// `tairix_sys_call_post` (`SyscallNumber::CALL_AWAIT`), parking until that
+/// call alone is answered, its deadline passes, or the endpoint ends. The
+/// arguments and results are `tairix_sys_call_reap`'s, less
+/// `TAIRIX_E_WOULD_BLOCK`, plus `TAIRIX_E_INTERRUPTED` once the process is
+/// being killed.
+#[must_use]
+#[export_name = "tairix_sys_call_await"]
+pub extern "C" fn sys_call_await(
+    endpoint: u64,
+    ticket: u64,
+    reply: *mut c_void,
+    reply_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_call`; the kernel validates the reply `(ptr, len)`
+    // pair against the caller's address space before writing it.
+    unsafe {
+        raw_syscall(
+            NUM_CALL_AWAIT,
             [endpoint, ticket, ptr_arg(reply), reply_cap as u64, 0, 0],
         )
     }
@@ -4290,6 +4318,7 @@ mod tests {
         (NUM_CALL_POST, "call_post", 5),
         (NUM_CALL_REAP, "call_reap", 4),
         (NUM_CALL_CANCEL, "call_cancel", 2),
+        (NUM_CALL_AWAIT, "call_await", 4),
         (NUM_LOG_EMIT, "log_emit", 2),
         (NUM_HW_EMIT_NODE, "hw_emit_node", 2),
         (NUM_HW_REMOVE_NODE, "hw_remove_node", 2),

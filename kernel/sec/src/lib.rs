@@ -56,6 +56,7 @@ pub mod captable;
 pub mod charge;
 pub mod dma;
 pub mod identity;
+pub mod level;
 pub mod manifest;
 pub mod mmio;
 pub mod session;
@@ -71,6 +72,7 @@ pub use identity::{
     GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,
     DEFAULT_MAX_SUPPLEMENTARY_GROUPS,
 };
+pub use level::{LevelChange, ProcessLevel};
 pub use manifest::{is_known_capability, verify_manifest, VerifiedManifest};
 pub use mmio::{map_mmio, unmap_mmio, MmioGateError};
 pub use session::{HeldExit, Placement, PlacementError, Released, SessionTree, ROOT_SESSION};

@@ -32,7 +32,7 @@ mod program {
         encode_status, FanPolicy, ThermalRequest, THERMAL_ENDPOINT, THERMAL_MAX_REPLY,
         THERMAL_REQUEST_LEN,
     };
-    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
+    use tairix_abi::waitset::{WaitSourceKind, WAITSET_TIMEOUT_NONE};
     use tairix_abi::{Errno, FieldValue};
     use tairix_caps::CapabilitySet;
     use tairix_log::{EventId, Field, Level};
@@ -46,8 +46,9 @@ mod program {
     const WATCH_TOKEN: u64 = 1;
     const TREE_TOKEN: u64 = 2;
 
-    /// Status calls queued at once; each is answered before the next.
-    const ENDPOINT_CAPACITY: usize = 8;
+    /// Status calls one caller may hold at once; each is answered before the
+    /// next.
+    const ENDPOINT_DEPTH: usize = 8;
 
     /// Status calls one wake answers before returning to the wait set, so a
     /// flood cannot hold the fan's sample back.
@@ -74,19 +75,16 @@ mod program {
     const EXIT_UNAVAILABLE: i32 = 1;
 
     fn main() -> i32 {
-        let (Some(set), Ok(calls)) = (serving(), WaitSet::create()) else {
+        let Some(set) = serving() else {
             record(
                 EVENT_UNAVAILABLE,
                 Level::Error,
-                "thermald: the endpoint or its wait sets could not be made",
+                "thermald: the endpoint or its wait set could not be made",
                 &[],
             );
             return EXIT_UNAVAILABLE;
         };
-        let mut machine = RtMachine {
-            calls,
-            observed: None,
-        };
+        let mut machine = RtMachine;
         let mut journal = LogJournal;
         let mut service = Thermald::default();
         let mut tree = Vec::new();
@@ -156,7 +154,7 @@ mod program {
             &CapabilitySet::empty(),
             THERMAL_REQUEST_LEN,
             THERMAL_MAX_REPLY,
-            ENDPOINT_CAPACITY,
+            ENDPOINT_DEPTH,
         );
         if bound != 0 {
             return None;
@@ -252,61 +250,23 @@ mod program {
     }
 
     /// The sensors and the header, over their channels.
-    struct RtMachine {
-        /// Where a call's reply, or its deadline, wakes the service: a set of
-        /// its own, so a call parks on nothing but its answer.
-        calls: WaitSet,
-        /// The endpoint whose replies `calls` observes: the one last called.
-        /// A member whose endpoint has ended stays ready, so the set keeps
-        /// none the service has stopped calling.
-        observed: Option<u64>,
-    }
+    struct RtMachine;
 
     impl RtMachine {
         /// Call `endpoint`, its answer in `reply` within [`CALL_DEADLINE_NS`].
-        fn call(
-            &mut self,
-            endpoint: u64,
-            request: &[u8],
-            reply: &mut [u8],
-        ) -> Result<usize, Errno> {
-            if self.observed != Some(endpoint) {
-                if let Some(previous) = self.observed.take() {
-                    // A member already gone has nothing left to remove.
-                    let _ = tairix_rt::waitset_ctl(
-                        self.calls.handle(),
-                        WaitSetOp::Del,
-                        WaitSourceKind::CallReply,
-                        previous,
-                        0,
-                    );
-                }
-                self.calls.add(WaitSourceKind::CallReply, endpoint, 0)?;
-                self.observed = Some(endpoint);
-            }
-            tairix_rt::call_within(
-                self.calls.handle(),
-                endpoint,
-                request,
-                reply,
-                CALL_DEADLINE_NS,
-            )
+        fn call(endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            tairix_rt::call_within(endpoint, request, reply, CALL_DEADLINE_NS)
         }
 
-        fn header(
-            &mut self,
-            endpoint: u64,
-            request: HeaderRequest,
-            reply: &mut [u8],
-        ) -> Result<usize, Errno> {
+        fn header(endpoint: u64, request: HeaderRequest, reply: &mut [u8]) -> Result<usize, Errno> {
             let mut frame = [0u8; HEADER_REQUEST_LEN];
             request.encode(&mut frame)?;
-            self.call(endpoint, &frame, reply)
+            Self::call(endpoint, &frame, reply)
         }
 
-        fn change(&mut self, endpoint: u64, request: HeaderRequest) -> Result<(), Errno> {
+        fn change(endpoint: u64, request: HeaderRequest) -> Result<(), Errno> {
             let mut reply = [0u8; HEADER_MAX_REPLY];
-            let len = self.header(endpoint, request, &mut reply)?;
+            let len = Self::header(endpoint, request, &mut reply)?;
             decode_status(reply.get(..len).unwrap_or_default())
         }
     }
@@ -316,7 +276,7 @@ mod program {
             let mut request = [0u8; SENSOR_REQUEST_LEN];
             encode_read(&mut request)?;
             let mut reply = [0u8; SENSOR_REPLY_LEN];
-            let len = self.call(endpoint, &request, &mut reply)?;
+            let len = Self::call(endpoint, &request, &mut reply)?;
             decode_reading(reply.get(..len).unwrap_or_default())
         }
 
@@ -327,7 +287,7 @@ mod program {
             polarity: Polarity,
             asserted: bool,
         ) -> Result<(), Errno> {
-            self.change(
+            Self::change(
                 endpoint,
                 HeaderRequest::Claim {
                     line,
@@ -338,16 +298,16 @@ mod program {
         }
 
         fn drive(&mut self, endpoint: u64, line: u8, asserted: bool) -> Result<(), Errno> {
-            self.change(endpoint, HeaderRequest::Drive { line, asserted })
+            Self::change(endpoint, HeaderRequest::Drive { line, asserted })
         }
 
         fn release(&mut self, endpoint: u64, line: u8) -> Result<(), Errno> {
-            self.change(endpoint, HeaderRequest::Release { line })
+            Self::change(endpoint, HeaderRequest::Release { line })
         }
 
         fn lines(&mut self, endpoint: u64) -> Result<LineTable, Errno> {
             let mut reply = [0u8; HEADER_MAX_REPLY];
-            let len = self.header(endpoint, HeaderRequest::Lines, &mut reply)?;
+            let len = Self::header(endpoint, HeaderRequest::Lines, &mut reply)?;
             decode_lines(reply.get(..len).unwrap_or_default())
         }
 

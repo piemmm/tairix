@@ -68,10 +68,14 @@ mod program {
     /// Exit code when the service cannot serve; the reason is logged first.
     const EXIT_UNAVAILABLE: i32 = 70;
 
-    /// Calls the endpoint holds queued before they are taken: a fixed memory
-    /// bound on what waits in the kernel, beside the front's own per-principal
-    /// bound on what it holds.
-    const CALL_CAPACITY: usize = 32;
+    /// Calls one caller may have queued at the endpoint before they are taken:
+    /// a fixed memory bound on what waits in the kernel, paid by that caller,
+    /// beside the front's own per-principal bound on what it holds.
+    const CALLER_DEPTH: usize = 32;
+
+    /// The most calls one wake serves before the loop returns to its wait-set,
+    /// so a busy endpoint cannot hold the loop's other sources off.
+    const CALLS_PER_WAKE: usize = 32;
 
     /// One connection's delivery port depth, and the most of its events one
     /// wake takes before the loop serves the others.
@@ -426,7 +430,7 @@ mod program {
             &CapabilitySet::empty(),
             NETSHARE_MAX_REQUEST,
             NETSHARE_MAX_REPLY,
-            CALL_CAPACITY,
+            CALLER_DEPTH,
         ) == 0
             && watched(WaitSourceKind::Endpoint, NETSHARE_ENDPOINT, TOKEN_CALL)
             && watched(WaitSourceKind::PeerExit, 0, TOKEN_EXIT)
@@ -436,14 +440,15 @@ mod program {
                 .is_some_and(|fd| watched(WaitSourceKind::Stream, u64::from(fd), TOKEN_RESOLVED))
     }
 
-    /// Serve every call waiting on the endpoint. A call whose origin cannot
-    /// be attested is answered as unreadable, never served.
+    /// Serve the calls waiting on the endpoint, at most [`CALLS_PER_WAKE`] of
+    /// them; the rest keep the endpoint ready for the next wake. A call whose
+    /// origin cannot be attested is answered as unreadable, never served.
     fn serve_calls(
         front: &mut Front<RtHost, LogSink>,
         now: u64,
         request: &mut Wiped<NETSHARE_MAX_REQUEST>,
     ) {
-        for _ in 0..CALL_CAPACITY {
+        for _ in 0..CALLS_PER_WAKE {
             let Ok(Some(tairix_rt::ServedCall { ticket, len })) =
                 tairix_rt::call_recv_ready(NETSHARE_ENDPOINT, &mut **request)
             else {

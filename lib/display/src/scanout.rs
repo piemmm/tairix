@@ -23,7 +23,7 @@
 //! uses, so without it a four-byte shuffle costs an out-of-line call.
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS};
-use tairix_geometry::{Rect, Region};
+use tairix_geometry::{Rect, Region, StaleFrames};
 use tairix_raster::Pixel;
 
 /// The byte order a display format wants each pixel written in.
@@ -280,6 +280,32 @@ pub fn damage_list<'a>(
         count = 1;
     }
     Some(&out[..count])
+}
+
+/// Add `damage`, clipped to `surface`, to `region`: the way back from a
+/// present's list to the region [`damage_list`] made it from. A rectangle whose
+/// origin a screen coordinate cannot hold marks the whole surface.
+pub fn add_damage(region: &mut Region, damage: &[DamageRect], surface: Rect) {
+    for rect in damage {
+        match (i32::try_from(rect.x), i32::try_from(rect.y)) {
+            (Ok(x), Ok(y)) => {
+                region.add(Rect::new(x, y, rect.width_px, rect.height_px).intersection(&surface));
+            }
+            _ => region.add(surface),
+        }
+    }
+}
+
+/// What each of `count` frames shaped as `mode` lacks of the picture, every
+/// one lacking all of it: a frame owes at most what one present's list holds
+/// for every frame of the ring before its region coarsens.
+#[must_use]
+pub fn stale_frames(count: usize, mode: &DisplayMode) -> StaleFrames {
+    StaleFrames::new(
+        count,
+        Rect::new(0, 0, mode.width_px, mode.height_px),
+        count.saturating_mul(MAX_DAMAGE_RECTS),
+    )
 }
 
 #[cfg(test)]

@@ -33,10 +33,11 @@ use tairix_usb::transport::{on_own_endpoint, UrbEngine};
 use crate::domain::{ControllerDomainEvent, ControllerHealth};
 use crate::serve::{attach_transport_grants, Operation, Reach, UrbOutcome, UrbReply, UrbService};
 
-/// Calls a transport endpoint queues before it is served. A class driver
-/// submits one at a time and blocks on the reply, so a small queue absorbs a
+/// Calls a transport endpoint's class driver may have queued before it is
+/// served; only the class driver the endpoint was granted to can call it. It
+/// submits one at a time and blocks on the reply, so a small depth absorbs a
 /// resubmit racing the previous reply.
-pub const ENDPOINT_CAPACITY: usize = 4;
+pub const ENDPOINT_DEPTH: usize = 4;
 
 /// Bytes of a node's URB buffer: one bulk chunk, the engine's per-TD ceiling,
 /// which also holds a boot report and any control-IN descriptor a class driver
@@ -981,11 +982,11 @@ impl Matching {
     }
 }
 
-/// Answer `NotFound` to every call queued on `endpoint`, which the endpoint's
-/// depth bounds.
+/// Answer `NotFound` to every call queued on `endpoint`: only its granted
+/// class driver calls it, so its per-caller depth bounds them.
 fn refuse_queued<S: Seam>(endpoint: u64, seam: &mut S) {
     let mut request = [0u8; USB_REQUEST_MAX_LEN];
-    for _ in 0..ENDPOINT_CAPACITY {
+    for _ in 0..ENDPOINT_DEPTH {
         let Ok(Some((ticket, _))) = seam.receive(endpoint, &mut request) else {
             return;
         };

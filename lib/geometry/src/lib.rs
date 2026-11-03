@@ -31,6 +31,10 @@
 //!
 //! [`Tiles`] marks a change in whole tiles at a cost per tile, and covers it
 //! with the few tile rectangles a compositor merges cheaply.
+//!
+//! [`StaleFrames`] is what each frame of a presentation ring lacks of the
+//! picture, so the display client and the window client both keep every frame
+//! current with copies the size of the changes.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -42,12 +46,14 @@ mod grid;
 mod modes;
 mod region;
 mod scale;
+mod stale;
 mod tiles;
 
 pub use grid::{GridFill, GridRun};
 pub use modes::{desktop_modes, DESKTOP_MIN, STANDARD_SIZES};
 pub use region::Region;
 pub use scale::{Scale, REFERENCE_DPI};
+pub use stale::StaleFrames;
 pub use tiles::Tiles;
 
 /// A point in screen space.

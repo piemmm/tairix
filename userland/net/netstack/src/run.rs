@@ -81,9 +81,10 @@ mod program {
     /// Exit code when the service cannot serve; the reason is recorded first.
     const EXIT_UNAVAILABLE: i32 = 1;
 
-    /// Outstanding-call capacity of the endpoint (a fail-closed memory
-    /// bound).
-    const CAPACITY: usize = 8;
+    /// Calls one caller may hold at either endpoint (a fail-closed memory
+    /// bound): a socket call blocks its thread, so a caller holds one per
+    /// calling thread, and a further thread waits its turn.
+    const CALLER_DEPTH: usize = 8;
 
     /// Wait-set member token of the admin request endpoint.
     const ENDPOINT_TOKEN: u64 = 1;
@@ -214,7 +215,7 @@ mod program {
             &empty,
             NETSTACK_MAX_REQUEST,
             NETSTACK_MAX_REPLY,
-            CAPACITY,
+            CALLER_DEPTH,
         ) != 0
         {
             return Err("the admin endpoint could not be bound");
@@ -243,7 +244,7 @@ mod program {
             &empty,
             SocketRequest::MAX_WIRE_LEN,
             SOCKET_MAX_REPLY,
-            CAPACITY,
+            CALLER_DEPTH,
         ) != 0
         {
             return Err("the socket endpoint could not be bound");

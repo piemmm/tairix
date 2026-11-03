@@ -407,8 +407,11 @@ The *nice level* itself is mutable after admission through the
 `SchedulerPolicy::set_priority` / `priority` pair — the contract behind the
 `sched_set_priority` syscall (`plans/NEW-TASKBAR.md` T12; the target rule,
 the `CAP_PROC_CONTROL` raise gate, and the audit record are the syscall
-page's, [`syscalls.md`](./syscalls.md)). The contract is deliberately the
-same shape as `set_sched_class`:
+page's, [`syscalls.md`](./syscalls.md)). The kernel keeps the level per
+process and brings every thread to it, and runs a process holding a seat's
+display in the `High` band while it holds it; the policy sees only each
+task's level. The contract is deliberately the same shape as
+`set_sched_class`:
 
 * the new level is **recorded at once** and governs the task's **next
   enqueue** onward — a task sitting ready in a run queue adopts the new

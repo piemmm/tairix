@@ -42,10 +42,10 @@ mod program {
     use tairix_soundd::service::Reply;
     use tairix_soundd::{cue_cache, CueAuthority, Decoder, FileIdentity, SoundStore, Speakers};
 
-    /// Calls the rendezvous holds: every cue sounding may be waiting on its
-    /// answer, with as many again arriving. A fail-closed bound — past it the
-    /// kernel refuses the post.
-    const CAPACITY: usize = 4 * MAX_CONCURRENT_CUES;
+    /// Calls one requester may hold at the rendezvous: every cue it has
+    /// sounding may be waiting on its answer, with as many again arriving. A
+    /// fail-closed bound — past it the kernel refuses that requester's post.
+    const CALLER_DEPTH: usize = 2 * MAX_CONCURRENT_CUES;
 
     const CUE_TOKEN: u64 = 1;
     const DECODER_READ: u64 = 2;
@@ -297,7 +297,7 @@ mod program {
             &empty,
             CUE_REQUEST_MAX,
             CUE_REPLY_LEN,
-            CAPACITY,
+            CALLER_DEPTH,
         ) != 0
         {
             record(

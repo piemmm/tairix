@@ -40,7 +40,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
-use tairix_abi::driver::display::{DamageList, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{
+    DamageList, DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS,
+};
 use tairix_abi::origin::{AppIdentity, ProcId};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::window_ipc::{
@@ -67,7 +69,8 @@ use tairix_abi::window_ipc::{
 };
 pub use tairix_abi::window_ipc::{WindowSizeState, WindowSizing};
 use tairix_abi::{BundleId, CapabilityId, Errno};
-use tairix_display::{FrameRegion, ShmMapper};
+use tairix_display::{add_damage, damage_list, FrameRegion, ShmMapper};
+use tairix_geometry::{Rect, Region};
 
 /// Upper bound, in bytes, of any reply [`WindowServer::serve`] writes,
 /// so one fixed buffer holds every outcome: the open-target frame (the
@@ -183,19 +186,18 @@ const _: () = assert!(WINDOW_CLIPBOARD_REPLY_LEN <= WINDOW_REPLY_MAX);
 const _: () = assert!(WINDOW_AUTHORISED_OUTPUT_REPLY_MAX <= WINDOW_REPLY_MAX);
 
 /// The share of the machine's RAM one attested client may hold mapped in the
-/// session as window frames: a quarter of it.
+/// session as window frames: half of it.
 ///
 /// The *physical* memory behind those frames is the client's own allocation,
 /// already bounded by its address-space limit and by the machine; what this
 /// bound protects is the session, which must not let one client's windows
-/// crowd out every other client's ability to map and draw. A quarter is far
-/// more than any application's windows measure — fifty terminal windows on a
-/// 256 MiB board, and thirty full-screen ones on a 4 GiB machine driving a 4K
-/// display — while still leaving three quarters for the session and every
-/// other client. An eighth was tried first and refused the twenty-seventh
-/// terminal window on that board, which is a bound tighter than the machine
-/// rather than a defence.
-const CLIENT_FRAME_RAM_DIVISOR: u64 = 4;
+/// crowd out every other client's ability to map and draw. Each window holds
+/// two frames, so half is what fits fifty terminal windows on a 256 MiB board
+/// and thirty full-screen ones on a 4 GiB machine driving a 4K display. A
+/// share admitting fewer, as an eighth of single frames did when it refused
+/// the twenty-seventh terminal window on that board, is a bound tighter than
+/// the machine rather than a defence.
+const CLIENT_FRAME_RAM_DIVISOR: u64 = 2;
 
 /// Frames of the session's own output one client may hold when the machine's
 /// RAM total is unknown.
@@ -482,22 +484,6 @@ pub trait WindowHost {
         let _ = (window_id, out);
         Err(Errno::NotSupported)
     }
-
-    /// A validated `Present`: `frame` is exactly one frame of
-    /// `window_id`'s region shaped as `surface`, of which `damage`
-    /// changed.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] compositing fails with; the refusal is relayed to
-    /// the client.
-    fn window_presented(
-        &mut self,
-        window_id: u64,
-        surface: &DisplayMode,
-        frame: &[u8],
-        damage: &DamageList,
-    ) -> Result<(), Errno>;
 
     /// A validated `Resize` re-mapped live `window_id` onto a fresh frame
     /// region of `surface` geometry, keeping the same window id, owner,
@@ -1120,6 +1106,79 @@ pub trait WindowHost {
     }
 }
 
+/// Where [`WindowServer::latch`] shows each window's newest presented frame:
+/// the compositor's side of a present, reached once a desktop frame rather
+/// than once a request.
+pub trait FrameHost {
+    /// Show `damage` of `frame`, window `window_id`'s newest presented frame,
+    /// exactly one frame of its region shaped as `surface`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] compositing fails with; the engine hands it to
+    /// [`Self::frame_refused`].
+    fn window_presented(
+        &mut self,
+        window_id: u64,
+        surface: &DisplayMode,
+        frame: &[u8],
+        damage: &DamageList,
+    ) -> Result<(), Errno>;
+
+    /// Window `window_id`'s frame could not be shown: the window keeps the
+    /// pixels it had until it presents again, and that present carries what
+    /// the refused frame changed as well.
+    fn frame_refused(&mut self, window_id: u64, errno: Errno);
+}
+
+/// The newest frame a window presented that the session has not shown, and
+/// everything changed since the last one it showed.
+///
+/// One per window however often it presents: a present while one is pending
+/// replaces the frame and adds its change, which is sound because a client
+/// brings each frame up to date before presenting it.
+struct Pending {
+    frame: Option<u32>,
+    damage: Region,
+}
+
+impl Pending {
+    const fn new() -> Self {
+        Self {
+            frame: None,
+            damage: Region::with_budget(MAX_DAMAGE_RECTS),
+        }
+    }
+
+    /// Frame `frame_index` is the newest, `damage` of it changed.
+    fn record(&mut self, frame_index: u32, damage: &DamageList, surface: &DisplayMode) {
+        self.frame = Some(frame_index);
+        let bounds = Rect::new(0, 0, surface.width_px, surface.height_px);
+        add_damage(&mut self.damage, damage.rects(), bounds);
+    }
+
+    /// Nothing is pending: the frames it named are shown or gone.
+    fn clear(&mut self) {
+        self.frame = None;
+        self.damage.clear();
+    }
+
+    /// The frame named could not be shown. It is not retried each desktop
+    /// frame; what it changed is shown with the window's next present.
+    fn refused(&mut self) {
+        self.frame = None;
+    }
+}
+
+/// What a present carries for `damage` of `surface`: its rectangles while they
+/// fit one present's list, their bounds past that, and the whole surface for
+/// damage that covers it.
+fn damage_of(damage: &Region, surface: &DisplayMode) -> Result<DamageList, Errno> {
+    let whole = [DamageRect::full(surface)];
+    let mut out = [whole[0]; MAX_DAMAGE_RECTS];
+    DamageList::new(damage_list(damage, surface, &mut out).unwrap_or(&whole))
+}
+
 /// What a `RenderPreview` names: the picture and the size it is rendered at,
 /// gathered because the engine validated them together.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1513,6 +1572,8 @@ struct WindowRecord<R> {
     /// pages can actually go, which needs both sides to let go. The geometry
     /// stays, so the window still lays out, hit-tests, and re-attaches.
     region: Option<R>,
+    /// The frame presented since the last the session showed.
+    pending: Pending,
     /// A `PickFile` was accepted for this purpose and its conclusion
     /// (`FilePicked`, `FolderPicked` or `PickCancelled`) has not been
     /// delivered yet. At most one pick is pending per window; the engine sets
@@ -2186,10 +2247,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 window_id,
                 frame_index,
                 damage,
-            } => status(
-                reply,
-                self.present(host, caller, window_id, frame_index, &damage),
-            ),
+            } => status(reply, self.present(caller, window_id, frame_index, &damage)),
             WindowRequest::PlaceLayer {
                 window_id,
                 x,
@@ -2338,6 +2396,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_count: spec.frame_count,
                 frame_len,
                 region: Some(region),
+                pending: Pending::new(),
                 pick_pending: None,
                 picked_name: None,
                 picked_files: VecDeque::new(),
@@ -2517,6 +2576,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_count: spec.frame_count,
                 frame_len,
                 region: Some(region),
+                pending: Pending::new(),
                 pick_pending: None,
                 picked_name: None,
                 picked_files: VecDeque::new(),
@@ -2582,6 +2642,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_count: spec.frame_count,
                 frame_len,
                 region: Some(region),
+                pending: Pending::new(),
                 pick_pending: None,
                 picked_name: None,
                 picked_files: VecDeque::new(),
@@ -2724,20 +2785,26 @@ impl<M: ShmMapper> WindowServer<M> {
             record.frame_count = spec.frame_count;
             record.frame_len = frame_len;
             record.region = Some(region);
+            // What was pending named a frame of the region just dropped.
+            record.pending.clear();
         }
         Ok(())
     }
 
     /// Present one frame of `caller`'s window `window_id`.
+    ///
+    /// Recorded, not shown: [`Self::latch`] shows it with the desktop's next
+    /// frame. The answer goes out at once, so the client may draw its other
+    /// frame while this one waits — never the one named here, which the
+    /// session reads until a later present replaces it.
     fn present(
         &mut self,
-        host: &mut dyn WindowHost,
         caller: ProcId,
         window_id: u64,
         frame_index: u32,
         damage: &DamageList,
     ) -> Result<(), Errno> {
-        let record = owned_window(&self.windows, caller, window_id)?;
+        let record = owned_window_mut(&mut self.windows, caller, window_id)?;
         if frame_index >= record.frame_count {
             return Err(Errno::OutOfRange);
         }
@@ -2748,14 +2815,59 @@ impl<M: ShmMapper> WindowServer<M> {
         // A window whose frames the session released holds no pixels to
         // present. Refusing typed is what lets a client re-attach on its next
         // paint instead of writing into a mapping neither side has.
+        if record.region.is_none() {
+            return Err(Errno::NotAttached);
+        }
+        record.pending.record(frame_index, damage, &record.surface);
+        Ok(())
+    }
+
+    /// Show every window's newest presented frame through `host`, once a
+    /// desktop frame: a client presenting faster than the desktop draws costs
+    /// one conversion a frame, never one a present.
+    pub fn latch(&mut self, host: &mut dyn FrameHost) {
+        for (&window_id, record) in &mut self.windows {
+            let Some(frame_index) = record.pending.frame else {
+                continue;
+            };
+            let shown = Self::frame_of(record, frame_index).and_then(|frame| {
+                let damage = damage_of(&record.pending.damage, &record.surface)?;
+                host.window_presented(window_id, &record.surface, frame, &damage)
+            });
+            match shown {
+                Ok(()) => record.pending.clear(),
+                Err(errno) => {
+                    record.pending.refused();
+                    host.frame_refused(window_id, errno);
+                }
+            }
+        }
+    }
+
+    /// Whether any window has presented a frame [`Self::latch`] has not shown.
+    #[must_use]
+    pub fn has_pending_frames(&self) -> bool {
+        self.windows
+            .values()
+            .any(|record| record.pending.frame.is_some())
+    }
+
+    /// Frame `frame_index` of `record`'s region.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotAttached`] for a released region, and
+    /// [`Errno::DeviceFault`] for one that no longer holds the frame: the
+    /// region was validated to hold every frame when it was mapped, so one
+    /// that shrank is a fault, not a clamp.
+    fn frame_of(record: &WindowRecord<M::Region>, frame_index: u32) -> Result<&[u8], Errno> {
         let bytes = record.region.as_ref().ok_or(Errno::NotAttached)?.bytes();
-        let base = frame_index as usize * record.frame_len;
-        // The region was validated to hold every frame at create time; a
-        // region that shrank underneath us is a fault, not a clamp.
-        let frame = bytes
-            .get(base..base + record.frame_len)
+        let base = (frame_index as usize)
+            .checked_mul(record.frame_len)
             .ok_or(Errno::DeviceFault)?;
-        host.window_presented(window_id, &record.surface, frame, damage)
+        bytes
+            .get(base..base.saturating_add(record.frame_len))
+            .ok_or(Errno::DeviceFault)
     }
 
     /// Accept a trusted-picker request for `caller`'s window `window_id`:
@@ -3398,6 +3510,7 @@ impl<M: ShmMapper> WindowServer<M> {
         let bytes = record.mapped_bytes();
         // Dropping the region is the unmap: the mapper owns that side.
         record.region = None;
+        record.pending.clear();
         bytes
     }
 

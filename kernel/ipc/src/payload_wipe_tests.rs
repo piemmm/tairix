@@ -137,7 +137,7 @@ fn endpoint(id: u64, sink: &RecordingSink) -> CallEndpoint {
         CallEndpointLimits {
             max_request: PAYLOAD_CAP,
             max_reply: PAYLOAD_CAP,
-            capacity: 8,
+            per_sender: 8,
         },
         tairix_abi::RLIMIT_INFINITY,
         sink,
@@ -179,13 +179,21 @@ fn call_round_trip_leaves_no_plaintext_in_freed_heap() {
 
     let seen = with_probe(IPC_SENTINEL, || {
         let ticket = ep
-            .post(&caller, 0x51, secret().as_bytes(), u64::MAX, &sink)
+            .post(
+                &caller,
+                0x51,
+                secret().as_bytes(),
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                &sink,
+            )
             .expect("posted");
         let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
             panic!("the request must be received");
         };
         assert_eq!(call.request.len(), PAYLOAD_LEN);
-        ep.reply(call.ticket, secret().as_bytes(), &sink)
+        let _ = ep
+            .reply(call.ticket, secret().as_bytes(), &sink)
             .expect("replied");
         // Releases the kernel-owned copy of the request the server was handed.
         drop(call);
@@ -207,13 +215,27 @@ fn abandoned_calls_leave_no_plaintext_in_freed_heap() {
         // A request withdrawn by its poster, before service.
         let ep = endpoint(0xC2, &sink);
         let ticket = ep
-            .post(&caller, 0x51, secret().as_bytes(), u64::MAX, &sink)
+            .post(
+                &caller,
+                0x51,
+                secret().as_bytes(),
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                &sink,
+            )
             .expect("posted");
-        assert!(ep.cancel_one(7, ticket));
+        assert!(ep.cancel_one(7, ticket).is_some());
 
         // A request dropped because its poster exited.
         let ticket = ep
-            .post(&caller, 0x51, secret().as_bytes(), u64::MAX, &sink)
+            .post(
+                &caller,
+                0x51,
+                secret().as_bytes(),
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                &sink,
+            )
             .expect("posted");
         assert_eq!(ep.cancel_posted_by(7, &sink), 1);
         assert!(matches!(
@@ -223,12 +245,20 @@ fn abandoned_calls_leave_no_plaintext_in_freed_heap() {
 
         // An unclaimed reply discarded with its poster.
         let ticket = ep
-            .post(&caller, 0x51, secret().as_bytes(), u64::MAX, &sink)
+            .post(
+                &caller,
+                0x51,
+                secret().as_bytes(),
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                &sink,
+            )
             .expect("posted");
         let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
             panic!("the request must be received");
         };
-        ep.reply(call.ticket, secret().as_bytes(), &sink)
+        let _ = ep
+            .reply(call.ticket, secret().as_bytes(), &sink)
             .expect("replied");
         drop(call);
         assert_eq!(ep.cancel_posted_by(7, &sink), 1);
@@ -238,10 +268,24 @@ fn abandoned_calls_leave_no_plaintext_in_freed_heap() {
         ));
 
         // A request and a reply cancelled by endpoint teardown.
-        ep.post(&caller, 0x51, secret().as_bytes(), u64::MAX, &sink)
-            .expect("posted");
+        ep.post(
+            &caller,
+            0x51,
+            secret().as_bytes(),
+            u64::MAX,
+            tairix_abi::RLIMIT_INFINITY,
+            &sink,
+        )
+        .expect("posted");
         let ticket = ep
-            .post(&caller, 0x51, secret().as_bytes(), u64::MAX, &sink)
+            .post(
+                &caller,
+                0x51,
+                secret().as_bytes(),
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                &sink,
+            )
             .expect("posted");
         let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
             panic!("the request must be received");
@@ -268,11 +312,25 @@ fn refused_calls_leave_no_plaintext_in_freed_heap() {
         // Fill the endpoint, then post into the full queue: the refused
         // request's copy is dropped inside `post`.
         for _ in 0..8 {
-            ep.post(&caller, 0x51, secret().as_bytes(), u64::MAX, &sink)
-                .expect("posted");
+            ep.post(
+                &caller,
+                0x51,
+                secret().as_bytes(),
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                &sink,
+            )
+            .expect("posted");
         }
-        ep.post(&caller, 0x51, secret().as_bytes(), u64::MAX, &sink)
-            .expect_err("the queue is full");
+        ep.post(
+            &caller,
+            0x51,
+            secret().as_bytes(),
+            u64::MAX,
+            tairix_abi::RLIMIT_INFINITY,
+            &sink,
+        )
+        .expect_err("the queue is full");
 
         // A reply for an unknown ticket: its copy is dropped inside `reply`.
         ep.reply(CallTicket(0xDEAD), secret().as_bytes(), &sink)
@@ -305,19 +363,34 @@ fn port_message_leaves_no_plaintext_in_freed_heap() {
 
     let seen = with_probe(IPC_SENTINEL, || {
         // A delivered-and-drained message.
-        port.send(&sender, secret().as_bytes(), &sink)
-            .expect("delivered");
+        port.send(
+            &sender,
+            secret().as_bytes(),
+            tairix_abi::RLIMIT_INFINITY,
+            &sink,
+        )
+        .expect("delivered");
         let msg = port.recv().expect("drained");
         assert_eq!(msg.payload.len(), PAYLOAD_LEN);
         drop(msg);
 
-        // A message refused because the mailbox is full.
+        // A message refused because its sender's lane is full.
         for _ in 0..4 {
-            port.send(&sender, secret().as_bytes(), &sink)
-                .expect("delivered");
+            port.send(
+                &sender,
+                secret().as_bytes(),
+                tairix_abi::RLIMIT_INFINITY,
+                &sink,
+            )
+            .expect("delivered");
         }
-        port.send(&sender, secret().as_bytes(), &sink)
-            .expect_err("the mailbox is full");
+        port.send(
+            &sender,
+            secret().as_bytes(),
+            tairix_abi::RLIMIT_INFINITY,
+            &sink,
+        )
+        .expect_err("the sender's lane is full");
 
         // Messages dropped by teardown.
         port.destroy(&sink);

@@ -43,9 +43,9 @@ use crate::damage_in;
 use crate::desktop::Desktop;
 use crate::server::{
     client_frame_budget_bytes, Activation, AlertOpen, CallerIdentity, ClientRegion, CursorSetName,
-    DialogSpec, DragConclusion, DragReport, EventSink, HandOverDesk, LayerSpec, OpenEntry,
-    PickedFile, PopupSpec, PreviewSize, ToolSpec, TransientSpec, WallpaperName, WindowHost,
-    WindowServer, WindowSizeState, WindowSizing, WINDOW_REPLY_MAX,
+    DialogSpec, DragConclusion, DragReport, EventSink, FrameHost, HandOverDesk, LayerSpec,
+    OpenEntry, PickedFile, PopupSpec, PreviewSize, ToolSpec, TransientSpec, WallpaperName,
+    WindowHost, WindowServer, WindowSizeState, WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -257,6 +257,10 @@ struct RecordingHost {
     terrain: Vec<TerrainPlate>,
     refuse_terrain: Option<Errno>,
     presented: Vec<(u64, Vec<u8>, DamageList)>,
+    /// What a frame refused at the latch is refused with, if it is.
+    refuse_frames: Option<Errno>,
+    /// Every frame the latch could not show, by window.
+    frames_refused: Vec<(u64, Errno)>,
     resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
     picks: Vec<(u64, PickPurpose)>,
@@ -352,6 +356,8 @@ impl Default for RecordingHost {
             terrain: Vec::new(),
             refuse_terrain: None,
             presented: Vec::new(),
+            refuse_frames: None,
+            frames_refused: Vec::new(),
             resized: Vec::new(),
             closed: Vec::new(),
             picks: Vec::new(),
@@ -415,6 +421,26 @@ fn sample_desktop() -> DesktopInfo {
     match DesktopInfo::new(1024, 768, 100, Appearance::Dark) {
         Ok(info) => info,
         Err(_) => unreachable!("a 1024x768 screen at 100% is in range"),
+    }
+}
+
+impl FrameHost for RecordingHost {
+    fn window_presented(
+        &mut self,
+        window_id: u64,
+        _surface: &DisplayMode,
+        frame: &[u8],
+        damage: &DamageList,
+    ) -> Result<(), Errno> {
+        if let Some(errno) = self.refuse_frames {
+            return Err(errno);
+        }
+        self.presented.push((window_id, frame.to_vec(), *damage));
+        Ok(())
+    }
+
+    fn frame_refused(&mut self, window_id: u64, errno: Errno) {
+        self.frames_refused.push((window_id, errno));
     }
 }
 
@@ -520,17 +546,6 @@ impl WindowHost for RecordingHost {
             spec.modality,
             String::from(spec.title.as_str()),
         ));
-        Ok(())
-    }
-
-    fn window_presented(
-        &mut self,
-        window_id: u64,
-        _surface: &DisplayMode,
-        frame: &[u8],
-        damage: &DamageList,
-    ) -> Result<(), Errno> {
-        self.presented.push((window_id, frame.to_vec(), *damage));
         Ok(())
     }
 
@@ -859,16 +874,6 @@ impl WindowHost for MinimalHost {
         Ok(())
     }
 
-    fn window_presented(
-        &mut self,
-        _window_id: u64,
-        _surface: &DisplayMode,
-        _frame: &[u8],
-        _damage: &DamageList,
-    ) -> Result<(), Errno> {
-        Ok(())
-    }
-
     fn window_resized(&mut self, _window_id: u64, _surface: &DisplayMode) -> Result<(), Errno> {
         Ok(())
     }
@@ -955,6 +960,15 @@ struct Loopback {
     answered: alloc::vec::Vec<(u64, alloc::vec::Vec<u8>)>,
     /// The ticket the next post is given.
     next_post: u64,
+    /// The depth this client's place at the endpoint holds, counting what is
+    /// posted and what is answered and not yet reaped, as the kernel does.
+    lane: Option<usize>,
+    /// Whether presented frames wait to be shown until [`Loopback::latch`],
+    /// as they do between the desktop's frames, rather than being shown as
+    /// each request is served.
+    holds_frames: bool,
+    /// Every post ticket a client waited on, in order.
+    awaited: alloc::vec::Vec<u64>,
 }
 
 impl Loopback {
@@ -974,7 +988,16 @@ impl Loopback {
             unserved: VecDeque::new(),
             answered: alloc::vec::Vec::new(),
             next_post: 1,
+            lane: None,
+            holds_frames: false,
+            awaited: alloc::vec::Vec::new(),
         }))
+    }
+
+    /// Show every frame presented since the last, as the desktop's next frame
+    /// does.
+    fn latch(&mut self) {
+        self.server.latch(&mut self.host);
     }
 
     /// Serve one request frame, answering the reply.
@@ -988,6 +1011,9 @@ impl Loopback {
             request,
             &mut frame,
         );
+        if !self.holds_frames {
+            self.latch();
+        }
         frame[..len].to_vec()
     }
 
@@ -1066,6 +1092,12 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
 
     fn post(&mut self, request: &[u8]) -> Result<u64, Errno> {
         let inner = &mut *self.borrow_mut();
+        if inner
+            .lane
+            .is_some_and(|depth| inner.unserved.len() + inner.answered.len() >= depth)
+        {
+            return Err(Errno::WouldBlock);
+        }
         inner.sent.push(request.to_vec());
         let ticket = inner.next_post;
         inner.next_post += 1;
@@ -1089,6 +1121,16 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
         let out = reply.get_mut(..frame.len()).ok_or(Errno::BufferTooSmall)?;
         out.copy_from_slice(&frame);
         Ok(Some(frame.len()))
+    }
+
+    fn await_reply(&mut self, ticket: u64, reply: &mut [u8]) -> Result<usize, Errno> {
+        {
+            let inner = &mut *self.borrow_mut();
+            inner.awaited.push(ticket);
+            // A waited-on post is reached however busy the session is.
+            inner.serve_posted();
+        }
+        self.reap(ticket, reply)?.ok_or(Errno::NotFound)
     }
 }
 
@@ -1579,11 +1621,19 @@ fn resize_is_refused_fail_closed() {
     client
         .present(window, 0, full_damage())
         .expect("still presents at the original size");
+    assert_eq!(refusal(&mut client), None);
     // Full damage of the larger surface is still out of bounds — the
     // window was never actually resized.
+    client
+        .present(window, 0, one(DamageRect::full(&BIG)))
+        .expect("posted");
     assert_eq!(
-        client.present(window, 0, one(DamageRect::full(&BIG))),
-        Err(Errno::LengthOutOfRange)
+        refusal(&mut client),
+        Some(refused(
+            window,
+            PostedRequest::Present,
+            Errno::LengthOutOfRange
+        ))
     );
 }
 
@@ -1609,9 +1659,10 @@ fn a_caller_cannot_touch_another_clients_window() {
     // B presents and closes A's window: refused exactly like a window
     // that does not exist, and A's window survives untouched.
     loopback.borrow_mut().ticket = TICKET_B;
+    client.present(window, 0, full_damage()).expect("posted");
     assert_eq!(
-        client.present(window, 0, full_damage()),
-        Err(Errno::NotFound)
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Present, Errno::NotFound))
     );
     client.set_title(window, "B's").expect("posted");
     client
@@ -1879,18 +1930,27 @@ fn released_frames_refuse_a_present_and_come_back_on_a_resize() {
         1,
         "the window itself survives its pixels"
     );
+    client
+        .present(window, 0, one(DamageRect::full(&SURFACE)))
+        .expect("posted");
     assert_eq!(
-        client.present(window, 0, one(DamageRect::full(&SURFACE))),
-        Err(Errno::NotAttached),
-        "a present with nothing attached is refused, not guessed at"
+        refusal(&mut client),
+        None,
+        "a present with nothing attached is refused, which is no news to report"
+    );
+    assert!(
+        client.content_released(window),
+        "the refusal says the next present re-attaches"
     );
     // The client's own next paint re-attaches with an ordinary resize.
     client
         .resize(window, 8, 1, &SURFACE)
         .expect("a released window re-attaches");
+    assert!(!client.content_released(window));
     client
         .present(window, 0, one(DamageRect::full(&SURFACE)))
         .expect("and presents again");
+    assert_eq!(refusal(&mut client), None);
 }
 
 /// A released window holds no frames, so its bytes are free for another
@@ -1989,10 +2049,26 @@ fn present_bounds_are_enforced() {
     let window = create_id(&mut client, 7, EVENTS_A, 2, "x").expect("create");
 
     // A frame index past the created count.
+    client.present(window, 2, full_damage()).expect("posted");
     assert_eq!(
-        client.present(window, 2, full_damage()),
-        Err(Errno::OutOfRange)
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Present, Errno::OutOfRange))
     );
+    // The refused frame never reached the screen, so the next present
+    // declares the whole window whatever it changed itself.
+    let corner = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    };
+    client.present(window, 1, one(corner)).expect("posted");
+    assert_eq!(refusal(&mut client), None);
+    {
+        let inner = loopback.borrow();
+        let (_, _, seen) = inner.host.presented.last().expect("shown");
+        assert_eq!(seen.rects(), full_damage().rects());
+    }
     // Damage falling outside the surface.
     let outside = DamageRect {
         x: 3,
@@ -2000,11 +2076,16 @@ fn present_bounds_are_enforced() {
         width_px: 2,
         height_px: 1,
     };
+    client.present(window, 0, one(outside)).expect("posted");
     assert_eq!(
-        client.present(window, 0, one(outside)),
-        Err(Errno::LengthOutOfRange)
+        refusal(&mut client),
+        Some(refused(
+            window,
+            PostedRequest::Present,
+            Errno::LengthOutOfRange
+        ))
     );
-    assert!(loopback.borrow().host.presented.is_empty());
+    assert_eq!(loopback.borrow().host.presented.len(), 1);
 }
 
 #[test]
@@ -2738,6 +2819,275 @@ fn a_run_of_resizes_folds_to_the_newest_extent() {
     assert_eq!(waiter.try_wait(&mut client), Ok(None));
 }
 
+/// A present is posted, and the next waits only for its answer — the frame
+/// the first named is the session's until then — never for a desktop frame.
+#[test]
+fn a_present_is_posted_and_the_next_waits_only_for_its_answer() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+
+    client.present(window, 0, full_damage()).expect("posted");
+    assert!(
+        loopback.borrow().awaited.is_empty(),
+        "the first waits on nothing"
+    );
+    assert!(
+        loopback.borrow().host.presented.is_empty(),
+        "nor is it served"
+    );
+
+    client.present(window, 1, full_damage()).expect("posted");
+    let inner = loopback.borrow();
+    assert_eq!(
+        inner.awaited.len(),
+        1,
+        "the second waited for the first alone"
+    );
+    assert_eq!(
+        inner.host.presented.len(),
+        1,
+        "the first was answered before the second went"
+    );
+    assert_eq!(
+        inner.unserved.len(),
+        1,
+        "the second waits on nothing in turn"
+    );
+}
+
+/// However often a window presents between the desktop's frames, the session
+/// converts one frame — the newest — carrying every change since the last.
+#[test]
+fn presents_between_frames_are_shown_once_with_every_change() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_frames = true;
+    let first = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    };
+    let second = DamageRect {
+        x: 3,
+        y: 2,
+        width_px: 1,
+        height_px: 1,
+    };
+
+    client.present(window, 0, one(first)).expect("posted");
+    client.present(window, 1, one(second)).expect("posted");
+    assert!(loopback.borrow().server.has_pending_frames());
+    loopback.borrow_mut().latch();
+    {
+        let inner = loopback.borrow();
+        assert_eq!(
+            inner.host.presented.len(),
+            1,
+            "one conversion for two presents"
+        );
+        let (id, frame, seen) = &inner.host.presented[0];
+        assert_eq!(*id, window);
+        let newest: Vec<u8> = (FRAME_LEN..2 * FRAME_LEN)
+            .map(|i| region_byte(7, i))
+            .collect();
+        assert_eq!(frame, &newest, "the newest frame is the one read");
+        assert_eq!(seen.rects(), [first, second]);
+    }
+    assert!(!loopback.borrow().server.has_pending_frames());
+    loopback.borrow_mut().latch();
+    assert_eq!(
+        loopback.borrow().host.presented.len(),
+        1,
+        "a frame shown is not shown again"
+    );
+}
+
+/// A re-map or a release drops the frame waiting to be shown: it names a frame
+/// of a region the session no longer reads.
+#[test]
+fn a_resize_or_a_release_drops_the_pending_frame() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_frames = true;
+
+    client.present(window, 0, full_damage()).expect("posted");
+    client.resize(window, 8, 2, &SURFACE).expect("posted");
+    assert_eq!(client.take_owed(), None, "the re-map was accepted");
+    assert!(!loopback.borrow().server.has_pending_frames());
+
+    client.present(window, 0, full_damage()).expect("posted");
+    loopback.borrow_mut().server.release_frames(window);
+    assert!(!loopback.borrow().server.has_pending_frames());
+    loopback.borrow_mut().latch();
+    assert!(loopback.borrow().host.presented.is_empty());
+}
+
+/// A frame the compositor cannot show is reported once, never retried on every
+/// desktop frame after, and what it changed is shown with the next present.
+#[test]
+fn a_frame_the_host_cannot_show_is_reported_once_and_owed_to_the_next() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    {
+        let inner = &mut *loopback.borrow_mut();
+        inner.holds_frames = true;
+        inner.host.refuse_frames = Some(Errno::OutOfMemory);
+    }
+    let first = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    };
+    let second = DamageRect {
+        x: 3,
+        y: 2,
+        width_px: 1,
+        height_px: 1,
+    };
+    client.present(window, 0, one(first)).expect("posted");
+    loopback.borrow_mut().latch();
+    loopback.borrow_mut().latch();
+    {
+        let inner = &mut *loopback.borrow_mut();
+        assert_eq!(inner.host.frames_refused, [(window, Errno::OutOfMemory)]);
+        assert!(inner.host.presented.is_empty());
+        assert!(!inner.server.has_pending_frames());
+        inner.host.refuse_frames = None;
+    }
+    client.present(window, 1, one(second)).expect("posted");
+    loopback.borrow_mut().latch();
+    let inner = loopback.borrow();
+    let seen: Vec<&[DamageRect]> = inner
+        .host
+        .presented
+        .iter()
+        .map(|(.., seen)| seen.rects())
+        .collect();
+    assert_eq!(
+        seen,
+        [&[first, second][..]],
+        "the refused frame's change is shown"
+    );
+}
+
+/// The library's answer to a redraw follows a present still in flight rather
+/// than waiting for it: it runs inside the application's event drain.
+#[test]
+fn a_redraw_asked_with_a_present_in_flight_follows_it_without_waiting() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+    let corner = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    };
+    client.present(window, 0, one(corner)).expect("posted");
+
+    assert_eq!(client.answer_redraw(window), Ok(true));
+    assert!(
+        loopback.borrow().awaited.is_empty(),
+        "the answer never waits"
+    );
+    loopback.borrow_mut().serve_posted();
+    client.reap_posted();
+    loopback.borrow_mut().serve_posted();
+    let inner = loopback.borrow();
+    let damages: Vec<DamageList> = inner
+        .host
+        .presented
+        .iter()
+        .map(|(.., seen)| *seen)
+        .collect();
+    assert_eq!(
+        damages,
+        [one(corner), full_damage()],
+        "the redraw went once the present before it was answered"
+    );
+}
+
+/// A window whose frames the session released holds nothing the library could
+/// re-send, so its redraw is the application's own next paint.
+#[test]
+fn a_released_window_is_left_for_its_application_to_paint() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    client.present(window, 0, full_damage()).expect("posted");
+    loopback.borrow_mut().server.release_frames(window);
+
+    let released = WindowEvent::ContentReleased { window_id: window };
+    let mut events = WindowEvents::new(QueueSource::new([released.to_le_bytes()]));
+    assert_eq!(events.try_wait(&mut client), Ok(Some(released)));
+    assert!(client.content_released(window));
+    let sent = loopback.borrow().sent.len();
+    assert_eq!(client.answer_redraw(window), Ok(false));
+    assert_eq!(loopback.borrow().sent.len(), sent, "nothing is sent");
+}
+
+/// A released window is hidden only until the session asks for it again: from
+/// then it is painted, and its next present re-attaches the frames — an app
+/// that held its paint for as long as the region stayed released never
+/// painted the window again.
+#[test]
+fn a_released_window_is_hidden_until_the_session_asks_for_it_again() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    client.present(window, 0, full_damage()).expect("posted");
+    assert!(!client.is_hidden(window));
+
+    loopback.borrow_mut().server.release_frames(window);
+    let released = WindowEvent::ContentReleased { window_id: window };
+    let asked = WindowEvent::RedrawRequested { window_id: window };
+    let mut events = WindowEvents::new(QueueSource::new([
+        released.to_le_bytes(),
+        asked.to_le_bytes(),
+    ]));
+    assert_eq!(events.try_wait(&mut client), Ok(Some(released)));
+    assert!(client.is_hidden(window), "nobody can see it");
+
+    assert_eq!(events.try_wait(&mut client), Ok(Some(asked)));
+    assert!(!client.is_hidden(window), "asked for, it is painted");
+    assert!(
+        client.content_released(window),
+        "and its next present re-attaches"
+    );
+    client.resize(window, 8, 2, &SURFACE).expect("re-attached");
+    assert!(!client.content_released(window) && !client.is_hidden(window));
+}
+
+/// A present this process's own calls leave no room for goes as a call, which
+/// waits for the room, rather than waiting on nothing.
+#[test]
+fn a_present_with_no_room_goes_as_a_call() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    {
+        let inner = &mut *loopback.borrow_mut();
+        inner.holds_posts = true;
+        inner.lane = Some(1);
+    }
+    client
+        .set_cursor(window, CursorShape::Text)
+        .expect("posted");
+    client.present(window, 0, full_damage()).expect("called");
+    let inner = loopback.borrow();
+    assert!(inner.awaited.is_empty());
+    assert_eq!(inner.host.presented.len(), 1, "answered before it returned");
+    assert_eq!(inner.host.cursors, [(window, CursorShape::Text)]);
+}
+
 /// No per-input request waits on the session: each is posted and answered
 /// later, so a loop busy with a slow desktop still returns at once.
 #[test]
@@ -2778,6 +3128,101 @@ fn a_posted_request_never_waits_on_the_session() {
     assert_eq!(host.cursors, [(window, CursorShape::Text)]);
     assert_eq!(host.retitled.len(), 1);
     assert_eq!(host.resized.len(), 1);
+}
+
+/// A post the endpoint refuses for room — this process's own calls fill its
+/// place — waits rather than failing, and goes, in the order it was asked,
+/// once one of the process's answers is reaped.
+#[test]
+fn a_post_refused_for_room_waits_for_an_answer_then_goes_in_order() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    {
+        let mut inner = loopback.borrow_mut();
+        inner.holds_posts = true;
+        inner.lane = Some(1);
+    }
+    let sent_before = loopback.borrow().sent.len();
+    client
+        .set_cursor(window, CursorShape::Text)
+        .expect("posted");
+    client
+        .set_title(window, "b")
+        .expect("held for room, not refused");
+    client
+        .set_sizing(window, WindowSizing::Fixed)
+        .expect("held for room, not refused");
+    assert_eq!(
+        loopback.borrow().sent.len(),
+        sent_before + 1,
+        "only the first reached the endpoint"
+    );
+    assert_eq!(client.take_owed(), None, "waiting for room is no refusal");
+
+    for posted in [sent_before + 2, sent_before + 3, sent_before + 3] {
+        loopback.borrow_mut().serve_posted();
+        client.reap_posted();
+        assert_eq!(
+            loopback.borrow().sent.len(),
+            posted,
+            "each answer makes room for one, the oldest waiting"
+        );
+    }
+    let host = &loopback.borrow().host;
+    assert_eq!(host.cursors, [(window, CursorShape::Text)]);
+    assert_eq!(host.retitled.len(), 1);
+    assert_eq!(host.resized_range.len(), 1);
+}
+
+/// A resize refused for room makes no region and is delivered again once one
+/// of the process's answers is reaped, so the window still ends at its size.
+#[test]
+fn a_resize_refused_for_room_is_deferred_and_delivered_again() {
+    const BIG: DisplayMode = DisplayMode {
+        width_px: 8,
+        height_px: 3,
+        stride_bytes: 32,
+        format: DisplayFormat::Bgra8888,
+    };
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (20, 2 * 96)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let resized = WindowEvent::Resized {
+        window_id: window,
+        width_px: 8,
+        height_px: 3,
+        state: WindowSizeState::Restored,
+    };
+    let mut events = WindowEvents::new(QueueSource::new([resized.to_le_bytes()]));
+    assert_eq!(events.try_wait(&mut client), Ok(Some(resized)));
+    {
+        let mut inner = loopback.borrow_mut();
+        inner.holds_posts = true;
+        inner.lane = Some(1);
+    }
+    client
+        .set_cursor(window, CursorShape::Text)
+        .expect("fills the lane");
+    assert_eq!(
+        client.resize(window, 20, 2, &BIG),
+        Err(Errno::WouldBlock),
+        "refused for room"
+    );
+    assert!(!client.resize_in_flight(window), "nothing was sent");
+    assert_eq!(
+        events.try_wait(&mut client),
+        Ok(None),
+        "nothing answered yet"
+    );
+
+    loopback.borrow_mut().serve_posted();
+    assert_eq!(
+        events.try_wait(&mut client),
+        Ok(Some(resized)),
+        "the size is delivered again once room is made"
+    );
+    assert_eq!(events.try_wait(&mut client), Ok(None), "and only once");
 }
 
 /// A posted resize reaches the session before the present of the frame
@@ -6837,16 +7282,6 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
             _surface: &DisplayMode,
             _title: &str,
             _sizing: WindowSizing,
-        ) -> Result<(), Errno> {
-            Ok(())
-        }
-
-        fn window_presented(
-            &mut self,
-            _window_id: u64,
-            _surface: &DisplayMode,
-            _frame: &[u8],
-            _damage: &DamageList,
         ) -> Result<(), Errno> {
             Ok(())
         }

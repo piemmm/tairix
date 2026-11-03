@@ -1080,7 +1080,8 @@ mod program {
             }
         }
 
-        /// Paint what is owed and present it.
+        /// Paint what is owed and present it: nothing when nothing was
+        /// reported, nor while the window is hidden.
         fn present(
             &mut self,
             repaint: Repaint,
@@ -1088,9 +1089,14 @@ mod program {
             theme: &Theme,
             scale: Scale,
         ) -> Result<(), Errno> {
+            if self.client.is_hidden(self.pane.id()) {
+                return Ok(());
+            }
             let mode = *self.pane.mode();
             let repaint = if self.pane.content_released() || !self.presented {
                 Repaint::Whole
+            } else if repaint == Repaint::Reported && reported.is_empty() {
+                Repaint::Nothing
             } else {
                 repaint
             };
@@ -1494,6 +1500,9 @@ mod program {
             pressure_moved: &pressure_moved,
             deadline_ns: &deadline_ns,
         });
+        // The event the last park woke for, served with the rest of the input
+        // that arrived since, so the whole burst costs one frame.
+        let mut woken: Option<WindowEvent> = None;
         loop {
             let mut reported = damage::sink();
             let mut repaint = Repaint::Reported;
@@ -1526,6 +1535,12 @@ mod program {
 
             // Then every queued input, before anything is painted, so a burst
             // costs one frame.
+            if let Some(event) = woken.take() {
+                if app_state.route(&event, endpoint, theme, scale, &mut reported) {
+                    app_state.link.leave();
+                    return 0;
+                }
+            }
             loop {
                 match events.try_wait(&mut app_state.client) {
                     Ok(Some(event)) => {
@@ -1562,21 +1577,7 @@ mod program {
             }
             deadline_ns.set(app_state.player.scroll_repeat_deadline(now));
             match events.wait(&mut app_state.client) {
-                Ok(Some(event)) => {
-                    let mut reported = damage::sink();
-                    if app_state.route(&event, endpoint, theme, scale, &mut reported) {
-                        app_state.link.leave();
-                        return 0;
-                    }
-                    app_state.raise_notices(endpoint);
-                    if app_state
-                        .present(Repaint::Reported, &reported, theme, scale)
-                        .is_err()
-                    {
-                        app_state.link.leave();
-                        return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
-                    }
-                }
+                Ok(Some(event)) => woken = Some(event),
                 Ok(None) => {}
                 Err(EventError::Mailbox(_)) => {
                     app_state.link.leave();

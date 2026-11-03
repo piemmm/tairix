@@ -16,7 +16,7 @@ use core::num::NonZeroU32;
 
 use alloc::collections::VecDeque;
 
-use super::{Interfaces, Note, Seam, UrbBuffer, ENDPOINT_CAPACITY};
+use super::{Interfaces, Note, Seam, UrbBuffer, ENDPOINT_DEPTH};
 use crate::domain::{ControllerDomainEvent, ControllerHealth, CONTROLLER_GRACE_NS};
 use crate::serve::UrbReply;
 use tairix_abi::hwtree::{HwResourceKind, HW_NODE_ROOT};
@@ -829,7 +829,7 @@ fn the_drain_before_a_publish_is_bounded_by_the_endpoint_depth() {
     mock.table[0] = None;
     interfaces.reconcile(&mut mock);
     mock.steps();
-    let tickets = 0..=u64::try_from(ENDPOINT_CAPACITY).expect("a small depth");
+    let tickets = 0..=u64::try_from(ENDPOINT_DEPTH).expect("a small depth");
     for ticket in tickets {
         mock.post(endpoint, ticket, report_poll());
     }
@@ -840,7 +840,7 @@ fn the_drain_before_a_publish_is_bounded_by_the_endpoint_depth() {
         .iter()
         .filter(|step| matches!(step, Step::Reply { .. }))
         .count();
-    assert_eq!(refusals, ENDPOINT_CAPACITY);
+    assert_eq!(refusals, ENDPOINT_DEPTH);
     assert_eq!(mock.queued.len(), 1, "a call past the depth is left alone");
 }
 

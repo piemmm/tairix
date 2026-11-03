@@ -46,13 +46,10 @@ const CONDITION_COUNT: usize = ReadyCondition::ALL.len();
 /// exhaust its memory. The bound is per service, so one busy service cannot
 /// starve another's queue. A legitimate service with more genuinely
 /// concurrent first-connections than this is vanishingly unlikely; if one
-/// ever arises it is raised deliberately here, never removed.
-///
-/// Public because the transport must size its endpoint's outstanding-call
-/// bound from it: a kernel queue shorter than this would refuse a connect
-/// before the engine's own bound was ever reached, leaving that bound dead
-/// and the refusal unaudited by the manager.
-pub const MAX_PENDING_PER_SERVICE: usize = 64;
+/// ever arises it is raised deliberately here, never removed. Every client's
+/// waits count against it, and the kernel bounds how many one client may hold
+/// at the activation endpoint, so no single client fills it alone.
+pub(crate) const MAX_PENDING_PER_SERVICE: usize = 64;
 
 /// How many times the restart policy will relaunch a single service that
 /// keeps dying before it has run stably, before the manager gives up on it.

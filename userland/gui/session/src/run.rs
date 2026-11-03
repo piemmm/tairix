@@ -162,19 +162,19 @@ mod program {
         DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource, DocumentAuthority,
         DocumentRelay, DragEnd, DragPlace, DragSurface, DropRefusal, ElevateAsk, Elevation,
         Elevator, FileManagerFound, FileManagerHand, FileManagerKeeper, FrameContent, FramePacer,
-        FrameReportGate, FrameStatsPublisher, FrameStatsSink, GestureRefusal, HangTracker,
-        HeldTarget, HoldBack, IdleAction, IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource,
-        Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed,
-        Listing as Authorisers, LoadedPrograms, MachineWatch, OfferEnd, OwedReport, OwnPick,
-        OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, PinboardApplied, PinboardCall,
-        PinboardRefusal, Prepared, PresentedOwners, PreviewBudget, PreviewDone, PreviewJob,
-        PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, Publication, Requester,
-        ResizedRecord, ResolutionAsk, ResolutionPrompt, Routed, SaveEnd, SaveOffer, SaverContext,
-        SaverEnd, SaverLaunch, SaverLauncher, SaverSetup, ScreenFade, ScreenLock, Screensaver,
-        Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake,
-        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SlideWant,
-        SlotAnswer, SoundCall, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Timed,
-        Trial, TrialEnd, TrialOutcome, UnlockAnswer, UnlockAsk, WallpaperDesk, WallpaperJob,
+        FrameReportGate, FrameShow, FrameStatsPublisher, FrameStatsSink, GestureRefusal,
+        HangTracker, HeldTarget, HoldBack, IdleAction, IdleClock, IdlePolicy, InputPolicy,
+        KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
+        LayerDecision, LayerFeed, Listing as Authorisers, LoadedPrograms, MachineWatch, OfferEnd,
+        OwedReport, OwnPick, OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep,
+        PinboardApplied, PinboardCall, PinboardRefusal, Prepared, PresentedOwners, PreviewBudget,
+        PreviewDone, PreviewJob, PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome,
+        Publication, Requester, ResizedRecord, ResolutionAsk, ResolutionPrompt, Routed, SaveEnd,
+        SaveOffer, SaverContext, SaverEnd, SaverLaunch, SaverLauncher, SaverSetup, ScreenFade,
+        ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter,
+        SeatWake, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord,
+        SlideWant, SlotAnswer, SoundCall, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
+        Timed, Trial, TrialEnd, TrialOutcome, UnlockAnswer, UnlockAsk, WallpaperDesk, WallpaperJob,
         WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH, APP_BAR_SETTLED,
         APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED,
         CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED,
@@ -604,31 +604,32 @@ mod program {
     /// driver posts each latch to.
     type Ring = RtDisplay<RtDisplayTransport>;
 
-    /// Queued-wake capacity of the mailbox. The authority sends one wake per
-    /// switch and the loop drains it on the very next turn, so a handful of
-    /// slots outlasts any legitimate burst and bounds what an unattested
-    /// sender can queue before the kernel refuses it.
-    const WAKE_CAPACITY: usize = 4;
+    /// Wakes one sender may have queued at the mailbox. The authority sends
+    /// one wake per switch and the loop drains it on the very next turn, so a
+    /// handful outlasts any legitimate burst, and an unattested sender can
+    /// queue no more than that, in its own lane, before the kernel refuses it.
+    const WAKE_DEPTH: usize = 4;
 
-    /// Outstanding-call capacity of the window endpoint (a fail-closed
-    /// memory bound): every app calls synchronously, so a small queue
-    /// covers several concurrent clients.
-    const WINDOW_CAPACITY: usize = 8;
+    /// Calls one app may hold at the window endpoint: a request of each posted
+    /// kind and a present for each of its windows, and one call per calling
+    /// thread. Past it the app's own further posts wait for its replies. A
+    /// fail-closed memory bound, paid by the app.
+    const WINDOW_CALLER_DEPTH: usize = 64;
 
-    /// Outstanding-call capacity of the notification endpoint: notifications
-    /// are infrequent and synchronous, so a small queue covers several
-    /// producers posting at once (a fail-closed memory bound).
-    const NOTIFY_CAPACITY: usize = 8;
+    /// Calls one producer may hold at the notification endpoint: notifications
+    /// are infrequent and synchronous, one per calling thread (a fail-closed
+    /// memory bound).
+    const NOTIFY_CALLER_DEPTH: usize = 4;
 
-    /// Outstanding-call capacity of the Switchboard endpoint: exactly one
-    /// attested publisher posts, change-driven and synchronous, so the
-    /// queue stays tiny (a fail-closed memory bound).
-    const SWITCHBOARD_CAPACITY: usize = 4;
+    /// Calls the Switchboard's one attested publisher may hold at its endpoint:
+    /// it posts change-driven and synchronously, so it stays tiny (a
+    /// fail-closed memory bound).
+    const SWITCHBOARD_DEPTH: usize = 4;
 
-    /// Outstanding-call capacity of the pinboard endpoint: an apply is a
-    /// deliberate, user-driven act and synchronous, so a tiny queue covers
-    /// every real caller (a fail-closed memory bound).
-    const PINBOARD_CAPACITY: usize = 4;
+    /// Calls one caller may hold at the pinboard endpoint: an apply is a
+    /// deliberate, user-driven act and synchronous (a fail-closed memory
+    /// bound).
+    const PINBOARD_CALLER_DEPTH: usize = 4;
 
     /// The sink this session records through — every cache's audit trail and
     /// the desktop's one-shot reveal witness. The shared cache constructors
@@ -1315,7 +1316,7 @@ mod program {
     fn advance_saver(
         (saver, lock): (&mut DesktopSaver, &ScreenLock),
         (shell, compositor, pacer): (&mut DesktopShell, &mut Compositor, &mut FramePacer),
-        ready: bool,
+        (ready, pending): (bool, bool),
         now_ns: u64,
     ) {
         tick_clock(shell, compositor, now_ns);
@@ -1323,8 +1324,26 @@ mod program {
             report_saver_end(&end);
         }
         if presentable(saver, lock, compositor) {
-            pacer.hold(compositor.has_damage(), ready);
+            pacer.hold(compositor.has_damage() || pending, ready);
         }
+    }
+
+    /// Show every window's newest presented frame, as the frame about to be
+    /// composed: an application presenting faster than the desktop draws
+    /// costs the session one conversion a frame.
+    fn latch_frames(
+        server: &mut WindowServer<RtShmMapper>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        seat_held: bool,
+    ) {
+        server.latch(&mut FrameShow {
+            shell,
+            compositor,
+            windows,
+            seat_held,
+        });
     }
 
     /// Whether a frame may go to the display: none while the saver holds it
@@ -2629,7 +2648,7 @@ mod program {
         // row out.
         let wake = session_wake_endpoint(self_origin.pid());
         let bound = !tairix_abi::ipc::is_reserved_endpoint(wake)
-            && tairix_rt::port_bind(wake, SESSION_WAKE_LEN, WAKE_CAPACITY) == 0
+            && tairix_rt::port_bind(wake, SESSION_WAKE_LEN, WAKE_DEPTH) == 0
             && tairix_rt::port_admit(wake, SESSION_ENDPOINT).is_ok();
         if !bound {
             io::write_stderr_line(
@@ -3287,7 +3306,7 @@ mod program {
             &empty,
             WINDOW_MAX_REQUEST,
             WINDOW_REPLY_MAX,
-            WINDOW_CAPACITY,
+            WINDOW_CALLER_DEPTH,
         ) != 0
         {
             return app::fail(
@@ -3309,7 +3328,7 @@ mod program {
             &empty,
             NOTIFY_MAX_REQUEST,
             STATUS_REPLY_LEN,
-            NOTIFY_CAPACITY,
+            NOTIFY_CALLER_DEPTH,
         ) != 0
         {
             return app::fail(
@@ -3331,7 +3350,7 @@ mod program {
             &empty,
             SWITCHBOARD_MAX_REQUEST,
             SWITCHBOARD_PUBLISH_REPLY_LEN,
-            SWITCHBOARD_CAPACITY,
+            SWITCHBOARD_DEPTH,
         ) != 0
         {
             return app::fail(
@@ -3353,7 +3372,7 @@ mod program {
             &empty,
             PINBOARD_MAX_REQUEST,
             PINBOARD_MAX_REPLY,
-            PINBOARD_CAPACITY,
+            PINBOARD_CALLER_DEPTH,
         ) != 0
         {
             return app::fail(
@@ -4218,11 +4237,18 @@ mod program {
                 if presentable(&saver, &lock, &compositor)
                     && pacer.admit(
                         now_ns,
-                        compositor.has_damage(),
+                        compositor.has_damage() || server.has_pending_frames(),
                         display.as_ref().is_none_or(Presenter::ready),
                         compositor.refresh_rate(),
                     )
                 {
+                    latch_frames(
+                        &mut server,
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        seat_held(&lock, &picker, (&confirm, &elevate, &resolution)),
+                    );
                     match present(
                         &mut shell,
                         &mut compositor,
@@ -4247,7 +4273,10 @@ mod program {
                 advance_saver(
                     (&mut saver, &lock),
                     (&mut shell, &mut compositor, &mut pacer),
-                    display.as_ref().is_none_or(Presenter::ready),
+                    (
+                        display.as_ref().is_none_or(Presenter::ready),
+                        server.has_pending_frames(),
+                    ),
                     now_ns,
                 );
                 frames.maybe_send(
@@ -5762,11 +5791,18 @@ mod program {
             if presentable(&saver, &lock, &compositor)
                 && pacer.admit(
                     now_ns,
-                    compositor.has_damage(),
+                    compositor.has_damage() || server.has_pending_frames(),
                     display.as_ref().is_none_or(Presenter::ready),
                     compositor.refresh_rate(),
                 )
             {
+                latch_frames(
+                    &mut server,
+                    &mut shell,
+                    &mut compositor,
+                    &mut windows,
+                    seat_held(&lock, &picker, (&confirm, &elevate, &resolution)),
+                );
                 match present(
                     &mut shell,
                     &mut compositor,
@@ -5791,7 +5827,10 @@ mod program {
             advance_saver(
                 (&mut saver, &lock),
                 (&mut shell, &mut compositor, &mut pacer),
-                display.as_ref().is_none_or(Presenter::ready),
+                (
+                    display.as_ref().is_none_or(Presenter::ready),
+                    server.has_pending_frames(),
+                ),
                 now_ns,
             );
             // What that frame cost, for the monitor's Resources page. After

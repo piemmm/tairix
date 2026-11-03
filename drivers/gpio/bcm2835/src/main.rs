@@ -22,9 +22,7 @@ mod program {
     use tairix_abi::hwtree::HwResourceKind;
     use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwProperty, ProcId, PROC_ID_HEX_LEN};
     use tairix_drv_gpio_bcm2835::block::{Block, LINES, WINDOW_LEN};
-    use tairix_drv_gpio_bcm2835::controller::{
-        Controller, HeaderPort, Record, BANK_INTERRUPTS, HEADER_CALLS_PER_WAKE,
-    };
+    use tairix_drv_gpio_bcm2835::controller::{Controller, HeaderPort, Record, BANK_INTERRUPTS};
     use tairix_drv_gpio_bcm2835::REQUIRED_CAPABILITIES;
     use tairix_drvrt::exit::{end, step, DriverExit};
     use tairix_drvrt::irqline::LineRecord;
@@ -89,14 +87,14 @@ mod program {
             );
         };
         let mut request = [0u8; IRQLINE_MAX_REQUEST];
-        // A consumer waits on each line at most once at a time, so the queue
-        // needs no more than a call per line.
+        // A consumer waits on each line at most once at a time, so one that
+        // owns every line holds no more than a call per line.
         let service = Service::bind(
             Endpoint {
                 id: endpoint,
                 request: &mut request,
                 max_reply: IRQLINE_MAX_REPLY,
-                capacity: usize::from(LINES),
+                per_sender: usize::from(LINES),
             },
             &wakes[..banks + usize::from(header_id.is_some())],
         );
@@ -183,7 +181,7 @@ mod program {
         gate: CapabilityId::GPIO,
         max_request: HEADER_REQUEST_LEN,
         max_reply: HEADER_MAX_REPLY,
-        capacity: HEADER_CALLS_PER_WAKE,
+        per_sender: 1,
     };
 
     /// The header endpoint over the runtime's call syscalls.

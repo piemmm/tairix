@@ -18,13 +18,22 @@
 //! with [`WindowFrames::release`]. A hidden 4K window then costs nothing
 //! instead of sixty megabytes.
 //!
-//! Coming back is [`WindowClient::frame_pixels`](crate::WindowClient::frame_pixels):
-//! the paint that follows the session's next redraw request finds the region
-//! released, makes a fresh one, and re-attaches it with the ordinary resize
-//! request. The app's paint code does not change.
+//! Coming back is the present that follows the session's next redraw request:
+//! it finds the region released, makes a fresh one, and re-attaches it with
+//! the ordinary resize request. The app's paint code does not change.
 
+use tairix_abi::driver::display::DisplayMode;
 use tairix_abi::window_ipc::WINDOW_ENDPOINT;
 use tairix_rt::shm::SharedRegion;
+#[cfg(any(test, freestanding))]
+use {
+    tairix_abi::driver::display::DamageList,
+    tairix_abi::Errno,
+    tairix_display::winframe::{self, damage_in},
+    tairix_display::{add_damage, SERIAL},
+    tairix_geometry::{Rect, Region, StaleFrames},
+    tairix_raster::Surface,
+};
 
 /// One live mapping of a window's frame region, with the grant the session
 /// maps it through.
@@ -118,3 +127,61 @@ pub(crate) fn granted_region(len: usize) -> Option<(SharedRegion, u64)> {
     #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
     Some((region, grant as u64))
 }
+
+/// Total bytes a `frame_count`-frame region shaped as `mode` needs, or `None`
+/// when that product does not fit an address.
+///
+/// Checked rather than saturating, because either failure mode is fatal to the
+/// caller: a wrapped length asks for a region too small for the window it
+/// describes, and a saturated one for a region no machine can map. On a 32-bit
+/// target the product of two `u32` dimensions genuinely does not fit.
+#[must_use]
+pub fn region_bytes(mode: &DisplayMode, frame_count: u32) -> Option<usize> {
+    usize::try_from(mode.stride_bytes)
+        .ok()?
+        .checked_mul(usize::try_from(mode.height_px).ok()?)?
+        .checked_mul(usize::try_from(frame_count).ok()?)
+}
+
+/// Bring frame `index` of `pixels`, a region of frames shaped as `mode`, up to
+/// date from `surface` for a present of `damage`: everything the frame lacks,
+/// as `stale` records it, and `damage`, encoded from `surface`. `changed` is
+/// scratch the caller keeps, so a present allocates nothing.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] for a frame the region does not hold, and whatever
+/// the frame codec refuses — the frame then still lacks all of it.
+#[cfg(any(test, freestanding))]
+pub(crate) fn draw_frame(
+    pixels: &mut [u8],
+    index: usize,
+    (stale, changed): (&mut StaleFrames, &mut Region),
+    surface: &Surface,
+    mode: &DisplayMode,
+    damage: &DamageList,
+) -> Result<(), Errno> {
+    let frame_len = region_bytes(mode, 1).ok_or(Errno::OutOfRange)?;
+    let start = index.checked_mul(frame_len).ok_or(Errno::OutOfRange)?;
+    let frame = pixels
+        .get_mut(start..start.saturating_add(frame_len))
+        .ok_or(Errno::OutOfRange)?;
+    changed.clear();
+    add_damage(
+        changed,
+        damage.rects(),
+        Rect::new(0, 0, mode.width_px, mode.height_px),
+    );
+    stale.bring_up_to_date(index, changed, |refresh| {
+        for rect in refresh.rects() {
+            if let Some(rect) = damage_in(mode, *rect) {
+                winframe::encode(surface, frame, mode, rect, &SERIAL)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+#[path = "frames_tests.rs"]
+mod tests;

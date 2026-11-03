@@ -539,7 +539,7 @@ flow is decided by the reader it wraps. Wrap a pointer reader in
 
 An application repaints its whole composition and presents whole-window
 damage, because a toolkit generally cannot say which pixels its own paint
-touched. `ShellWindowHost::window_presented` therefore converts the presented
+touched. `FrameShow::window_presented` therefore converts the presented
 pixels into the compositor's own content surface **and measures what actually
 changed while it does so**: the conversion returns the bounding rectangle of
 the pixels whose value differs, and only that rectangle is marked dirty. A
@@ -552,6 +552,13 @@ writes the surface, so it adds one read per pixel and no allocation.
 The conversion also validates every index it will use *before* the first
 write, so a malformed or hostile geometry refuses the whole present and
 leaves the window exactly as it was, never half-converted.
+
+It runs once a desktop frame, not once a present: the window engine answers a
+`Present` as it records the window's newest frame, and `WindowServer::latch`
+converts each window's newest one through `FrameShow` just before the
+compositor composes. A client presenting faster than the desktop draws costs
+one conversion a frame, and no client's present waits on the desktop's frame
+work.
 
 ## Running-task list ↔ window stack
 

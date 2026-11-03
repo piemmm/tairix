@@ -1634,9 +1634,10 @@ memory model, two mechanisms suited to two different kinds of memory.
   a window and leaves two thirds pinned. It therefore unmaps its side
   (`WindowServer::release_frames`) and tells the client
   (`WindowEvent::ContentReleased`), which releases its own two and re-attaches
-  a fresh region on the paint that follows the next redraw request
-  (`WindowClient::frame_pixels`). A present against a released window is
-  refused `NotAttached` rather than reading a mapping neither side has.
+  a fresh region on the present that follows the next redraw request
+  (`WindowPane::present_list`), presenting nothing before it. A present
+  against a released window is refused `NotAttached` rather than reading a
+  mapping neither side has.
 - **A window nobody can see is not asked to present.** Asking one would have
   its client establish the buffer the release just freed, for pixels nobody can
   see: the release would free nothing and cost a repaint per hidden window,
@@ -2098,7 +2099,11 @@ never cross the IPC, two far-apart edits are converted and recomposed as two
 rectangles rather than the box between them, and no pixel is converted twice:
 a list naming overlapping rectangles is refused at decode, and the session
 checks every rectangle's shape before it converts any
-(`tairix_display::winframe::decode_list`). A
+(`tairix_display::winframe::decode_list`). A window holds two frames: the
+session answers a `Present` as it records it and converts the window's newest
+frame once a desktop frame, reading it until a later present replaces it, so
+the app draws its next present into the other, brought up to date from its
+own picture first (`plans/FIX-DESKTOP.md` DESK-19). A
 `Create` also carries the frame geometry, a bounded, validated
 `WindowTitle` (UTF-8, no control characters — it crosses into the taskbar
 renderer), and the app's own **event endpoint**; the reply is the

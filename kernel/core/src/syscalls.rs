@@ -76,9 +76,7 @@
 use crate::cpufreq::TargetWaiter;
 #[cfg(feature = "watchdog-diagnostics")]
 use crate::latency::Overrun;
-use crate::sched::{
-    level_of_priority, priority_of_level, CpuId, SchedClass, Scheduler, SchedulerArch,
-};
+use crate::sched::{priority_of_level, CpuId, SchedClass, Scheduler, SchedulerArch};
 use tairix_abi::cpufreq::CpuFreqLimits;
 use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_abi::driver::filesystem::DirVisit;
@@ -118,6 +116,7 @@ use tairix_caps::CapabilitySet;
 use tairix_collections::RangeError;
 use tairix_kernel_ipc::{
     CallEndpoint, CallEndpointLimits, CallTicket, EndpointId, PortRegistry, RecvCall, ReplyOutcome,
+    RoomWake,
 };
 use tairix_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
@@ -129,7 +128,7 @@ use tairix_kernel_mem::{
 };
 use tairix_kernel_sched_api::{Priority, TaskId as SchedTaskId};
 use tairix_kernel_sec::{
-    CapTable, GroupId, HeldExit, Placement, ProcName, ProcessId, TaskCapabilities,
+    CapTable, GroupId, HeldExit, LevelChange, Placement, ProcName, ProcessId, TaskCapabilities,
     TaskId as SecTaskId, UserId,
 };
 use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
@@ -1285,7 +1284,6 @@ where
     fn make_serve_channel(
         &self,
         caller: &CallerContext<'_>,
-        capacity: usize,
         window_len: usize,
     ) -> Result<MadeChannel, Errno> {
         use tairix_abi::fsserve::{FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX};
@@ -1296,7 +1294,7 @@ where
         let limits = CallEndpointLimits {
             max_request: u32::try_from(FSSERVE_REQUEST_MAX).map_err(|_| Errno::OutOfRange)?,
             max_reply: u32::try_from(FSSERVE_REPLY_MAX).map_err(|_| Errno::OutOfRange)?,
-            capacity,
+            per_sender: crate::fs::served::LANE_ENDPOINT_DEPTH,
         };
         let id = crate::fs::served::mint_served_endpoint().ok_or(Errno::NoSpace)?;
         let queue_limit = self.soft_limit(caller, LimitKind::IpcQueueBytes);
@@ -1343,6 +1341,156 @@ where
         if let Some(endpoint) = crate::callreg::unregister(EndpointId(endpoint)) {
             endpoint.destroy(self.audit);
         }
+    }
+
+    /// Post `request` for a blocking call, parking while the caller's process
+    /// has the endpoint's per-caller depth of calls waiting on the server
+    /// rather than failing: the server answering one of them makes room, as
+    /// does one timing out or being withdrawn, and each wakes the threads
+    /// waiting as that process. Its own uncollected answers never hold room, so
+    /// the wait is on the server and never on the caller itself.
+    fn post_blocking(
+        &self,
+        ep: &CallEndpoint,
+        caller: &CallerContext<'_>,
+        request: &[u8],
+    ) -> Result<CallTicket, Errno> {
+        let sched_task = caller.task_id.0;
+        let limit = self.soft_limit(caller, LimitKind::IpcQueueBytes);
+        let post = || {
+            ep.post(
+                caller.caps,
+                sched_task,
+                request,
+                CALL_DEADLINE_NONE,
+                limit,
+                self.audit,
+            )
+        };
+        match post() {
+            Err(Errno::WouldBlock) => {}
+            posted => return posted,
+        }
+        // Recorded before the retry, so a call retiring between the retry and
+        // the park still finds this task to wake.
+        let process = caller.caps.process().0;
+        ep.watch_room(sched_task, process)?;
+        crate::waitq::CALL_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        let posted = loop {
+            match post() {
+                Err(Errno::WouldBlock) => {}
+                posted => break posted,
+            }
+            park_current_task(self.arch);
+            // A doomed waiter never re-parks: the kill lands at the syscall
+            // boundary.
+            if crate::procsignal::kill_pending(sched_task) {
+                break Err(Errno::Interrupted);
+            }
+        };
+        crate::waitq::CALL_WAITQ.deregister(sched_task);
+        ep.unwatch_room(sched_task, process);
+        posted
+    }
+
+    /// Hand `caller` the settled `outcome` of a reap of `claimant`'s call on
+    /// `ep`: the reply copied into `reply`, or the refusal the outcome is.
+    fn deliver_reply(
+        &self,
+        caller: &CallerContext<'_>,
+        ep: &CallEndpoint,
+        claimant: u64,
+        outcome: ReplyOutcome,
+        (reply, reply_cap): (u64, usize),
+    ) -> SyscallResult {
+        // A call that timed out unanswered frees room for this process, which
+        // a sibling thread may be parked for; a collected answer held none.
+        if matches!(outcome, ReplyOutcome::TimedOut) {
+            wake_call_room(&ep.room_wake_for(claimant));
+        }
+        match outcome {
+            ReplyOutcome::Ready(bytes) => {
+                // Refuse to truncate: the reply was claimed and the ticket
+                // retired, so the caller re-issues with a larger buffer — each
+                // endpoint's protocol bounds its replies, so a correctly-sized
+                // buffer always fits (the `ipc_call` precedent).
+                if bytes.len() > reply_cap {
+                    return Err(Errno::BufferTooSmall);
+                }
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_out(space, physmap, VirtAddr::new(reply), &bytes)
+                }) {
+                    Some(Ok(())) => Ok(bytes.len() as u64),
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    None => Err(Errno::BadAddress),
+                }
+            }
+            // Non-ready outcomes are the non-blocking signals the client event
+            // loop acts on: retry (still pending), fail closed on a timeout
+            // (the ticket is already retired), abandon on a torn-down or
+            // foreign ticket (no existence oracle).
+            ReplyOutcome::Pending => Err(Errno::WouldBlock),
+            ReplyOutcome::TimedOut => Err(Errno::TimedOut),
+            ReplyOutcome::Cancelled | ReplyOutcome::Unknown => Err(Errno::NotFound),
+        }
+    }
+
+    /// Make `apply` to `process`'s level under `change` and bring each of the
+    /// process's threads to the level it then runs at.
+    ///
+    /// Made inside the thread table's read lock, after the room for the
+    /// threads is taken and before they are collected: a thread registering
+    /// holds the write lock and takes the level it finds, so it joins either
+    /// before the collection or already at the outcome. The threads are then
+    /// re-weighted with no table lock held, `change` keeping every other
+    /// change of this process out until they are.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the room for the threads cannot be taken,
+    /// the level then left unchanged, and [`Errno::NotFound`] when the
+    /// scheduler knows none of the process's threads: it is being torn down,
+    /// and no level changed for anything that runs.
+    fn apply_level(
+        &self,
+        process: ProcessId,
+        change: &LevelChange<'_>,
+        apply: impl FnOnce(&LevelChange<'_>),
+    ) -> SyscallResult {
+        let threads = {
+            let table = self.caps.read();
+            let mut threads = Vec::new();
+            threads
+                .try_reserve_exact(table.thread_count(process))
+                .map_err(|_| Errno::OutOfMemory)?;
+            apply(change);
+            threads.extend(table.threads_of(process));
+            threads
+        };
+        let level = priority_of_level(change.effective());
+        // A thread exiting meanwhile needs no level.
+        let applied = threads
+            .iter()
+            .filter(|thread| self.sched.set_priority(thread.0, level).is_ok())
+            .count();
+        if applied == 0 {
+            return Err(Errno::NotFound);
+        }
+        Ok(0)
+    }
+
+    /// Serve `process` in the strongest band exactly while it holds a seat's
+    /// display, reading whether it does under the change that applies it, so
+    /// the last of two racing transitions leaves the level the leases say.
+    fn follow_display(&self, process: ProcessId) {
+        let Some(level) = self.caps.read().level_of(process) else {
+            return;
+        };
+        let change = level.change();
+        let held = self.seat_registry.holds_live_lease(SeatOwner(process.0));
+        // A process whose threads cannot be listed keeps the level they run
+        // at; the next transition of its leases applies it again.
+        let _ = self.apply_level(process, &change, |change| change.hold_display(held));
     }
 
     /// Whether `caller` holds the per-endpoint grant `ep` demands of its
@@ -4311,16 +4459,21 @@ where
         // single-slot protocol like the USB URB transport, wedge the
         // endpoint against the caller's replacement.
         crate::callreg::cancel_posted_by(process.0, self.audit);
+        // What it sent and no one has taken yet stays deliverable, within the
+        // room each port's owner set aside for an ended sender's messages.
+        let instance = self.caps.read().instance_of(process);
+        if instance != ProcId::KERNEL {
+            self.ipc.read().sender_ended(instance, self.audit);
+        }
         // Tear down every asynchronous message port this process bound, so
         // a dead process's mailbox is never left for a later process to squat
         // on or a sender to fill (racing senders observe the closed port
-        // and fail typed).
-        self.ipc.write().teardown_owned_by(process.0, self.audit);
-        // A sender parked for room in one of those mailboxes must learn its
-        // destination is gone rather than wait for a drain that can never
-        // come. The destroyed port took its own record of who was waiting
-        // with it, so this is the one place the broadcast is right.
-        crate::waitq::port_room_wake();
+        // and fail typed). A sender parked for room in one of those mailboxes
+        // learns its destination is gone rather than wait for a drain that
+        // can never come; no other waiter is disturbed.
+        self.ipc
+            .write()
+            .teardown_owned_by(process.0, self.audit, |woken| wake_port_room(&woken));
         // A driver's function stops mastering here, and a translated driver's
         // device loses every carve at once, so the releases below free its
         // DMA memory rather than quarantine it.
@@ -4508,7 +4661,8 @@ where
                         .generation()
                         .is_ok_and(|generation| generation != m.observed)
             }
-            // A send to this port would not be refused *for want of room*.
+            // A send from the caller would not be refused *for want of room*
+            // in its own lane — the only room its sends can ever lack.
             // A vanished port and a caller that no longer holds the send
             // authority both report ready rather than parking a sender on a
             // destination it can never reach: the woken sender's own send
@@ -4521,7 +4675,7 @@ where
                     !port
                         .required_send_caps()
                         .is_subset_of(caller.caps.effective())
-                        || port.has_room()
+                        || port.has_room_for(caller.caps.proc_id())
                 })
             }
             // The terminal changed hands since this member last looked — an
@@ -6384,22 +6538,27 @@ fn region_errno(err: RangeError) -> Errno {
     }
 }
 
-/// Wake the `ipc_call` caller a just-completed `CallEndpoint::reply`
-/// belongs to.
-///
-/// `outcome` is the reply's result: on success it carries the poster's
-/// scheduler id captured at post time, and exactly that task is unparked
-/// off `CALL_WAITQ` — never a broadcast that would spuriously ready every
-/// other parked caller. A `0` id (a poster with no scheduler identity)
-/// falls back to the broadcast so the caller is still released; a failed
-/// reply woke nothing and changes nothing (the ticket is still pending or
-/// already answered, both fail-closed states the caller's own poll
-/// handles).
-fn wake_replied_poster(outcome: Result<u64, Errno>) {
-    match outcome {
-        Ok(0) => crate::waitq::call_wake(),
-        Ok(poster) => crate::waitq::call_wake_task(poster),
-        Err(_) => {}
+/// Wake the senders parked for room that a port named: only those waiting as
+/// the sender whose lane gained room, or every waiter of a port that went.
+fn wake_port_room(woken: &RoomWake<ProcId>) {
+    for task in woken.tasks() {
+        crate::waitq::port_room_wake_task(task);
+    }
+}
+
+/// Wake the callers' threads parked in a blocking call for room, by the same
+/// rule as [`wake_port_room`].
+fn wake_call_room(woken: &RoomWake<u64>) {
+    for task in woken.tasks() {
+        crate::waitq::call_wake_task(task);
+    }
+}
+
+/// Withdraw `claimant`'s call `ticket`, waking whoever the withdrawal
+/// concerns: a thread awaiting it, and those waiting for the room it held.
+fn withdraw(ep: &CallEndpoint, claimant: u64, ticket: CallTicket) {
+    if let Some(woken) = ep.cancel_one(claimant, ticket) {
+        crate::waitq::call_woken(&woken);
     }
 }
 
@@ -6604,11 +6763,16 @@ where
         self.copy_in_user(caller, ptr, payload.as_bytes_mut())?;
 
         // Enqueue. `Port::send` performs the per-send capability check
-        // against the caller's effective set and
-        // re-checks the payload size, returning a stable `Errno` for
-        // every refusal.
+        // against the caller's effective set, re-checks the payload size and
+        // charges the message to the caller's own budget, returning a stable
+        // `Errno` for every refusal.
         let owner = port.owner();
-        port.send(caller.caps, payload.as_bytes(), self.audit)?;
+        port.send(
+            caller.caps,
+            payload.as_bytes(),
+            self.soft_limit(caller, LimitKind::IpcQueueBytes),
+            self.audit,
+        )?;
         drop(ipc);
         // Wake exactly the port's owner: a receiver parks off the run
         // queue on a wait-set observing this port (registered on
@@ -6695,36 +6859,32 @@ where
             })
         });
 
-        // A committed dequeue is exactly the slot a sender parked on this
-        // port's room is waiting for. Collect the recorded waiters while the
-        // registry guard still resolves the port, then wake them once it is
-        // dropped — waking takes scheduler locks and must not nest inside
-        // the registry. Named, never broadcast, so a busy mailbox disturbs
-        // no unrelated waiter; empty and allocation-free when none waits.
-        let freed_a_slot = matches!(copied, Some(Some(Ok(_))));
-        let woken = if freed_a_slot {
-            port.room_waiters()
-        } else {
-            alloc::vec::Vec::new()
-        };
-        drop(ipc);
-        for task in woken {
-            crate::waitq::port_room_wake_task(task);
-        }
-
-        match copied {
+        // A committed dequeue frees a slot in exactly one sender's lane, so
+        // only the senders parked for room in that lane are woken. Collected
+        // while the registry guard still resolves the port and woken once it
+        // is dropped — waking takes scheduler locks and must not nest inside
+        // the registry — along with the taken message, whose payload is wiped
+        // and freed outside every lock.
+        let (outcome, taken, woken) = match copied {
             // No registered address space — fail closed with the same
             // `BadAddress` a fault produces, never leaking the case.
-            None => Err(Errno::BadAddress),
+            None => (Err(Errno::BadAddress), None, RoomWake::none()),
             // Bound but empty: a live endpoint with nothing to deliver
             // is retryable, not an error in the endpoint itself.
-            Some(None) => Err(Errno::WouldBlock),
-            // Delivered: return the number of payload bytes copied.
-            Some(Some(Ok(n))) => Ok(n as u64),
+            Some(None) => (Err(Errno::WouldBlock), None, RoomWake::none()),
+            // Delivered: answer the number of payload bytes copied.
+            Some(Some(Ok((n, message)))) => {
+                let woken = port.room_wake_for(message.origin.proc_id());
+                (Ok(n as u64), Some(message), woken)
+            }
             // Copy-out fault or undersized buffer: the message stays
             // queued (`recv_with` did not commit).
-            Some(Some(Err(err))) => Err(err),
-        }
+            Some(Some(Err(err))) => (Err(err), None, RoomWake::none()),
+        };
+        drop(ipc);
+        drop(taken);
+        wake_port_room(&woken);
+        outcome
     }
 
     fn cap_query(&self, caller: &CallerContext<'_>, cap: CapabilityId) -> SyscallResult {
@@ -8101,6 +8261,7 @@ where
         // (`plans/DISPLAY.md` D4); a stale pre-revoke handle can then never
         // be mistaken for the live grant.
         let lease = self.seat_registry.acquire(seat, seat_owner(caller))?;
+        self.follow_display(caller.process());
         Ok(lease.generation)
     }
 
@@ -8119,6 +8280,7 @@ where
         // (`plans/DISPLAY.md` D2). `next` decides only what the screen shows
         // in the gap that follows, never who may release.
         self.seat_registry.release(seat, seat_owner(caller), next)?;
+        self.follow_display(caller.process());
         Ok(0)
     }
 
@@ -8164,6 +8326,7 @@ where
         // lease to revoke) rather than reporting a success that changed
         // nothing.
         let evicted = self.seat_registry.revoke(seat_id)?;
+        self.follow_display(ProcessId(evicted.0));
         // Every eviction is attributable: the record carries the evicted
         // owner's task id. The evicted owner's next owner-gated call fails
         // closed with the distinct `SeatRevoked` refusal, so the loss is
@@ -9198,11 +9361,7 @@ where
         // Built only for a volume that awaits its driver; the bind decides
         // again, atomically, once they exist.
         self.volume_service.awaiting_server(volume)?;
-        let made = self.make_serve_channel(
-            caller,
-            crate::fs::served::LANE_ENDPOINT_CAPACITY,
-            FSSERVE_WINDOW_LEN,
-        )?;
+        let made = self.make_serve_channel(caller, FSSERVE_WINDOW_LEN)?;
         let (endpoint, base) = (made.endpoint, made.window);
         // Written before the bind, so a driver that cannot receive its grant
         // never leaves a volume served by nobody.
@@ -9247,11 +9406,8 @@ where
         // server the kernel admitted from a signed bundle may offer one.
         let app = caller.caps.app_identity().ok_or(Errno::PermissionDenied)?;
         let window_len = u32::try_from(offer.lanes.window_len()).map_err(|_| Errno::OutOfRange)?;
-        let capacity = crate::fs::served::LANE_ENDPOINT_CAPACITY
-            .checked_mul(offer.lanes.count())
-            .ok_or(Errno::OutOfRange)?;
         let id = crate::fs::served::mint_offer().ok_or(Errno::NoSpace)?;
-        let made = self.make_serve_channel(caller, capacity, offer.lanes.window_len())?;
+        let made = self.make_serve_channel(caller, offer.lanes.window_len())?;
         let (endpoint, base) = (made.endpoint, made.window);
         // Written before the offer is held, so a server that cannot receive
         // its grant never leaves an offer nobody serves.
@@ -9690,14 +9846,15 @@ where
 
         // Raising service (toward `High`) is an administrative act under
         // `CAP_PROC_CONTROL` regardless of the target rule, so no user can
-        // weight their own work above other principals' fair share. The
-        // current level is the scheduler's own record; a task it no longer
-        // knows is gone (fail closed, never a guessed level).
-        let current = match self.sched.priority(target.0) {
-            Ok(current) => level_of_priority(current),
-            Err(_) => return Err(Errno::NotFound),
-        };
-        let raise = priority.outranks(current);
+        // weight their own work above other principals' fair share. The level
+        // compared is the one the target's principal set, read under the
+        // change that will set it: a display the target holds raises it, and
+        // is the kernel's, not a level anyone set. A process with no live
+        // thread is gone (fail closed, never a guessed level).
+        let process = ProcessId(target.0);
+        let level = self.caps.read().level_of(process).ok_or(Errno::NotFound)?;
+        let change = level.change();
+        let raise = priority.outranks(change.set_level());
         if raise && !caller.caps.has(CapabilityId::PROC_CONTROL) {
             self.audit_priority_change(
                 caller.process(),
@@ -9730,15 +9887,7 @@ where
                 },
             );
         }
-        match self
-            .sched
-            .set_priority(target.0, priority_of_level(priority))
-        {
-            Ok(()) => Ok(0),
-            // The task is unknown or terminal (a concurrent teardown): fail
-            // closed rather than pretend the level changed.
-            Err(_) => Err(Errno::NotFound),
-        }
+        self.apply_level(process, &change, |change| change.set(priority))
     }
 
     /// `system_power(action)` — flush every mounted volume, then power the
@@ -10437,19 +10586,14 @@ where
         self.copy_in_user(caller, request, payload.as_bytes_mut())?;
 
         // Post the request. `CallEndpoint::post` performs the per-call
-        // capability check against the caller's effective set (no ambient authority) and re-checks the size, returning a
-        // stable `Errno` for every refusal and otherwise an opaque ticket
-        // correlating this caller with its reply. The caller's kernel-held
-        // scheduler id rides along so the reply wakes exactly this task.
-        // `ipc_call` carries no deadline: the caller is released only by the
-        // server's reply or the endpoint's teardown.
-        let ticket = ep.post(
-            caller.caps,
-            caller.task_id.0,
-            payload.as_bytes(),
-            CALL_DEADLINE_NONE,
-            self.audit,
-        )?;
+        // capability check against the caller's effective set (no ambient
+        // authority), re-checks the size and charges the call to the caller's
+        // own budget, returning a stable `Errno` for every refusal and
+        // otherwise an opaque ticket correlating this caller with its reply.
+        // The caller's kernel-held scheduler id rides along so the reply wakes
+        // exactly this task. `ipc_call` carries no deadline: the caller is
+        // released only by the server's reply or the endpoint's teardown.
+        let ticket = self.post_blocking(&ep, caller, payload.as_bytes())?;
 
         // Wake the bound server: an IPC server parks off the run queue on
         // `SERVE_WAITQ` between requests (no busy-yield), so the posted
@@ -10571,6 +10715,7 @@ where
             caller.task_id.0,
             payload.as_bytes(),
             deadline_abs,
+            self.soft_limit(caller, LimitKind::IpcQueueBytes),
             self.audit,
         )?;
 
@@ -10591,11 +10736,11 @@ where
         }) {
             Some(Ok(())) => Ok(0),
             Some(Err(err)) => {
-                let _ = ep.cancel_one(caller.caps.process().0, ticket);
+                withdraw(&ep, caller.caps.process().0, ticket);
                 Err(copy_fault_errno(err))
             }
             None => {
-                let _ = ep.cancel_one(caller.caps.process().0, ticket);
+                withdraw(&ep, caller.caps.process().0, ticket);
                 Err(Errno::BadAddress)
             }
         }
@@ -10617,30 +10762,52 @@ where
         let claimant = caller.caps.process().0;
         let cpu = SchedulerArch::current_cpu(self.arch);
         let now = self.arch.monotonic_ns(cpu);
-        match ep.take_reply(claimant, CallTicket(ticket), now, self.audit) {
-            ReplyOutcome::Ready(bytes) => {
-                // Refuse to truncate: the reply was claimed and the ticket
-                // retired, so the caller re-issues with a larger buffer — each
-                // endpoint's protocol bounds its replies, so a correctly-sized
-                // buffer always fits (the `ipc_call` precedent).
-                if bytes.len() > reply_cap {
-                    return Err(Errno::BufferTooSmall);
-                }
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_out(space, physmap, VirtAddr::new(reply), &bytes)
-                }) {
-                    Some(Ok(())) => Ok(bytes.len() as u64),
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    None => Err(Errno::BadAddress),
-                }
+        let outcome = ep.take_reply(claimant, CallTicket(ticket), now, self.audit);
+        self.deliver_reply(caller, &ep, claimant, outcome, (reply, reply_cap))
+    }
+
+    fn call_await(
+        &self,
+        caller: &CallerContext<'_>,
+        endpoint: u64,
+        ticket: u64,
+        reply: u64,
+        reply_cap: usize,
+    ) -> SyscallResult {
+        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
+            return Err(Errno::NotFound);
+        };
+        let claimant = caller.caps.process().0;
+        let sched_task = caller.task_id.0;
+        // Named and registered before the first look, so a reply landing
+        // between that look and the park still wakes this thread.
+        let deadline = ep.await_by(claimant, CallTicket(ticket), sched_task)?;
+        let timed = deadline != crate::waitq::NO_DEADLINE;
+        crate::waitq::CALL_WAITQ.register(sched_task, deadline);
+        if timed {
+            crate::waitq::rearm_timed_wakeup();
+        }
+        let settled = loop {
+            let cpu = SchedulerArch::current_cpu(self.arch);
+            let now = self.arch.monotonic_ns(cpu);
+            match ep.take_reply(claimant, CallTicket(ticket), now, self.audit) {
+                ReplyOutcome::Pending => {}
+                outcome => break Some(outcome),
             }
-            // Non-ready outcomes are the non-blocking signals the client event
-            // loop acts on: retry (still pending), fail closed on a timeout
-            // (the ticket is already retired), abandon on a torn-down or
-            // foreign ticket (no existence oracle).
-            ReplyOutcome::Pending => Err(Errno::WouldBlock),
-            ReplyOutcome::TimedOut => Err(Errno::TimedOut),
-            ReplyOutcome::Cancelled | ReplyOutcome::Unknown => Err(Errno::NotFound),
+            park_current_task(self.arch);
+            // A doomed waiter never re-parks: the kill lands at the syscall
+            // boundary.
+            if crate::procsignal::kill_pending(sched_task) {
+                break None;
+            }
+        };
+        crate::waitq::CALL_WAITQ.deregister(sched_task);
+        if timed {
+            crate::waitq::rearm_timed_wakeup();
+        }
+        match settled {
+            Some(outcome) => self.deliver_reply(caller, &ep, claimant, outcome, (reply, reply_cap)),
+            None => Err(Errno::Interrupted),
         }
     }
 
@@ -10651,11 +10818,12 @@ where
         // Only the ticket's own poster may withdraw it; a foreign, unknown, or
         // already-completed ticket removes nothing and fails closed with the
         // same `NotFound` (no existence oracle).
-        if ep.cancel_one(caller.caps.process().0, CallTicket(ticket)) {
-            Ok(0)
-        } else {
-            Err(Errno::NotFound)
-        }
+        let claimant = caller.caps.process().0;
+        let woken = ep
+            .cancel_one(claimant, CallTicket(ticket))
+            .ok_or(Errno::NotFound)?;
+        crate::waitq::call_woken(&woken);
+        Ok(0)
     }
 
     // Six `abi-v1` arguments plus the kernel-trusted caller context — the
@@ -10669,7 +10837,7 @@ where
         recv_caps: u64,
         max_request: usize,
         max_reply: usize,
-        capacity: usize,
+        per_sender: usize,
     ) -> SyscallResult {
         // Bound the payload caps to the ABI register width before touching
         // anything else (cheap reject; `CallEndpoint::create` re-bounds them
@@ -10754,7 +10922,7 @@ where
         let limits = CallEndpointLimits {
             max_request,
             max_reply,
-            capacity,
+            per_sender,
         };
         let seat_attested = tairix_abi::ipc::is_seat_scoped_endpoint(endpoint_id)
             && !caller
@@ -10896,11 +11064,15 @@ where
         }) {
             Some(Ok(())) => Ok(call.request.len() as u64),
             Some(Err(err)) => {
-                wake_replied_poster(ep.reply(call.ticket, &[], self.audit));
+                if let Ok(woken) = ep.reply(call.ticket, &[], self.audit) {
+                    crate::waitq::call_woken(&woken);
+                }
                 Err(copy_fault_errno(err))
             }
             None => {
-                wake_replied_poster(ep.reply(call.ticket, &[], self.audit));
+                if let Ok(woken) = ep.reply(call.ticket, &[], self.audit) {
+                    crate::waitq::call_woken(&woken);
+                }
                 Err(Errno::BadAddress)
             }
         }
@@ -10925,12 +11097,13 @@ where
         let mut payload = alloc_sensitive(reply_len).map_err(AllocError::as_errno)?;
         self.copy_in_user(caller, reply, payload.as_bytes_mut())?;
 
-        // Complete the ticket and wake the caller blocked in `ipc_call` for
-        // it — exactly that caller, by the poster scheduler id the endpoint
-        // captured at post time. `reply` re-checks the ticket and size and
-        // fails closed on an unknown/already-answered ticket.
-        let poster = ep.reply(CallTicket(ticket), payload.as_bytes(), self.audit)?;
-        wake_replied_poster(Ok(poster));
+        // Complete the ticket and wake exactly the threads its answer
+        // concerns — its poster and any thread awaiting it, by the scheduler
+        // ids the endpoint captured — and those waiting for the room it freed.
+        // `reply` re-checks the ticket and size and fails closed on an
+        // unknown/already-answered ticket.
+        let woken = ep.reply(CallTicket(ticket), payload.as_bytes(), self.audit)?;
+        crate::waitq::call_woken(&woken);
         Ok(0)
     }
 
@@ -11443,7 +11616,10 @@ where
         // dead seat fails closed from here on (`plans/DISPLAY.md` D6). Each
         // destruction is audited with the seat and node ids.
         for vanished in removed {
-            if let Some(seat_id) = self.seat_registry.detach_display(vanished) {
+            if let Some((seat_id, owner)) = self.seat_registry.detach_display(vanished) {
+                if let Some(owner) = owner {
+                    self.follow_display(ProcessId(owner.0));
+                }
                 crate::audit::emit(
                     self.audit,
                     tairix_log::Level::Warn,
@@ -12574,17 +12750,21 @@ where
         if observes_hosted {
             crate::waitq::CONSOLE_DAMAGE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         }
+        // A registration that could not be recorded leaves the wait unable to
+        // hear its event, so the wait fails closed rather than park deaf.
+        let mut deaf = false;
         if observes_room {
             crate::waitq::PORT_ROOM_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
-            // Have each observed port record this task, so the drain that
-            // frees a slot wakes exactly the senders waiting for one.
-            // Recorded *before* the first scan so a drain in the
-            // register/park window is not lost.
+            // Have each observed port record this task as waiting for room in
+            // its own process's lane, so the drain that frees a slot there
+            // wakes exactly the senders waiting for one. Recorded *before* the
+            // first scan so a drain in the register/park window is not lost.
             let ipc = self.ipc.read();
+            let sender = caller.caps.proc_id();
             for m in &members {
                 if m.kind == WaitSourceKind::PortRoom {
                     if let Some(port) = ipc.lookup(EndpointId(m.id)) {
-                        port.watch_room(sched_task);
+                        deaf |= port.watch_room(sched_task, sender).is_err();
                     }
                 }
             }
@@ -12614,7 +12794,6 @@ where
             .filter(|m| matches!(m.kind, WaitSourceKind::File | WaitSourceKind::DirWatch))
             .filter_map(|m| m.table.as_ref().and_then(|t| t.0.key(m.node)));
         let mut watch_keys: Vec<crate::waitq::WakeKey> = Vec::new();
-        let mut deaf = false;
         for key in node_keys {
             if watch_keys.contains(&key) {
                 continue;
@@ -12788,10 +12967,11 @@ where
         if observes_room {
             crate::waitq::PORT_ROOM_WAITQ.deregister(sched_task);
             let ipc = self.ipc.read();
+            let sender = caller.caps.proc_id();
             for m in &members {
                 if m.kind == WaitSourceKind::PortRoom {
                     if let Some(port) = ipc.lookup(EndpointId(m.id)) {
-                        port.unwatch_room(sched_task);
+                        port.unwatch_room(sched_task, sender);
                     }
                 }
             }
@@ -14351,11 +14531,12 @@ where
         caller: &CallerContext<'_>,
         endpoint: u64,
         max_payload: usize,
-        capacity: usize,
+        per_sender: usize,
     ) -> SyscallResult {
         // Bound the payload cap to the ABI register width before touching
         // anything else (cheap reject; `Port::create` re-bounds it against
-        // `IPC_MESSAGE_MAX_PAYLOAD_LEN` and refuses a zero capacity). The
+        // `IPC_MESSAGE_MAX_PAYLOAD_LEN` and refuses a per-sender depth of zero
+        // or past `IPC_SENDER_DEPTH_MAX`). The
         // `usize` → `u32` conversion is the only narrowing; a payload cap
         // beyond `u32` is malformed — exactly the `call_create` shape.
         let Ok(max_payload) = u32::try_from(max_payload) else {
@@ -14377,7 +14558,7 @@ where
             CapabilitySet::empty(),
             CapabilitySet::empty(),
             max_payload,
-            capacity,
+            per_sender,
             self.soft_limit(caller, LimitKind::IpcQueueBytes),
             self.audit,
         )?;
@@ -14401,18 +14582,16 @@ where
             return Err(Errno::PermissionDenied);
         }
         let server = crate::callreg::lookup(EndpointId(server)).ok_or(Errno::NotFound)?;
-        // The admitted sender may be parked for room the discarded
-        // messages held; it is woken once the registry guard is dropped,
-        // as a receive wakes it.
-        let woken = if port.admit(server.owner_instance(), self.audit) {
-            port.room_waiters()
+        // Every other sender's lane was discarded, so a sender parked for room
+        // in one is woken once the registry guard is dropped, to find its
+        // sends refused rather than wait for a drain that will never come.
+        let woken = if port.admit(server.owner_instance(), self.audit)? {
+            port.room_wake_everyone()
         } else {
-            alloc::vec::Vec::new()
+            RoomWake::none()
         };
         drop(ipc);
-        for task in woken {
-            crate::waitq::port_room_wake_task(task);
-        }
+        wake_port_room(&woken);
         Ok(0)
     }
 
@@ -14426,15 +14605,13 @@ where
             if port.owner() != caller.caps.process().0 {
                 return Err(Errno::PermissionDenied);
             }
-            let woken = port.room_waiters();
+            let woken = port.room_wake_everyone();
             ipc.unregister(id, self.audit)?;
             woken
         };
         // A sender parked for room learns its destination is gone rather than
         // waiting for a drain that can never come.
-        for task in woken {
-            crate::waitq::port_room_wake_task(task);
-        }
+        wake_port_room(&woken);
         Ok(0)
     }
 
@@ -18566,7 +18743,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 16,
                     max_reply: 16,
-                    capacity: 1,
+                    per_sender: 1,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -18604,7 +18781,7 @@ mod tests {
         ipc.read()
             .lookup(EndpointId(1))
             .expect("bound")
-            .send(&other, b"early", sink)
+            .send(&other, b"early", tairix_abi::RLIMIT_INFINITY, sink)
             .expect("open to anyone before the admission");
         assert_eq!(h.port_admit(&owner_ctx, 1, call_id), Ok(0));
         assert!(sink
@@ -18614,11 +18791,14 @@ mod tests {
         let port = guard.lookup(EndpointId(1)).expect("port stays bound");
         assert!(port.is_empty(), "what another sent first is discarded");
         assert_eq!(
-            port.send(&other, b"junk", sink),
+            port.send(&other, b"junk", tairix_abi::RLIMIT_INFINITY, sink),
             Err(Errno::PermissionDenied)
         );
         let admitted = make_caps_record(0xD4, &[], sink).with_proc_id(server);
-        assert_eq!(port.send(&admitted, b"notice", sink), Ok(()));
+        assert_eq!(
+            port.send(&admitted, b"notice", tairix_abi::RLIMIT_INFINITY, sink),
+            Ok(())
+        );
         drop(guard);
         crate::callreg::unregister(EndpointId(call_id));
     }
@@ -18889,7 +19069,7 @@ mod tests {
             .read()
             .lookup(EndpointId(endpoint))
             .expect("endpoint is bound")
-            .send(&sender, payload, sink)
+            .send(&sender, payload, tairix_abi::RLIMIT_INFINITY, sink)
             .expect("unrestricted port accepts the send");
     }
 
@@ -37347,11 +37527,31 @@ mod tests {
     /// Admit one parked task so the scheduler genuinely knows the target,
     /// returning its id as both the scheduler's `u64` and the syscall's
     /// signed pid spelling.
-    fn spawn_priority_target(sched: &Scheduler<TestArch>) -> (u64, i64) {
+    fn spawn_priority_target(sched: &Scheduler<TestArch>, table: &RwLock<CapTable>) -> (u64, i64) {
         let id = sched
             .spawn_parked(0, Priority::Normal, |_| TaskAction::Park)
             .expect("spawn target");
+        table
+            .write()
+            .insert(make_caps_record(id, &[], &NULL_LOG_SINK));
         (id, id.cast_signed())
+    }
+
+    /// A second thread of `process`, registered in `table` as a thread
+    /// creation registers it.
+    fn spawn_priority_thread(
+        sched: &Scheduler<TestArch>,
+        table: &RwLock<CapTable>,
+        process: u64,
+    ) -> u64 {
+        let id = sched
+            .spawn_parked(0, Priority::Normal, |_| TaskAction::Park)
+            .expect("spawn thread");
+        table
+            .write()
+            .register_thread(SecTaskId(id), ProcessId(process))
+            .expect("registered");
+        id
     }
 
     /// Lowering a caller's own live child needs no capability and stays off
@@ -37361,7 +37561,7 @@ mod tests {
     fn sched_set_priority_of_own_child_lowers_silently() {
         let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
-        let (target, pid) = spawn_priority_target(&sched);
+        let (target, pid) = spawn_priority_target(&sched, &table);
         let rng = unseeded_rng();
         let sink = make_sink();
         let caps = make_caps_record(2, &[], sink);
@@ -37391,7 +37591,7 @@ mod tests {
     fn sched_set_priority_restating_the_level_is_not_a_raise() {
         let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
-        let (target, pid) = spawn_priority_target(&sched);
+        let (target, pid) = spawn_priority_target(&sched, &table);
         let rng = unseeded_rng();
         let sink = make_sink();
         let caps = make_caps_record(2, &[], sink);
@@ -37423,7 +37623,7 @@ mod tests {
     fn sched_set_priority_raise_of_own_child_needs_proc_control() {
         let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
-        let (target, pid) = spawn_priority_target(&sched);
+        let (target, pid) = spawn_priority_target(&sched, &table);
         let rng = unseeded_rng();
         let sink = make_sink();
         let caps = make_caps_record(2, &[], sink);
@@ -37460,7 +37660,7 @@ mod tests {
     fn sched_set_priority_raise_with_proc_control_is_allowed_and_audited() {
         let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
-        let (target, pid) = spawn_priority_target(&sched);
+        let (target, pid) = spawn_priority_target(&sched, &table);
         let rng = unseeded_rng();
         let sink = make_sink();
         let caps = make_caps_record(2, &[CapabilityId::PROC_CONTROL], sink);
@@ -37493,7 +37693,7 @@ mod tests {
     fn sched_set_priority_of_a_same_uid_non_child_is_allowed() {
         let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
-        let (target, pid) = spawn_priority_target(&sched);
+        let (target, pid) = spawn_priority_target(&sched, &table);
         let rng = unseeded_rng();
         let sink = make_sink();
         let caps = make_caps_record(2, &[], sink);
@@ -37530,7 +37730,7 @@ mod tests {
     fn sched_set_priority_of_another_principal_is_denied_without_the_capability() {
         let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
-        let (target, pid) = spawn_priority_target(&sched);
+        let (target, pid) = spawn_priority_target(&sched, &table);
         let rng = unseeded_rng();
         let sink = make_sink();
         let caps = make_caps_record(2, &[], sink);
@@ -37570,7 +37770,7 @@ mod tests {
     fn sched_set_priority_of_another_principal_is_allowed_with_proc_control() {
         let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
         let sched = make_sched(arch.clone());
-        let (target, pid) = spawn_priority_target(&sched);
+        let (target, pid) = spawn_priority_target(&sched, &table);
         let rng = unseeded_rng();
         let sink = make_sink();
         let caps = make_caps_record(2, &[CapabilityId::PROC_CONTROL], sink);
@@ -37597,6 +37797,107 @@ mod tests {
         assert_eq!(records[0].level, Level::Info);
         assert_eq!(field_of(&records[0], "rule"), "capability");
         assert_eq!(field_of(&records[0], "priority"), "3");
+    }
+
+    /// The handlers a display-owning process `owner` calls through, over a
+    /// seat registry of their own, and the caller context it calls as.
+    fn with_display_owner(
+        body: impl FnOnce(
+            &KernelSyscallHandlers<'_, TestArch>,
+            &CallerContext<'_>,
+            &Scheduler<TestArch>,
+            (u64, u64, i64),
+        ),
+    ) {
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
+        let sched = make_sched(arch.clone());
+        let (owner, pid) = spawn_priority_target(&sched, &table);
+        let second = spawn_priority_thread(&sched, &table, owner);
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(owner, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let queue: &'static crate::console::ConsoleInputQueue =
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
+        let producer: &'static RecordingProcessSignal =
+            crate::forever(Box::new(RecordingProcessSignal::childless(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat)
+        .with_process_signal(producer);
+        body(&h, &ctx, &sched, (owner, second, pid));
+    }
+
+    /// A level is the process's: lowering it re-weights every thread.
+    #[test]
+    fn sched_set_priority_reweights_every_thread_of_the_process() {
+        with_display_owner(|h, ctx, sched, (owner, second, pid)| {
+            assert_eq!(h.sched_set_priority(ctx, pid, SchedPriority::Low), Ok(0));
+            assert_eq!(sched.priority(owner), Ok(Priority::Low));
+            assert_eq!(sched.priority(second), Ok(Priority::Low));
+        });
+    }
+
+    /// Whoever holds a seat's display runs in the strongest band, every thread
+    /// of it, for exactly as long as it holds it, then at the level its
+    /// principal set — one set meanwhile included.
+    #[test]
+    fn the_display_owner_runs_in_the_strongest_band_while_it_holds_the_seat() {
+        with_display_owner(|h, ctx, sched, (owner, second, pid)| {
+            assert_eq!(h.display_acquire(ctx, SEAT_PRIMARY), Ok(1));
+            for thread in [owner, second] {
+                assert_eq!(sched.priority(thread), Ok(Priority::High));
+            }
+            assert_eq!(h.sched_set_priority(ctx, pid, SchedPriority::Low), Ok(0));
+            assert_eq!(
+                sched.priority(owner),
+                Ok(Priority::High),
+                "the display still holds it up"
+            );
+            assert_eq!(
+                h.display_release(ctx, SEAT_PRIMARY, ReleaseSurface::Text),
+                Ok(0)
+            );
+            for thread in [owner, second] {
+                assert_eq!(sched.priority(thread), Ok(Priority::Low));
+            }
+        });
+    }
+
+    /// A revoked owner no longer owns the screen, so it drops back at once.
+    #[test]
+    fn a_revoked_display_owner_drops_back_to_its_own_level() {
+        with_display_owner(|h, ctx, sched, (owner, second, _)| {
+            assert_eq!(h.display_acquire(ctx, SEAT_PRIMARY), Ok(1));
+            assert_eq!(h.seat_revoke(ctx, SEAT_PRIMARY), Ok(0));
+            for thread in [owner, second] {
+                assert_eq!(sched.priority(thread), Ok(Priority::Normal));
+            }
+        });
+    }
+
+    /// The band a display raises a process to is the kernel's, not a level
+    /// its principal set: raising the level it did set still needs the
+    /// capability.
+    #[test]
+    fn a_display_owner_still_needs_the_capability_to_raise_its_own_level() {
+        with_display_owner(|h, ctx, sched, (owner, _, pid)| {
+            assert_eq!(h.display_acquire(ctx, SEAT_PRIMARY), Ok(1));
+            assert_eq!(
+                h.sched_set_priority(ctx, pid, SchedPriority::High),
+                Err(Errno::PermissionDenied)
+            );
+            assert_eq!(
+                h.display_release(ctx, SEAT_PRIMARY, ReleaseSurface::Text),
+                Ok(0)
+            );
+            assert_eq!(sched.priority(owner), Ok(Priority::Normal));
+        });
     }
 
     /// A pid the capability table does not know fails closed with
@@ -44494,7 +44795,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 128,
                     max_reply: 128,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -44567,7 +44868,8 @@ mod tests {
                         match ep.recv_call(usize::MAX) {
                             RecvCall::Received(call) => {
                                 assert_eq!(call.request.as_bytes(), self.request);
-                                ep.reply(call.ticket, self.reply, &NULL_LOG_SINK)
+                                let _ = ep
+                                    .reply(call.ticket, self.reply, &NULL_LOG_SINK)
                                     .expect("reply");
                                 served += 1;
                             }
@@ -44724,7 +45026,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 128,
                     max_reply: 128,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -44893,7 +45195,7 @@ mod tests {
         match ep.recv_call(usize::MAX) {
             RecvCall::Received(call) => {
                 assert_eq!(call.request.as_bytes(), b"ping");
-                ep.reply(call.ticket, b"pong", sink).expect("reply");
+                let _ = ep.reply(call.ticket, b"pong", sink).expect("reply");
             }
             other => panic!("expected a received call, got {other:?}"),
         }
@@ -44905,6 +45207,145 @@ mod tests {
         assert_eq!(read_reply_page(physmap, 4), b"pong");
         drop(guard);
         crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// One caller's call endpoint, its address space registered, the handlers
+    /// over it, and `post` minting a ticket for each call it posts.
+    fn with_await_endpoint(
+        id: u64,
+        deadline_ns: u64,
+        body: impl FnOnce(
+            &KernelSyscallHandlers<'_, TestArch>,
+            &CallerContext<'_>,
+            &Arc<CallEndpoint>,
+            &dyn Fn() -> u64,
+            &dyn Fn(usize) -> alloc::vec::Vec<u8>,
+        ),
+    ) {
+        let principal = crate::test_boot::claim_task();
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        arch.set_monotonic_ns(0);
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(principal), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(principal, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(principal),
+            caps: &caps,
+        };
+        let ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let post = || {
+            assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, deadline_ns), Ok(0));
+            let guard = aspaces.read();
+            let (_s, physmap) = guard.resolve(ProcessId(principal)).expect("aspace present");
+            read_ticket(physmap)
+        };
+        let replied = |len: usize| {
+            let guard = aspaces.read();
+            let (_s, physmap) = guard.resolve(ProcessId(principal)).expect("aspace present");
+            read_reply_page(physmap, len)
+        };
+        body(&h, &ctx, &ep, &post, &replied);
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// An await settles on its own call's reply alone: a reply already
+    /// waiting for another call of the same process neither ends it nor is
+    /// taken by it.
+    #[test]
+    fn call_await_takes_its_own_calls_reply_and_leaves_anothers() {
+        with_await_endpoint(0xCA11_2101, u64::MAX, |h, ctx, ep, post, replied| {
+            let first = post();
+            let second = post();
+            let (RecvCall::Received(a), RecvCall::Received(b)) =
+                (ep.recv_call(usize::MAX), ep.recv_call(usize::MAX))
+            else {
+                panic!("both calls are received");
+            };
+            let _ = ep
+                .reply(b.ticket, b"bbbb", &NULL_LOG_SINK)
+                .expect("reply b");
+            let awaited = std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    ep.reply(a.ticket, b"aaaa", &NULL_LOG_SINK)
+                        .expect("reply a")
+                });
+                h.call_await(ctx, ep.id().0, first, 0x2000, 64)
+            });
+            assert_eq!(awaited, Ok(4));
+            assert_eq!(replied(4), b"aaaa");
+            assert_eq!(h.call_reap(ctx, ep.id().0, second, 0x2000, 64), Ok(4));
+            assert_eq!(replied(4), b"bbbb");
+        });
+    }
+
+    /// A call past its deadline ends the await `TimedOut` and is retired.
+    #[test]
+    fn call_await_ends_at_its_calls_deadline() {
+        with_await_endpoint(0xCA11_2102, 100, |h, ctx, ep, post, _| {
+            let ticket = post();
+            h.arch.set_monotonic_ns(200);
+            assert_eq!(
+                h.call_await(ctx, ep.id().0, ticket, 0x2000, 64),
+                Err(Errno::TimedOut)
+            );
+            assert_eq!(
+                h.call_reap(ctx, ep.id().0, ticket, 0x2000, 64),
+                Err(Errno::NotFound)
+            );
+        });
+    }
+
+    /// An endpoint that ended answers an await `NotFound` rather than parking
+    /// it on a reply that can never come.
+    #[test]
+    fn call_await_on_an_ended_endpoint_is_not_found() {
+        with_await_endpoint(0xCA11_2103, u64::MAX, |h, ctx, ep, post, _| {
+            let ticket = post();
+            ep.destroy(&NULL_LOG_SINK);
+            assert_eq!(
+                h.call_await(ctx, ep.id().0, ticket, 0x2000, 64),
+                Err(Errno::NotFound)
+            );
+        });
+    }
+
+    /// A reply longer than the await's buffer is refused, never truncated, and
+    /// is gone with its ticket.
+    #[test]
+    fn call_await_refuses_a_reply_longer_than_its_buffer() {
+        with_await_endpoint(0xCA11_2104, u64::MAX, |h, ctx, ep, post, _| {
+            let ticket = post();
+            let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
+                panic!("the call is received");
+            };
+            let _ = ep
+                .reply(call.ticket, b"a long reply", &NULL_LOG_SINK)
+                .expect("reply");
+            assert_eq!(
+                h.call_await(ctx, ep.id().0, ticket, 0x2000, 4),
+                Err(Errno::BufferTooSmall)
+            );
+            assert_eq!(
+                h.call_reap(ctx, ep.id().0, ticket, 0x2000, 64),
+                Err(Errno::NotFound)
+            );
+        });
     }
 
     /// A `call_post` whose per-request deadline elapses with no reply reaps
@@ -45021,6 +45462,165 @@ mod tests {
             h.call_reap(&ctx, id, ticket, 0x2000, 64),
             Err(Errno::NotFound)
         );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// Post `depth` calls as `ctx` and answer each from the server side,
+    /// leaving every reply uncollected; the tickets, in posting order.
+    /// Post `depth` calls as `ctx`'s process and leave them unanswered.
+    fn fill_depth_with_unanswered_calls<A: KernelArch>(
+        h: &KernelSyscallHandlers<'_, A>,
+        ctx: &CallerContext<'_>,
+        id: u64,
+        depth: usize,
+    ) {
+        for _ in 0..depth {
+            assert_eq!(h.call_post(ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
+        }
+    }
+
+    /// The lock-out a shared total allowed: a caller that held calls open held
+    /// the endpoint against every other caller.
+    #[test]
+    fn a_caller_at_its_depth_never_refuses_another() {
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let (hog, other) = (
+            crate::test_boot::claim_task(),
+            crate::test_boot::claim_peer_task(),
+        );
+        for principal in [hog, other] {
+            let (space, physmap) = call_aspace(b"ping");
+            aspaces
+                .write()
+                .register(ProcessId(principal), space, physmap)
+                .expect("registration succeeds");
+        }
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let (hog_caps, other_caps) = (
+            make_caps_record(hog, &[], sink),
+            make_caps_record(other, &[], sink),
+        );
+        let hog_ctx = CallerContext {
+            task_id: SecTaskId(hog),
+            caps: &hog_caps,
+        };
+        let other_ctx = CallerContext {
+            task_id: SecTaskId(other),
+            caps: &other_caps,
+        };
+        let id = 0xCA11_2006;
+        let ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let depth = ep.per_sender();
+        fill_depth_with_unanswered_calls(&h, &hog_ctx, id, depth);
+        assert_eq!(
+            h.call_post(&hog_ctx, id, 0x1000, 4, 0x2000, u64::MAX),
+            Err(Errno::WouldBlock),
+            "its own unanswered calls fill its own depth"
+        );
+        let server = CallServer::new(b"ping", b"pong");
+        let written = server.serve(&ep, depth + 1, None, || {
+            h.ipc_call(&other_ctx, id, 0x1000, 4, 0x2000, 64)
+        });
+        assert_eq!(
+            written,
+            Ok(4),
+            "another caller is never refused for the hog's calls"
+        );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// A blocking call whose own process has its depth of calls unanswered
+    /// waits for room rather than failing, and goes ahead once the server
+    /// answers one of them: the wait is on the server, never on the caller.
+    #[test]
+    fn ipc_call_at_its_depth_waits_for_an_answer_rather_than_failing() {
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let principal = crate::test_boot::claim_task();
+        let (space, physmap) = call_aspace(b"ping");
+        aspaces
+            .write()
+            .register(ProcessId(principal), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(principal, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(principal),
+            caps: &caps,
+        };
+        let id = 0xCA11_2007;
+        let ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let depth = ep.per_sender();
+        fill_depth_with_unanswered_calls(&h, &ctx, id, depth);
+
+        let written = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let started = std::time::Instant::now();
+                // Taken as the server's answer would take it, which is how this
+                // thread learns the blocked call is waiting.
+                let waiting = loop {
+                    let waiting = ep.room_wake_for(principal);
+                    if !waiting.is_empty() {
+                        break waiting;
+                    }
+                    assert!(
+                        started.elapsed() < std::time::Duration::from_secs(60),
+                        "the blocked call never waited for room"
+                    );
+                    std::thread::yield_now();
+                };
+                // The server answers every call, the blocked one last.
+                let mut served = 0;
+                while served <= depth {
+                    if let RecvCall::Received(call) = ep.recv_call(usize::MAX) {
+                        let woken = ep
+                            .reply(call.ticket, b"pong", &NULL_LOG_SINK)
+                            .expect("reply");
+                        crate::waitq::call_woken(&woken);
+                        if served == 0 {
+                            wake_call_room(&waiting);
+                        }
+                        served += 1;
+                    } else {
+                        std::thread::yield_now();
+                    }
+                }
+            });
+            h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64)
+        });
+        assert_eq!(written, Ok(4));
+        assert!(
+            ep.room_wake_for(principal).is_empty(),
+            "a finished call leaves no wait behind"
+        );
+        let guard = aspaces.read();
+        let (_s, physmap) = guard.resolve(ProcessId(principal)).expect("aspace present");
+        assert_eq!(read_reply_page(physmap, 4), b"pong");
+        drop(guard);
         crate::callreg::unregister(EndpointId(id));
     }
 
@@ -45440,7 +46040,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 128,
                     max_reply: 128,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -46218,7 +46818,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -46313,7 +46913,7 @@ mod tests {
                     CallEndpointLimits {
                         max_request: 64,
                         max_reply: 64,
-                        capacity: 4,
+                        per_sender: 4,
                     },
                     tairix_abi::RLIMIT_INFINITY,
                     sink,
@@ -46403,7 +47003,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -47792,7 +48392,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -47808,7 +48408,14 @@ mod tests {
         let client = crate::test_boot::claim_task();
         let client_caps = admitted_record(&table, client, &[], sink);
         let ticket = ep
-            .post(&client_caps, client, b"present", u64::MAX, sink)
+            .post(
+                &client_caps,
+                client,
+                b"present",
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                sink,
+            )
             .expect("posted");
 
         let ctx = CallerContext {
@@ -47972,7 +48579,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -47982,7 +48589,14 @@ mod tests {
         crate::callreg::register(ep.clone(), sink).expect("registered");
         let client_caps = admitted_record(table, client, &[], sink);
         let ticket = ep
-            .post(&client_caps, client, b"open", u64::MAX, sink)
+            .post(
+                &client_caps,
+                client,
+                b"open",
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                sink,
+            )
             .expect("posted");
         let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
             panic!("posted call is receivable");
@@ -48194,7 +48808,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -48204,7 +48818,14 @@ mod tests {
         crate::callreg::register(ep.clone(), sink).expect("registered");
         let poster_caps = make_caps_record(poster, &[], sink).with_proc_id(instance);
         let ticket = ep
-            .post(&poster_caps, poster, b"offer", u64::MAX, sink)
+            .post(
+                &poster_caps,
+                poster,
+                b"offer",
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                sink,
+            )
             .expect("posted");
         let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
             panic!("posted call is receivable");
@@ -48311,7 +48932,7 @@ mod tests {
         );
 
         // Once answered, the call is no longer in service.
-        ep.reply(ticket, b"done", sink).expect("replied");
+        let _ = ep.reply(ticket, b"done", sink).expect("replied");
         assert_eq!(
             h.call_peer_node(&ctx, id, ticket.0, 0x1000, HwNode::WIRE_LEN),
             Err(Errno::NotFound)
@@ -50446,7 +51067,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -50455,8 +51076,15 @@ mod tests {
         );
         crate::callreg::register(ep.clone(), sink).expect("registered");
         let poster = make_caps_record(client, &[], sink);
-        ep.post(&poster, client, b"x", u64::MAX, sink)
-            .expect("post a request");
+        ep.post(
+            &poster,
+            client,
+            b"x",
+            u64::MAX,
+            tairix_abi::RLIMIT_INFINITY,
+            sink,
+        )
+        .expect("post a request");
 
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -50534,7 +51162,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -50543,8 +51171,15 @@ mod tests {
         );
         crate::callreg::register(ep.clone(), sink).expect("registered");
         let poster = make_caps_record(client, &[], sink);
-        ep.post(&poster, client, b"x", u64::MAX, sink)
-            .expect("post a request");
+        ep.post(
+            &poster,
+            client,
+            b"x",
+            u64::MAX,
+            tairix_abi::RLIMIT_INFINITY,
+            sink,
+        )
+        .expect("post a request");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
@@ -50616,7 +51251,7 @@ mod tests {
                     CallEndpointLimits {
                         max_request: 64,
                         max_reply: 64,
-                        capacity: 4,
+                        per_sender: 4,
                     },
                     tairix_abi::RLIMIT_INFINITY,
                     sink,
@@ -50624,8 +51259,15 @@ mod tests {
                 .expect("endpoint"),
             );
             crate::callreg::register(ep.clone(), sink).expect("registered");
-            ep.post(&poster, client, b"x", u64::MAX, sink)
-                .expect("post a request");
+            ep.post(
+                &poster,
+                client,
+                b"x",
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                sink,
+            )
+            .expect("post a request");
             endpoints.push(ep);
         }
 
@@ -50721,7 +51363,7 @@ mod tests {
         // reports its token (a non-consuming peek).
         match ep.recv_call(usize::MAX) {
             RecvCall::Received(call) => {
-                ep.reply(call.ticket, b"pong", sink).expect("reply");
+                let _ = ep.reply(call.ticket, b"pong", sink).expect("reply");
             }
             other => panic!("expected a received call, got {other:?}"),
         }
@@ -50953,7 +51595,7 @@ mod tests {
             ),
             Err(Errno::LengthOutOfRange)
         );
-        ipc.write().teardown_owned_by(0x5704, sink);
+        ipc.write().teardown_owned_by(0x5704, sink, |_| {});
     }
 
     /// `port_bind` charges a port's worst case to the caller's
@@ -51006,8 +51648,8 @@ mod tests {
         );
         assert_eq!(
             h.port_bind(&ctx, c, 64, usize::MAX),
-            Err(Errno::LimitExceeded),
-            "an absurd depth is priced, not trusted"
+            Err(Errno::LengthOutOfRange),
+            "an absurd depth is refused, not trusted"
         );
 
         assert_eq!(h.port_unbind(&ctx, c), Err(Errno::NotFound));
@@ -51028,7 +51670,7 @@ mod tests {
         assert_eq!(h.port_unbind(&ctx, c), Ok(0));
         assert_eq!(h.port_bind(&ctx, a, 64, 4), Ok(0), "and so is the id");
 
-        ipc.write().teardown_owned_by(owner, sink);
+        ipc.write().teardown_owned_by(owner, sink, |_| {});
         assert_eq!(held(), 0, "teardown returns every charge");
     }
 
@@ -51109,7 +51751,7 @@ mod tests {
         assert!(!crate::waitset::owned_by(owner, third));
         assert_eq!(held(LimitKind::WaitSets), 0);
         assert_eq!(held(LimitKind::WaitSetMembers), 0);
-        ipc.write().teardown_owned_by(owner, sink);
+        ipc.write().teardown_owned_by(owner, sink, |_| {});
     }
 
     /// Binding a **reserved** well-known endpoint id as a port requires
@@ -51150,7 +51792,7 @@ mod tests {
             caps: &privileged_caps,
         };
         assert_eq!(h.port_bind(&privileged, reserved, 64, 4), Ok(0));
-        ipc.write().teardown_owned_by(0x5706, sink);
+        ipc.write().teardown_owned_by(0x5706, sink, |_| {});
     }
 
     /// A delivered message on a member port makes `waitset_wait` report
@@ -51228,8 +51870,70 @@ mod tests {
         assert_eq!(h.ipc_recv(&ctx, id, 0x1000, 64, 0x1800), Ok(4));
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
-        ipc.write().teardown_owned_by(owner, sink);
-        ipc.write().teardown_owned_by(0xF0F0, sink);
+        ipc.write().teardown_owned_by(owner, sink, |_| {});
+        ipc.write().teardown_owned_by(0xF0F0, sink, |_| {});
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+    }
+
+    /// A `PortRoom` member observes the caller's own lane: another sender
+    /// filling the port leaves it ready, and only the caller's own messages
+    /// make it quiet.
+    #[test]
+    fn port_room_is_the_callers_own_lane_never_another_senders() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
+        aspaces
+            .write()
+            .register(ProcessId(owner), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(owner, &[], sink).with_proc_id(tairix_abi::ProcId::from_raw(
+            [0x5C; tairix_abi::PROC_ID_LEN],
+        ));
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let id = 0x5EAD_0024u64;
+        register_port_for(&ipc, id, 0xF0F5, sink);
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PORT_ROOM, id, 0x45)
+            .expect("send authority admits the member");
+
+        for _ in 0..4 {
+            enqueue(&ipc, id, &[0xEE; 4], sink);
+        }
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x2000),
+            Ok(0),
+            "another sender's full lane leaves the caller room"
+        );
+        let port = |f: &dyn Fn(&Port)| f(ipc.read().lookup(EndpointId(id)).expect("bound"));
+        for _ in 0..4 {
+            port(&|port| {
+                port.send(&caps, &[0x11; 2], tairix_abi::RLIMIT_INFINITY, sink)
+                    .expect("the caller's own room");
+            });
+        }
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x2000),
+            Err(Errno::TimedOut),
+            "the caller's own full lane is what parks it"
+        );
+
+        ipc.write().teardown_owned_by(0xF0F5, sink, |_| {});
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
@@ -51284,7 +51988,7 @@ mod tests {
             .read()
             .lookup(EndpointId(id))
             .expect("bound")
-            .room_waiters()
+            .room_wake_everyone()
             .is_empty());
 
         // One drain frees one slot and the member reports its token. The
@@ -51311,7 +52015,7 @@ mod tests {
         );
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
 
-        ipc.write().teardown_owned_by(0xF0F2, sink);
+        ipc.write().teardown_owned_by(0xF0F2, sink, |_| {});
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
@@ -51403,7 +52107,7 @@ mod tests {
             ipc.read()
                 .lookup(EndpointId(restricted))
                 .expect("bound")
-                .send(&sender, &[0x11; 2], sink)
+                .send(&sender, &[0x11; 2], tairix_abi::RLIMIT_INFINITY, sink)
                 .expect("an authorised sender fills it");
         }
         assert_eq!(h.waitset_wait(&raw, set, 0, 0x2000), Err(Errno::TimedOut));
@@ -51416,7 +52120,7 @@ mod tests {
         // A destination that is gone reports ready too: the woken sender
         // fails its send closed rather than waiting on a mailbox that can
         // never drain again.
-        ipc.write().teardown_owned_by(0xF0F3, sink);
+        ipc.write().teardown_owned_by(0xF0F3, sink, |_| {});
         assert_eq!(h.waitset_wait(&raw, set, 0, 0x2000), Ok(0));
 
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
@@ -52100,7 +52804,7 @@ mod tests {
         // A racing sender fails typed, never delivers into a dead mailbox.
         assert_eq!(h.ipc_send(&ctx, id, 0x1000, 4), Err(Errno::NotFound));
 
-        ipc.write().teardown_owned_by(0xF0F1, sink);
+        ipc.write().teardown_owned_by(0xF0F1, sink, |_| {});
     }
 
     /// `waitset_ctl(Add)` owner-checks a `Child` member: before a producer
@@ -52346,7 +53050,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -52411,7 +53115,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -52423,7 +53127,14 @@ mod tests {
         // A client (task 7) posts a request, awaiting its reply.
         let client_caps = make_caps_record(client, &[], sink);
         let ticket = ep
-            .post(&client_caps, client, b"ping", u64::MAX, sink)
+            .post(
+                &client_caps,
+                client,
+                b"ping",
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                sink,
+            )
             .expect("posted");
 
         let ctx = CallerContext {
@@ -52493,7 +53204,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -52519,7 +53230,14 @@ mod tests {
         // A queued request is still drained normally in the same mode.
         let client_caps = make_caps_record(client, &[], sink);
         let _ = ep
-            .post(&client_caps, client, b"ping", u64::MAX, sink)
+            .post(
+                &client_caps,
+                client,
+                b"ping",
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                sink,
+            )
             .expect("posted");
         let got = h
             .call_recv(&ctx, id, 0x1000, 64, 0x2000, CallRecvFlags::NON_BLOCKING)
@@ -52558,7 +53276,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -52571,7 +53289,14 @@ mod tests {
         let client = crate::test_boot::claim_peer_task();
         let client_caps = make_caps_record(client, &[], sink);
         let _ = ep
-            .post(&client_caps, client, b"stale", u64::MAX, sink)
+            .post(
+                &client_caps,
+                client,
+                b"stale",
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                sink,
+            )
             .expect("posted");
         assert!(ep.has_pending());
 
@@ -52626,7 +53351,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -52641,8 +53366,9 @@ mod tests {
         let client_caps = make_caps_record(client, &[CapabilityId::SYSINFO_GLOBAL], sink)
             .with_proc_id(ProcId::from_raw([0x71; 16]));
         let expected = client_caps.attest_origin();
+        let limit = tairix_abi::RLIMIT_INFINITY;
         let ticket = ep
-            .post(&client_caps, client, b"who-am-i", u64::MAX, sink)
+            .post(&client_caps, client, b"who-am-i", u64::MAX, limit, sink)
             .expect("posted");
 
         let ctx = CallerContext {
@@ -52761,7 +53487,7 @@ mod tests {
                 CallEndpointLimits {
                     max_request: 64,
                     max_reply: 64,
-                    capacity: 4,
+                    per_sender: 4,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 sink,
@@ -52773,7 +53499,14 @@ mod tests {
         let poster = crate::test_boot::claim_peer_task();
         let client_caps = make_caps_record(poster, &[], sink);
         let ticket = ep
-            .post(&client_caps, poster, b"who-am-i", u64::MAX, sink)
+            .post(
+                &client_caps,
+                poster,
+                b"who-am-i",
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                sink,
+            )
             .expect("posted");
 
         let ctx = CallerContext {

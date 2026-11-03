@@ -36,45 +36,35 @@
 mod startup;
 mod supervisor;
 
-/// How many control requests either administrative endpoint queues
-/// before a further caller is refused by the kernel.
+/// How many control calls one caller may hold on either administrative
+/// endpoint before the kernel refuses it more.
 ///
-/// A control tool call is synchronous and PID 1 answers one per wakeup, so
-/// the queue only absorbs callers that arrive while an earlier one is
-/// being served. A bound rather than a capacity: this is the depth at
-/// which a flood of control calls is refused instead of consuming kernel
-/// memory, and only an administrator can reach these endpoints at all.
+/// A control tool call is synchronous and PID 1 answers one per wakeup, so a
+/// caller holds one per calling thread; only an administrator can reach these
+/// endpoints at all.
 const CONTROL_QUEUE_DEPTH: usize = 4;
 
-/// How many activation calls may be outstanding at once.
+/// How many activation calls one client may have waiting at once.
 ///
-/// The kernel counts a *parked* call against this, and the whole point of
-/// the activation endpoint is that a client waits on it while its service
-/// starts — so this is not a burst allowance like the control depth, it
-/// is how many clients may be waiting. It is therefore the engine's own
-/// per-service pending bound plus the one call being served, so the
-/// engine's bound is what a flood actually meets (refused with
-/// `QueueFull`, and audited by the manager) instead of the kernel
-/// refusing first and leaving that bound dead. Every graphical process
-/// reaches this endpoint, so a hand-picked small depth would refuse
-/// ordinary desktop start-up, not a flood.
-const ACTIVATION_QUEUE_DEPTH: usize = tairix_init::MAX_PENDING_PER_SERVICE + 1;
+/// A client waits on the activation endpoint while its service starts, one
+/// call per waiting thread. How many any one service may have waiting is the
+/// engine's own per-service bound, which every client's waits count against
+/// and which a flood meets — refused with `QueueFull` and audited by the
+/// manager — so this only keeps one client from filling that bound alone.
+const ACTIVATION_QUEUE_DEPTH: usize = 4;
 
-/// How many readiness notices may be outstanding at once.
+/// How many readiness notices one service may have outstanding at once.
 ///
-/// A notice is answered in the wakeup that receives it and never parked,
-/// so this only absorbs services announcing simultaneously — at most
-/// every service the boot description registers. Derived from that
-/// description rather than picked, so it cannot be outgrown by adding a
-/// service. A refused notice would be worse than a refused control call:
-/// the service's readiness would be lost and its clients left waiting.
-const NOTICE_QUEUE_DEPTH: usize = startup::REGISTERED_SERVICES;
+/// Each service reports itself, the notice is answered in the wakeup that
+/// receives it, and a blocking notice waits for its predecessor rather than
+/// being refused, so a service needs one in flight and room for the next.
+const NOTICE_QUEUE_DEPTH: usize = 2;
 
 // A depth the kernel refuses is a bind PID 1 cannot make, which ends the
 // boot; caught here rather than at the first boot after a bound moves.
-const _: () = assert!(ACTIVATION_QUEUE_DEPTH <= tairix_abi::ipc::IPC_CALL_CAPACITY_MAX);
-const _: () = assert!(NOTICE_QUEUE_DEPTH <= tairix_abi::ipc::IPC_CALL_CAPACITY_MAX);
-const _: () = assert!(CONTROL_QUEUE_DEPTH <= tairix_abi::ipc::IPC_CALL_CAPACITY_MAX);
+const _: () = assert!(ACTIVATION_QUEUE_DEPTH <= tairix_abi::ipc::IPC_SENDER_DEPTH_MAX);
+const _: () = assert!(NOTICE_QUEUE_DEPTH <= tairix_abi::ipc::IPC_SENDER_DEPTH_MAX);
+const _: () = assert!(CONTROL_QUEUE_DEPTH <= tairix_abi::ipc::IPC_SENDER_DEPTH_MAX);
 
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]

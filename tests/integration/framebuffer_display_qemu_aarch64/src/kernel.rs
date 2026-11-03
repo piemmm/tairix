@@ -531,7 +531,7 @@ fn drive_multi_seat(env: &dyn QemuEnv, mapper: &dyn MmioMapper, config: Framebuf
     // B's still-held lease loses its present authority instantly (the
     // scan-out keeps B's last frame) while the boot seat's owner is
     // untouched.
-    if SEATS.detach_display(DISPLAY_NODE) != Some(second) {
+    if SEATS.detach_display(DISPLAY_NODE).map(|(seat, _)| seat) != Some(second) {
         env.fail("multi-seat: detach");
     }
     {

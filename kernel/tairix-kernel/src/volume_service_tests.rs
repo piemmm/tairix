@@ -76,7 +76,7 @@ use tairix_fsserve::{
 use tairix_hash::{HashSeed, SipHash13};
 use tairix_kernel_core::devres::{install_shared_mem_facility, SharedChunk, SharedMemFacility};
 use tairix_kernel_core::filelock::{self, LockedNode, Request};
-use tairix_kernel_core::fs::served::{mint_served_endpoint, LANE_ENDPOINT_CAPACITY};
+use tairix_kernel_core::fs::served::{mint_served_endpoint, LANE_ENDPOINT_DEPTH};
 use tairix_kernel_core::fs::{
     Acting, At, Authority, CreateMode, FilesystemService, FinalLink, FrozenAuthority, Grant,
     NodeHandle, OfferingServer, Opened, Principal, ServeChannel, Start,
@@ -674,7 +674,7 @@ fn serve(
                     }
                 }
             };
-            endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
+            let _ = endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
         }
     })
 }
@@ -699,7 +699,7 @@ fn register_endpoint(id: u64, owner: u64) -> StdArc<CallEndpoint> {
             CallEndpointLimits {
                 max_request: u32::try_from(BLK_REQUEST_LEN).unwrap(),
                 max_reply: u32::try_from(BLK_COMPLETION_LEN).unwrap(),
-                capacity: 4,
+                per_sender: 4,
             },
             tairix_abi::RLIMIT_INFINITY,
             &SINK,
@@ -1002,7 +1002,7 @@ impl Driver {
                 CallEndpointLimits {
                     max_request: u32::try_from(FSSERVE_REQUEST_MAX).unwrap(),
                     max_reply: u32::try_from(FSSERVE_REPLY_MAX).unwrap(),
-                    capacity: LANE_ENDPOINT_CAPACITY,
+                    per_sender: LANE_ENDPOINT_DEPTH,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 &SINK,
@@ -4478,7 +4478,7 @@ impl NetServer {
                 CallEndpointLimits {
                     max_request: u32::try_from(FSSERVE_REQUEST_MAX).unwrap(),
                     max_reply: u32::try_from(FSSERVE_REPLY_MAX).unwrap(),
-                    capacity: LANE_ENDPOINT_CAPACITY * lanes.count(),
+                    per_sender: LANE_ENDPOINT_DEPTH,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 &SINK,

@@ -25,7 +25,7 @@ Every kernel-owned payload copy — a `Port` message, a `CallEndpoint`
 request, a `CallEndpoint` reply — is a
 [`SensitiveBuffer`](./memory.md#4-sensitive-region-api) and is therefore
 zeroed the moment the kernel releases it, whichever way the transfer ends:
-delivered and drained, refused for capability, size, or capacity, withdrawn
+delivered and drained, refused for capability, size, budget or depth, withdrawn
 by its poster, reaped on a deadline, or cancelled by teardown. The staging
 buffers the `ipc_send` / `ipc_call` / `call_post` / `call_reply` handlers
 copy user bytes into are the same type, so no stage of the path holds
@@ -51,16 +51,66 @@ test-only global allocator scans every released block for the payload
 sentinel, and one of its cases leaks a payload deliberately so the scan
 cannot pass vacuously.
 
+## Per-sender lanes
+
+Ports and call endpoints are reached by many senders at once, so each keeps
+what every sending process has outstanding in a lane of its own
+(`kernel/ipc/src/lanes.rs`):
+
+- **A depth per sender, not a total.** The owner declares how many messages
+  one sender may have queued, or calls one caller may have waiting on the
+  server — posted or in service — the `per_sender` bound of `port_bind` and
+  `call_create`, at most `IPC_SENDER_DEPTH_MAX`. A sender at its depth is
+  refused `WouldBlock`, and nothing another sender holds counts against it, so
+  no sender can make an endpoint refuse another. A call's room comes back when
+  the server answers it: an answer the caller has not collected is held in its
+  lane, at its expense, but never stops it posting.
+- **The sender pays.** A lane is charged to its sender's `ipc-queue-bytes`
+  limit for all the storage it holds, as it grows, until it retires; a queued
+  message for its payload, and an outstanding call for the larger of its two
+  payloads, until taken or retired. The owner pays for the endpoint's
+  bookkeeping, the few idle lanes it keeps for reuse, and — for a port — one
+  full lane for senders that have ended (below).
+- **Served in turn.** The owner takes one item from each sender with something
+  waiting before it takes a second from any, each sender's own items oldest
+  first: a sender's earlier request is always served before its later one, and
+  a deep backlog waits behind one item of everyone else's.
+- **Nothing grows with the number of senders.** Lanes are found by hash and
+  the turn order is a list threaded through them, so opening, serving and
+  retiring a lane cost the same at one sender as at thousands; a call in
+  service is found by its ticket. Only a send or post grows anything, fallibly,
+  reserving all the room its item will later need, so receive, reply,
+  collection and teardown never allocate and cannot fail for memory. What
+  leaves an endpoint is dropped after its lock is released.
+- **Room is per sender.** A sender parked for room — a `PortRoom` wait-set
+  member, or a blocking `ipc_call` at its depth — waits as its own process and
+  is woken only when its own lane makes room, however many threads wait as it.
+  No change to one sender's lane wakes another's waiters, and there is no
+  broadcast to fall back on.
+
+Port lanes are keyed by the sending process *instance*, because a queued
+message outlives its sender and a recycled process number must not inherit a
+dead sender's lane; call lanes by process number, because a dead caller's
+calls are cancelled before its number is reused.
+
+A message outlives its sender at its receiver's expense, up to what the
+receiver set aside: each port's owner pays at bind for one full lane of its
+largest messages (`Port::ended_room`), and when a sender ends, what it left
+queued at each port is held against that room while it fits and discarded
+whole when it does not (`PORT_ENDED_SENDER_DISCARDED`). A sender that sends and
+exits therefore has its last messages delivered, while senders that end in
+numbers cannot make a port hold more than its owner chose.
+
 ## Message ports
 
 ```text
-+--------+   send(payload)    +-----------------+   recv()    +----------+
-| sender |  -------------->   |     Port        |  -------->  | receiver |
-+--------+   caps checked     | required_send,  |             +----------+
-                              | required_recv,  |
-                              | max_payload,    |
-                              | bounded mailbox |
-                              +-----------------+
++--------+   send(payload)    +------------------+   recv()    +----------+
+| sender |  -------------->   |      Port        |  -------->  | receiver |
++--------+   caps checked     | required_send,   |             +----------+
+                              | required_recv,   |
+                              | max_payload,     |
+                              | a lane per sender|
+                              +------------------+
 ```
 
 `Port::create` performs the bind-time check (creator must hold every
@@ -78,21 +128,24 @@ fast path:
    bounded by the global ABI cap `IPC_MESSAGE_MAX_PAYLOAD_LEN` (1 MiB
    in `abi-v1`). Oversize sends return `Errno::MessageTooLarge`
    (semantically `EMSGSIZE`).
-4. **Capacity check** against the bounded mailbox.
+4. **Charge** of the message to the sender's own `ipc-queue-bytes` limit,
+   then the **admission check** (below), then the **depth check** against
+   the sender's own lane.
 
 Every rejection emits exactly one audit event before returning.
 `Port::destroy` drains in-flight messages and is idempotent.
 
-The receive side offers two shapes. `Port::recv` pops and returns the
-oldest message unconditionally. `Port::recv_with(f)` is a **peek/commit**
-variant for receivers that must move the payload across a fallible
-boundary before they can accept it: it holds the mailbox lock while it
-runs `f` against the head message and dequeues it **only** when `f`
-returns `Ok`, so a failure — for example a faulting `copy_to_user` when
-the kernel delivers the payload into the receiver's address space, or a
-receive buffer too small to hold it — leaves the message at the head of
-the mailbox to be re-delivered rather than dropping it on the floor
-(`AGENTS.md` §5.4, fail closed). Like `recv` it performs no capability
+The receive side offers two shapes. `Port::recv` takes the next message in
+turn unconditionally. `Port::recv_with(f)` is a **peek/commit** variant for
+receivers that must move the payload across a fallible boundary before they
+can accept it: it holds the mailbox lock while it runs `f` against the next
+message and dequeues it **only** when `f` returns `Ok`, handing the message
+back so its payload is wiped and freed outside the lock. A failure — for
+example a faulting `copy_to_user` when the kernel delivers the payload into
+the receiver's address space, or a receive buffer too small to hold it —
+leaves the message at the head of its sender's lane, the sender keeping its
+turn, to be re-delivered rather than dropping it on the floor (`AGENTS.md`
+§5.4, fail closed). Like `recv` it performs no capability
 check of its own; the **syscall layer** gates every receive — the
 `ipc_recv` handler checks the caller against the port's
 `required_recv_caps` *before* any message is observed or dequeued (the
@@ -154,24 +207,25 @@ TAIRiX `EAGAIN`) when the bound mailbox is momentarily empty and
 
 A port takes messages from any capable sender and its owner authenticates
 each by its attested origin, which keeps a forged message from being believed
-but not from occupying the mailbox. A port whose id another process can work
-out — one derived from its owner's pid — could therefore be filled to starve
-the one sender it serves. `port_admit` lets the owner name that sender, by
-the call endpoint it serves — the kernel resolves the instance serving it now,
-so the identity is attested rather than the owner's word. From then on
-`Port::send` refuses any other process instance with `PermissionDenied`,
-checked under the mailbox lock the send already takes, so a refused message
-occupies no room and an unrestricted port pays nothing. The admission itself
-discards whatever another instance queued before it, under the same lock, so
-the owner never has to drain a port to trust it, and wakes any sender parked
-for the room that frees. Only the first refusal under an admission is
-recorded; the rest are counted into the port's destruction record, so a
-sender the port will never take cannot flood the audit trail through it.
+but not from being queued: another sender's lane can never take the room of
+the one sender a port serves, but its messages still cost the owner a drain
+and a discard. `port_admit` lets the owner name that sender, by the call
+endpoint it serves — the kernel resolves the instance serving it now, so the
+identity is attested rather than the owner's word. From then on `Port::send`
+refuses any other process instance with `PermissionDenied`, checked under the
+mailbox lock the send already takes, so a refused message is never queued and
+an unrestricted port pays nothing. The admission itself discards every other
+sender's lane — taken out under the same lock and wiped and freed after it,
+the room the admitted lane is kept in made beforehand — so the owner never has
+to drain a port to trust it, and wakes the senders parked for room in them,
+who now find their sends refused. Only the first refusal under an admission is recorded; the rest
+are counted into the port's destruction record, so a sender the port will
+never take cannot flood the audit trail through it.
 
-A port, like a call endpoint, is charged to its owner's `ipc-queue-bytes`
-limit when it is created — its capacity times its largest message, plus its
-bookkeeping, since any sender may fill it — and the charge travels with the
-object, so destroying it by any path returns it
+A port, like a call endpoint, charges its owner's `ipc-queue-bytes` limit for
+its bookkeeping when it is created, and each queued message to its sender
+([per-sender lanes](#per-sender-lanes)); every charge travels with its object,
+so destroying it by any path returns it
 ([resource limits](./resource-limits.md)). `port_unbind` lets the owner tear a
 port down before it exits, which is what a program opening a transport per
 operation needs: `tairix_rt::PrivatePort` unbinds its port when dropped.
@@ -254,24 +308,39 @@ A `Port` is fire-and-forget; the reactive driver-store file service
 (Design D — `/System` file-read IPC service) and any future request/reply
 system service need *synchronous* semantics instead. `CallEndpoint` is
 that primitive: a caller `post`s a request and receives an opaque,
-unforgeable `CallTicket`; the single bound server drains the oldest
-request with `recv_call` (moving it to an in-service table keyed by its
-ticket) and answers with `reply(ticket, …)`; the caller claims the answer
-with `take_reply(claimant, ticket)`. The bind-/send-time capability split
-and size/closed-port checks mirror `Port` exactly; `create` takes its
-bounds as one `CallEndpointLimits` value (`max_request`, `max_reply`,
-`capacity`), where `capacity` is a fail-closed bound on the number of
-*outstanding* calls (`AGENTS.md` §24.4), not a scaling capacity. Because it
-reaches `create` straight from the endpoint-create syscall's argument, it is
-itself bounded by `IPC_CALL_CAPACITY_MAX`: an unbounded value would leave the
-endpoint with no memory bound at all.
+unforgeable `CallTicket`; the single bound server takes the next request in
+turn with `recv_call` (moving it to an in-service table keyed by its ticket)
+and answers with `reply(ticket, …)`; the caller claims the answer with
+`take_reply(claimant, ticket)`. The bind-/send-time capability split and
+size/closed-port checks mirror `Port` exactly; `create` takes its bounds as
+one `CallEndpointLimits` value (`max_request`, `max_reply`, `per_sender`),
+where `per_sender` is a fail-closed bound on the calls one caller may have
+waiting on the server (`AGENTS.md` §24.4), not a scaling capacity, bounded by
+`IPC_SENDER_DEPTH_MAX` because it reaches `create` straight from the syscall's
+argument.
 
-The three call states are held in flat, doubling collections bounded by that
-capacity, and lookup by ticket is a linear scan over them. No call operation
-allocates or frees a per-call node, and every removed payload is moved out and
-dropped *after* the endpoint lock is released, so the receive and reply paths
-never descend into the kernel heap's own global, IRQ-masking lock while
-holding this endpoint's lock.
+A caller's calls live in its lane ([per-sender lanes](#per-sender-lanes)) —
+queued, in service, and answered — and its own operations search that lane
+alone; the server's reply finds the caller of a call in service through an
+index keyed by ticket, so the server's cost never grows with how many callers
+it has or how many answers any of them has left uncollected. Every removed
+payload is moved out and dropped *after* the endpoint lock is released, so the
+receive and reply paths never descend into the kernel heap's own global,
+IRQ-masking lock while holding this endpoint's lock.
+
+A blocking `ipc_call` whose caller is at its depth does not fail: it parks until
+the server answers one of its process's calls, or one times out or is
+withdrawn, each of which wakes the threads waiting as that process, and then
+posts. Its own uncollected answers never hold room, so the wait is on the
+server and never on the caller. A posted call (`call_post`) is answered
+`WouldBlock` instead, and its caller posts again once the server has answered
+one of its own calls.
+
+An answer wakes the thread awaiting the call (`call_await`) and its poster,
+which may be watching for it another way; a call is awaited by one thread at a
+time, so a second thread awaiting the same call is refused `Busy` rather than
+left asleep when the first takes the answer. A call withdrawn with
+`call_cancel` wakes its awaiter, which then finds it gone.
 
 `CallEndpoint` is the request/reply *state machine* only and never
 blocks — the caller parking until its ticket is replied and the server
@@ -279,9 +348,9 @@ parking until a request arrives are layered above through the same
 cooperative yield/park seam the IRQ-wait and `wait` syscalls use
 (`kernel/core`), so the primitive stays scheduler-free and host-testable
 (`AGENTS.md` §2.2 / §17.4). Two security properties beyond `Port`:
-`take_reply` takes the claiming task id and a reply is claimable only by
-the task that posted it (a mismatch is reported as `Unknown`, never
-revealing another task's ticket — `AGENTS.md` §19.1); and `destroy`
+`take_reply` takes the claiming process and searches that process's lane
+alone, so a reply is claimable only by the process that posted it and
+another's ticket reads as `Unknown`, never revealed (`AGENTS.md` §19.1); and `destroy`
 cancels every in-flight ticket so a parked caller observes `Cancelled`
 and abandons rather than waiting forever (fail closed, `AGENTS.md` §2.9).
 
@@ -311,15 +380,14 @@ wake, which is simply nothing to serve.
 
 A client that must not wait on a wedged server forever posts with a
 deadline. `tairix_rt::call_within` is that call for a client with nothing
-else to do meanwhile: it posts, parks on a wait-set observing the endpoint's
-replies — which the deadline readies too, as the endpoint's end does — and
-reaps (`tairix_rt::call_await`), answering `TimedOut` once the deadline
-passes unanswered, and withdrawing the call if the wait itself fails. The set
-holds no other member that can stay ready, so every wake is the call's: a
-member whose endpoint ended stays ready, so a client keeps a reply member
-only while it calls that endpoint. A timed-out call says nothing of what the
-server did: one still queued at its deadline was never received, while one
-in service may have been carried out and its reply refused.
+else to do meanwhile: it posts and awaits that one call
+(`tairix_rt::call_await`, the `call_await` syscall), answering `TimedOut` once
+the deadline passes unanswered. The await parks on the call itself rather than
+on a wait-set's reply member, which is ready for any of the process's replies
+on the endpoint, so a client with several calls outstanding there is never
+woken for another's answer. A timed-out call says nothing of what the server
+did: one still queued at its deadline was never received, while one in
+service may have been carried out and its reply refused.
 
 ## Audit catalogue
 
@@ -343,7 +411,8 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3011 | Error | `MESSAGE_SEND_DENIED`         | A send was refused. `reason` discriminates: `missing_capability` (the sender lacks the port's required capabilities) or `not_admitted` (the port's owner admitted another sender — recorded once per admission, the rest counted into `PORT_DESTROYED`, so a sender the port will never take cannot flood the trail). |
 | 3012 | Error | `MESSAGE_TOO_LARGE`           | Payload exceeded `max_payload`. |
 | 3013 | Error | `MESSAGE_SEND_TO_CLOSED_PORT` | A send raced with destruction and lost. |
-| 3014 | Debug | `MAILBOX_FULL`                | The receiver's mailbox was full. |
+| 3014 | Debug | `MAILBOX_FULL`                | The sender's own lane at the port was at the port's per-sender depth; the receiver has not taken that sender's earlier messages yet. Another sender's traffic never causes it. |
+| 3015 | Warn  | `PORT_ENDED_SENDER_DISCARDED` | A sender that ended left messages queued that did not fit the room the port's owner set aside for ended senders, and they were discarded whole. |
 | 3020 | Info  | `SHMEM_CREATED`               | A shared-memory object was created. |
 | 3021 | Info  | `SHMEM_MAPPED`                | A mapping was established. |
 | 3022 | Error | `SHMEM_MAP_DENIED`            | A mapping request was refused. |
@@ -358,7 +427,7 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3044 | Error | `CALL_POST_DENIED`            | Caller lacks the endpoint's required capabilities. |
 | 3045 | Error | `CALL_REQUEST_TOO_LARGE`      | Request payload exceeded `max_request`. |
 | 3046 | Error | `CALL_POST_TO_CLOSED_ENDPOINT`| A post raced with destruction and lost. |
-| 3047 | Debug | `CALL_QUEUE_FULL`             | The endpoint's outstanding-call queue was full. |
+| 3047 | Debug | `CALL_QUEUE_FULL`             | A posted call found its caller already at the endpoint's per-caller depth of calls waiting on the server; the server answering one makes room. Another caller's traffic never causes it. |
 | 3048 | Debug | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput RPC completion. Its denial (3049) stays at `Error`. |
 | 3049 | Error | `CALL_REPLY_DENIED`           | A reply was refused. `reason` discriminates: `oversize_reply` (exceeded `max_reply`) or `unknown_ticket` (no such in-flight call — timed out, cancelled, or forged). A late reply after a missed deadline is preceded by its own `CALL_TIMED_OUT` (3053). |
 | 3053 | Warn  | `CALL_TIMED_OUT`              | An in-flight call's deadline elapsed before the server replied; the ticket is retired and a late reply is refused. Recorded at the IPC layer because an in-kernel caller (the filesystem's block path) never reaches the syscall dispatcher's audit — without it, a device that stopped answering leaves no trace but the puzzling refusal of its own late reply. Edge-triggered: retiring the ticket means a later poll finds nothing. |
@@ -366,6 +435,7 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3051 | Info  | `CALL_POSTER_VANISHED`        | A caller task exited with calls still in flight on this endpoint; the kernel cancelled them (queued requests dropped before service, in-service tickets retired so the server's reply fails closed, unclaimed replies discarded). |
 | 3052 | Info  | `CALL_ENDPOINT_GRANTS_REVOKED` | A destroyed endpoint's delegated per-endpoint grants were revoked. |
 | 3060 | Error | `PAYLOAD_ALLOC_FAILED`        | The kernel heap could not hold the wiped-on-drop copy of a port send, call post, or reply, so the transfer failed closed with `Errno::OutOfMemory`. Machine distress rather than back-pressure, hence `Error` where `MAILBOX_FULL` / `CALL_QUEUE_FULL` are `Debug`. |
+| 3061 | Debug | `IPC_SENDER_LIMIT_REACHED`    | A send or post would have carried its sender past its own `ipc-queue-bytes` limit and was refused `LimitExceeded`. The sender's own budget refusing it, never the receiver's state; `Debug` like the other back-pressure events, so a flooding sender cannot turn each refusal into an alert. |
 
 Adding a new event requires assigning the next free identifier in
 `kernel/ipc/src/audit.rs` and appending a row to this table.
@@ -377,7 +447,8 @@ Adding a new event requires assigning the next free identifier in
 | `PermissionDenied`     | Sender / binder / mapper lacks a required capability |
 | `MessageTooLarge`      | Payload exceeded the port's `max_payload` (EMSGSIZE) |
 | `LengthOutOfRange`     | Configuration out of range                           |
-| `WouldBlock`           | Receiver's mailbox full / endpoint's call queue full — transient back-pressure, retry |
+| `WouldBlock`           | The sender's own lane at the port or endpoint is at its per-sender depth — back-pressure on that sender alone, retry once the receiver takes one of its messages or the server answers one of its calls |
+| `LimitExceeded`        | The send or post would carry the sender past its own `ipc-queue-bytes` limit |
 | `NotFound`             | Send to destroyed port, map of revoked shmem, unregister of an unbound endpoint, publish naming an unregistered endpoint, withdraw of an unbound name |
 | `AlreadyExists`        | Register of an already-bound `EndpointId`, publish of an already-bound `PortName` |
 | `OutOfMemory`          | The kernel-owned wiped-on-drop payload copy could not be allocated |

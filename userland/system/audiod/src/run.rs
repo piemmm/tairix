@@ -51,10 +51,10 @@ mod program {
     use tairix_rt::changenotice::ChangeNotice;
     use tairix_rt::{ClockDelay, LogSink};
 
-    /// Outstanding-call capacity of the `audio-v1` rendezvous. Every client
-    /// blocks on its reply, so a short queue only absorbs a request racing
-    /// the previous reply — a fail-closed memory bound, not a capacity.
-    const ENDPOINT_CAPACITY: usize = 8;
+    /// Calls one client may hold at the `audio-v1` rendezvous at once. Every
+    /// client blocks on its reply, one per calling thread — a fail-closed
+    /// memory bound, not a capacity.
+    const ENDPOINT_DEPTH: usize = 8;
 
     /// Wait-set token of the control endpoint.
     const CONTROL_TOKEN: u64 = 0;
@@ -220,7 +220,7 @@ mod program {
             &empty,
             AUDIO_MAX_REQUEST,
             AUDIO_MAX_REPLY,
-            ENDPOINT_CAPACITY,
+            ENDPOINT_DEPTH,
         ) != 0
         {
             return exit::NO_SERVICE;

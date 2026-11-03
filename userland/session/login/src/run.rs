@@ -342,6 +342,11 @@ mod program {
 
     /// The waitset token naming this console's elevation call endpoint.
     const TOKEN_ELEVATE: u64 = 1;
+
+    /// Calls one caller may hold at either broker endpoint: one exchange at a
+    /// time, and another caller's request waits its turn rather than being
+    /// refused or crowding this one out.
+    const CALLER_DEPTH: usize = 1;
     /// The waitset token naming the running child: the session, or the
     /// login screen while a graphical round is up.
     const TOKEN_CHILD: u64 = 2;
@@ -465,10 +470,9 @@ mod program {
             };
             // Unrestricted senders on both: any process may post —
             // placement and identity are enforced per request by the
-            // brokers. Capacity 1 on both: each exchange is serialised by
-            // design (one elevation per console, one question at a time
-            // from the login screen), so a second concurrent post fails
-            // closed instead of queueing.
+            // brokers, which answer each request in the turn that receives
+            // it, so an exchange is serialised by design and a caller holds
+            // one at a time.
             server.elevate = elevate_endpoint(own_console).ok().filter(|endpoint| {
                 server.bind_endpoint(
                     *endpoint,
@@ -498,7 +502,15 @@ mod program {
             token: u64,
         ) -> bool {
             let empty = CapabilitySet::empty();
-            if tairix_rt::call_create(endpoint, &empty, &empty, max_request, max_reply, 1) != 0 {
+            if tairix_rt::call_create(
+                endpoint,
+                &empty,
+                &empty,
+                max_request,
+                max_reply,
+                CALLER_DEPTH,
+            ) != 0
+            {
                 return false;
             }
             tairix_rt::waitset_ctl(

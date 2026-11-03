@@ -61,3 +61,8 @@ workspace = true
 
 [build-dependencies]
 tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"] }
+
+[dev-dependencies]
+# The shared seeded generator the randomised unit tests draw from (never in a
+# shipping build).
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

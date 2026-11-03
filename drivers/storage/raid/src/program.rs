@@ -162,27 +162,25 @@ const RAID_AGENT_EXITED: EventId = EventId(28_224);
 /// it is released once that array lets the device go.
 const RAID_MEMBERSHIP_STILL_COMPOSED: EventId = EventId(28_225);
 
-/// Outstanding-membership capacity of the reserved rendezvous. Each admitted
-/// member holds its offer call open for the life of its membership, so this
-/// bounds concurrent memberships — a fail-closed kernel memory bound, not a
-/// scaling capacity: past it an agent's offer is refused and its own paced
-/// re-offer brings it back as memberships free, so no device is lost. It is
-/// generous enough that a realistic machine's disks all register at once.
-const REGISTRY_CAPACITY: usize = 256;
+/// Offers one member agent may hold at the reserved rendezvous at once. An
+/// agent puts one device in the composer's hands and holds its offer call open
+/// for the life of the membership, so it needs that one and room for the
+/// re-offer that races its end; every device's agent pays for its own.
+const MEMBER_DEPTH: usize = 2;
 
-/// Outstanding-request capacity of the reserved control endpoint (a fail-closed
-/// kernel memory bound, not a scaling capacity). Administration and status are
-/// short calls posted by a handful of tools, and the composer answers each one
-/// within the same turn it receives it, so a small queue absorbs a burst of
-/// them; past it a caller is refused and retries. Deliberately its own queue,
-/// so a flood of status calls can never cost the machine a member registration.
-const CONTROL_CAPACITY: usize = 8;
+/// Calls one administration tool may hold at the reserved control endpoint at
+/// once (a fail-closed kernel memory bound, not a scaling capacity).
+/// Administration and status are short calls the composer answers within the
+/// turn it receives them, so a tool holds one per calling thread. Deliberately
+/// its own endpoint, so a flood of status calls can never cost the machine a
+/// member registration.
+const CONTROL_DEPTH: usize = 4;
 
-/// Outstanding-request capacity of a per-array block-service endpoint. The
-/// volume layer and the kernel's mounts submit one request at a time (each
-/// blocks on its reply); a small queue absorbs a re-submit racing the previous
-/// reply. It mirrors a leaf block driver's per-unit endpoint.
-const ARRAY_ENDPOINT_CAPACITY: usize = 4;
+/// Requests one client of a per-array block-service endpoint may hold at once.
+/// The volume layer and the kernel's mounts each submit one request at a time
+/// (each blocks on its reply); the room beyond absorbs a re-submit racing the
+/// previous reply. It mirrors a leaf block driver's per-unit endpoint.
+const ARRAY_ENDPOINT_DEPTH: usize = 4;
 
 /// The shared buffer one array's maintenance chunk is staged through.
 ///
@@ -457,7 +455,7 @@ fn create_registry_endpoint() -> bool {
         &recv_caps,
         RAID_MAX_REQUEST,
         STATUS_REPLY_LEN,
-        REGISTRY_CAPACITY,
+        MEMBER_DEPTH,
     ) == 0
 }
 
@@ -478,7 +476,7 @@ fn create_control_endpoint() -> bool {
         &recv_caps,
         RAID_CONTROL_MAX_REQUEST,
         RAID_CONTROL_MAX_REPLY,
-        CONTROL_CAPACITY,
+        CONTROL_DEPTH,
     ) == 0
 }
 
@@ -497,7 +495,7 @@ fn create_array_endpoint(id: u64) -> bool {
         &recv_caps,
         BLK_REQUEST_LEN,
         BLK_COMPLETION_LEN,
-        ARRAY_ENDPOINT_CAPACITY,
+        ARRAY_ENDPOINT_DEPTH,
     ) == 0
 }
 

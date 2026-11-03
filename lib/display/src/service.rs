@@ -40,9 +40,9 @@ use crate::rt::RtBufferMemory;
 use crate::server::{Delivery, DisplayServer, Latch, PeerFacts, DISPLAY_REPLY_MAX};
 use crate::{Framebuffer, FramebufferConfig};
 
-/// Outstanding calls the endpoint queues. A fail-closed memory bound: one
-/// session presents synchronously, so a small queue is ample.
-const CAPACITY: usize = 4;
+/// Calls one caller may hold at the endpoint. A fail-closed memory bound: a
+/// session presents synchronously, so it holds one at a time.
+const CALLER_DEPTH: usize = 4;
 
 /// Wait-set token of the endpoint.
 const ENDPOINT_TOKEN: u64 = 1;
@@ -218,7 +218,7 @@ fn bind(wakes: &[DeviceWake]) -> Result<u64, i32> {
         &empty,
         DISPLAY_MAX_REQUEST,
         DISPLAY_REPLY_MAX,
-        CAPACITY,
+        CALLER_DEPTH,
     ) != 0
     {
         return Err(end(

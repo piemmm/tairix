@@ -50,6 +50,7 @@
 
 pub mod audit;
 pub mod call;
+mod lanes;
 mod loom_compat;
 pub mod notify;
 #[cfg(all(test, not(loom)))]
@@ -60,8 +61,9 @@ pub mod shmem;
 
 pub use audit::AuditEvent;
 pub use call::{
-    CallEndpoint, CallEndpointLimits, CallTicket, ReceivedCall, RecvCall, ReplyOutcome,
+    CallEndpoint, CallEndpointLimits, CallTicket, ReceivedCall, RecvCall, ReplyOutcome, Woken,
 };
+pub use lanes::RoomWake;
 pub use notify::{NotificationChannel, NotificationFlags};
 pub use port::{EndpointId, Message, Port};
 pub use registry::PortRegistry;

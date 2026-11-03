@@ -366,11 +366,12 @@ mod program {
 
     /// Whether the desktop holds the window's pixels, and whether the window is
     /// on show: a released one is painted nothing until the redraw that shows
-    /// it again, and a minimised one is still repainted for what changes while
-    /// nothing moves on the clock.
+    /// it again, which owes it whole, and a minimised one is still repainted
+    /// for what changes while nothing moves on the clock.
     #[derive(Copy, Clone)]
     struct Shown {
         released: bool,
+        owed_whole: bool,
         on_show: bool,
     }
 
@@ -378,6 +379,7 @@ mod program {
         /// A window just opened.
         const OPEN: Self = Self {
             released: false,
+            owed_whole: false,
             on_show: true,
         };
 
@@ -389,7 +391,9 @@ mod program {
                     surface.window.release_frames();
                     self.released = true;
                 }
-                WindowEvent::RedrawRequested { .. } => self.released = false,
+                WindowEvent::RedrawRequested { .. } => {
+                    self.owed_whole |= core::mem::take(&mut self.released);
+                }
                 _ => {}
             }
             self.on_show = event.on_show().unwrap_or(self.on_show);
@@ -501,8 +505,10 @@ mod program {
                 .on_show
                 .then(|| gallery.animate(now_ns, viewport, pace, theme, &mut damage))
                 .flatten();
-            let repaint = if whole {
+            let repaint = if whole || core::mem::take(&mut shown.owed_whole) {
                 Repaint::Whole
+            } else if damage.is_empty() {
+                Repaint::Nothing
             } else {
                 Repaint::Reported
             };

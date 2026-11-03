@@ -73,10 +73,10 @@ pub const DRIVER_STORE_MAX_REQUEST: u32 = MAX_REQUEST_LEN as u32;
 /// would exceed it fails closed in-band.
 pub const DRIVER_STORE_MAX_REPLY: u32 = 64 * 1024;
 
-/// Maximum number of outstanding calls the endpoint queues before failing
-/// closed (a fail-closed memory bound, not a scaling
-/// capacity).
-pub const DRIVER_STORE_CAPACITY: usize = 16;
+/// Calls one caller may hold outstanding at the endpoint before its next post
+/// fails closed (a fail-closed memory bound, paid by that caller, not a
+/// scaling capacity).
+pub const DRIVER_STORE_CALLER_DEPTH: usize = 16;
 
 /// Create the well-known read-only `/System` driver-store call endpoint
 /// ([`DRIVER_STORE_ENDPOINT`]).
@@ -107,7 +107,7 @@ pub fn create_driver_store_endpoint<S: Sink + ?Sized>(
         CallEndpointLimits {
             max_request: DRIVER_STORE_MAX_REQUEST,
             max_reply: DRIVER_STORE_MAX_REPLY,
-            capacity: DRIVER_STORE_CAPACITY,
+            per_sender: DRIVER_STORE_CALLER_DEPTH,
         },
         tairix_abi::RLIMIT_INFINITY,
         audit,
@@ -441,12 +441,9 @@ where
     // A reply failure (oversize / unknown ticket) is itself fail-closed and
     // audited inside `CallEndpoint::reply`; the affected caller's own poll
     // then observes the unanswered ticket fail-closed. On success wake
-    // exactly the poster; a poster with no scheduler identity (`0`) falls
-    // back to the broadcast so it is still released.
-    match endpoint.reply(call.ticket, &reply, audit) {
-        Ok(0) => tairix_kernel_core::call_wake(),
-        Ok(poster) => tairix_kernel_core::call_wake_task(poster),
-        Err(_) => {}
+    // exactly the threads the answer concerns.
+    if let Ok(woken) = endpoint.reply(call.ticket, &reply, audit) {
+        tairix_kernel_core::call_woken(&woken);
     }
     true
 }

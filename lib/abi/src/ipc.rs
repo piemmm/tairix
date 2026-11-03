@@ -18,15 +18,15 @@ pub const IPC_MESSAGE_HEADER_MAGIC: u32 = u32::from_le_bytes(*b"IPC1");
 /// IPC message.
 pub const IPC_MESSAGE_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 
-/// Maximum outstanding calls a synchronous call endpoint may be created with.
+/// The deepest per-sender bound a port or call endpoint may be created with:
+/// the most messages one sender may have queued at a port, or calls one caller
+/// may have waiting on the server — posted or in service — at a call endpoint.
 ///
-/// The endpoint's `capacity` is a fail-closed containment bound, not a
-/// scaling capacity, so it is fixed here rather than taken on trust: the
-/// creating task supplies it through the endpoint-create syscall, and an
-/// unbounded value leaves the endpoint with no memory bound at all. Well
-/// above every in-tree endpoint (the largest is the driver store's 16), and
-/// small enough that the endpoint's by-ticket lookup stays a cheap scan.
-pub const IPC_CALL_CAPACITY_MAX: usize = 256;
+/// Each sender pays for its own queued traffic and no sender's traffic counts
+/// against another's, so this is a containment bound on one sender's lane —
+/// what a sender's own lane is searched for is at most this deep — and fixed
+/// here rather than taken on trust from the creating task.
+pub const IPC_SENDER_DEPTH_MAX: usize = 256;
 
 /// Whether `id` is a **reserved well-known** call-endpoint id: the fixed
 /// rendezvous each system service publishes, named in the body below, the

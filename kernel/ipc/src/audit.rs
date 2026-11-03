@@ -27,6 +27,7 @@
 //! | 3012 | Error | `MESSAGE_TOO_LARGE`           | A send was refused because the payload exceeded the port's `max_payload`. |
 //! | 3013 | Error | `MESSAGE_SEND_TO_CLOSED_PORT` | A send raced with destruction and lost. |
 //! | 3014 | Debug | `MAILBOX_FULL`                | A send was refused because the receiver's mailbox was full. Recorded at `Debug`: a busy receiver is a routine resource condition on a normal high-rate path, not an authorisation decision, so recording one per refused send would flood the log; forensics recovers it by lowering the level. |
+//! | 3015 | Warn  | `PORT_ENDED_SENDER_DISCARDED` | The messages a sender that ended left queued did not fit the room the port's owner set aside for ended senders, and were discarded whole. |
 //! | 3020 | Info  | `SHMEM_CREATED`               | A shared-memory object was created. |
 //! | 3021 | Info  | `SHMEM_MAPPED`                | A mapping into a recipient was established. |
 //! | 3022 | Error | `SHMEM_MAP_DENIED`            | A mapping request was refused. |
@@ -41,7 +42,7 @@
 //! | 3044 | Error | `CALL_POST_DENIED`            | A request was refused for lack of the endpoint's required capabilities. |
 //! | 3045 | Error | `CALL_REQUEST_TOO_LARGE`      | A request was refused because its payload exceeded `max_request`. |
 //! | 3046 | Error | `CALL_POST_TO_CLOSED_ENDPOINT`| A post raced with destruction and lost. |
-//! | 3047 | Debug | `CALL_QUEUE_FULL`             | A post was refused because the endpoint's outstanding-call queue was full. `Debug` for the same reason as `MAILBOX_FULL` (3014): a busy server is a routine resource condition, not an authorisation decision. |
+//! | 3047 | Debug | `CALL_QUEUE_FULL`             | A post was refused because its caller already had the endpoint's depth of calls waiting on the server. `Debug` for the same reason as `MAILBOX_FULL` (3014): a busy server is a routine resource condition, not an authorisation decision. |
 //! | 3048 | Debug | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. Recorded at `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput RPC completion. Its denial (3049) stays at `Error`. |
 //! | 3049 | Error | `CALL_REPLY_DENIED`           | A reply was refused. The `reason` field discriminates: `oversize_reply` (the server exceeded `max_reply`) or `unknown_ticket` (no such in-flight call — it timed out, was cancelled, or the ticket is forged). |
 //! | 3053 | Warn  | `CALL_TIMED_OUT`              | An in-flight call's deadline elapsed before the server replied; the ticket is retired and a late reply is refused. Recorded because the caller's own failure may be handled silently — for an in-kernel caller (the filesystem's block path) this is the only trace that a device missed its budget. |
@@ -99,13 +100,18 @@ pub enum AuditEvent {
     MessageTooLarge,
     /// A send raced with destruction and lost.
     MessageSendToClosedPort,
-    /// A send was refused because the receiver's mailbox was full.
+    /// A send was refused because the sender's own lane at the port was full.
     ///
     /// This is a resource condition, not a denial: the receiver merely has
-    /// not drained the mailbox yet, and the sender may retry
-    /// ([`Errno::WouldBlock`](tairix_abi::Errno::WouldBlock)). See
-    /// [`Self::level`] for why it is recorded at `Debug`.
+    /// not taken that sender's earlier messages yet, and the sender may retry
+    /// once it has ([`Errno::WouldBlock`](tairix_abi::Errno::WouldBlock)).
+    /// Another sender's traffic never causes it. See [`Self::level`] for why
+    /// it is recorded at `Debug`.
     MailboxFull,
+    /// The messages a sender that has ended left queued were discarded: they
+    /// did not fit the room the port's owner set aside for an ended sender's
+    /// traffic. Recorded at `Warn`: delivery was lost, but the port is fine.
+    PortEndedSenderDiscarded,
     /// A shared-memory object was created.
     ShmemCreated,
     /// A mapping into a recipient was established.
@@ -134,12 +140,14 @@ pub enum AuditEvent {
     CallRequestTooLarge,
     /// A post raced with destruction and lost.
     CallPostToClosedEndpoint,
-    /// A post was refused because the endpoint's outstanding-call queue was full.
+    /// A post was refused because the caller already holds the endpoint's
+    /// per-caller depth of outstanding calls.
     ///
-    /// This is a resource condition, not a denial: the server merely has not
-    /// drained the queue yet, and the caller may retry
-    /// ([`Errno::WouldBlock`](tairix_abi::Errno::WouldBlock)). See
-    /// [`Self::level`] for why it is recorded at `Debug`.
+    /// This is a resource condition, not a denial: one of the caller's own
+    /// calls completing makes room, and the caller may retry then
+    /// ([`Errno::WouldBlock`](tairix_abi::Errno::WouldBlock)). Another
+    /// caller's traffic never causes it. See [`Self::level`] for why it is
+    /// recorded at `Debug`.
     CallQueueFull,
     /// A server delivered a reply to an in-flight call.
     CallReplied,
@@ -175,6 +183,15 @@ pub enum AuditEvent {
     /// answering leaves no trace but the puzzling refusal of its own late
     /// reply.
     CallTimedOut,
+    /// A send or post was refused because it would carry the sender past its
+    /// own `ipc-queue-bytes` limit
+    /// ([`Errno::LimitExceeded`](tairix_abi::Errno::LimitExceeded)).
+    ///
+    /// Every sender pays for the traffic it has queued and not seen consumed,
+    /// so this is the sender's own budget refusing it, never the receiver's
+    /// state. Recorded at `Debug` with the other back-pressure events: a
+    /// sender flooding an endpoint must not turn each refusal into an alert.
+    IpcSenderLimitReached,
 }
 
 impl AuditEvent {
@@ -197,6 +214,7 @@ impl AuditEvent {
             Self::MessageTooLarge => 3012,
             Self::MessageSendToClosedPort => 3013,
             Self::MailboxFull => 3014,
+            Self::PortEndedSenderDiscarded => 3015,
             Self::ShmemCreated => 3020,
             Self::ShmemMapped => 3021,
             Self::ShmemMapDenied => 3022,
@@ -219,6 +237,7 @@ impl AuditEvent {
             Self::CallEndpointGrantsRevoked => 3052,
             Self::CallTimedOut => 3053,
             Self::PayloadAllocFailed => 3060,
+            Self::IpcSenderLimitReached => 3061,
         })
     }
 
@@ -267,12 +286,13 @@ impl AuditEvent {
             | Self::CallEndpointGrantsRevoked => Level::Info,
             // A missed deadline is an anomaly the operator must see above the
             // default filter, but it is handled: the caller fails closed.
-            Self::CallTimedOut => Level::Warn,
+            Self::CallTimedOut | Self::PortEndedSenderDiscarded => Level::Warn,
             Self::MessageDelivered
             | Self::CallPosted
             | Self::CallReplied
             | Self::MailboxFull
-            | Self::CallQueueFull => Level::Debug,
+            | Self::CallQueueFull
+            | Self::IpcSenderLimitReached => Level::Debug,
             Self::PortCreateDenied
             | Self::PortRegisterDenied
             | Self::PortNamePublishDenied
@@ -313,6 +333,7 @@ impl AuditEvent {
             Self::MessageTooLarge => "ipc message too large",
             Self::MessageSendToClosedPort => "ipc message send to closed port",
             Self::MailboxFull => "ipc mailbox full",
+            Self::PortEndedSenderDiscarded => "ipc port discarded an ended sender's messages",
             Self::ShmemCreated => "ipc shmem created",
             Self::ShmemMapped => "ipc shmem mapped",
             Self::ShmemMapDenied => "ipc shmem map denied",
@@ -335,6 +356,7 @@ impl AuditEvent {
             Self::CallEndpointGrantsRevoked => "ipc call endpoint grants revoked",
             Self::CallTimedOut => "ipc call timed out",
             Self::PayloadAllocFailed => "ipc payload allocation failed",
+            Self::IpcSenderLimitReached => "ipc sender limit reached",
         }
     }
 }
@@ -469,6 +491,7 @@ mod tests {
         assert_eq!(AuditEvent::MessageTooLarge.id(), EventId(3012));
         assert_eq!(AuditEvent::MessageSendToClosedPort.id(), EventId(3013));
         assert_eq!(AuditEvent::MailboxFull.id(), EventId(3014));
+        assert_eq!(AuditEvent::PortEndedSenderDiscarded.id(), EventId(3015));
         assert_eq!(AuditEvent::ShmemCreated.id(), EventId(3020));
         assert_eq!(AuditEvent::ShmemMapped.id(), EventId(3021));
         assert_eq!(AuditEvent::ShmemMapDenied.id(), EventId(3022));
@@ -511,6 +534,7 @@ mod tests {
             AuditEvent::MessageTooLarge,
             AuditEvent::MessageSendToClosedPort,
             AuditEvent::MailboxFull,
+            AuditEvent::PortEndedSenderDiscarded,
             AuditEvent::ShmemCreated,
             AuditEvent::ShmemMapped,
             AuditEvent::ShmemMapDenied,

@@ -977,8 +977,8 @@ impl SeatRegistry {
     }
 
     /// Destroy the seat created for the display-class node `node_id`,
-    /// returning its seat id — or `None` when no seat was attached to that
-    /// node (`plans/DISPLAY.md` D6).
+    /// returning its seat id and the owner whose lease it ended — or `None`
+    /// when no seat was attached to that node (`plans/DISPLAY.md` D6).
     ///
     /// Driven by the `hw_remove_node` handler when the node leaves the live
     /// tree: unplugging a display destroys its seat with no reboot. Every
@@ -987,17 +987,17 @@ impl SeatRegistry {
     /// keyboard channel is zeroed as it is freed (a ring that held typed
     /// characters never outlives its seat). The boot seat has no display
     /// node and can never be destroyed.
-    pub fn detach_display(&self, node_id: u32) -> Option<u64> {
-        let seat_id = {
+    pub fn detach_display(&self, node_id: u32) -> Option<(u64, Option<SeatOwner>)> {
+        let seat = {
             let mut hotplug = self.hotplug.lock();
             let index = hotplug.iter().position(|seat| seat.node_id == node_id)?;
-            let seat = hotplug.remove(index);
-            seat.seat_id
+            hotplug.remove(index)
         };
+        let owner = seat.slot.state.lock().owner();
         // A destroyed seat is a `SeatInput` readiness edge for its (former)
         // owner, exactly like a revoke; wake outside the hotplug lock.
         crate::waitq::seat_input_wake();
-        Some(seat_id)
+        Some((seat.seat_id, owner))
     }
 
     /// Retarget seat `seat_id`'s foreground text console (`seat_switch`,
@@ -2698,7 +2698,7 @@ mod tests {
         gate_handle.seat_id = second;
         assert_eq!(seat.present_gate(gate_handle).check_present(), Ok(()));
 
-        assert_eq!(seat.detach_display(5), Some(second));
+        assert_eq!(seat.detach_display(5), Some((second, Some(WM))));
         // Every operation naming the dead seat fails closed, including the
         // still-held present handle — unplugging the display ends the
         // lease's authority immediately.
@@ -2718,7 +2718,7 @@ mod tests {
     fn seat_ids_are_never_reused_after_a_destroy() {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         let first = seat.attach_display(5);
-        assert_eq!(seat.detach_display(5), Some(first));
+        assert_eq!(seat.detach_display(5), Some((first, None)));
         // A later display — even the same node replugged — mints a fresh
         // id, so a stale lease or record can never alias the new seat.
         let replugged = seat.attach_display(5);

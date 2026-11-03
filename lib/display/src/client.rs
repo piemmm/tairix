@@ -27,17 +27,17 @@ use tairix_abi::display_ipc::{
 };
 use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, BufferId, CursorCaps, DamageList, DamageRect, DisplayMode, DisplayPower,
-    OutputMode, Presented, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS,
+    OutputMode, Presented, MAX_ACCEL_LAYERS,
 };
 use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::{DriverError, Errno, ProcId};
-use tairix_geometry::{Rect, Region};
+use tairix_geometry::{Rect, Region, StaleFrames};
 use tairix_inline::ArrayVec;
 
 use crate::driver_error_from_errno;
 use crate::memory::copy_rows;
 use crate::presenter::{Base, BaseFrame, CursorPlane, DrawInPlace, LayerPresenter, Presenter};
-use crate::scanout::as_damage;
+use crate::scanout::{add_damage, as_damage, stale_frames};
 
 /// One request/reply exchange with the display service.
 pub trait DisplayTransport {
@@ -264,12 +264,11 @@ impl<T: DisplayTransport> DisplayClient<T> {
     }
 }
 
-/// One output frame the driver granted: its id, this presenter's mapping of
-/// it, and what it lacks of the current frame.
+/// One output frame the driver granted: its id, and this presenter's mapping
+/// of it.
 struct Frame<B> {
     id: BufferId,
     memory: B,
-    stale: Region,
 }
 
 /// A buffer allocated beyond the frames, and its mapping.
@@ -294,6 +293,8 @@ pub struct RemoteDisplay<M: BufferMapper, T: DisplayTransport> {
     mode: DisplayMode,
     surface: Rect,
     frames: ArrayVec<Frame<M::Mapping>, { DISPLAY_MAX_FRAMES as usize }>,
+    /// What each frame lacks of the current frame.
+    stale: StaleFrames,
     /// Bytes from one row to the next of every frame.
     stride: u32,
     back: usize,
@@ -346,17 +347,15 @@ impl<M: BufferMapper, T: DisplayTransport> RemoteDisplay<M, T> {
         let mut frames = ArrayVec::new();
         for grant in configured.frames() {
             let memory = mapper.map(configured.grantor, grant.grant, frame_len)?;
-            let mut stale = Region::with_budget(stale_budget(configured.count()));
-            stale.add(surface);
             frames
                 .try_push(Frame {
                     id: grant.buffer,
                     memory,
-                    stale,
                 })
                 .map_err(|_| Errno::LengthOutOfRange)?;
         }
         let planes = client.query_planes()?;
+        let stale = stale_frames(frames.len(), &mode);
         Ok(Self {
             client,
             mapper,
@@ -364,6 +363,7 @@ impl<M: BufferMapper, T: DisplayTransport> RemoteDisplay<M, T> {
             mode,
             surface,
             frames,
+            stale,
             stride: configured.stride_bytes,
             back: 0,
             in_flight: None,
@@ -406,56 +406,39 @@ impl<M: BufferMapper, T: DisplayTransport> RemoteDisplay<M, T> {
         }
         let mut changed = core::mem::take(&mut self.changed);
         changed.clear();
-        mark(&mut changed, damage, self.surface);
-        let refresh = self.refresh_back(&changed);
-        for &rect in refresh.rects() {
-            self.copy_rect(frame, self.back, rect);
-        }
-        let id = self.settle_back(refresh, &changed);
-        self.changed = changed;
-        Ok(id)
-    }
-
-    /// What the back frame needs brought up to date for a present of which
-    /// `changed` changed: that, and what the frame missed since it was shown.
-    fn refresh_back(&mut self, changed: &Region) -> Region {
-        let mut refresh = core::mem::take(&mut self.frames[self.back].stale);
-        refresh.add_region(changed);
-        refresh.clip(self.surface);
-        refresh
-    }
-
-    /// The back frame is up to date: give it back its emptied `refresh`, owe
-    /// `changed` to every other frame, and name the back frame.
-    fn settle_back(&mut self, mut refresh: Region, changed: &Region) -> BufferId {
-        let (surface, back) = (self.surface, self.back);
-        refresh.clear();
-        self.frames[back].stale = refresh;
-        for (index, other) in self.frames.iter_mut().enumerate() {
-            if index != back {
-                other.stale.add_region(changed);
-                other.stale.clip(surface);
+        add_damage(&mut changed, damage, self.surface);
+        let mode = self.mode;
+        let staged = self.draw_back(&changed, &mut |memory, stride, refresh| {
+            for &rect in refresh.rects() {
+                copy_rect(memory, stride, frame, &mode, rect);
             }
-        }
-        self.frames[back].id
+            Ok(())
+        });
+        self.changed = changed;
+        staged
     }
 
     /// Hand the back frame to `draw` with what it lacks for a present of
-    /// which `changed` changed, and settle it once drawn, naming it. A refused
-    /// draw leaves all of that owed to it, and nothing owed to another frame.
+    /// which `changed` changed, owing `changed` to every other frame once it is
+    /// drawn, and name it. A refused draw leaves all of that owed to it, and
+    /// nothing owed to another frame.
     fn draw_back(
         &mut self,
         changed: &Region,
         draw: &mut DrawInPlace<'_>,
     ) -> Result<BufferId, DriverError> {
-        let refresh = self.refresh_back(changed);
-        let back = &mut self.frames[self.back];
-        if let Err(refused) = draw(back.memory.as_mut(), self.stride, &refresh) {
-            // What the draw left is unknown, so all of it stays owed.
-            back.stale = refresh;
-            return Err(refused);
-        }
-        Ok(self.settle_back(refresh, changed))
+        let index = self.back;
+        let Self {
+            frames,
+            stale,
+            stride,
+            ..
+        } = self;
+        let back = frames.get_mut(index).ok_or(DriverError::OutOfRange)?;
+        stale.bring_up_to_date(index, changed, |refresh| {
+            draw(back.memory.as_mut(), *stride, refresh)
+        })?;
+        Ok(back.id)
     }
 
     /// The staged back frame went to the display, so the next is drawn into.
@@ -463,32 +446,6 @@ impl<M: BufferMapper, T: DisplayTransport> RemoteDisplay<M, T> {
         self.settle(reply);
         self.shown = Some(self.back);
         self.back = (self.back + 1) % self.frames.len();
-    }
-
-    fn copy_rect(&mut self, frame: &[u8], index: usize, rect: Rect) {
-        let rect = rect.intersection(&self.surface);
-        let (Ok(left), Ok(top)) = (usize::try_from(rect.left()), usize::try_from(rect.top()))
-        else {
-            return;
-        };
-        if rect.is_empty() {
-            return;
-        }
-        let bpp = self.mode.format.bytes_per_pixel() as usize;
-        let (from_stride, to_stride) = (self.mode.stride_bytes as usize, self.stride as usize);
-        let span = rect.width as usize * bpp;
-        let memory = self.frames[index].memory.as_mut();
-        for row in top..top + rect.height as usize {
-            let from = row * from_stride + left * bpp;
-            let to = row * to_stride + left * bpp;
-            // Both lengths were checked against the mode when the frames were
-            // mapped and the frame handed in, so a short slice is never met.
-            if let (Some(dst), Some(src)) =
-                (memory.get_mut(to..to + span), frame.get(from..from + span))
-            {
-                dst.copy_from_slice(src);
-            }
-        }
     }
 
     /// Frame `index`'s bytes, as this presenter mapped them.
@@ -552,19 +509,28 @@ fn draw_image<B: AsMut<[u8]>>(
     )
 }
 
-/// The rectangles one frame's stale region may hold before it coarsens.
-fn stale_budget(frames: usize) -> usize {
-    frames.saturating_mul(MAX_DAMAGE_RECTS)
-}
-
-/// Add `damage`, clipped to `surface`, to `region`.
-fn mark(region: &mut Region, damage: &[DamageRect], surface: Rect) {
-    for rect in damage {
-        match (i32::try_from(rect.x), i32::try_from(rect.y)) {
-            (Ok(x), Ok(y)) => {
-                region.add(Rect::new(x, y, rect.width_px, rect.height_px).intersection(&surface));
-            }
-            _ => region.add(surface),
+/// Copy `rect` of `source`, laid out as `mode`, into `memory`, whose rows lie
+/// `stride` bytes apart.
+fn copy_rect(memory: &mut [u8], stride: u32, source: &[u8], mode: &DisplayMode, rect: Rect) {
+    let rect = rect.intersection(&Rect::new(0, 0, mode.width_px, mode.height_px));
+    let (Ok(left), Ok(top)) = (usize::try_from(rect.left()), usize::try_from(rect.top())) else {
+        return;
+    };
+    if rect.is_empty() {
+        return;
+    }
+    let bpp = mode.format.bytes_per_pixel() as usize;
+    let (from_stride, to_stride) = (mode.stride_bytes as usize, stride as usize);
+    let span = rect.width as usize * bpp;
+    for row in top..top + rect.height as usize {
+        let from = row * from_stride + left * bpp;
+        let to = row * to_stride + left * bpp;
+        // Both lengths were checked against the mode when the frames were
+        // mapped and the frame handed in, so a short slice is never met.
+        if let (Some(dst), Some(src)) =
+            (memory.get_mut(to..to + span), source.get(from..from + span))
+        {
+            dst.copy_from_slice(src);
         }
     }
 }

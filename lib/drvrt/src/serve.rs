@@ -10,7 +10,7 @@ use tairix_abi::driver::thermal::{
 use tairix_abi::driver::{named_register_window, sole_register_window, DeviceWake};
 use tairix_abi::hwlink::{LinkDuty, LinkRole};
 use tairix_abi::hwtree::{HwResource, NodeEndpointBlock};
-use tairix_abi::ipc::IPC_CALL_CAPACITY_MAX;
+use tairix_abi::ipc::IPC_SENDER_DEPTH_MAX;
 use tairix_abi::rtc_ipc::{self, RTC_ENDPOINT};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
@@ -191,8 +191,9 @@ pub struct Endpoint<'b> {
     pub request: &'b mut [u8],
     /// The protocol's longest reply.
     pub max_reply: usize,
-    /// How many calls may be queued at once, clamped to the kernel's bound.
-    pub capacity: usize,
+    /// How many calls one caller may hold at once, clamped to the kernel's
+    /// bound.
+    pub per_sender: usize,
 }
 
 /// A supplier's endpoint, bound and gathered with its holders' ends and its
@@ -217,7 +218,7 @@ impl<'b> Service<'b> {
             id,
             request,
             max_reply,
-            capacity,
+            per_sender,
         }: Endpoint<'b>,
         wakes: &[DeviceWake],
     ) -> Result<Self, Ended> {
@@ -229,7 +230,7 @@ impl<'b> Service<'b> {
             &CapabilitySet::empty(),
             request.len(),
             max_reply,
-            capacity.clamp(1, IPC_CALL_CAPACITY_MAX),
+            per_sender.clamp(1, IPC_SENDER_DEPTH_MAX),
         ) != 0
         {
             return Err(Ended::Unbound);
@@ -296,9 +297,9 @@ impl<'b> Service<'b> {
     }
 }
 
-/// Calls the board clock's endpoint queues: its one client asks a handful of
+/// Calls the board clock's one client may hold at once: it asks a handful of
 /// times a day, each answered before the next is received.
-const RTC_ENDPOINT_CAPACITY: usize = 4;
+const RTC_ENDPOINT_DEPTH: usize = 4;
 
 /// Serve the board's clock chip `chip` on the RTC endpoint for the life of
 /// the driver, answering the status the driver ends with.
@@ -315,7 +316,7 @@ pub fn rtc<R: Rtc + ?Sized>(chip: &mut R) -> i32 {
         &CapabilitySet::empty(),
         rtc_ipc::REQUEST_LEN,
         rtc_ipc::REPLY_LEN,
-        RTC_ENDPOINT_CAPACITY,
+        RTC_ENDPOINT_DEPTH,
     );
     if bound == -i64::from(Errno::AlreadyExists.as_i32()) {
         return end(
@@ -357,8 +358,9 @@ pub struct DeviceChannel {
     pub max_request: usize,
     /// The protocol's longest reply.
     pub max_reply: usize,
-    /// How many calls may be queued at once, clamped to the kernel's bound.
-    pub capacity: usize,
+    /// How many calls one caller may hold at once, clamped to the kernel's
+    /// bound.
+    pub per_sender: usize,
 }
 
 impl DeviceChannel {
@@ -375,7 +377,7 @@ impl DeviceChannel {
             &CapabilitySet::empty(),
             self.max_request,
             self.max_reply,
-            self.capacity.clamp(1, IPC_CALL_CAPACITY_MAX),
+            self.per_sender.clamp(1, IPC_SENDER_DEPTH_MAX),
         );
         (bound == 0).then_some(id)
     }
@@ -413,9 +415,9 @@ impl crate::tree::TreeCalls for RtTree {
     }
 }
 
-/// Calls a sensor's channel queues: its consumer asks once a period, each
+/// Calls a sensor's consumer may hold at once: it asks once a period, each
 /// answered before the next is received.
-const SENSOR_CHANNEL_CAPACITY: usize = 4;
+const SENSOR_CHANNEL_DEPTH: usize = 4;
 
 /// Serve `sensor` on its node's sensor channel for the life of the driver,
 /// answering the status the driver ends with.
@@ -430,7 +432,7 @@ pub fn thermal_sensor<S: ThermalSensor + ?Sized>(sensor: &mut S) -> i32 {
         gate: CapabilityId::SYSINFO_HW,
         max_request: thermal::SENSOR_REQUEST_LEN,
         max_reply: thermal::SENSOR_REPLY_LEN,
-        capacity: SENSOR_CHANNEL_CAPACITY,
+        per_sender: SENSOR_CHANNEL_DEPTH,
     };
     let Some(endpoint) = channel.bind() else {
         return end(

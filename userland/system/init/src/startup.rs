@@ -140,15 +140,6 @@ pub const MAX_ENROLLED_SERVICES: usize = count_keyword_directives(DEFAULT_CONFIG
 /// `ondemand` directive grows the bound with it.
 pub const MAX_ONDEMAND_SERVICES: usize = count_keyword_directives(DEFAULT_CONFIG, b"ondemand");
 
-/// Every service the compiled-in boot description registers, across all
-/// three tiers.
-///
-/// The number that can announce readiness at once, which is what the
-/// lifecycle-notice endpoint's outstanding-call bound is sized from. Derived
-/// from the floor text like its three parts, so it tracks the floor rather
-/// than a magic number.
-pub const REGISTERED_SERVICES: usize = MAX_SERVICES + MAX_ENROLLED_SERVICES + MAX_ONDEMAND_SERVICES;
-
 /// The startup configuration compiled into the `init` `Run` binary.
 ///
 /// The session is the login service (`plans/PI.md` P11): every text console
@@ -799,7 +790,7 @@ mod tests {
     use super::{
         service_name, Conditions, ConfigError, Duration64, Launch, ReadinessKind, ReadyCondition,
         RestartPolicy, StartupConfig, DEFAULT_CONFIG, MAX_CONFIG_LEN, MAX_ENROLLED_SERVICES,
-        MAX_ONDEMAND_SERVICES, MAX_SERVICES, REGISTERED_SERVICES,
+        MAX_ONDEMAND_SERVICES, MAX_SERVICES,
     };
 
     extern crate alloc;
@@ -1242,12 +1233,6 @@ mod tests {
         // And over `ondemand`: `fontd` alone.
         assert_eq!(floor.ondemand().len(), MAX_ONDEMAND_SERVICES);
         assert_eq!(MAX_ONDEMAND_SERVICES, 1);
-        // The three tiers together are what the notice endpoint is sized
-        // from, so the sum must be the whole registered population.
-        assert_eq!(
-            REGISTERED_SERVICES,
-            floor.services().len() + floor.enrolled().len() + floor.ondemand().len()
-        );
     }
 
     #[test]

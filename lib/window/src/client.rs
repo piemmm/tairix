@@ -163,10 +163,10 @@ impl Repaint {
 /// One definition, because every app that presents what it changed faces the
 /// same three cases.
 ///
-/// Presenting less than the whole window is sound only where the frame being
-/// presented already holds the rest of the window's current pixels: a
-/// single-frame region the app writes each rectangle into as it goes, never an
-/// alternate buffer whose other pixels are a frame behind.
+/// Presenting less than the whole window is sound because the frame a present
+/// is drawn into is first brought up to date with what the window's other
+/// frame was presented with since (`WindowPane::present_list`), so it holds the
+/// rest of the window's current pixels.
 ///
 /// This is the box spanning everything reported, for an app that repaints one
 /// box; an app that paints each reported rectangle alone presents them as
@@ -656,6 +656,14 @@ pub trait WindowTransport {
     ///
     /// As [`call`](Self::call).
     fn reap(&mut self, ticket: u64, reply: &mut [u8]) -> Result<Option<usize>, Errno>;
+
+    /// Wait for the reply to the request posted as `ticket`, its length
+    /// written into `reply`. Only that request's answer ends the wait.
+    ///
+    /// # Errors
+    ///
+    /// As [`call`](Self::call).
+    fn await_reply(&mut self, ticket: u64, reply: &mut [u8]) -> Result<usize, Errno>;
 }
 
 /// A request the client posts rather than waits on. Each is made as input
@@ -677,6 +685,8 @@ pub enum PostedRequest {
     Title,
     /// [`WindowClient::set_sizing`].
     Sizing,
+    /// [`WindowClient::present`].
+    Present,
 }
 
 impl PostedRequest {
@@ -689,6 +699,7 @@ impl PostedRequest {
             Self::SaveOfferAnswer => "a save answer",
             Self::Title => "a title",
             Self::Sizing => "a resize range",
+            Self::Present => "a frame",
         }
     }
 }
@@ -727,6 +738,7 @@ enum Asked {
     SaveOfferAnswer(u32, bool),
     Title(WindowTitle),
     Sizing(WindowSizing),
+    Present(u32, DamageList),
 }
 
 impl Asked {
@@ -738,6 +750,7 @@ impl Asked {
             Self::SaveOfferAnswer(..) => PostedRequest::SaveOfferAnswer,
             Self::Title(_) => PostedRequest::Title,
             Self::Sizing(_) => PostedRequest::Sizing,
+            Self::Present(..) => PostedRequest::Present,
         }
     }
 
@@ -761,6 +774,11 @@ impl Asked {
             },
             Self::Title(title) => WindowRequest::SetTitle { window_id, title },
             Self::Sizing(sizing) => WindowRequest::SetSizing { window_id, sizing },
+            Self::Present(frame_index, damage) => WindowRequest::Present {
+                window_id,
+                frame_index,
+                damage,
+            },
         }
     }
 }
@@ -771,7 +789,10 @@ impl Asked {
 struct Posting {
     window_id: u64,
     kind: PostedRequest,
-    ticket: u64,
+    /// `None` while the request waits for room: this process's own calls
+    /// fill its place at the endpoint, and one of them being answered is what
+    /// makes room, so it is posted then, in the order it was asked.
+    ticket: Option<u64>,
     held: Option<Asked>,
     /// Its window was closed since: the answer is still reaped, but nobody
     /// is told of it.
@@ -803,6 +824,24 @@ struct LastPresent {
     /// A resize was asked while another was unanswered; the reported
     /// geometry is owed back once that one is.
     deferred: bool,
+    /// Where the window's frames stand with the session.
+    frames: Frames,
+    /// A present the session refused never reached the screen, so the next
+    /// one declares the whole window.
+    owed_whole: bool,
+}
+
+/// Where a window's frames stand with the session.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Frames {
+    /// The session holds them.
+    Mapped,
+    /// The session released its side, so the next present re-attaches a
+    /// region and sends the whole window.
+    Released,
+    /// Released because nobody can see the window, and not yet asked for
+    /// again.
+    Hidden,
 }
 
 /// A typed handle on the desktop session's window service.
@@ -830,8 +869,9 @@ pub struct WindowClient<T: WindowTransport> {
     /// The serving session's attested identity, as the last reply that
     /// carried it stated. `None` until one has.
     session: Option<ProcId>,
-    /// The requests posted and not yet answered: at most one a kind per
-    /// window, so a burst of pointer samples has one in flight.
+    /// The requests posted and not yet answered, and those waiting for room
+    /// to be posted: at most one a kind per window, so a burst of pointer
+    /// samples has one in flight.
     posted: Vec<Posting>,
     /// Refusals reaped and not yet handed to the application.
     refused: VecDeque<Refused>,
@@ -1209,26 +1249,117 @@ impl<T: WindowTransport> WindowClient<T> {
     /// Present frame `frame_index` of window `window_id`, of which
     /// `damage` changed.
     ///
+    /// Posted once the window's previous present is answered
+    /// ([`Self::await_present`]), so the client never has two in flight; the
+    /// session answers as it records the frame, and shows it with its next
+    /// one. A frame this process's own calls leave no room for is sent as a
+    /// call instead, which waits for the room. A refusal of a posted present
+    /// arrives later as [`EventError::Refused`], and the window's next present
+    /// declares the whole window, since the refused one never reached it.
+    ///
     /// # Errors
     ///
-    /// The session's typed refusal, a transport failure, or a corrupt
-    /// status frame.
+    /// A transport failure, or the session's refusal of a present sent as a
+    /// call.
     pub fn present(
         &mut self,
         window_id: u64,
         frame_index: u32,
         damage: DamageList,
     ) -> Result<(), Errno> {
-        let request = WindowRequest::Present {
-            window_id,
-            frame_index,
-            damage,
+        self.await_present(window_id);
+        let owed = self
+            .record_mut(window_id)
+            .filter(|record| record.owed_whole)
+            .map(|record| (record.width_px, record.height_px));
+        let damage = match owed {
+            Some((width_px, height_px)) => DamageList::new(&[DamageRect {
+                x: 0,
+                y: 0,
+                width_px,
+                height_px,
+            }])?,
+            None => damage,
         };
-        self.status_call(&request)?;
+        let request = Asked::Present(frame_index, damage).request(window_id);
+        match self.post(&request) {
+            Ok(ticket) => self.posted.push(Posting {
+                window_id,
+                kind: PostedRequest::Present,
+                ticket: Some(ticket),
+                held: None,
+                orphaned: false,
+            }),
+            Err(Errno::WouldBlock) => {
+                if let Err(errno) = self.status_call(&request) {
+                    let _ = self.present_refused(window_id, errno);
+                    return Err(errno);
+                }
+            }
+            Err(errno) => return Err(errno),
+        }
         if let Some(record) = self.record_mut(window_id) {
             record.frame_index = Some(frame_index);
+            record.owed_whole = false;
         }
         Ok(())
+    }
+
+    /// Wait until window `window_id` has no present unanswered.
+    ///
+    /// The session reads the frame a present names until a later present
+    /// replaces it, so a client draws its other frame only once the present
+    /// naming that one is answered. The answer is prompt — the session records
+    /// a frame and replies, it does not draw it first — so this waits only
+    /// for a client that presents faster than the session serves it. How an
+    /// awaited present ended reaches the application as any posted request's
+    /// answer does.
+    pub fn await_present(&mut self, window_id: u64) {
+        loop {
+            self.reap_posted();
+            let Some(index) = self.posted.iter().position(|posting| {
+                posting.window_id == window_id && posting.kind == PostedRequest::Present
+            }) else {
+                return;
+            };
+            let posting = self.posted[index];
+            let Some(ticket) = posting.ticket else {
+                // A present that waited for room is sent as a call, which
+                // waits for the room itself.
+                self.posted.remove(index);
+                if let Some(held) = posting.held {
+                    let answer = self.status_call(&held.request(window_id));
+                    self.settle(&posting, answer);
+                }
+                continue;
+            };
+            let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
+            let answer = self
+                .transport
+                .await_reply(ticket, &mut reply)
+                .and_then(|len| decode_status_reply(&reply[..len]));
+            let _ = self.answered(index, answer);
+        }
+    }
+
+    /// Whether the session released window `window_id`'s pixels because
+    /// nobody can see it, and has not asked for them again. Painting it now
+    /// would map again the memory the release gave back; the
+    /// [`WindowEvent::RedrawRequested`] that ends it comes before anyone can.
+    #[must_use]
+    pub fn is_hidden(&self, window_id: u64) -> bool {
+        self.presented
+            .iter()
+            .any(|record| record.window_id == window_id && record.frames == Frames::Hidden)
+    }
+
+    /// Whether the session released its side of window `window_id`'s
+    /// frames, so its next present must re-attach a region.
+    #[cfg(any(test, all(freestanding, feature = "rt")))]
+    pub(crate) fn content_released(&self, window_id: u64) -> bool {
+        self.presented
+            .iter()
+            .any(|record| record.window_id == window_id && record.frames != Frames::Mapped)
     }
 
     /// Close window `window_id`.
@@ -1244,6 +1375,8 @@ impl<T: WindowTransport> WindowClient<T> {
         // has in flight is still reaped, unreported.
         self.presented
             .retain(|record| record.window_id != window_id);
+        self.posted
+            .retain(|posting| posting.window_id != window_id || posting.ticket.is_some());
         for posting in &mut self.posted {
             if posting.window_id == window_id {
                 posting.held = None;
@@ -1289,11 +1422,22 @@ impl<T: WindowTransport> WindowClient<T> {
             stride_bytes: surface.stride_bytes,
             format: surface.format,
         };
-        let ticket = self.post(&request)?;
+        let ticket = match self.post(&request) {
+            Ok(ticket) => ticket,
+            Err(Errno::WouldBlock) => {
+                // This process's own calls fill its place at the endpoint:
+                // the size is delivered again once one of them is answered.
+                if let Some(record) = self.record_mut(window_id) {
+                    record.deferred = true;
+                }
+                return Err(Errno::WouldBlock);
+            }
+            Err(err) => return Err(err),
+        };
         self.posted.push(Posting {
             window_id,
             kind: PostedRequest::Resize,
-            ticket,
+            ticket: Some(ticket),
             held: None,
             orphaned: false,
         });
@@ -1320,37 +1464,6 @@ impl<T: WindowTransport> WindowClient<T> {
             }
         }
         in_flight
-    }
-
-    /// The bytes of `frames` for window `window_id`, re-attaching the region
-    /// first if the session released it.
-    ///
-    /// An app's paint path calls this instead of touching the region
-    /// directly, so coming back from a release costs it no code: a region the
-    /// app gave up after [`WindowEvent::ContentReleased`] is re-created here
-    /// and handed to the session with an ordinary
-    /// [`resize`](Self::resize) at the same geometry, and the caller then
-    /// paints and presents as it always does. `surface` is the window's
-    /// current mode and `frame_count` its frame count, which the re-attach
-    /// re-states because it is the same request a real resize makes.
-    ///
-    /// `None` when the region could not be re-created or the session refused
-    /// the re-attach: the caller draws nothing this frame and the window shows
-    /// through, exactly as it did while released. It is not an error path an
-    /// app has to report — the next redraw request tries again.
-    #[cfg(feature = "rt")]
-    pub fn frame_pixels<'f>(
-        &mut self,
-        frames: &'f mut crate::frames::WindowFrames,
-        window_id: u64,
-        frame_count: u32,
-        surface: &DisplayMode,
-    ) -> Option<&'f mut [u8]> {
-        if frames.is_released() {
-            let grant = frames.reattach()?;
-            self.resize(window_id, grant, frame_count, surface).ok()?;
-        }
-        frames.pixels()
     }
 
     /// Retitle window `window_id` — one of the caller's own windows — to
@@ -2129,13 +2242,10 @@ impl<T: WindowTransport> WindowClient<T> {
     /// full-window damage, answering a session redraw request.
     ///
     /// Returns whether a frame was re-presented: a window this client
-    /// does not own, or one that has not presented since it was created
-    /// or resized, has nothing to re-send and is ignored.
-    ///
-    /// An app that renders in place (single-buffered) may have the frame
-    /// half-painted when this fires, so the session can briefly show a
-    /// partly drawn frame — the same tearing in-place rendering already
-    /// accepts, and strictly better than leaving the window blank.
+    /// does not own, one that has not presented since it was created
+    /// or resized, or one whose frames the session released has nothing to
+    /// re-send and is ignored. A present still in flight is followed, not
+    /// waited for: this runs inside the application's event drain.
     ///
     /// # Errors
     ///
@@ -2150,19 +2260,20 @@ impl<T: WindowTransport> WindowClient<T> {
         else {
             return Ok(false);
         };
-        let Some(frame_index) = record.frame_index else {
+        // A released window's frames are gone on the session's side, so only
+        // the application's own next paint can bring it back.
+        let (Frames::Mapped, Some(frame_index)) = (record.frames, record.frame_index) else {
             return Ok(false);
         };
-        self.present(
-            window_id,
-            frame_index,
-            DamageList::new(&[DamageRect {
-                x: 0,
-                y: 0,
-                width_px: record.width_px,
-                height_px: record.height_px,
-            }])?,
-        )?;
+        let whole = DamageList::new(&[DamageRect {
+            x: 0,
+            y: 0,
+            width_px: record.width_px,
+            height_px: record.height_px,
+        }])?;
+        // Held behind a present still in flight rather than waited for: this
+        // runs inside the application's event drain.
+        self.post_or_hold(window_id, Asked::Present(frame_index, whole))?;
         Ok(true)
     }
 
@@ -2174,6 +2285,9 @@ impl<T: WindowTransport> WindowClient<T> {
             record.width_px = width_px;
             record.height_px = height_px;
             record.frame_index = None;
+            // A fresh region, which the application paints whole.
+            record.frames = Frames::Mapped;
+            record.owed_whole = false;
             return;
         }
         self.presented.push(LastPresent {
@@ -2184,6 +2298,8 @@ impl<T: WindowTransport> WindowClient<T> {
             accepted: (width_px, height_px),
             reported: None,
             deferred: false,
+            frames: Frames::Mapped,
+            owed_whole: false,
         });
     }
 
@@ -2218,12 +2334,16 @@ impl<T: WindowTransport> WindowClient<T> {
             posting.held = Some(asked);
             return Ok(());
         }
-        let ticket = self.transport.post(&self.frame[..len])?;
+        let (ticket, held) = match self.transport.post(&self.frame[..len]) {
+            Ok(ticket) => (Some(ticket), None),
+            Err(Errno::WouldBlock) => (None, Some(asked)),
+            Err(err) => return Err(err),
+        };
         self.posted.push(Posting {
             window_id,
             kind,
             ticket,
-            held: None,
+            held,
             orphaned: false,
         });
         Ok(())
@@ -2232,12 +2352,20 @@ impl<T: WindowTransport> WindowClient<T> {
     /// Take in every posted request's answer that has landed, never waiting:
     /// a refusal is kept for the application, a resize settles its window's
     /// geometry, and the newest request held behind an answered one is
-    /// posted in its place.
+    /// posted in its place. The requests waiting for room are then posted,
+    /// oldest first — any call of this process can free room, not only one
+    /// reaped here — and a resize that waited for room has its size delivered
+    /// again.
     pub fn reap_posted(&mut self) {
+        let mut answered = false;
         let mut index = 0;
         while let Some(&posting) = self.posted.get(index) {
+            let Some(ticket) = posting.ticket else {
+                index += 1;
+                continue;
+            };
             let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-            let answer = match self.transport.reap(posting.ticket, &mut reply) {
+            let answer = match self.transport.reap(ticket, &mut reply) {
                 Ok(None) => {
                     index += 1;
                     continue;
@@ -2245,32 +2373,114 @@ impl<T: WindowTransport> WindowClient<T> {
                 Ok(Some(len)) => decode_status_reply(&reply[..len]),
                 Err(err) => Err(err),
             };
-            self.settle(&posting, answer);
-            let next = posting
-                .held
-                .map(|held| self.post(&held.request(posting.window_id)));
-            match next {
-                Some(Ok(ticket)) => {
+            answered = true;
+            if self.answered(index, answer) {
+                index += 1;
+            }
+        }
+        if self.post_waiting() || answered {
+            self.redeliver_deferred();
+        }
+    }
+
+    /// Act on `answer` to the posting at `index`, posting the newest request
+    /// held behind it in its place, and answer whether a posting stays there.
+    fn answered(&mut self, index: usize, answer: Result<(), Errno>) -> bool {
+        let Some(&posting) = self.posted.get(index) else {
+            return false;
+        };
+        self.settle(&posting, answer);
+        let Some(held) = posting.held else {
+            self.posted.remove(index);
+            return false;
+        };
+        let ticket = match self.post(&held.request(posting.window_id)) {
+            Ok(ticket) => Some(ticket),
+            Err(Errno::WouldBlock) => None,
+            Err(errno) => {
+                self.settle(&posting, Err(errno));
+                self.posted.remove(index);
+                return false;
+            }
+        };
+        self.posted[index] = Posting {
+            ticket,
+            held: ticket.is_none().then_some(held),
+            ..posting
+        };
+        true
+    }
+
+    /// Post the requests that waited for room, in the order they were asked,
+    /// stopping at the first the endpoint still has no room for, and answer
+    /// whether any went.
+    fn post_waiting(&mut self) -> bool {
+        let mut posted = false;
+        let mut index = 0;
+        while let Some(&posting) = self.posted.get(index) {
+            let (None, Some(held)) = (posting.ticket, posting.held) else {
+                index += 1;
+                continue;
+            };
+            match self.post(&held.request(posting.window_id)) {
+                Ok(ticket) => {
                     self.posted[index] = Posting {
-                        ticket,
+                        ticket: Some(ticket),
                         held: None,
                         ..posting
                     };
+                    posted = true;
                     index += 1;
                 }
-                Some(Err(errno)) => {
-                    self.refuse(&posting, errno);
+                Err(Errno::WouldBlock) => break,
+                Err(errno) => {
+                    self.settle(&posting, Err(errno));
                     self.posted.remove(index);
                 }
-                None => {
-                    self.posted.remove(index);
-                }
+            }
+        }
+        posted
+    }
+
+    /// Deliver again the size of every window whose resize waited for room,
+    /// now that room was made, unless a resize of it is still in flight —
+    /// whose own answer delivers it.
+    fn redeliver_deferred(&mut self) {
+        let Self {
+            presented,
+            posted,
+            owed,
+            ..
+        } = self;
+        for record in presented.iter_mut().filter(|record| record.deferred) {
+            let in_flight = posted.iter().any(|posting| {
+                posting.window_id == record.window_id && posting.kind == PostedRequest::Resize
+            });
+            if in_flight {
+                continue;
+            }
+            record.deferred = false;
+            if let Some((width_px, height_px, state)) = record.reported {
+                owed.push_back(WindowEvent::Resized {
+                    window_id: record.window_id,
+                    width_px,
+                    height_px,
+                    state,
+                });
             }
         }
     }
 
     /// Act on `answer` to `posting`.
     fn settle(&mut self, posting: &Posting, answer: Result<(), Errno>) {
+        if posting.kind == PostedRequest::Present {
+            if let Err(errno) = answer {
+                if self.present_refused(posting.window_id, errno) {
+                    self.refuse(posting, errno);
+                }
+            }
+            return;
+        }
         if let Err(errno) = answer {
             self.refuse(posting, errno);
         }
@@ -2303,6 +2513,33 @@ impl<T: WindowTransport> WindowClient<T> {
                 height_px,
                 state,
             });
+        }
+    }
+
+    /// Note that a present of window `window_id` was refused: a window whose
+    /// frames the session released re-attaches on its next present, and any
+    /// other refusal leaves that present declaring the whole window. Answers
+    /// whether the application hears of it, which it does not of a release.
+    fn present_refused(&mut self, window_id: u64, errno: Errno) -> bool {
+        let Some(record) = self.record_mut(window_id) else {
+            return false;
+        };
+        if errno == Errno::NotAttached {
+            if record.frames == Frames::Mapped {
+                record.frames = Frames::Released;
+            }
+            return false;
+        }
+        record.owed_whole = true;
+        true
+    }
+
+    /// Note that the session released its side of window `window_id`'s
+    /// frames because nobody can see it, so the next present re-attaches a
+    /// region.
+    fn note_released(&mut self, window_id: u64) {
+        if let Some(record) = self.record_mut(window_id) {
+            record.frames = Frames::Hidden;
         }
     }
 
@@ -2642,8 +2879,18 @@ fn decode_delivered<T: WindowTransport>(
     frame: &[u8; WindowEvent::WIRE_LEN],
 ) -> Result<WindowEvent, EventError> {
     let event = WindowEvent::from_bytes(frame).map_err(EventError::Undecodable)?;
-    if let WindowEvent::RedrawRequested { window_id } = event {
-        let _ = client.answer_redraw(window_id);
+    match event {
+        WindowEvent::RedrawRequested { window_id } => {
+            if let Some(record) = client
+                .record_mut(window_id)
+                .filter(|record| record.frames == Frames::Hidden)
+            {
+                record.frames = Frames::Released;
+            }
+            let _ = client.answer_redraw(window_id);
+        }
+        WindowEvent::ContentReleased { window_id } => client.note_released(window_id),
+        _ => {}
     }
     client.note_reported(&event);
     Ok(event)

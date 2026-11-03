@@ -96,7 +96,7 @@ pub mod service;
 pub use error::{ActivateError, ControlError, InitError, NotifyError, StartFailure};
 pub use manager::{
     ActivationOutcome, EnrolReport, FailedService, HeartbeatReport, Init, InitConfig, NotifyReport,
-    ParkOutcome, ReleasedClient, StartReport, StartedService, MAX_PENDING_PER_SERVICE,
+    ParkOutcome, ReleasedClient, StartReport, StartedService,
 };
 pub use scope::AuthorityScope;
 pub use service::{

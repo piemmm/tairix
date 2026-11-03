@@ -93,9 +93,9 @@ pub use frames::WindowFrames;
 pub use mailbox::EventMailbox;
 pub use server::{
     client_frame_budget_bytes, Activation, AlertOpen, CallerIdentity, ClientRegion, CursorSetName,
-    DialogSpec, DragConclusion, DragReport, EventSink, HandOverDesk, LayerSpec, OpenEntry,
-    PickedFile, PopupSpec, PreviewSize, ToolSpec, TransientSpec, WallpaperName, WindowHost,
-    WindowServer, WindowSizing, WINDOW_REPLY_MAX,
+    DialogSpec, DragConclusion, DragReport, EventSink, FrameHost, HandOverDesk, LayerSpec,
+    OpenEntry, PickedFile, PopupSpec, PreviewSize, ToolSpec, TransientSpec, WallpaperName,
+    WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
 };
 pub use tairix_display::winframe::damage_in;
 

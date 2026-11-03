@@ -1561,8 +1561,8 @@ pub trait SyscallHandlers {
     /// installed in `kernel/core`.
     // Six `abi-v1` arguments plus the kernel-trusted caller context: the
     // shape is the syscall's own (endpoint id, two `CapabilitySet` pointers,
-    // and the three payload/capacity bounds), not an accidental parameter
-    // pile, so the count is intrinsic (justified allow).
+    // the two payload bounds and the per-sender depth), not an accidental
+    // parameter pile, so the count is intrinsic (justified allow).
     #[allow(clippy::too_many_arguments)]
     fn call_create(
         &self,
@@ -1572,7 +1572,7 @@ pub trait SyscallHandlers {
         _recv_caps: u64,
         _max_request: usize,
         _max_reply: usize,
-        _capacity: usize,
+        _per_sender: usize,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -1735,6 +1735,28 @@ pub trait SyscallHandlers {
         _caller: &CallerContext<'_>,
         _endpoint: u64,
         _ticket: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Await the reply to a request posted with [`Self::call_post`], parking
+    /// the calling thread until that call alone is answered, its deadline
+    /// passes, or the endpoint ends.
+    ///
+    /// The dispatcher has already checked `reply` is a non-null `UserPtr`.
+    /// The outcomes are [`Self::call_reap`]'s, less [`Errno::WouldBlock`], plus
+    /// [`Errno::Interrupted`] once the caller's process is being killed.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn call_await(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _reply: u64,
+        _reply_cap: usize,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -3146,8 +3168,8 @@ pub trait SyscallHandlers {
     /// Bind an asynchronous IPC message port owned by the calling task
     /// (the receive half of `ipc_send`/`ipc_recv`).
     ///
-    /// The implementation bounds `max_payload` and `capacity` against the
-    /// ABI message ceilings, requires `CAP_IPC_BIND_PRIVILEGED` for a
+    /// The implementation bounds `max_payload` and `per_sender` (the messages
+    /// one sender may have queued) against the ABI ceilings, requires `CAP_IPC_BIND_PRIVILEGED` for a
     /// reserved well-known id (squat protection, exactly as `call_create`),
     /// refuses an id that is already bound (`Errno::AlreadyExists`),
     /// records the kernel-trusted caller as the port's owner — the only
@@ -3160,7 +3182,7 @@ pub trait SyscallHandlers {
         _caller: &CallerContext<'_>,
         _endpoint: u64,
         _max_payload: usize,
-        _capacity: usize,
+        _per_sender: usize,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -4298,6 +4320,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::CALL_CANCEL => {
                 // args[0] is the endpoint id; args[1] the ticket to withdraw.
                 self.handlers.call_cancel(caller, args.0[0], args.0[1])
+            }
+            SyscallNumber::CALL_AWAIT => {
+                // `call_reap`'s arguments.
+                let reply_cap = decode_len(args.0[3])?;
+                self.handlers
+                    .call_await(caller, args.0[0], args.0[1], args.0[2], reply_cap)
             }
             SyscallNumber::LOG_EMIT => {
                 // args[0] is the non-null record `UserPtr` (dispatcher-
@@ -6042,7 +6070,7 @@ mod tests {
             _recv_caps: u64,
             _max_request: usize,
             _max_reply: usize,
-            _capacity: usize,
+            _per_sender: usize,
         ) -> SyscallResult {
             self.record("call_create");
             Ok(0)
@@ -6131,6 +6159,18 @@ mod tests {
             // Echo the ticket so the reachability test can assert the
             // dispatcher decoded both arguments.
             Ok(ticket)
+        }
+
+        fn call_await(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _ticket: u64,
+            _reply: u64,
+            reply_cap: usize,
+        ) -> SyscallResult {
+            self.record("call_await");
+            Ok(reply_cap as u64)
         }
 
         fn call_peer_seat(
@@ -6696,7 +6736,7 @@ mod tests {
             _c: &CallerContext<'_>,
             _endpoint: u64,
             _max_payload: usize,
-            _capacity: usize,
+            _per_sender: usize,
         ) -> SyscallResult {
             self.record("port_bind");
             Ok(0)

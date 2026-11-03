@@ -37,7 +37,8 @@ use tairix_abi::window_ipc::{
     WINDOW_ENDPOINT,
 };
 use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, CALL_DEADLINE_NONE};
-use tairix_display::{winframe, SERIAL};
+use tairix_display::stale_frames;
+use tairix_geometry::{Rect, Region, StaleFrames};
 use tairix_raster::Surface;
 use tairix_rt::work::{Desk, Worker};
 use tairix_theme::{Accessibility, ThemeRegistry};
@@ -47,7 +48,8 @@ use crate::client::{
     notice_alert, presented_damage, retained_damage, WindowClient, WindowTransport,
 };
 use crate::desktop::Desktop;
-use crate::frames::WindowFrames;
+pub use crate::frames::region_bytes;
+use crate::frames::{draw_frame, WindowFrames};
 use crate::server::{DialogSpec, LayerSpec, PopupSpec, ToolSpec, TransientSpec};
 
 /// Exit code when the shared frame region could not be created or granted to
@@ -214,8 +216,9 @@ pub const SIZE_KEPT: &str = "the window's new size could not be made; it keeps t
 pub enum Fitted {
     /// It has the size: repaint at it.
     Adopted,
-    /// An earlier resize is unanswered; the size is delivered again as a
-    /// `Resized` event once it is. Nothing to report.
+    /// An earlier resize is unanswered, or this process's own calls fill its
+    /// place at the session; the size is delivered again as a `Resized` event
+    /// once one is answered. Nothing to report.
     Deferred,
     /// It keeps the size it had and stays drawable: no region could be made
     /// for the new one, or the session could not be asked.
@@ -247,6 +250,10 @@ impl WindowTransport for RtWindowTransport {
                 err => Err(err),
             },
         }
+    }
+
+    fn await_reply(&mut self, ticket: u64, reply: &mut [u8]) -> Result<usize, Errno> {
+        tairix_rt::call_await(WINDOW_ENDPOINT, ticket, reply)
     }
 }
 
@@ -626,27 +633,9 @@ pub fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
     }
 }
 
-/// Total bytes a `frame_count`-frame region shaped as `mode` needs, or `None`
-/// when that product does not fit an address.
-///
-/// Checked rather than saturating, because either failure mode is fatal to the
-/// caller: a wrapped length asks for a region too small for the window it
-/// describes, and a saturated one for a region no machine can map. On a 32-bit
-/// target the product of two `u32` dimensions genuinely does not fit.
-#[must_use]
-pub fn region_bytes(mode: &DisplayMode, frame_count: u32) -> Option<usize> {
-    usize::try_from(mode.stride_bytes)
-        .ok()?
-        .checked_mul(usize::try_from(mode.height_px).ok()?)?
-        .checked_mul(usize::try_from(frame_count).ok()?)
-}
-
-/// Frames in a window's shared region.
-///
-/// The window protocol serialises a present — the app is parked in the call
-/// while the session reads — so a single frame is race-free; the constant names
-/// the choice.
-pub const FRAME_COUNT: u32 = 1;
+/// Frames in a window's shared region: the one the session may still be
+/// reading, and the one the app draws its next present into.
+pub const FRAME_COUNT: u32 = 2;
 /// One open window's channel-side state: the id the session knows it by, the
 /// shared frame region every present crosses, and the pixel layout both are
 /// shaped as.
@@ -667,9 +656,28 @@ pub struct WindowPane {
     window: u64,
     frames: WindowFrames,
     mode: DisplayMode,
+    /// What each frame lacks of the picture last presented.
+    stale: StaleFrames,
+    /// The frame the next present is drawn into, never the one the session
+    /// took last.
+    back: usize,
+    /// The change a present carries, held so a present allocates none.
+    changed: Region,
 }
 
 impl WindowPane {
+    /// The pane over window `window`'s fresh `frames`, shaped as `mode`.
+    fn adopt(window: u64, frames: WindowFrames, mode: &DisplayMode) -> Self {
+        Self {
+            window,
+            frames,
+            mode: *mode,
+            stale: stale_frames(FRAME_COUNT as usize, mode),
+            back: 0,
+            changed: Region::new(),
+        }
+    }
+
     /// Create and grant a `mode`-shaped frame region.
     fn region(mode: &DisplayMode) -> Result<(WindowFrames, u64), ShellError> {
         let Some(len) = region_bytes(mode, FRAME_COUNT) else {
@@ -717,14 +725,7 @@ impl WindowPane {
             .map_err(|err| {
                 ShellError::new(EXIT_NO_WINDOW, "desktop session refused the window", err)
             })?;
-        Ok((
-            Self {
-                window,
-                frames,
-                mode: *mode,
-            },
-            server,
-        ))
+        Ok((Self::adopt(window, frames, mode), server))
     }
 
     /// Open an undecorated popup of `mode` at `offset` from `parent`'s client
@@ -776,11 +777,7 @@ impl WindowPane {
                 Errno::PermissionDenied,
             ));
         }
-        Ok(Self {
-            window,
-            frames,
-            mode: *mode,
-        })
+        Ok(Self::adopt(window, frames, mode))
     }
 
     /// Open a tool window of client `mode` titled `title`, hung from
@@ -835,11 +832,7 @@ impl WindowPane {
                 Errno::PermissionDenied,
             ));
         }
-        Ok(Self {
-            window,
-            frames,
-            mode: *mode,
-        })
+        Ok(Self::adopt(window, frames, mode))
     }
 
     /// Open a dialog window of client `mode` titled `title`, owned by `owner`
@@ -886,11 +879,7 @@ impl WindowPane {
                 Errno::PermissionDenied,
             ));
         }
-        Ok(Self {
-            window,
-            frames,
-            mode: *mode,
-        })
+        Ok(Self::adopt(window, frames, mode))
     }
 
     /// Open a desktop layer surface of `mode` at screen point `at` in
@@ -947,11 +936,7 @@ impl WindowPane {
                 Errno::PermissionDenied,
             ));
         }
-        Ok(Self {
-            window,
-            frames,
-            mode: *mode,
-        })
+        Ok(Self::adopt(window, frames, mode))
     }
 
     /// Move this layer surface to screen point `at` in stacking layer
@@ -996,9 +981,15 @@ impl WindowPane {
     /// Copy `damage` of `surface` into the shared frame and present exactly
     /// that rectangle.
     ///
-    /// A region the session released is re-attached first and sent whole, since
-    /// the fresh region holds none of the pixels a partial present would leave
-    /// standing; `surface` is therefore the whole window's picture.
+    /// The frame drawn into is the one the session is not reading, brought up
+    /// to date from `surface` with whatever the other frame's presents changed
+    /// since it was last drawn; `surface` is therefore the whole window's
+    /// picture. A region the session released is re-attached first and sent
+    /// whole, since the fresh region holds none of the pixels a partial
+    /// present would leave standing — but not while the window is hidden
+    /// ([`WindowClient::is_hidden`]): nothing is presented then, since nobody
+    /// can see it and re-attaching would map again the memory the release
+    /// gave back.
     ///
     /// # Errors
     ///
@@ -1029,16 +1020,35 @@ impl WindowPane {
         surface: &Surface,
         damage: &DamageList,
     ) -> Result<(), Errno> {
-        let mode = self.mode;
-        let window = self.window;
-        let damage = presented_damage(&mode, self.frames.is_released(), *damage)?;
-        let pixels = client
-            .frame_pixels(&mut self.frames, window, FRAME_COUNT, &mode)
-            .ok_or(Errno::NotAttached)?;
-        for rect in damage.rects() {
-            winframe::encode(surface, pixels, &mode, *rect, &SERIAL)?;
+        let (window, mode) = (self.window, self.mode);
+        if client.is_hidden(window) {
+            return Ok(());
         }
-        client.present(window, 0, damage)
+        client.await_present(window);
+        let fresh = self.frames.is_released() || client.content_released(window);
+        if fresh {
+            let grant = self.frames.reattach().ok_or(Errno::NotAttached)?;
+            client
+                .resize(window, grant, FRAME_COUNT, &mode)
+                .map_err(|_| Errno::NotAttached)?;
+            self.stale
+                .reset(Rect::new(0, 0, mode.width_px, mode.height_px));
+            self.back = 0;
+        }
+        let damage = presented_damage(&mode, fresh, *damage)?;
+        let pixels = self.frames.pixels().ok_or(Errno::NotAttached)?;
+        draw_frame(
+            pixels,
+            self.back,
+            (&mut self.stale, &mut self.changed),
+            surface,
+            &mode,
+            &damage,
+        )?;
+        let index = u32::try_from(self.back).map_err(|_| Errno::OutOfRange)?;
+        client.present(window, index, damage)?;
+        self.back = (self.back + 1) % FRAME_COUNT as usize;
+        Ok(())
     }
 
     /// Re-map the frame region onto `new_mode`.
@@ -1048,9 +1058,9 @@ impl WindowPane {
     /// made after it. A refusal arrives later, as an
     /// [`EventError::Refused`](crate::client::EventError::Refused) followed by
     /// the size the session kept, which this is asked to take again. A size
-    /// asked while an earlier resize is unanswered is
-    /// [`Fitted::Deferred`]: no region is made for it, and it is delivered
-    /// again once that one is answered.
+    /// asked while an earlier resize is unanswered, or while this process's
+    /// own calls fill its place at the session, is [`Fitted::Deferred`]: no
+    /// region is kept for it, and it is delivered again once one is answered.
     pub fn resize<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
@@ -1077,14 +1087,18 @@ impl WindowPane {
         let Some(grant) = spare.grant() else {
             return Fitted::Kept;
         };
-        if client
-            .resize(self.window, grant, FRAME_COUNT, new_mode)
-            .is_err()
-        {
-            return Fitted::Kept;
+        match client.resize(self.window, grant, FRAME_COUNT, new_mode) {
+            Ok(()) => {}
+            // This process's own calls fill its place at the endpoint; the
+            // size is delivered again once one of them is answered.
+            Err(Errno::WouldBlock) => return Fitted::Deferred,
+            Err(_) => return Fitted::Kept,
         }
         self.frames = spare;
         self.mode = *new_mode;
+        self.stale
+            .reset(Rect::new(0, 0, new_mode.width_px, new_mode.height_px));
+        self.back = 0;
         Fitted::Adopted
     }
 
@@ -1259,9 +1273,9 @@ impl AppWindow {
     ///
     /// A region the session released while the window was hidden is re-attached
     /// and presented whole, because it holds none of the pixels a partial
-    /// present would leave standing. With no window open, or nothing of the
-    /// rectangle inside it, this is a no-op, so a loop need not sort its
-    /// repaints by whether one is showing.
+    /// present would leave standing. With no window open, nothing of the
+    /// rectangle inside it, or the window still hidden, this is a no-op, so a
+    /// loop need not sort its repaints by whether one is showing.
     ///
     /// # Errors
     ///
@@ -1299,7 +1313,14 @@ impl AppWindow {
         let Some(held) = self.retained.as_mut() else {
             return Ok(Ok(()));
         };
-        let released = held.pane.content_released();
+        // Nobody can see it; the present after the session asks for it again
+        // sends the whole window.
+        if self.client.is_hidden(held.pane.id()) {
+            return Ok(Ok(()));
+        }
+        // Painted whole after either side let the frames go: a paint skipped
+        // while the window was hidden left the picture behind.
+        let released = held.pane.content_released() || self.client.content_released(held.pane.id());
         let Some(damage) = retained_damage(held.pane.mode(), released, held.torn.take(), damage)
         else {
             return Ok(Ok(()));

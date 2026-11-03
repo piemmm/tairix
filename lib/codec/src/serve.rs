@@ -13,9 +13,10 @@ const CODEC_HELD: EventId = EventId(24_400);
 const CODEC_ABANDONED: EventId = EventId(24_401);
 const CODEC_REFUSED: EventId = EventId(24_402);
 
-/// The interface drivers a codec's links name call one at a time and are
-/// answered at once; the queue's bound is containment, not capacity.
-const ENDPOINT_CAPACITY: usize = 4;
+/// Calls one interface driver a codec's links name may hold at once: each
+/// calls one at a time and is answered at once, so the bound is containment,
+/// not capacity.
+const ENDPOINT_DEPTH: usize = 4;
 
 /// Bind the codec node's endpoint under its `duty` and serve `codec` from it
 /// for the life of the driver process.
@@ -31,7 +32,7 @@ pub fn serve<C: Codec>(codec: C, duty: &LinkDuty) -> i32 {
             id: endpoint,
             request: &mut request,
             max_reply: CODEC_MAX_REPLY,
-            capacity: ENDPOINT_CAPACITY,
+            per_sender: ENDPOINT_DEPTH,
         },
         &[],
     );

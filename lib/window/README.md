@@ -13,10 +13,15 @@ server and every app's client can never drift apart.
   `call_peer_origin` — an unforgeable `ProcId`, never a claimed id),
   keys every window to that owner, maps the app's endpoint-directed
   `shm_grant` region **once** at `Create` through the shared
-  `tairix_display::ShmMapper` seam, and hands each `Present` to the
-  injected `WindowHost` (the session's compositor bridge) as a
-  bounds-checked frame slice plus a validated damage rectangle — no
-  per-present mapping, allocation, or copy of its own. A
+  `tairix_display::ShmMapper` seam, and answers each `Present` as it
+  records it: a window's newest frame and the damage since the last one
+  shown, one per window however often it presents. `latch`, which the
+  session calls once a desktop frame, hands each to the injected `FrameHost`
+  (the compositor's side) as a bounds-checked frame slice plus its damage —
+  so a client presenting faster than the desktop draws costs one conversion
+  a frame, and no present waits on the desktop's frame work. A resize or a
+  release drops what it supersedes, and a frame the host cannot show is
+  reported to it once, its change carried to the window's next present. A
   `SetBackdropBlur` takes the same owner check and reaches the same
   bridge (`WindowHost::backdrop_blur_set`), so an app frosts the backdrop
   of its own window and of no other. A `Present`, `SetBackdropBlur`, or
@@ -33,7 +38,14 @@ server and every app's client can never drift apart.
   for it either way, which is what clears the pending pick.
 - **Client** (`WindowClient` / `WindowEvents`): the app-side half over
   the injected `WindowTransport` seam (`ipc_call` and its posted halves,
-  `call_post`/`call_reap`, in production). The requests an app makes as
+  `call_post`/`call_reap`, and `call_await` for one posted request's answer,
+  in production). A `present` is posted once the window's previous one is
+  answered — the session reads the frame a present names until a later one
+  replaces it — and the answer comes as the session records the frame, so a
+  present waits only for an app that outruns the session serving it. A
+  present refused for room goes as a call, which waits for the room; a
+  refused present is handed out like any posted request's refusal, and the
+  window's next present declares the whole window. The requests an app makes as
   input moves — `resize`, `set_cursor`, `set_tooltip`, `drag_verdict`,
   `set_title`, `set_sizing` — are **posted, never awaited**
   (`plans/FIX-DESKTOP.md` DESK-21): at most one of each kind per window is in
@@ -173,18 +185,20 @@ server and every app's client can never drift apart.
   window, `WindowServer::window_ids`) and answers whether anything
   changed. One definition of that bookkeeping, so no app repeats it.
 - **The redraw handshake is answered here, not in every app.** The
-  session may release a window's retained content to reclaim memory and
-  then send `WindowEvent::RedrawRequested`. `WindowClient` remembers each
-  window's last presented frame index and current extent, so
-  `WindowEvents::wait` re-presents that frame with full-window damage
-  before handing the event on — one definition of the answer instead of
-  one per app. The event is still delivered, so an app that would rather
-  render genuinely fresh pixels can; a window that has never presented
-  has nothing to re-send and the event is a no-op; a request naming a
-  window this client does not hold is refused like any other foreign
-  window. An app rendering in place (single-buffered) may re-present a
-  partially drawn frame, which is the same tearing it already accepts
-  from rendering in place at all.
+  session may drop its copy of a window's pixels and then send
+  `WindowEvent::RedrawRequested`. `WindowClient` remembers each window's
+  last presented frame index and current extent, so `WindowEvents::wait`
+  re-presents that frame with full-window damage before handing the event
+  on — behind a present still in flight rather than waiting for it — one
+  definition of the answer instead of one per app. The event is still
+  delivered, so an app that would rather render genuinely fresh pixels can;
+  a window that has never presented has nothing to re-send and the event is
+  a no-op. A window whose frames the session *released*
+  (`WindowEvent::ContentReleased`) has nothing left to re-send, so its
+  redraw is the application's own whole-window paint: `is_hidden` answers
+  whether the session has yet asked for it again, and until it has, nothing
+  is presented, since re-attaching would map again the memory the release
+  gave back.
 
 - **The app-side shell** (`app`, bare-metal targets only): the bring-up
   sequence every windowed `Run` binary repeated verbatim. `RtWindowTransport`
@@ -220,9 +234,14 @@ server and every app's client can never drift apart.
   it, grant it, ask the session — with every refusal unmapping what it had;
   `open_popup` additionally refuses a create reply that did not come from the
   session that opened the parent, closing the window it named rather than
-  drawing into it. `present` re-attaches a released region, converts the named
-  rectangle of a caller's surface through the one window-frame codec, and
-  presents exactly that. `resize`'s ordering is the load-bearing part: the
+  drawing into it. The region holds `FRAME_COUNT` frames, two: `present`
+  draws into the one the session is not reading, first bringing it up to date
+  from the caller's surface with what the other frame was presented with since
+  (`tairix_geometry::StaleFrames`, the record the display client keeps for its
+  own frames), converts the named rectangles through the one window-frame
+  codec, and presents exactly those. It re-attaches a released region and
+  sends it whole, and presents nothing while the window is hidden.
+  `resize`'s ordering is the load-bearing part: the
   spare region is created and granted *first* and adopted only once the
   session has accepted the resize, so a refusal drops the spare and leaves the
   old geometry standing and drawable — it answers `false`, which means "still

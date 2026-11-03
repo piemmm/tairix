@@ -261,7 +261,9 @@ fn main() -> i32 {
     }
     let mut wakes = [DeviceWake::Port(0); STREAM_ENDPOINTS];
     let mut count = 0usize;
-    let capacity = usize::from(ISO_MAX_SLOTS) + 1;
+    // The host controller is a port's one sender: a completion per slot,
+    // and the next racing the drain.
+    let depth = usize::from(ISO_MAX_SLOTS) + 1;
     for (slot, _) in wanted.iter().enumerate().filter(|(_, wanted)| **wanted) {
         // The table's slot is the address it came from: number, then the
         // direction bit.
@@ -270,7 +272,7 @@ fn main() -> i32 {
         };
         let endpoint = number | if slot % 2 == 1 { 0x80 } else { 0 };
         let port = iso_notify_endpoint_for(origin.pid(), endpoint);
-        if tairix_rt::port_bind(port, ISO_NOTIFY_LEN, capacity) != 0 {
+        if tairix_rt::port_bind(port, ISO_NOTIFY_LEN, depth) != 0 {
             return end(
                 DriverExit::BringupFailed,
                 &[

@@ -37,6 +37,7 @@ use tairix_util::fallible::collected;
 use crate::audit::{record, AuditEvent};
 use crate::charge::ResourceCharges;
 use crate::identity::{format_hex_u64, format_i32, GroupId, UserId};
+use crate::level::ProcessLevel;
 use crate::session::{HeldExit, Placement, PlacementError, Released, SessionTree, ROOT_SESSION};
 
 /// Numeric task identifier carried by audit records — one **thread**.
@@ -1288,11 +1289,14 @@ impl JobGeneration {
     }
 }
 
-/// One process's live threads and the job-control generation they run under.
+/// One process's live threads, the job-control generation they run under, and
+/// the scheduling level they run at.
 #[derive(Debug, Default)]
 struct ThreadGroup {
     threads: BTreeSet<TaskId>,
     job: AtomicU32,
+    /// Shared, so a change outlasts the table lock it was found under.
+    level: Arc<ProcessLevel>,
 }
 
 impl ThreadGroup {
@@ -1440,6 +1444,20 @@ impl CapTable {
             .get(&process)
             .into_iter()
             .flat_map(|group| group.threads.iter().copied())
+    }
+
+    /// The scheduling level `process`'s threads run at, or [`None`] for a
+    /// process with no live thread.
+    ///
+    /// A registration reads it under the table's write lock, so a change that
+    /// collects the threads under the read lock after making itself reaches
+    /// every thread: each joined before the collection or already at the
+    /// outcome.
+    #[must_use]
+    pub fn level_of(&self, process: ProcessId) -> Option<Arc<ProcessLevel>> {
+        self.members
+            .get(&process)
+            .map(|group| Arc::clone(&group.level))
     }
 
     /// How many live threads `process` has. `0` for an unknown process.

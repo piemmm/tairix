@@ -63,9 +63,9 @@ mod program {
     /// and the most one wake drains. The stack holds the rest until it does.
     const STREAM_CAPACITY: usize = 32;
 
-    /// Calls the discovery endpoint holds at once — a fixed memory bound on
-    /// the service's clients, each of whose calls is answered at once.
-    const CALL_CAPACITY: usize = 16;
+    /// Calls one client may hold at the discovery endpoint at once — a fixed
+    /// memory bound, each call answered at once.
+    const CALLER_DEPTH: usize = 16;
 
     /// Wait-set tokens.
     const TOKEN_PORT: u64 = 1;
@@ -294,7 +294,7 @@ mod program {
             &empty,
             DISCOVERY_MAX_REQUEST,
             DISCOVERY_MAX_REPLY,
-            CALL_CAPACITY,
+            CALLER_DEPTH,
         ) == 0
             && tairix_rt::waitset_ctl(
                 set,

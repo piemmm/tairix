@@ -49,12 +49,13 @@ mod program {
     use tairix_rt::{File, LogSink};
     use zeroize::Zeroize;
 
-    /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
+    /// Calls one caller may hold at the endpoint (a fail-closed memory bound,
+    /// paid by that caller).
     ///
     /// A settings read is a short, synchronous exchange, so a caller is
-    /// serviced and gone; this bounds how many may be queued behind the one
-    /// being served before a poster is made to wait.
-    const CAPACITY: usize = 16;
+    /// serviced and gone; this bounds how many of its own calls may be queued
+    /// behind the one being served before a further one waits its turn.
+    const CALLER_DEPTH: usize = 16;
 
     /// The audit sink every record is written through.
     static LOG_SINK: LogSink = LogSink;
@@ -233,7 +234,7 @@ mod program {
             &empty,
             APPDATA_MAX_REQUEST,
             APPDATA_MAX_REPLY,
-            CAPACITY,
+            CALLER_DEPTH,
         ) == 0
         {
             return true;

@@ -3124,6 +3124,15 @@ mod program {
             windows[index].pane.release_frames();
             return;
         }
+        // Shown again: the whole window is owed to the fresh region its next
+        // present attaches. While its frames are still mapped the client
+        // library re-presents them instead.
+        if matches!(event, WindowEvent::RedrawRequested { .. })
+            && windows[index].pane.content_released()
+        {
+            windows[index].owed.owe_whole();
+            return;
+        }
 
         if route_dialog(
             windows,
@@ -3486,7 +3495,7 @@ mod program {
                     damage.add(rect);
                 }
             }
-            owe(win, Repaint::Reported, &damage);
+            owe(win, Repaint::reported_if(!damage.is_empty()), &damage);
         }
     }
 

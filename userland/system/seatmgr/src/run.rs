@@ -46,9 +46,9 @@ mod program {
     use tairix_rt::LogSink;
     use tairix_seatmgr::{serve, SeatAdmin};
 
-    /// Outstanding-call capacity of the endpoint (a fail-closed memory
-    /// bound): seat administration is low-volume, so a small queue is ample.
-    const CAPACITY: usize = 4;
+    /// Calls one caller may hold at the endpoint (a fail-closed memory
+    /// bound): seat administration is low-volume, one call per calling thread.
+    const CALLER_DEPTH: usize = 4;
 
     /// The production [`SeatAdmin`]: a thin shim over the kernel's
     /// `seat_switch` / `seat_revoke` syscalls, which re-check
@@ -89,7 +89,7 @@ mod program {
             &empty,
             SEATMGR_MAX_REQUEST,
             SEATMGR_REPLY_LEN,
-            CAPACITY,
+            CALLER_DEPTH,
         );
         if bound != 0 {
             // Could not publish the endpoint (already bound, or no registry):

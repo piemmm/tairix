@@ -360,6 +360,9 @@ const NUM_CALL_REAP: u64 = SyscallNumber::CALL_REAP.as_u16() as u64;
 /// `call_cancel` syscall number (as above).
 const NUM_CALL_CANCEL: u64 = SyscallNumber::CALL_CANCEL.as_u16() as u64;
 
+/// `call_await` syscall number (as above).
+const NUM_CALL_AWAIT: u64 = SyscallNumber::CALL_AWAIT.as_u16() as u64;
+
 /// `log_emit` syscall number (as above).
 const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
 
@@ -3673,8 +3676,9 @@ pub fn ipc_send(endpoint: u64, payload: &[u8]) -> i64 {
 /// mailbox refused parks on the other side of the same port, through
 /// [`tairix_abi::WaitSourceKind::PortRoom`].
 ///
-/// The kernel bounds `max_payload` and `capacity` (fail-closed memory
-/// bounds), requires `CAP_IPC_BIND_PRIVILEGED` for a reserved well-known
+/// The kernel bounds `max_payload` and `per_sender` — the messages one sender
+/// may have queued, paid for by that sender (fail-closed memory bounds) —
+/// requires `CAP_IPC_BIND_PRIVILEGED` for a reserved well-known
 /// id (squat protection), refuses an id that is already bound
 /// (`AlreadyExists`), records the kernel-trusted caller as the port's
 /// owner — the only task that may receive from it — and tears the port
@@ -3685,13 +3689,13 @@ pub fn ipc_send(endpoint: u64, payload: &[u8]) -> i64 {
 /// convention; the wrapper hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn port_bind(endpoint: u64, max_payload: usize, capacity: usize) -> i64 {
+pub fn port_bind(endpoint: u64, max_payload: usize, per_sender: usize) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; every argument is a
     // plain scalar the kernel validates — no user memory is named.
     let ret = unsafe {
         raw_syscall(
             NUM_PORT_BIND,
-            [endpoint, max_payload as u64, capacity as u64, 0, 0, 0],
+            [endpoint, max_payload as u64, per_sender as u64, 0, 0, 0],
         )
     };
     ret as i64
@@ -4175,6 +4179,7 @@ pub fn call_reap(endpoint: u64, ticket: u64, reply: &mut [u8]) -> Result<usize, 
     // reply `(ptr, len)` pair against the caller's address space before writing
     // it. `reply` is a live exclusive `&mut [u8]` for the duration of the call.
     #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
     let ret = unsafe {
         raw_syscall(
             NUM_CALL_REAP,
@@ -4186,8 +4191,8 @@ pub fn call_reap(endpoint: u64, ticket: u64, reply: &mut [u8]) -> Result<usize, 
     }
     // Defence in depth: clamp the kernel's count to the buffer, exactly as
     // [`ipc_call`] does.
-    #[allow(clippy::cast_possible_truncation)]
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the count is clamped to `reply.len()`.
+    #[allow(clippy::cast_sign_loss)] // The negative (`-errno`) case returns early above.
     Ok((ret as usize).min(reply.len()))
 }
 
@@ -4209,37 +4214,42 @@ pub fn call_cancel(endpoint: u64, ticket: u64) -> i64 {
 }
 
 /// Await the reply to the call `ticket` posted to `endpoint`, copying it into
-/// `reply`: [`call_reap`] each time the wait-set `set` wakes.
-///
-/// `set` must hold the endpoint's [`WaitSourceKind::CallReply`] member — which
-/// the call's deadline readies, as the endpoint's end does — and no other
-/// member that can stay ready, so every wake is this call's and no wait
-/// outlasts its answer.
+/// `reply` (`SyscallNumber::CALL_AWAIT`): the thread parks until that call
+/// alone is answered, its deadline passes, or the endpoint ends.
 ///
 /// # Errors
 ///
-/// The reap's refusal — [`Errno::TimedOut`] once a deadline passes
-/// unanswered, [`Errno::NotFound`] for an endpoint that ended — or the wait's,
-/// the call then withdrawn.
-pub fn call_await(set: u64, endpoint: u64, ticket: u64, reply: &mut [u8]) -> Result<usize, Errno> {
-    loop {
-        match call_reap(endpoint, ticket, reply).map_err(Errno::from_syscall) {
-            Err(Errno::WouldBlock) => {}
-            reaped => return reaped,
-        }
-        let mut token = 0u64;
-        let waited = waitset_wait(set, u64::MAX, &mut token);
-        if waited < 0 {
-            // A withdrawal that finds the call already answered has nothing
-            // left to withdraw.
-            let _ = call_cancel(endpoint, ticket);
-            return Err(Errno::from_syscall(waited));
-        }
+/// [`Errno::TimedOut`] once the call's deadline passes unanswered,
+/// [`Errno::NotFound`] for an endpoint that ended or a ticket this process
+/// does not hold, [`Errno::BufferTooSmall`] for a reply longer than `reply`
+/// (the reply is then gone), [`Errno::Busy`] when another of the process's
+/// threads awaits the call already, and [`Errno::Interrupted`] once the
+/// process is being killed.
+pub fn call_await(endpoint: u64, ticket: u64, reply: &mut [u8]) -> Result<usize, Errno> {
+    let reply_ptr = reply.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // reply `(ptr, len)` pair against the caller's address space before writing
+    // it. `reply` is a live exclusive `&mut [u8]` for the duration of the call.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CALL_AWAIT,
+            [endpoint, ticket, reply_ptr, reply.len() as u64, 0, 0],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
     }
+    // Defence in depth: clamp the kernel's count to the buffer, exactly as
+    // [`ipc_call`] does.
+    #[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the count is clamped to `reply.len()`.
+    #[allow(clippy::cast_sign_loss)] // The negative (`-errno`) case returns early above.
+    Ok((ret as usize).min(reply.len()))
 }
 
 /// Call `endpoint` with `request`, its answer copied into `reply` within
-/// `deadline_ns`: [`call_post`], then [`call_await`] on `set`.
+/// `deadline_ns`: [`call_post`], then [`call_await`].
 ///
 /// A timed-out call says nothing of what the server did: one still queued at
 /// its deadline was never received, one in service may have been carried out.
@@ -4248,14 +4258,13 @@ pub fn call_await(set: u64, endpoint: u64, ticket: u64, reply: &mut [u8]) -> Res
 ///
 /// The post's refusal, or [`call_await`]'s.
 pub fn call_within(
-    set: u64,
     endpoint: u64,
     request: &[u8],
     reply: &mut [u8],
     deadline_ns: u64,
 ) -> Result<usize, Errno> {
     let ticket = call_post(endpoint, request, deadline_ns).map_err(Errno::from_syscall)?;
-    call_await(set, endpoint, ticket, reply)
+    call_await(endpoint, ticket, reply)
 }
 
 /// Emit one pre-encoded diagnostic [`tairix_abi::LogRecordRef`] wire image to
@@ -4404,7 +4413,8 @@ impl tairix_log::Sink for LogSink {
 /// `endpoint` is the well-known id callers name in [`ipc_call`]; `send_caps`
 /// is the capability a caller must hold to post and `recv_caps` the
 /// capability this task must hold to [`call_recv`]/[`call_reply`];
-/// `max_request`/`max_reply`/`capacity` bound the endpoint. Binding a
+/// `max_request`/`max_reply` bound its payloads and `per_sender` the calls one
+/// caller may have waiting on the server, each paid for by its caller. Binding a
 /// restricted-sender endpoint (non-empty `send_caps`) — or any **reserved**
 /// well-known service id ([`tairix_abi::ipc::is_reserved_endpoint`], which a
 /// squatter could otherwise claim ahead of the service) — requires
@@ -4423,7 +4433,7 @@ pub fn call_create(
     recv_caps: &tairix_caps::CapabilitySet,
     max_request: usize,
     max_reply: usize,
-    capacity: usize,
+    per_sender: usize,
 ) -> i64 {
     // Marshal both capability sets to their fixed `WIRE_LEN` images on the
     // stack and hand the kernel their pointers; the kernel copies them in
@@ -4445,7 +4455,7 @@ pub fn call_create(
                 recv_ptr,
                 max_request as u64,
                 max_reply as u64,
-                capacity as u64,
+                per_sender as u64,
             ],
         )
     };
@@ -10724,11 +10734,11 @@ mod tests {
     }
 
     #[test]
-    fn a_call_refused_at_its_post_is_answered_without_a_park() {
+    fn a_call_refused_at_its_post_is_never_awaited() {
         let mut reply = [0u8; 8];
         let (number, args) = capture(refusal(Errno::PermissionDenied), || {
             assert_eq!(
-                call_within(5, 9, b"request", &mut reply, 250),
+                call_within(9, b"request", &mut reply, 250),
                 Err(Errno::PermissionDenied)
             );
         });
@@ -10737,24 +10747,26 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_already_there_is_reaped_without_a_park() {
+    fn a_posted_call_is_awaited_on_its_endpoint() {
         let mut reply = [0u8; 8];
         let (number, args) = capture(3, || {
-            assert_eq!(call_within(5, 9, b"request", &mut reply, 250), Ok(3));
+            assert_eq!(call_within(9, b"request", &mut reply, 250), Ok(3));
         });
-        assert_eq!(number, NUM_CALL_REAP, "reaped, never parked");
+        assert_eq!(number, NUM_CALL_AWAIT);
         assert_eq!(args[0], 9);
+        assert_eq!(args[3], 8, "the whole reply buffer is offered");
     }
 
     #[test]
-    fn an_answer_that_ends_the_call_is_returned_without_a_park() {
+    fn an_await_marshals_its_call_and_surfaces_what_ended_it() {
         let mut reply = [0u8; 8];
-        for ended in [Errno::TimedOut, Errno::NotFound] {
+        for ended in [Errno::TimedOut, Errno::NotFound, Errno::Interrupted] {
             let (number, args) = capture(refusal(ended), || {
-                assert_eq!(call_await(5, 9, 4, &mut reply), Err(ended));
+                assert_eq!(call_await(9, 4, &mut reply), Err(ended));
             });
-            assert_eq!(number, NUM_CALL_REAP, "{ended:?}");
+            assert_eq!(number, NUM_CALL_AWAIT, "{ended:?}");
             assert_eq!((args[0], args[1]), (9, 4));
+            assert_eq!(&args[4..], &[0, 0]);
         }
     }
 

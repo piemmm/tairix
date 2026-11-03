@@ -400,8 +400,9 @@ mod program {
         Idle,
         /// The game changed and must be re-presented.
         Changed,
-        /// Every pixel moved — a resize the window manager already applied, or
-        /// a theme change — so the whole window is redrawn at its current size.
+        /// Every pixel is owed — a resize the window manager already applied,
+        /// a theme change, or pixels the session let go asked for again — so
+        /// the whole window is redrawn at its current size.
         Relaid,
         /// The *board* changed size, so the window itself must be re-shaped to
         /// suit it. Distinct from `Relaid` because re-shaping in answer to a
@@ -473,6 +474,11 @@ mod program {
     ) -> Acted {
         match event {
             WindowEvent::CloseRequested { .. } => Acted::Close,
+            // Pixels the session let go are the game's to paint again; while
+            // its frames are still mapped the client library re-presents them.
+            WindowEvent::RedrawRequested { .. } if surface.window.content_released() => {
+                Acted::Relaid
+            }
             WindowEvent::AppBarMenu { item } => menu_chosen(round, *item, damage),
             WindowEvent::AppBarDefault => Acted::Open,
             // The size is the user's, already applied to the window: it is
@@ -516,10 +522,9 @@ mod program {
             // on Close asks to leave what the window shows, and the board is
             // the only thing it shows. The game declares no file association,
             // opens no menu chain of its own, and asks for no picker, so none
-            // of those outcomes can arrive. `RedrawRequested` is answered by
-            // the client library re-presenting the last frame, and the desktop
-            // change and the released content are handled by the caller, which
-            // owns the region and the theme.
+            // of those outcomes can arrive. The desktop change and the released
+            // content are handled by the caller, which owns the region and the
+            // theme.
             WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::MenuClosed { .. }
             // The layer-surface feeds and a tool window's moves address
@@ -612,7 +617,7 @@ mod program {
                     .game
                     .deadline_ns(tairix_rt::clock_get(), round.desktop.refresh()),
             );
-            let waited = events.wait(surface.window.client());
+            let mut waited = events.wait(surface.window.client());
             let now = tairix_rt::clock_get();
             let mut damage = tairix_controls::damage::sink();
 
@@ -630,22 +635,31 @@ mod program {
                 acted = acted.or(adopt_desktop(surface, round, &mut damage));
             }
 
-            match waited {
-                Ok(Some(event)) => {
-                    acted = acted.or(apply_event(surface, round, &event, now, &mut damage));
-                    if matches!(event, WindowEvent::ContentReleased { .. }) {
-                        surface.window.release_frames();
-                        continue;
+            // The event that ended the park, then every one queued behind it,
+            // before anything is painted, so a burst costs one frame. A
+            // conclusion the window must act on first ends the drain.
+            loop {
+                match waited {
+                    Ok(Some(event)) => {
+                        acted = acted.or(apply_event(surface, round, &event, now, &mut damage));
+                        if matches!(event, WindowEvent::ContentReleased { .. }) {
+                            surface.window.release_frames();
+                        }
+                    }
+                    // A deadline with no event, or a drained queue.
+                    Ok(None) => break,
+                    // A malformed frame from the authenticated session is
+                    // refused rather than guessed at.
+                    Err(EventError::Undecodable(_)) => {}
+                    Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
+                    Err(EventError::Mailbox(_)) => {
+                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                     }
                 }
-                // A deadline with no event, or a malformed frame from the
-                // authenticated session, which is refused rather than guessed
-                // at. Either way the tick above still stands.
-                Ok(None) | Err(EventError::Undecodable(_)) => {}
-                Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
-                Err(EventError::Mailbox(_)) => {
-                    return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
+                if matches!(acted, Acted::Quit | Acted::Close | Acted::Open) {
+                    break;
                 }
+                waited = events.try_wait(surface.window.client());
             }
 
             match acted {

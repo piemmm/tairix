@@ -22,13 +22,12 @@
 use tairix_abi::hwtree::HwResourceKind;
 use tairix_abi::raid_ipc::{MemberOffer, MembershipEnd, RAID_REGISTRY_ENDPOINT};
 use tairix_abi::reply::STATUS_REPLY_LEN;
-use tairix_abi::waitset::WaitSourceKind;
 use tairix_abi::Errno;
 use tairix_drv_storage_raid_member::{AgentStep, MemberAgent, Transport};
 use tairix_drvrt::exit::{end, DriverExit};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
-use tairix_rt::{LogSink, WaitSet};
+use tairix_rt::LogSink;
 use tairix_util::fmt::format_hex_u64;
 
 /// Diagnostic event id: the device was offered to the composer and the
@@ -104,21 +103,10 @@ fn offer(transport: &Transport, node: u32) -> Result<u64, Errno> {
         .map_err(Errno::from_syscall)
 }
 
-/// Claim the membership's outcome, parking until it is known on a set that
-/// observes the rendezvous's replies for this membership alone: kept past it,
-/// a member whose endpoint ended would stay ready and wake every later park.
+/// Claim the membership's outcome, parking until it is known.
 fn await_end(ticket: u64) -> MembershipEnd {
-    let watched = WaitSet::create().and_then(|set| {
-        set.add(WaitSourceKind::CallReply, RAID_REGISTRY_ENDPOINT, 0)?;
-        Ok(set)
-    });
-    let Ok(set) = watched else {
-        // A membership whose end could never be heard is withdrawn.
-        let _ = tairix_rt::call_cancel(RAID_REGISTRY_ENDPOINT, ticket);
-        return MembershipEnd::ComposerGone;
-    };
     let mut reply = [0u8; STATUS_REPLY_LEN];
-    match tairix_rt::call_await(set.handle(), RAID_REGISTRY_ENDPOINT, ticket, &mut reply) {
+    match tairix_rt::call_await(RAID_REGISTRY_ENDPOINT, ticket, &mut reply) {
         Ok(len) => MembershipEnd::from_reply(Some(&reply[..len])),
         // Anything else retires the ticket: the composer went away, or the
         // reply could not be claimed, and the agent re-offers.

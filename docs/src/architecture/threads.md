@@ -20,11 +20,12 @@ What a thread has of its own, and what belongs to the group:
 
 | Per thread | Per process (shared by every thread) |
 |---|---|
-| Scheduler task, priority, run state | Address space and every mapping in it |
+| Scheduler task, run state | Address space and every mapping in it |
 | Kernel stack (guarded arena slot) | Capability record, credentials, attested name |
 | User stack + its unbacked guard page | Descriptor table and standard streams |
 | psABI thread pointer | Resource limits, working directory and umask, I/O counters |
 | Signal-intake and kill-gate state | IPC ports, IRQ bindings, shared memory, wait-sets, seat leases |
+| | Scheduling level: every thread runs at it and a new one joins at it |
 
 The single shared capability record is a **security** decision, not a
 convenience: a `cap_revoke` by one thread binds its siblings immediately,

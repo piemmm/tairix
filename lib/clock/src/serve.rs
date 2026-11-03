@@ -10,7 +10,6 @@
 use tairix_abi::driver::clock::{ClockOp, CLOCK_MAX_REPLY, CLOCK_MAX_REQUEST};
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::HwResource;
-use tairix_abi::ipc::IPC_CALL_CAPACITY_MAX;
 use tairix_abi::PROC_ID_HEX_LEN;
 use tairix_caps::CapabilitySet;
 use tairix_drvrt::exit::{end, step, DriverExit};
@@ -29,6 +28,10 @@ const EVENT_CUT: EventId = EventId(24_306);
 const EVENT_STUCK: EventId = EventId(24_307);
 const EVENT_REFUSED: EventId = EventId(24_308);
 const EVENT_UNRETURNED: EventId = EventId(24_309);
+
+/// Calls one consumer may hold at once: every call is answered at once and a
+/// consumer has only its own in flight, one per calling thread.
+const CONSUMER_DEPTH: usize = 4;
 
 /// The clock controller node the driver running with `caps` was loaded for.
 ///
@@ -75,14 +78,12 @@ pub fn serve<H: ClockHardware>(node: &DutyNode, hardware: H) -> i32 {
         );
     };
     let mut request = [0u8; CLOCK_MAX_REQUEST];
-    // Every call is answered at once and each consumer has only its own in
-    // flight, so the containment bound is the only bound.
     let service = Service::bind(
         Endpoint {
             id: endpoint,
             request: &mut request,
             max_reply: CLOCK_MAX_REPLY,
-            capacity: IPC_CALL_CAPACITY_MAX,
+            per_sender: CONSUMER_DEPTH,
         },
         &[],
     );

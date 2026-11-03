@@ -1645,6 +1645,11 @@ mod program {
         let concluded = acted_of;
         match event {
             WindowEvent::CloseRequested { .. } => Acted::Quit,
+            // Pixels the session let go are the window's to paint again; while
+            // its frames are still mapped the client library re-presents them.
+            WindowEvent::RedrawRequested { .. } if surface.window.content_released() => {
+                Acted::Whole
+            }
             // The desktop resized the client: re-map the frame region to the
             // new extent, then lay the shell out to it.
             WindowEvent::Resized {
@@ -2776,7 +2781,8 @@ mod program {
                 WindowEvent::RedrawRequested { .. } => self.owed.owe_whole(),
                 _ => {}
             }
-            self.owed.owe(&mode, Repaint::Reported, &damage);
+            self.owed
+                .owe(&mode, Repaint::reported_if(!damage.is_empty()), &damage);
             outcome
         }
 
@@ -2825,7 +2831,8 @@ mod program {
                 (bounds, scale, theme),
                 &mut damage,
             );
-            self.owed.owe(&mode, Repaint::Reported, &damage);
+            self.owed
+                .owe(&mode, Repaint::reported_if(!damage.is_empty()), &damage);
             if self.present(client, scale, theme).is_err() {
                 app::report(APP_NAME, "the zone chooser could not be drawn");
             }

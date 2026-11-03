@@ -26,9 +26,10 @@ mod program {
     use tairix_settingsd::events::{ORIGIN_UNREADABLE, SERVICE_UNAVAILABLE, SETTINGSD_READY};
     use tairix_settingsd::{document_ceiling, DocumentStore, SettingsService};
 
-    /// Calls the rendezvous holds. An administrator's tools ask one at a time;
-    /// a fail-closed bound, past which the kernel refuses the post.
-    const CAPACITY: usize = 8;
+    /// Calls one caller may hold at the rendezvous. An administrator's tools
+    /// ask one at a time; a fail-closed bound, past which the kernel refuses
+    /// that caller's post.
+    const CALLER_DEPTH: usize = 8;
 
     fn record(id: EventId, level: Level, message: &str) {
         tairix_log::log(
@@ -74,7 +75,7 @@ mod program {
             &CapabilitySet::empty(),
             SETTINGS_REQUEST_MAX,
             SETTINGS_REPLY_MAX,
-            CAPACITY,
+            CALLER_DEPTH,
         ) == 0
     }
 

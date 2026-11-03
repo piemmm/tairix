@@ -673,6 +673,17 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn call_await(
+        &self,
+        _c: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _reply: u64,
+        _reply_cap: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn wall_time_get(&self, _c: &CallerContext<'_>, _out: u64, _out_cap: usize) -> SyscallResult {
         self.bump();
         Ok(0)

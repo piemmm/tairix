@@ -1391,7 +1391,7 @@ A served window's pixels are its application's, so between the create and the
 application's first present there is nothing of the application's to put on
 screen. The window therefore opens **off screen and holding no pixels**
 (`Compositor::add_unpresented_window`, reached through
-`DesktopShell::open_unpresented_window`), and `ShellWindowHost::window_presented`
+`DesktopShell::open_unpresented_window`), and `FrameShow::window_presented`
 maps it — show, raise, focus — on the never-presented → painted transition,
 *before* the frame is composed, so the `WINDOW_SHOWN` witness still follows
 pixels the display actually took. While the seat is held it is shown beneath
@@ -2475,10 +2475,25 @@ An application repaints its whole composition and presents whole-window
 damage, because a toolkit generally cannot say which pixels its own paint
 touched. Taking that claim at face value would recomposite every pixel of the
 window for a hover highlight a few rows tall, so the session measures the
-truth instead: `ShellWindowHost::window_presented` converts the presented
-pixels into the compositor's own content surface and returns the bounding
-rectangle of the pixels whose value actually differs, and only that rectangle
-is marked dirty. A repaint that changes nothing marks nothing.
+truth instead: `FrameShow::window_presented` converts the presented pixels
+into the compositor's own content surface and returns the bounding rectangle
+of the pixels whose value actually differs, and only that rectangle is marked
+dirty. A repaint that changes nothing marks nothing.
+
+The conversion runs once a desktop frame, never once a present. A `Present`
+is answered as the window engine records it — the window's newest frame, with
+every change since the last one shown — and `WindowServer::latch` converts
+each window's newest frame through `FrameShow` immediately before the
+compositor composes, inside the frame pacer's own admission; a pending frame
+counts as damage there, so the pacer admits or holds a frame for it exactly as
+for the session's own changes. An application presenting faster than the
+desktop draws therefore costs the session one conversion a frame, and no
+application's present waits on the desktop's frame work. A frame the
+compositor cannot show is recorded (`FRAME_REFUSED`, 20035) and not retried:
+the window keeps its pixels until it presents again, and that present carries
+the refused frame's change with its own. A background or darkened
+session latches nothing until it draws again; its applications are answered
+regardless.
 
 The comparison is exact — a pixel reported unchanged carries the
 byte-identical value it already had — and it rides a loop that already reads

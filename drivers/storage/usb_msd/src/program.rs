@@ -131,10 +131,10 @@ const MSD_DOMAIN_RECOVERED: EventId = EventId(27_372);
 /// a later genuine transfer recovers it with no reboot.
 const MSD_DOMAIN_OFFLINE: EventId = EventId(27_373);
 
-/// Outstanding-request capacity of a per-LUN endpoint. The volume layer
-/// submits one request at a time (it blocks on the reply); a small queue
-/// absorbs a re-submit racing the previous reply.
-const BLK_ENDPOINT_CAPACITY: usize = 4;
+/// Requests one client of a per-LUN endpoint may hold at once. The volume
+/// layer submits one request at a time (it blocks on the reply); the room
+/// beyond absorbs a re-submit racing the previous reply.
+const BLK_ENDPOINT_DEPTH: usize = 4;
 
 /// The class-side URB transport: one synchronous, capability-checked
 /// `ipc_call` to the host-controller driver's per-interface endpoint. It
@@ -510,7 +510,7 @@ fn create_blk_endpoint(id: u64) -> bool {
         &recv_caps,
         BLK_REQUEST_LEN,
         BLK_COMPLETION_LEN,
-        BLK_ENDPOINT_CAPACITY,
+        BLK_ENDPOINT_DEPTH,
     ) == 0
 }
 

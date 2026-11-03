@@ -66,10 +66,11 @@ const CALL_TOKEN: u64 = 1;
 /// Wait-set token for "one of the device's event sources is ready".
 const EVENT_TOKEN: u64 = 2;
 
-/// Outstanding-call capacity of the device-channel endpoint. The mixer issues
-/// one control request at a time (it blocks on the reply); a small queue
-/// absorbs a doorbell racing the previous reply — a fail-closed memory bound.
-const ENDPOINT_CAPACITY: usize = 4;
+/// Calls the mixer may hold at the device-channel endpoint at once. It issues
+/// one control request at a time (it blocks on the reply); the room beyond
+/// that absorbs a doorbell racing the previous reply — a fail-closed memory
+/// bound.
+const ENDPOINT_DEPTH: usize = 4;
 
 /// The device channel, served restricted-sender to the one holder of
 /// `CAP_AUDIO_DEVICE`, the mixer.
@@ -78,7 +79,7 @@ const CHANNEL: DeviceChannel = DeviceChannel {
     gate: CapabilityId::AUDIO_DEVICE,
     max_request: AUDIO_CHANNEL_MAX_REQUEST,
     max_reply: AUDIO_CHANNEL_MAX_REPLY,
-    capacity: ENDPOINT_CAPACITY,
+    per_sender: ENDPOINT_DEPTH,
 };
 
 /// A device channel claimed, published and served: the endpoint the mixer

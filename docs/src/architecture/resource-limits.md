@@ -51,8 +51,8 @@ frozen from the first release.
   lock records it may hold — see [Advisory file locking](../filesystem/locking.md)),
   `DirWatches` (the directory watches it may hold — see
   [Directory watches](../filesystem/watch.md)), `IpcQueueBytes` (the kernel
-  memory its message ports and call endpoints may reserve for queued
-  messages), `WaitSets` (the wait-sets it may hold) and `WaitSetMembers` (the
+  memory its IPC may hold: the bookkeeping of the ports and call endpoints it
+  binds, and the messages and calls it has queued at any endpoint), `WaitSets` (the wait-sets it may hold) and `WaitSetMembers` (the
   members it may register across them). Discriminants never move; a new
   resource takes the next free discriminant and bumps `LimitKind::COUNT`.
   `LimitKind::counts_bytes` says which are measured in bytes, so no consumer
@@ -205,15 +205,24 @@ resource**, before the resource is committed, and fails closed (`AGENTS.md`
   the soft bound is refused with `LimitExceeded` and arms nothing. A watch's
   kernel cost is a journal bounded at 32 KiB, so the default scales the reach
   of a process with the machine.
-- **`IpcQueueBytes` on `port_bind` and `call_create`.** An endpoint is charged
-  its worst case when it is bound — its capacity times its largest message
-  (for a call endpoint the larger of request and reply, since a call holds one
-  at a time), plus its bookkeeping — because any sender may fill it, and the
-  bytes then sit in the kernel heap until the owner drains them. The check
-  runs after the bounds are validated and the bind is authorised, so a
-  malformed request is still `LengthOutOfRange`; a bind past the soft bound is
-  refused with `LimitExceeded` and binds nothing. The charge also bounds how
-  many endpoints a process holds. `port_unbind` and the owner's exit return it.
+- **`IpcQueueBytes` on `port_bind` and `call_create`, and on every send and
+  post.** An endpoint's owner is charged its bookkeeping when it is bound — and
+  a port's owner one full lane for the messages of senders that have ended;
+  the check runs after the bounds are validated and the bind is authorised, so
+  a malformed request is still `LengthOutOfRange`, and a bind past the soft
+  bound is refused with `LimitExceeded` and binds nothing. The charge also
+  bounds how many endpoints a process holds; `port_unbind` and the owner's exit
+  return it. What a sender queues is charged to the *sender*: its lane's storage
+  for as long as the lane holds anything, a message's payload until its port's
+  owner takes it, a call — the larger of its request and reply, so a reply
+  never fails for its caller's budget — until its caller collects the reply or
+  the call is withdrawn, times out, or is cancelled. A send or post past the
+  sender's soft bound is refused `LimitExceeded`. So every byte waiting in an
+  endpoint is paid for by the process that put it there, and no sender's
+  traffic can spend another's budget or another's room
+  ([per-sender lanes](./ipc.md#per-sender-lanes)). What an ended sender left at
+  a port is held against the room the port's owner set aside, so senders that
+  end in numbers cannot make a port hold more than that.
 - **`WaitSets` and `WaitSetMembers` on `waitset_create` and `waitset_ctl`.**
   Each set and each member is one unit; a set or a member past its soft bound
   is refused with `LimitExceeded`. `waitset_close` and the owner's exit return

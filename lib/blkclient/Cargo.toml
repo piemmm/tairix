@@ -16,9 +16,9 @@ workspace = true
 # this crate implements, and the `DriverError`/`Errno` vocabulary every
 # fail-closed path returns — the one ABI definition.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
-# The pure-Rust userland runtime: the `call_post`/`call_reap` async blkio
-# submit/reap pair and the `waitset_*` wrappers the production transport
-# parks a caller on. The crate builds cleanly on the host (its syscall trap
+# The pure-Rust userland runtime: the `call_post`/`call_await` pair the
+# production transport makes each transfer with. The crate builds cleanly on
+# the host (its syscall trap
 # fails closed with a sentinel there rather than requiring a kernel), so
 # this dependency needs no target-conditional gate for the client to stay
 # host-testable end to end.

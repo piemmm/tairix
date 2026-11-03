@@ -184,14 +184,15 @@ pub fn serve<E: DmaEngine>(node: &Node, engine: E, reach: DmaReach) -> i32 {
         *wake = DeviceWake::Irq(line.handle);
     }
     let mut request = [0u8; DMA_ENGINE_MAX_REQUEST];
-    // Each owned channel may hold a posted wait and one call beside it.
-    let capacity = 2 * controller.usable().count_ones() as usize;
+    // One caller may own every channel, each holding a posted wait and one
+    // call beside it.
+    let per_sender = 2 * controller.usable().count_ones() as usize;
     let service = Service::bind(
         Endpoint {
             id: endpoint,
             request: &mut request,
             max_reply: DMA_ENGINE_MAX_REPLY,
-            capacity,
+            per_sender,
         },
         &wakes[..line_count],
     );

@@ -332,7 +332,7 @@ pub use users::{
     USERS_DB_PATH,
 };
 pub use waitq::{
-    call_wake, call_wake_task, console_damage_wake, console_deregister, console_wake,
+    call_wake, call_wake_task, call_woken, console_damage_wake, console_deregister, console_wake,
     drain_pending_wakes, hw_tree_wake, install_wait_arch, irq_wake, nearest_timed_deadline,
     procwait_wake, rearm_timed_wakeup, seat_input_wake, serve_wake, serve_wake_task,
     timed_wake_sweep, wait_now_ns, WaitArchAlreadyInstalled, WaitQueue, WaitQueueArch, CALL_WAITQ,

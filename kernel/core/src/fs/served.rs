@@ -62,9 +62,11 @@ use crate::waitq::{
 /// endless listing.
 const LISTING_MAX: usize = 1 << 24;
 
-/// How many calls one lane of a served volume puts on its endpoint at once:
-/// one call out at a time, and the release after a call it abandoned.
-pub const LANE_ENDPOINT_CAPACITY: usize = 2;
+/// How many calls one lane of a served volume holds on its endpoint at once:
+/// one call out at a time, and the release after a call it abandoned. Each
+/// lane posts as a sender of its own, so this is the endpoint's per-sender
+/// depth however many lanes share it.
+pub const LANE_ENDPOINT_DEPTH: usize = 2;
 
 /// Where the synthetic identities the proxies post under are numbered from:
 /// readable in an audit record, and disjoint from every real process.
@@ -544,7 +546,9 @@ impl ServedFs {
                     liveness,
                 });
             } else {
-                let _ = self.endpoint.cancel_one(self.caps.process().0, ticket);
+                if let Some(woken) = self.endpoint.cancel_one(self.caps.process().0, ticket) {
+                    crate::waitq::call_woken(&woken);
+                }
                 self.quarantined = true;
             }
         }
@@ -560,6 +564,8 @@ impl ServedFs {
                 task.unwrap_or(0),
                 &self.frame[..len],
                 NO_DEADLINE,
+                // The kernel's own client, bounded by its depth at the driver.
+                tairix_abi::RLIMIT_INFINITY,
                 self.audit,
             )
             .map_err(|err| match err {

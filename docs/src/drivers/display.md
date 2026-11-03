@@ -145,8 +145,10 @@ place, `BaseFrame::Drawn`) and `CursorPlane`.
 it maps the frames the driver granted at `Configure`, copies each present's
 damage into the frame the device does not read — or hands that frame to the
 caller's draw, showing nothing should it refuse — together with whatever that
-frame missed while others were shown, and names it by id. How the desktop
-uses the layers and the plane is [the window manager's](../desktop/wm.md).
+frame missed while others were shown, and names it by id. What each frame
+missed is `tairix_geometry::StaleFrames`, the one record a window's own two
+frames are kept current by as well (`tairix_display::stale_frames`). How the
+desktop uses the layers and the plane is [the window manager's](../desktop/wm.md).
 
 ## Shipped drivers
 

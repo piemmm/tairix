@@ -22,9 +22,12 @@
 | DESK-16 | The settings sheet repaints what its controls reported | done |
 | DESK-17 | A desk hands a job out by taking it | done |
 | DESK-18 | The font protocol is per run, not per glyph | done |
-| DESK-19 | A client's `Present` does not carry the desktop's frame work | planned |
+| DESK-19 | A client's `Present` does not carry the desktop's frame work | done |
 | DESK-20 | Settings asks for its pictures off its loop | done |
 | DESK-21 | Window-channel requests are posted, never awaited | done |
+| DESK-22 | Every caller's IPC in a lane of its own: no application can refuse another the desktop | done |
+| DESK-23 | Settings and the viewer paint once per burst of input, not once per event | planned |
+| DESK-24 | The process holding a seat's display runs in the high band while it holds it | done |
 
 Binding under `AGENTS.md`. This plan removes the desktop freeze that
 occurs while an application is loaded and started, fixes it as a
@@ -107,6 +110,7 @@ event loop** inherits the freeze:
 | Desktop listing + wallpaper workers | `lib/browse/src/desk.rs`, `userland/gui/session/src/wallpaper.rs` | A **runaway**: the job hand-out cloned the request instead of taking it, so an answered job was immediately workable again and the worker re-ran it for ever — 1030 directory reads of one folder in 13 s, ~150/s, each waking the compositor. A core and a disk spent continuously, contending with every frame. Fixed in DESK-17. |
 | Compositor glyph misses | `userland/gui/session/src/run.rs` (text drawn on the frame path through `lib/font`) | A glyph the client cache did not hold was a **blocking `FONT_ENDPOINT` round trip on the compositor loop** — 41 of them in a 13 s hover run, clustered where new text appears: 32 inside 41 ms on window-open. The cache absorbs the steady state, so this was a cold-cache stall rather than a periodic one. Fixed in DESK-18. |
 | Settings picture requests | `userland/apps/settings/src/run.rs` (`Pictures::request` → `WindowClient::render_preview`) | A window-channel round trip to the session's serve loop **per picture asked for**, on the pane's own loop: a busy desktop stalled the Settings window once per thumbnail. Fixed in DESK-20. |
+| Window endpoint capacity | `kernel/ipc/src/call.rs` (one outstanding-call total every caller shared, counting replies not yet collected) | An application that posted a handful of window requests and never reaped them **refused every other application's `Create`, `Present` and `Close` `WouldBlock`** for as long as it lived; so did a busy desktop serving many posting clients. Fixed in DESK-22. |
 | Shell foreground launch | `userland/shell/elsh/src/run.rs` (`spawn_attached`) | The shell cannot service its own input (job-control signals, `stdinfo`) during the load. Secondary. |
 | Terminal startup shell | `userland/apps/terminal/src/run.rs` (`spawn_attached`) | One-time, at terminal open. Minor. |
 | Login → session/shell | `userland/session/login/src/run.rs` (`spawn_attached` / `spawn_in`) | One-time, at login. Minor. |
@@ -1060,50 +1064,53 @@ Each stage is independently reviewable and must leave the whole-project
   is asked, a decline withdraws the request and keeps its region spare, and an
   acceptance lets the next go.
 
-### DESK-19 — A client's `Present` must not carry the desktop's frame work
-- The desktop session serves window clients and composites on one
-  thread, and `WindowServer::present` runs the whole `winframe::decode` of the
-  client's frame — and, behind it, whatever composite the session owes — before
-  the reply goes out. So every application's `present` measures the desktop's
-  *worst* frame, not its own work.
-- **The witness.** The stall-trace facility caught both ends of one call at the
-  same instant: the session blocked 997 ms in `Pool::await_workers` under
-  `window_presented` → `winframe::decode`, and the switchboard blocked 1002 ms
-  in `ipc_call` under `WindowClient::present`. Six of that run's eight
-  switchboard overrun reports are this coupling rather than anything the
-  switchboard does.
-- **The prerequisite, which is most of the work.** Every app window is
-  single-buffered (`FRAME_COUNT = 1` in all seven app crates) and
-  `tairix_window::present_damage`'s soundness *depends* on it: presenting less
-  than the whole window is sound only where the presented frame already holds
-  the rest of the window's current pixels, "never an alternate buffer whose
-  other pixels are a frame behind". Replying before the decode therefore needs
-  double buffering plus per-buffer damage catch-up, in this order:
-  1. **One shared per-buffer staleness mechanism.** `lib/display`'s display-side
-     `stale: [Region; _]` / `mark` / `stale_budget` is hoisted beside `Region`
-     in `lib/geometry` and consumed by both sides; a second copy is forbidden.
-  2. **A ring in `WindowFrames`.** `pixels()` hands back the back frame, and the
-     buffer's accumulated stale region is caught up from the other frame before
-     the app paints — the rectangle-sized copy
-     `plans/FIX-DESKTOP-SPEEDUP.md` anticipates, not a whole-window one.
-  3. **Deferred decode with real back-pressure.** `present` records the pending
-     frame and replies. A second `Present` while one pends may not coalesce
-     (the buffers differ) and may not spin: the engine holds the caller's
-     `ticket` and answers it when the frame is consumed. The session's window
-     endpoint is already a `call_recv`/`call_reply` pair with an explicit
-     ticket, so no new mechanism is needed — one frame of pipelining, and a
-     client blocks only when it genuinely outruns the compositor.
-  4. **Drained on the frame path**, inside the existing `pacer.admit` gate,
-     immediately before `compositor.present`.
-  5. **Ring depth threaded into the per-client bound.**
-     `client_frame_budget_bytes` is already derived from discovered RAM, so the
-     doubled footprint is bounded — but it *is* doubled, which is a real cost
-     at the §26.7 floor and the reason this is staged rather than incidental.
-- **What it does not fix.** The session's own composite cost. The 1 s frames in
-  that run are a dev-profile (unoptimised) build under QEMU TCG; this decouples
-  a client's loop from the compositor's frame time, which is an architectural
-  property that holds on any machine, and is worth doing for that reason rather
-  than for those milliseconds.
+### DESK-19 — A client's `Present` does not carry the desktop's frame work
+- **What it fixed.** The session ran a client's whole `winframe::decode` — and
+  whatever composite it owed — before answering its `Present`, so every
+  application's present measured the desktop's worst frame (the stall trace
+  caught the session 997 ms in `window_presented` → `decode` while the
+  switchboard sat 1002 ms in `WindowClient::present`), and a client presenting
+  faster than the desktop drew made the session convert every one.
+- **Recorded, then latched.** `WindowServer::present` validates and records the
+  window's newest frame with every change since the last one shown — one per
+  window, the newest winning — and answers at once. `WindowServer::latch`
+  converts each window's newest frame through the session's `FrameShow` once a
+  desktop frame, inside `pacer.admit` immediately before the composite; a
+  pending frame is damage at both admit sites and at the saver's hold. A resize
+  or a release drops what it supersedes, and a frame the compositor cannot show
+  is logged (`FRAME_REFUSED`) and dropped.
+- **Two frames, each brought up to date.** `FRAME_COUNT` is 2.
+  `WindowPane::present_list` draws into the frame the session is not reading,
+  first catching it up from the app's surface with what the other frame was
+  presented with (`tairix_geometry::StaleFrames`, hoisted from `lib/display`,
+  which keeps its own frames through it; `tairix_display::stale_frames` builds
+  both rings). The newest frame may replace one pending because every frame is
+  whole when it is presented.
+- **Posted, one in flight.** `WindowClient::present` posts once the window's
+  previous present is answered (`await_present`, on the `call_await` syscall,
+  which that call's answer alone ends), so a client waits only when it outruns
+  the session serving it, never on a conversion or a composite. A present
+  refused for room goes as a call. A refused present reaches the app as
+  `EventError::Refused` and the next present declares the whole window; a
+  `NotAttached` refusal marks the window released instead. The library's redraw
+  answer is held behind a present in flight, never awaited.
+- **Released and hidden.** The client marks a window released on
+  `ContentReleased` (or a `NotAttached` refusal) and hidden until the session's
+  `RedrawRequested`. Nothing is presented while it is hidden (`is_hidden`), the
+  next present re-attaches and sends the whole window, and the redraw answer
+  declines a released window: its repaint is the application's own.
+- **The per-client bound.** `CLIENT_FRAME_RAM_DIVISOR` is 2: each window holds
+  two frames, so half of RAM keeps the measured capacity.
+- **What it does not fix.** The session's own composite cost.
+- **Proven by** `a_present_is_posted_and_the_next_waits_only_for_its_answer`,
+  `presents_between_frames_are_shown_once_with_every_change`,
+  `a_resize_or_a_release_drops_the_pending_frame`,
+  `a_frame_the_host_cannot_show_is_reported_once_and_dropped`,
+  `a_redraw_asked_with_a_present_in_flight_follows_it_without_waiting`,
+  `a_released_window_is_left_for_its_application_to_paint`,
+  `a_released_window_is_hidden_until_the_session_asks_for_it_again`,
+  `a_present_with_no_room_goes_as_a_call`, the `draw_frame` tests, the
+  `StaleFrames` model test and the `call_await` kernel tests.
 
 ### DESK-21 — Window-channel requests are posted, never awaited
 - **What it fixed.** A Raspberry Pi 4 file manager overran its 250 ms budget
@@ -1129,7 +1136,7 @@ Each stage is independently reviewable and must leave the whole-project
   frame) and posted when that one is answered. A resize asked while one is
   unanswered makes no region (`Fitted::Deferred`) and its size is delivered
   again once that one is answered.
-- **What stays a call.** `Create`, `Present` (DESK-19's), `Close`, menus,
+- **What stays a call.** `Create`, `Close`, menus,
   alerts and the queries: their answers are needed before the app goes on.
 - **Proven by** the `lib/window` tests over a loopback that answers posts only
   when told: `a_posted_request_never_waits_on_the_session`,
@@ -1138,6 +1145,85 @@ Each stage is independently reviewable and must leave the whole-project
   `a_resize_asked_while_another_is_unanswered_is_delivered_again`, and the
   rewritten refusal tests (`resize_is_refused_fail_closed` among them). The
   Pi drag-resize witness is `plans/TEMPORARY.md` TMP-6.
+
+### DESK-22 — Every caller's IPC in a lane of its own
+- **What it fixed.** A call endpoint's capacity was one total every caller
+  drew from, and a reply its caller had not collected held its slot: any
+  process could post a few calls, never reap them, and refuse every other
+  caller of the window endpoint — and of `fontd`, `sysinfod`, `confd`, or the
+  lock screen's elevation broker — until it exited. Ports shared one mailbox
+  capacity the same way.
+- **Lanes** (`kernel/ipc/src/lanes.rs`, `docs/src/architecture/ipc.md`).
+  Every caller's calls, and every sender's messages, sit in a lane of their
+  own, found by hash and served in turn through a list threaded through them —
+  each sender's own items oldest first, so DESK-21's posted-before-present
+  order holds, and no operation's cost grows with the number of senders. A
+  lane's storage, its messages' payloads and its calls are charged to its
+  sender's own `ipc-queue-bytes`; the owner pays its bookkeeping, a few spare
+  lanes, and for a port one full lane for senders that have ended, which is
+  all an ended sender's leftover messages may hold.
+- **Depth and room.** The per-sender depth (`call_create`'s and `port_bind`'s
+  last argument) bounds a sender's queued messages, or a caller's calls
+  waiting on the server; an answer the caller has not collected never counts.
+  A blocking `ipc_call` at its depth parks until the server answers one of its
+  process's calls (or one times out or is withdrawn) — never on its own
+  caller; a posted call is answered `WouldBlock` and the window client holds
+  it, trying it again oldest first at every reap, defers a resize refused for
+  room until room is made, and sends a present refused for room as a call.
+  Room waiters are kept per sender, so a wake names only that sender's threads
+  and there is no broadcast.
+- **Depths.** Every endpoint's bound was re-derived as what one caller holds
+  at once; the window endpoint's is `WINDOW_CALLER_DEPTH` (64: each window's
+  posted kinds and present, and a call per thread).
+- **Proven by** the lane, port and call unit tests (`a_full_sender_never_refuses_another`,
+  `a_full_caller_holds_only_its_own_depth`,
+  `the_depth_bounds_unanswered_calls_and_an_answer_frees_room`,
+  `ended_senders_cannot_make_a_port_hold_more_than_its_owner_set_aside`), the
+  syscall tests `a_caller_at_its_depth_never_refuses_another` and
+  `ipc_call_at_its_depth_waits_for_an_answer_rather_than_failing`, the Bronze
+  port and call-endpoint models, the Silver model's `room-isolation`
+  invariant, and the loom room-wake and await models (`plans/OPEN-DEFECTS.md`
+  D1648–D1653, D1657).
+
+### DESK-23 — Settings and the viewer paint once per burst
+- **The defect.** The charter's interactive-surface rule wants input drained
+  before a paint, so a burst of pointer samples costs one frame. The Settings
+  window and the viewer each take one event per turn of their loop and present
+  for it, so a pointer moving across either presents once per sample. Sapper
+  had the same shape and now drains its burst first.
+- **Why it is staged.** Neither loop folds a round: Settings runs a chooser
+  route, an action and a readings request per event with early returns, and
+  the viewer presents each of its windows from its router. Draining first means
+  giving each a per-window `Owed` folded across the burst (the file manager's
+  and Date & Time's shape) and acting on each event's conclusion before one
+  present — a rework of two program loops with no host harness, kept apart from
+  DESK-19, which left their per-event cost no higher than it was.
+- **Remains.** Both loops drain with `WindowEvents::try_wait` after the event
+  that ended the park, fold each window's damage into its own `Owed`, and
+  present each owed window once.
+
+### DESK-24 — The display owner runs in the high band
+- **What it fixed.** The session composites in a fair share no larger than any
+  application's, so a few CPU-bound applications took the desktop's frames
+  with them.
+- **The level is the process's** (`tairix_kernel_sec::ProcessLevel`, kept with
+  its thread group): the level its principal set and whether it holds a
+  seat's display. `sched_set_priority` sets the former and brings every thread
+  to the outcome; a thread created later joins at it, read under the same
+  write lock that registers it. Changes are serialised by the level's own lock
+  and collected under the thread table's read lock, then applied with no table
+  lock held.
+- **Boost follows the seat.** `display_acquire`, `display_release`,
+  `seat_revoke` and an unplugged display each re-read whether the process holds
+  a live lease and set the `High` band exactly while it does. No capability:
+  the lease is the authority, and the band is the kernel's, so raising the set
+  level still needs `CAP_PROC_CONTROL`.
+- **Proven by** `sched_set_priority_reweights_every_thread_of_the_process`,
+  `the_display_owner_runs_in_the_strongest_band_while_it_holds_the_seat`,
+  `a_revoked_display_owner_drops_back_to_its_own_level`,
+  `a_display_owner_still_needs_the_capability_to_raise_its_own_level`,
+  `a_registering_thread_joins_its_processs_level` and the `ProcessLevel` unit
+  tests.
 
 ### DESK-11 — The file manager's reads off its loop
 - Every unbounded read the file manager makes now runs off its loop, on the

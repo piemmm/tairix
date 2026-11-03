@@ -2056,8 +2056,9 @@ impl SyscallNumber {
     /// this caller's (no existence oracle — a foreign ticket is
     /// indistinguishable from an unknown one). A reply larger than `reply_cap`
     /// fails closed with [`crate::Errno::BufferTooSmall`]. The caller parks on
-    /// a [`crate::WaitSourceKind::CallReply`] wait-set member between reaps; the
-    /// reap itself never blocks.
+    /// a [`crate::WaitSourceKind::CallReply`] wait-set member between reaps, or
+    /// awaits the one call with [`SyscallNumber::CALL_AWAIT`]; the reap itself
+    /// never blocks.
     pub const CALL_REAP: Self = Self(100);
 
     /// Withdraw one outstanding request posted with
@@ -2150,6 +2151,11 @@ impl SyscallNumber {
     /// weight their own work above other principals' fair share; lowering
     /// and re-stating the current level follow the plain target rule.
     /// Cross-principal outcomes and every raise attempt are audited.
+    ///
+    /// The level is the process's: every thread runs at it, and a thread
+    /// created later joins at it. A process holding a seat's display runs in
+    /// the `High` band for as long as it does, and at this level again once
+    /// it does not.
     pub const SCHED_SET_PRIORITY: Self = Self(104);
 
     /// End the machine's power state: flush every mounted volume, then
@@ -3212,6 +3218,22 @@ impl SyscallNumber {
     /// Gated by [`crate::CapabilityId::FS_SERVE`]; not audited.
     pub const ARCHIVE_WRITE: Self = Self(166);
 
+    /// Await the reply to one request posted with
+    /// [`SyscallNumber::CALL_POST`], parking until it lands.
+    ///
+    /// Arguments and returns are [`SyscallNumber::CALL_REAP`]'s: `endpoint`,
+    /// `ticket`, and the `reply` buffer with its `reply_cap`. Where a reap
+    /// answers [`crate::Errno::WouldBlock`], an await parks instead, and is
+    /// woken by that call's reply alone, its deadline, or the endpoint ending,
+    /// so a process with several calls outstanding to one endpoint never wakes
+    /// for another's. Whichever of the process's threads awaits is the one the
+    /// reply wakes, with the call's poster; one thread awaits a call at a time,
+    /// so a second is refused [`crate::Errno::Busy`]. A call withdrawn with
+    /// [`SyscallNumber::CALL_CANCEL`] wakes its awaiter, which then answers
+    /// [`crate::Errno::NotFound`]. [`crate::Errno::Interrupted`] once the
+    /// process is being killed, the call left posted.
+    pub const CALL_AWAIT: Self = Self(167);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3529,6 +3551,7 @@ mod tests {
         assert_eq!(SyscallNumber::IMAGE_ATTACH.as_u16(), 164);
         assert_eq!(SyscallNumber::ARCHIVE_READ.as_u16(), 165);
         assert_eq!(SyscallNumber::ARCHIVE_WRITE.as_u16(), 166);
+        assert_eq!(SyscallNumber::CALL_AWAIT.as_u16(), 167);
     }
 
     #[test]

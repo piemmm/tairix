@@ -919,7 +919,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         arg_count: 6,
         args: [
             // endpoint id, send-caps ptr, recv-caps ptr, max_request,
-            // max_reply, capacity.
+            // max_reply, and the per-caller depth: the calls one caller
+            // process may have waiting on the server at once.
             AbiType::IpcEndpoint,
             AbiType::UserPtr,
             AbiType::UserPtr,
@@ -2267,9 +2268,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         name: "port_bind",
         arg_count: 3,
         args: [
-            // Port id, maximum payload bytes, mailbox capacity (both
-            // fail-closed bounds re-checked against the ABI ceilings in
-            // the handler).
+            // Port id, maximum payload bytes, and the per-sender depth: the
+            // messages one sender may have queued at once (both fail-closed
+            // bounds re-checked against the ABI ceilings in the handler).
             AbiType::IpcEndpoint,
             AbiType::Len,
             AbiType::Len,
@@ -3997,6 +3998,26 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ret: AbiType::Errno,
         // As `archive_read`, its source rather than its destination.
         required_capability: Some(CapabilityId::FS_SERVE),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CALL_AWAIT,
+        name: "call_await",
+        arg_count: 4,
+        args: [
+            // endpoint, ticket, reply ptr, reply cap: `call_reap`'s.
+            AbiType::IpcEndpoint,
+            AbiType::Handle,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `call_reap`'s reply-bytes-written-or-`-errno` convention.
+        ret: AbiType::U64,
+        // As `call_reap`: the ticket is the authority, claimant-checked
+        // kernel-side, and the wait for a reply is not a security decision.
+        required_capability: None,
         audit: false,
     },
 ];

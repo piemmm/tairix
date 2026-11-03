@@ -28,8 +28,11 @@ crates implement together:
 - `kernel/sec::TaskCapabilities` — a task's authority under `derive`,
   `delegate`, and `revoke`.
 - `lib/caps::CapabilitySet` — the subset algebra those operations use.
-- `kernel/ipc::Port` — the capability-checked, bounded mailbox under `send`,
-  `recv`, and `destroy`.
+- `kernel/ipc::Port` — the capability-checked mailbox under `send`, `recv`,
+  and `destroy`, with a lane per sender: each bounded by its own depth and
+  served in turn ([per-sender lanes](../../architecture/ipc.md#per-sender-lanes)).
+  The model drives two senders, enough to show one sender's traffic never
+  costs another its room or its turn.
 
 Capabilities are abstracted to the bits `0..N` of a small mask (the model
 uses `N = 2`, which exercises every subset relation: empty, each singleton,
@@ -42,14 +45,16 @@ covering each qualitative case.
 
 ```
 Subset      == 0 .. (2^N - 1)          \* a capability mask
+Senders     == 0 .. (SENDERS - 1)
 Msg         == [ caps_ok: BOOLEAN, size_ok: BOOLEAN ]
 
 State == [
-  user_grant : Subset,   \* fixed at derive: the user's grant (upper bound)
-  manifest   : Subset,   \* fixed at derive: the executable's request (upper bound)
-  effective  : Subset,   \* evolves under delegate / revoke
-  closed     : BOOLEAN,  \* the port has been destroyed
-  queue      : Seq(Msg)  \* the FIFO mailbox, |queue| <= CAPACITY
+  user_grant : Subset,                 \* fixed at derive (upper bound)
+  manifest   : Subset,                 \* fixed at derive (upper bound)
+  effective  : Subset,                 \* evolves under delegate / revoke
+  closed     : BOOLEAN,                \* the port has been destroyed
+  lanes      : [Senders -> Seq(Msg)],  \* each sender's lane, oldest first
+  turn       : Seq(Senders)            \* senders with a message waiting, next first
 ]
 ```
 
@@ -69,7 +74,8 @@ Init ==
     /\ manifest   = mf
     /\ effective  = ug & mf          \* bitwise AND = set intersection
     /\ closed     = FALSE
-    /\ queue      = << >>
+    /\ lanes      = [s \in Senders |-> << >>]
+    /\ turn       = << >>
 ```
 
 ## Transitions (`Next`)
@@ -79,41 +85,49 @@ Delegate(req) ==                      \* TaskCapabilities::delegate
   /\ IF req \subseteq effective       \* adopt only a subset; else refuse
        THEN effective' = req
        ELSE effective' = effective    \* refused: untouched
-  /\ UNCHANGED << user_grant, manifest, closed, queue >>
+  /\ UNCHANGED << user_grant, manifest, closed, lanes, turn >>
 
 Revoke(bit) ==                        \* TaskCapabilities::revoke
   /\ effective' = effective \ {bit}
-  /\ UNCHANGED << user_grant, manifest, closed, queue >>
+  /\ UNCHANGED << user_grant, manifest, closed, lanes, turn >>
 
-Send(sender_caps, len) ==             \* Port::send, fail-closed precedence
-  LET caps_ok     == REQUIRED_SEND \subseteq sender_caps
-      size_ok     == len <= MAX_LEN
-      capacity_ok == Len(queue) < CAPACITY
-      accept      == ~closed /\ caps_ok /\ size_ok /\ capacity_ok
+Send(s, sender_caps, len) ==          \* Port::send, fail-closed precedence
+  LET caps_ok == REQUIRED_SEND \subseteq sender_caps
+      size_ok == len <= MAX_LEN
+      room    == Len(lanes[s]) < DEPTH  \* the sender's own lane, never a total
+      accept  == ~closed /\ caps_ok /\ size_ok /\ room
   IN  /\ IF accept
-           THEN queue' = Append(queue, [caps_ok |-> caps_ok, size_ok |-> size_ok])
-           ELSE queue' = queue
+           THEN /\ lanes' = [lanes EXCEPT ![s] = Append(@, [caps_ok |-> caps_ok,
+                                                           size_ok |-> size_ok])]
+                /\ turn'  = IF s \in Range(turn) THEN turn ELSE Append(turn, s)
+           ELSE UNCHANGED << lanes, turn >>
       /\ UNCHANGED << user_grant, manifest, effective, closed >>
 
-Recv ==                               \* Port::recv
-  /\ queue' = IF queue = << >> THEN << >> ELSE Tail(queue)
+Recv ==                               \* Port::recv: the front sender's oldest
+  IF turn = << >>
+    THEN UNCHANGED << lanes, turn >>
+    ELSE LET s == Head(turn) IN
+         /\ lanes' = [lanes EXCEPT ![s] = Tail(@)]
+         /\ turn'  = IF Tail(lanes[s]) = << >> THEN Tail(turn)
+                     ELSE Append(Tail(turn), s)   \* more waiting: to the back
   /\ UNCHANGED << user_grant, manifest, effective, closed >>
 
 Destroy ==                            \* Port::destroy: close and drain
   /\ closed' = TRUE
-  /\ queue'  = << >>
+  /\ lanes'  = [s \in Senders |-> << >>]
+  /\ turn'   = << >>
   /\ UNCHANGED << user_grant, manifest, effective >>
 
 Next == \/ \E r \in Subset:        Delegate(r)
         \/ \E b \in 0 .. (N-1):    Revoke(b)
-        \/ \E c \in Subset, l \in 0 .. MAX_LEN+1: Send(c, l)
+        \/ \E s \in Senders, c \in Subset, l \in 0 .. MAX_LEN+1: Send(s, c, l)
         \/ Recv
         \/ Destroy
 ```
 
-The `Send` precedence — `closed → caps → size → capacity` — is identical to
-`Port::send`, and the model draws `len` up to `MAX_LEN + 1` so the oversize
-(`size_ok = FALSE`) branch is always reachable.
+The `Send` precedence — `closed → caps → size → the sender's own depth` — is
+identical to `Port::send`, and the model draws `len` up to `MAX_LEN + 1` so the
+oversize (`size_ok = FALSE`) branch is always reachable.
 
 ## Invariants (`Inv`)
 
@@ -124,16 +138,26 @@ State invariants, checked at every reachable state:
   derive-time bounds — the unforgeability guarantee.
 - **`ipc-fail-closed`** (§5.4): every queued `Msg` has `caps_ok ∧ size_ok`.
   No unauthorised or oversize message is ever in the mailbox.
-- **`mailbox-capacity`**: `Len(queue) ≤ CAPACITY`.
-- **`closed-port-drained`**: `closed ⇒ queue = << >>`.
+- **`lane-depth`**: `∀ s: Len(lanes[s]) ≤ DEPTH`.
+- **`closed-port-drained`**: `closed ⇒` every lane and the turn are empty.
+- **`turn-exact`**: the turn order names exactly the senders whose lane is
+  non-empty, each once — so none is served twice in a round and none skipped.
+- **`room-isolation`**: on an open port, a capable sender whose own lane is
+  below `DEPTH` is admitted, however full every other lane is. The property a
+  shared total breaks: under one, a sender that filled the port refused every
+  other.
 
 Transition invariants, checked on every reachable step:
 
 - **`authority-monotone`**: `effective' ⊆ effective` for *every* transition.
   This single relation subsumes delegate-never-widens, revoke-only-shrinks,
   and the impossibility of any action minting authority.
-- **`fail-closed-admission`**: if a message was appended, the port was open,
-  had spare capacity, and the message was genuinely authorised and sized.
+- **`fail-closed-admission`**: if a message was appended to a lane, the port
+  was open, that sender's lane had room, and the message was genuinely
+  authorised and sized.
+- **`served-in-turn`**: on an open port a message leaves only the lane whose
+  turn it was, one per receive, and a sender with more waiting goes to the
+  back of the order.
 
 ## Keeping the model in sync
 
@@ -145,9 +169,10 @@ not drift. When `TaskCapabilities` or `Port` changes shape:
    recorded authorisation facts surfaces as an invariant counterexample with
    a minimal action trace.
 
-The checker also carries fault-injection tests (a widening `delegate` and a
-port that skips the capability check) that prove it *rejects* a model that
-breaks an invariant — the oracle has teeth.
+The checker also carries fault-injection tests (a widening `delegate`, a
+port that skips the capability check, and lanes bounded by one shared total)
+that prove it *rejects* a model that breaks an invariant — the oracle has
+teeth.
 
 ## Tiers beyond Silver
 

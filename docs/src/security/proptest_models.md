@@ -45,10 +45,13 @@ Each lives in a `tests/proptest_model.rs` next to the code it checks:
   ambient authority), that delegation never widens and a refused
   delegation is a no-op, that revoke only shrinks, and that the registry's
   contents match the model.
-* **`kernel/ipc`** — drives a capability-checked `Port` through
-  `send` / `recv` / `destroy` commands against a reference mailbox,
-  checking the fail-closed send precedence (closed → capabilities → size
-  → capacity), FIFO byte-for-byte delivery, and the capacity bound.
+* **`kernel/ipc`** — drives a capability-checked `Port` through `send` /
+  `recv` / `admit` / `destroy` commands from several sending instances
+  against a reference of per-sender lanes, checking the fail-closed send
+  precedence (closed → capabilities → size → admission → the sender's own
+  depth), that a sender is refused room only by its own lane and that the
+  room it waits on agrees with `send`, delivery in turn with each sender's
+  messages byte-for-byte and oldest first, and the per-sender depth.
 * **`kernel/syscall`** — drives `Dispatcher::dispatch` with random caller
   capability sets and syscall selectors (known, in-range-unassigned, and
   out-of-range numbers). With always-valid arguments, the only rejection a

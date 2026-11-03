@@ -191,6 +191,7 @@ extern "C" {
 #define TAIRIX_SYS_IMAGE_ATTACH 164u
 #define TAIRIX_SYS_ARCHIVE_READ 165u
 #define TAIRIX_SYS_ARCHIVE_WRITE 166u
+#define TAIRIX_SYS_CALL_AWAIT 167u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -943,6 +944,7 @@ int32_t tairix_sys_view_unbind(void * a0, uintptr_t a1);
 uint64_t tairix_sys_image_attach(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4, uint32_t a5);
 uint64_t tairix_sys_archive_read(uint64_t a0, uint32_t a1, uint64_t a2, void * a3, uintptr_t a4);
 int32_t tairix_sys_archive_write(uint64_t a0, uint32_t a1, uint64_t a2, void * a3, uintptr_t a4);
+uint64_t tairix_sys_call_await(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 
 #ifdef __cplusplus
 } /* extern "C" */

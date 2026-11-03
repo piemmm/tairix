@@ -73,12 +73,11 @@ or on a root not yet served), and the
 hardware tree's generation. Its deadline is an automatic fan's next sample,
 or a call the header left unanswered asked again, so a fan that is off,
 always on, or has no line to switch, and owes the header no answer, costs no
-wake-ups at all. A call to a sensor or the header parks on a second wait set,
-observing only that call's reply, for at most a quarter of a second, so a
-wedged driver never stalls the service, though its endpoint, the watch and
-the tree wait meanwhile: a wedged sensor costs the fan a reading, which runs
-it. Every such call goes through `tairix_rt::call_within`, the deadline call
-the block client shares. The configuration is followed through
+wake-ups at all. A call to a sensor or the header awaits that call's reply
+alone for at most a quarter of a second, so a wedged driver never stalls the
+service, though its endpoint, the watch and the tree wait meanwhile: a wedged
+sensor costs the fan a reading, which runs it. Every such call goes through
+`tairix_rt::call_within`, the deadline call the block client shares. The configuration is followed through
 `tairix_rt::follow`, the one file-following engine it shares with the time
 service.
 

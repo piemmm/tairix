@@ -101,15 +101,15 @@ pub enum LimitKind {
     /// exhausting the heap for every other principal; live usage is its
     /// current armed count.
     DirWatches = 7,
-    /// Maximum bytes of kernel memory the process's own message ports and
-    /// call endpoints may reserve for queued messages
-    /// (`docs/src/architecture/resource-limits.md`).
+    /// Maximum bytes of kernel memory the process's IPC may hold
+    /// (`docs/src/architecture/resource-limits.md`): the bookkeeping of the
+    /// ports and call endpoints it binds, and every message and call it has
+    /// queued at any endpoint.
     ///
-    /// Each endpoint is charged its worst case when it is bound — its
-    /// capacity times its largest message, plus its bookkeeping — because
-    /// any sender may fill it and the bytes then sit in the kernel heap
-    /// until the owner drains them. The charge bounds the count of endpoints
-    /// as well as their depth; live usage is the bytes currently reserved.
+    /// The sender pays for what it queues — a message until the owner takes
+    /// it, a call until its reply is collected — so a sender's traffic can
+    /// never spend another process's budget, and the charge on its endpoints
+    /// bounds how many a process binds. Live usage is the bytes held now.
     IpcQueueBytes = 8,
     /// Maximum number of wait-sets the process may hold.
     WaitSets = 9,

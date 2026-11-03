@@ -51,12 +51,13 @@ write-protected device by either side alone.
 `RemoteBlock` is generic over `BlkCall`, one synchronous request/reply
 exchange with the serving block driver. The production implementation,
 `RtBlkCall`, calls the granted endpoint through `tairix_rt::call_within` —
-the one deadline call loop, which the cooling service shares — with the
-caller's own per-request deadline (derived from the device's declared
-medium, never a value the transport chooses for itself), parking on a
-`CallReply` wait-set rather than a busy poll when a reply is not yet ready.
-A wedged device therefore fails a transfer closed at its deadline instead of
-parking the caller forever, and a wait that fails withdraws the call.
+the one deadline call, which the cooling service shares — with the caller's
+own per-request deadline (derived from the device's declared medium, never a
+value the transport chooses for itself). The transfer is posted and that call
+alone awaited (`call_await`), so a consumer with transfers outstanding on
+several devices is never woken for another device's answer, and a wedged
+device fails a transfer closed at its deadline instead of parking the caller
+forever.
 
 A served device need not declare a medium the ABI recognises, so what the
 completion carries is an `Option<BlkMedium>`: a medium word this version does
@@ -68,17 +69,6 @@ envelope a paravirtual device gets. `device_class` therefore reports the class
 the device is *served as*, derived from the medium it declared, while
 `medium` reports what it actually said, which a layer over the client
 inherits.
-
-That wait-set is the transport's own: made on first use with its endpoint's
-`CallReply` member and nothing else, and closed when the transport drops. The
-kernel keeps a member whose endpoint has ended ready, as the sign that it
-ended, so a set shared across the members of a multi-device consumer would
-leave every other device's transfers spinning on a removed device's member
-until they were answered; one set per transport confines that sign to the
-transport whose device ended, whose next call fails closed at its post. A set
-closed with its transport costs nothing past it, so the RAID composer, which
-reconnects a member device on every assembly attempt, holds a set per open
-member and no more.
 
 `RtBlkCall` builds on `tairix-rt`'s syscall wrappers, which themselves
 build cleanly on the host (the underlying syscall trap fails closed with a

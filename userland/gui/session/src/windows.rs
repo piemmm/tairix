@@ -159,6 +159,13 @@ pub const SAVE_INTO_TAKEN: EventId = EventId(20_034);
 /// The exact message [`SAVE_INTO_TAKEN`] is emitted with.
 pub const SAVE_INTO_TAKEN_MESSAGE: &str = "dropped save's folder taken";
 
+/// Event id of a window's presented frame the session could not show: the
+/// window keeps the pixels it had until it presents again.
+pub const FRAME_REFUSED: EventId = EventId(20_035);
+
+/// The exact message [`FRAME_REFUSED`] is emitted with.
+pub const FRAME_REFUSED_MESSAGE: &str = "window frame not shown";
+
 /// Event id of an application's own window brought forward with the keyboard
 /// on its request: it is at the front of the stack, moved there or already
 /// there, so what is pressed next lands on it.
@@ -1174,6 +1181,134 @@ pub struct ScreensaverServe<'a> {
     pub savers: &'a SaverCatalog,
 }
 
+/// The compositor's side of a window's presented frames, which
+/// [`WindowServer::latch`](tairix_window::WindowServer::latch) shows once a
+/// desktop frame.
+pub struct FrameShow<'a> {
+    /// The desktop shell, which maps a window on its first frame.
+    pub shell: &'a mut DesktopShell,
+    /// The compositor the frames are converted into.
+    pub compositor: &'a mut Compositor,
+    /// The session's served-window bookkeeping.
+    pub windows: &'a mut SessionWindows,
+    /// Whether a surface the user must answer holds the seat, so a window
+    /// first shown now goes beneath it.
+    pub seat_held: bool,
+}
+
+#[cfg(test)]
+impl ShellWindowHost<'_> {
+    /// Show a frame through this bridge's own parts, as the latch shows one.
+    pub(crate) fn window_presented(
+        &mut self,
+        window_id: u64,
+        surface: &DisplayMode,
+        frame: &[u8],
+        damage: &DamageList,
+    ) -> Result<(), Errno> {
+        tairix_window::FrameHost::window_presented(
+            &mut FrameShow {
+                shell: &mut *self.shell,
+                compositor: &mut *self.compositor,
+                windows: &mut *self.windows,
+                seat_held: self.seat_held,
+            },
+            window_id,
+            surface,
+            frame,
+            damage,
+        )
+    }
+}
+
+impl tairix_window::FrameHost for FrameShow<'_> {
+    fn window_presented(
+        &mut self,
+        window_id: u64,
+        surface: &DisplayMode,
+        frame: &[u8],
+        damage: &DamageList,
+    ) -> Result<(), Errno> {
+        let Some(record) = self.windows.records.get(&window_id) else {
+            return Err(Errno::NotFound);
+        };
+        let wm = record.wm;
+        // Only the damaged pixels are converted, into the compositor's one
+        // copy, and only those the conversion changed are marked dirty. The
+        // frame's own mode sizes that copy, so a frame drawn at a geometry the
+        // window manager has since left still lands. The rows go across the
+        // machine's cores: the app declares the damage, so this is the one
+        // pass the session cannot bound.
+        let runner = self.compositor.job_runner();
+        let Some(result) = self.compositor.present_window_content(
+            wm,
+            surface.width_px,
+            surface.height_px,
+            |content, changed| {
+                winframe::decode_list(frame, content, surface, damage, runner, |rect| {
+                    changed.add(rect);
+                })
+            },
+        ) else {
+            return Err(Errno::NotFound);
+        };
+        result?;
+        // A shown frame is what the frame-report gate classifies.
+        if !self.windows.presented.contains(&window_id) {
+            self.windows.presented.push(window_id);
+        }
+        // A window that never presented is mapped before the frame first
+        // carrying it is composed. A released one awaiting its pixels again
+        // is left as the user left it, minimised or not.
+        let map = self
+            .windows
+            .records
+            .get_mut(&window_id)
+            .is_some_and(|record| {
+                record.presented_extent = Some((surface.width_px, surface.height_px));
+                let unpresented = record.first_frame == FirstFrame::Unpresented;
+                if matches!(
+                    record.first_frame,
+                    FirstFrame::Unpresented | FirstFrame::Awaited
+                ) {
+                    record.first_frame = FirstFrame::Painted;
+                }
+                unpresented
+            });
+        // Beneath a surface holding the seat, and without the keyboard, so
+        // nothing can open its way into the keys typed at a prompt.
+        if map {
+            if self.seat_held {
+                self.shell.map_window_behind(self.compositor, wm);
+            } else {
+                self.shell.map_window(self.compositor, wm);
+            }
+        }
+        Ok(())
+    }
+
+    fn frame_refused(&mut self, window_id: u64, errno: Errno) {
+        tairix_log::log(
+            self.shell.audit(),
+            &tairix_log::Event {
+                level: tairix_log::Level::Warn,
+                id: FRAME_REFUSED,
+                message: FRAME_REFUSED_MESSAGE,
+                fields: &[
+                    Field {
+                        key: "window",
+                        value: FieldValue::UnsignedInt(window_id),
+                    },
+                    Field {
+                        key: "reason",
+                        value: FieldValue::SignedInt(i64::from(errno.as_i32())),
+                    },
+                ],
+            },
+        );
+    }
+}
+
 /// The [`WindowHost`] bridge one serve pass borrows: the desktop shell,
 /// the compositor, the session's window table, and the trusted picker
 /// slot a validated `PickFile` opens.
@@ -1857,97 +1992,6 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
                 height_px: height,
                 state: WindowSizeState::Restored,
             });
-        }
-        Ok(())
-    }
-
-    fn window_presented(
-        &mut self,
-        window_id: u64,
-        surface: &DisplayMode,
-        frame: &[u8],
-        damage: &DamageList,
-    ) -> Result<(), Errno> {
-        let Some(record) = self.windows.records.get(&window_id) else {
-            return Err(Errno::NotFound);
-        };
-        let wm = record.wm;
-        // Convert exactly the damaged pixels of the presented frame
-        // directly into the compositor's own window surface — the single
-        // owned copy — and mark dirty only the pixels the conversion
-        // genuinely changed, so an app that repaints its whole
-        // composition for a one-row highlight costs one row of
-        // recomposition rather than a whole window. The presented mode is
-        // what that surface is sized from, so a frame drawn at a geometry
-        // the window manager has already moved on from still lands: the
-        // frame around the client is the session's, the pixels inside it
-        // are the app's. The engine validated the damage against the
-        // window's surface and handed a frame slice sized from the mode,
-        // but every index the conversion uses is still checked: a
-        // disagreement refuses the present rather than reading out of
-        // bounds, and refuses it before writing anything. A window the
-        // compositor no longer knows, or one whose pixels cannot be
-        // allocated, fails closed.
-        //
-        // The rows go across the machine's cores, because this is the one
-        // whole-window pass the session cannot bound: the app declares the
-        // damage, so a client that repaints everything makes the desktop
-        // convert everything. Read back rather than installed here, so the
-        // conversion and the composite share one answer about how wide the
-        // machine is.
-        let runner = self.compositor.job_runner();
-        let Some(result) = self.compositor.present_window_content(
-            wm,
-            surface.width_px,
-            surface.height_px,
-            |content, changed| {
-                winframe::decode_list(frame, content, surface, damage, runner, |rect| {
-                    changed.add(rect);
-                })
-            },
-        ) else {
-            return Err(Errno::NotFound);
-        };
-        result?;
-        // A successful present is what the frame-report gate classifies: the
-        // Switchboard measuring itself must not re-excite a report.
-        if !self.windows.presented.contains(&window_id) {
-            self.windows.presented.push(window_id);
-        }
-        // The window now holds the app's own pixels, so the next frame the
-        // display takes is the one that shows it. Only a window awaiting its
-        // pixels moves on; one already on screen stays announced.
-        //
-        // A window that had never presented is also mapped here, before the
-        // frame is composed — so the frame that first carries it is the one
-        // that puts it on screen, and the announcement above still follows
-        // pixels the display took. A *released* window is only awaiting its
-        // pixels again and is left exactly as the user left it, minimised or
-        // not: a present must never un-minimise a window that keeps painting.
-        let map = self
-            .windows
-            .records
-            .get_mut(&window_id)
-            .is_some_and(|record| {
-                record.presented_extent = Some((surface.width_px, surface.height_px));
-                let unpresented = record.first_frame == FirstFrame::Unpresented;
-                if matches!(
-                    record.first_frame,
-                    FirstFrame::Unpresented | FirstFrame::Awaited
-                ) {
-                    record.first_frame = FirstFrame::Painted;
-                }
-                unpresented
-            });
-        // A window first shown while the seat is held goes beneath the
-        // surface holding it and takes no keyboard, so nothing can open its
-        // way into the keys typed at a prompt.
-        if map {
-            if self.seat_held {
-                self.shell.map_window_behind(self.compositor, wm);
-            } else {
-                self.shell.map_window(self.compositor, wm);
-            }
         }
         Ok(())
     }

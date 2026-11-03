@@ -76,9 +76,9 @@ mod program {
     };
     use tairix_rt::io::write_stderr_line;
 
-    /// Outstanding-call capacity of the ingress endpoint (a fail-closed memory
-    /// bound on queued, not-yet-serviced records).
-    const CAPACITY: usize = 16;
+    /// Records one client may have queued at the ingress endpoint and not yet
+    /// serviced (a fail-closed memory bound, paid by that client).
+    const CALLER_DEPTH: usize = 16;
 
     /// The journal's own ingest-lane CPU identity for the records it stamps at
     /// the user-space IPC boundary (records arriving over IPC have no
@@ -296,7 +296,7 @@ mod program {
             &empty,
             LOG_INGRESS_MAX_REQUEST,
             LOG_INGRESS_REPLY_LEN,
-            CAPACITY,
+            CALLER_DEPTH,
         );
         if bound != 0 {
             // Could not publish (already bound, or no registry): fail closed;

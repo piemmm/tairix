@@ -59,7 +59,9 @@ pub use rt::{
     RtDeviceMemory, RtDisplay, RtDisplayTransport, RtMapping, RtSharedBuffer, RtShmMapper,
     RtShmRegion,
 };
-pub use scanout::{damage_list, scanout_len, sub_screen_damage, ChannelOrder};
+pub use scanout::{
+    add_damage, damage_list, scanout_len, stale_frames, sub_screen_damage, ChannelOrder,
+};
 // The runner contract and the calling-thread runner a window-frame conversion
 // names, re-exported so a program that converts its own frame does not take a
 // second dependency to spell one constant (one definition, as `tairix_wm`

@@ -78,7 +78,7 @@ fn endpoint() -> Arc<CallEndpoint> {
             CallEndpointLimits {
                 max_request: u32::try_from(FSSERVE_REQUEST_MAX).unwrap(),
                 max_reply: u32::try_from(FSSERVE_REPLY_MAX).unwrap(),
-                capacity: 4,
+                per_sender: 4,
             },
             tairix_abi::RLIMIT_INFINITY,
             &SINK,

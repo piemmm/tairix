@@ -292,18 +292,18 @@ mod program {
 
         fn owe(&mut self, damage: &Region) {
             let mode = self.mode();
-            self.owed.owe(&mode, Repaint::Reported, damage);
+            self.owed
+                .owe(&mode, Repaint::reported_if(!damage.is_empty()), damage);
         }
 
         /// Paint what is owed through `paint`, each rectangle under its own
-        /// clip, and present them; nothing while the session holds none of
-        /// the window's pixels.
+        /// clip, and present them; nothing while the window is hidden.
         fn present(
             &mut self,
             client: &mut Client,
             paint: impl Fn(&mut Surface),
         ) -> Result<(), Errno> {
-            if self.pane.content_released() {
+            if client.is_hidden(self.id()) {
                 return Ok(());
             }
             let mode = self.mode();

@@ -63,11 +63,12 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use tairix_abi::ipc::PortName;
-use tairix_abi::Errno;
+use tairix_abi::{Errno, ProcId};
 use tairix_log::{Field, Sink};
 use tairix_util::fmt::format_hex_u64;
 
 use crate::audit::{record, AuditEvent};
+use crate::lanes::RoomWake;
 use crate::port::{EndpointId, Port};
 
 /// A map from [`EndpointId`] to the kernel-owned [`Port`] bound to it,
@@ -223,8 +224,15 @@ impl PortRegistry {
     /// port is destroyed (racing senders fail closed), and the audit
     /// trail records every step. A task that exits, faults, or is killed
     /// therefore never leaves a mailbox behind for a later task to
-    /// squat on or drain.
-    pub fn teardown_owned_by<S: Sink + ?Sized>(&mut self, owner: u64, audit: &S) {
+    /// squat on or drain. The senders parked for room at each port it tears
+    /// down are handed to `woken`: their destination is gone, and they are
+    /// the only threads it concerns.
+    pub fn teardown_owned_by<S: Sink + ?Sized>(
+        &mut self,
+        owner: u64,
+        audit: &S,
+        mut woken: impl FnMut(RoomWake<ProcId>),
+    ) {
         // Collect first: removal mutates the map.
         let reclaimed: Vec<EndpointId> = self
             .ports
@@ -233,12 +241,25 @@ impl PortRegistry {
             .map(|(&id, _)| id)
             .collect();
         for id in reclaimed {
+            if let Some(port) = self.ports.get(&id) {
+                woken(port.room_wake_everyone());
+            }
             // The id was collected from the live map above and nothing
             // else mutates it between (the registry is behind its lock),
             // so the unregister cannot miss; a `NotFound` would be a
             // registry bug and is deliberately not swallowed silently
             // into a different behaviour — `unregister` audits each step.
             let _ = self.unregister(id, audit);
+        }
+    }
+
+    /// Note at every port that the process instance `sender` has ended
+    /// ([`Port::sender_ended`]): what it left queued stays deliverable within
+    /// the room each port's owner set aside, and nothing it waited for room
+    /// with is woken.
+    pub fn sender_ended<S: Sink + ?Sized>(&self, sender: ProcId, audit: &S) {
+        for port in self.ports.values() {
+            port.sender_ended(sender, audit);
         }
     }
 
@@ -399,6 +420,49 @@ mod tests {
         .expect("unrestricted port creation succeeds")
     }
 
+    /// Tearing an owner's ports down wakes exactly the senders waiting at
+    /// those ports, never one waiting anywhere else: an exit is not a
+    /// broadcast.
+    #[test]
+    fn teardown_wakes_only_the_senders_waiting_at_the_ports_it_destroys() {
+        let sink = RecordingSink::new();
+        let mut reg = PortRegistry::new();
+        for (id, owner) in [(0x10, 5), (0x11, 6)] {
+            let port = Port::create(
+                EndpointId(id),
+                &task_with(owner, &[]),
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                64,
+                4,
+                tairix_abi::RLIMIT_INFINITY,
+                &sink,
+            )
+            .expect("bound");
+            reg.register(port, &sink)
+                .map_err(|(_, e)| e)
+                .expect("registered");
+        }
+        let sender = ProcId::from_raw([9; tairix_abi::PROC_ID_LEN]);
+        for (id, task) in [(0x10, 0xA), (0x11, 0xB)] {
+            reg.lookup(EndpointId(id))
+                .expect("registered")
+                .watch_room(task, sender)
+                .expect("recorded");
+        }
+        let mut woken = Vec::new();
+        reg.teardown_owned_by(5, &sink, |wake| woken.extend(wake.tasks()));
+        assert_eq!(woken, [0xA]);
+        assert!(!reg.contains(EndpointId(0x10)));
+        let kept: Vec<u64> = reg
+            .lookup(EndpointId(0x11))
+            .expect("still registered")
+            .room_wake_for(sender)
+            .tasks()
+            .collect();
+        assert_eq!(kept, [0xB], "the other port's waiter is untouched");
+    }
+
     #[test]
     fn new_registry_is_empty() {
         let reg = PortRegistry::new();
@@ -457,7 +521,8 @@ mod tests {
         let sender = task_with(2, &[]);
 
         let port = reg.lookup(EndpointId(5)).expect("bound port is found");
-        port.send(&sender, b"ping", &sink).expect("send succeeds");
+        port.send(&sender, b"ping", tairix_abi::RLIMIT_INFINITY, &sink)
+            .expect("send succeeds");
 
         let msg = reg
             .lookup(EndpointId(5))

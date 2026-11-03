@@ -14,7 +14,6 @@ use tairix_abi::driver::i2c::{
 };
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::HwProperty;
-use tairix_abi::ipc::IPC_CALL_CAPACITY_MAX;
 use tairix_abi::{Errno, ProcId, PROC_ID_HEX_LEN};
 use tairix_caps::CapabilitySet;
 use tairix_drvrt::exit::{end, step, DriverExit};
@@ -31,6 +30,10 @@ const EVENT_CLOSED: EventId = EventId(24_103);
 const EVENT_ABANDONED: EventId = EventId(24_104);
 const EVENT_FAULTED: EventId = EventId(24_105);
 const EVENT_REFUSED: EventId = EventId(24_106);
+
+/// Calls one consumer may hold at once: each blocks on its own transfer, so a
+/// consumer holds one per calling thread, and a further thread waits its turn.
+const CONSUMER_DEPTH: usize = 4;
 
 /// The I²C controller node the driver running with `caps` was loaded for.
 ///
@@ -85,14 +88,12 @@ pub fn serve<B: I2cBus>(node: &DutyNode, bus: B) -> i32 {
         endpoint,
     );
     let mut request = [0u8; I2C_MAX_REQUEST];
-    // Each consumer blocks on its own call, so the containment bound is the
-    // only bound.
     let service = Service::bind(
         Endpoint {
             id: endpoint,
             request: &mut request,
             max_reply: I2C_MAX_REPLY,
-            capacity: IPC_CALL_CAPACITY_MAX,
+            per_sender: CONSUMER_DEPTH,
         },
         &[],
     );

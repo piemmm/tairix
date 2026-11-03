@@ -69,8 +69,9 @@ mod program {
     use tairix_procinfo::IpcTransport;
     use tairix_rt::{File, LogSink};
 
-    /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
-    const CAPACITY: usize = 8;
+    /// Calls one client may hold at the endpoint (a fail-closed memory bound,
+    /// paid by that client): a run is one call, one per calling thread.
+    const CALLER_DEPTH: usize = 8;
 
     /// Wait-set token for "a glyph request is waiting on the endpoint".
     const REQUEST_TOKEN: u64 = 0;
@@ -207,7 +208,7 @@ mod program {
             &empty,
             FontRequest::WIRE_LEN,
             FONT_MAX_GLYPH_REPLY,
-            CAPACITY,
+            CALLER_DEPTH,
         ) != 0
         {
             record(

@@ -217,6 +217,9 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 162 | `view_bind`    | `user_ptr` (`ViewBindRequest`), `len`   | `errno`       | — (in-service)          | yes     |
 | 163 | `view_unbind`  | `user_ptr` (target), `len`              | `errno`       | — (in-service)          | yes     |
 | 164 | `image_attach` | `u32 fd`, `user_ptr` (`ImageAttach`), `len`, `user_ptr` (`ImageAttachReply` out), `len` | `u64` (bytes) | — (in-service: the descriptor's authority) | yes |
+| 165 | `archive_read` | `u64 volume`, `u32 region`, `u64 offset`, `user_ptr` (dest), `len` | `u64` (bytes) | `CAP_FS_SERVE` | no |
+| 166 | `archive_write` | `u64 volume`, `u32 region`, `u64 offset`, `user_ptr` (src), `len` | `errno` | `CAP_FS_SERVE` | no |
+| 167 | `call_await`   | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (reply), `len` | `u64` (bytes) | — | no |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -1124,7 +1127,12 @@ owner and two `CapabilitySet` wire images naming the capability a caller must
 hold to post (`send_caps`) and the capability the server must hold to serve
 (`recv_caps`); binding a restricted-sender endpoint (non-empty `send_caps`)
 requires `CAP_IPC_BIND_PRIVILEGED`, and an id already bound fails closed with
-`AlreadyExists` (the kernel never re-points a live endpoint). An id in a link
+`AlreadyExists` (the kernel never re-points a live endpoint). Its last argument
+is the per-caller depth: how many calls one caller process may hold
+outstanding, each paid for by that caller, never a total callers share
+([per-sender lanes](./ipc.md#per-sender-lanes)). A blocking `ipc_call` whose
+caller already holds that many parks until one of them retires, rather than
+failing. An id in a link
 supplier's block is bindable only by the holder of the node's duty naming it,
 whatever the role (`plans/SUPPLIERS.md` SL1), and the endpoint registry
 reports each such bind and unbind to the hardware tree, whose node then states
@@ -1162,19 +1170,31 @@ the **asynchronous** caller half — the client-side split of `ipc_call` that
 lets one task drive many endpoints at once and never park forever on a wedged
 callee (`plans/FIX-IO.md` IO1). `call_post` posts a request without blocking,
 arms a per-request one-shot deadline, and writes the correlating ticket out;
-`call_reap` is the non-blocking claim (`WouldBlock` while pending, `TimedOut`
+`call_post` answers `WouldBlock` when the caller already holds the
+endpoint's per-caller depth, and `LimitExceeded` when the call would carry it
+past its own `ipc-queue-bytes` limit; `call_reap` is the non-blocking claim
+(`WouldBlock` while pending, `TimedOut`
 once the deadline elapses — the ticket is then retired, `NotFound` for a
 cancelled/torn-down/foreign ticket, the reply bytes otherwise); `call_cancel`
-withdraws one outstanding ticket. Between reaps the caller parks on a wait-set
+withdraws one outstanding ticket, waking the thread awaiting it. Between reaps the caller parks on a wait-set
 member of kind `WaitSourceKind::CallReply` (added under the caller's *send*
 authority to the endpoint, ready when a reply the caller posted lands **or**
 its deadline elapses), so a caller multiplexes every device's completions and
-timeouts on one wait-set with no blocking thread per device. They carry the
-same endpoint send-capability and per-endpoint grant checks as `ipc_call` (no
-new authority); `call_post` is audited like `ipc_call`, `call_reap` /
-`call_cancel` are not (the client's high-volume drain loop). The first-party
-Rust wrappers are `tairix_rt::{call_post, call_reap, call_cancel}`; the C
-stubs are `tairix_sys_call_post` / `tairix_sys_call_reap` /
+timeouts on one wait-set with no blocking thread per device. Such a member is
+ready for *any* of the process's replies on that endpoint, so a caller that
+wants one call's answer awaits it with `call_await` (no. 167) instead: the
+reap's outcomes, less `WouldBlock`, with the thread parked until that call
+alone is answered, its deadline passes, or the endpoint ends —
+`Interrupted` once the process is being killed. The reply wakes whichever of
+the process's threads awaits it, and its poster; a call is awaited by one
+thread at a time, so a second thread awaiting it is refused `Busy`. They carry
+the same endpoint
+send-capability and per-endpoint grant checks as `ipc_call` (no new
+authority); `call_post` is audited like `ipc_call`, `call_reap` /
+`call_await` / `call_cancel` are not (the client's high-volume drain loop).
+The first-party Rust wrappers are
+`tairix_rt::{call_post, call_reap, call_await, call_cancel}`; the C stubs are
+`tairix_sys_call_post` / `tairix_sys_call_reap` / `tairix_sys_call_await` /
 `tairix_sys_call_cancel`. The volume manager's block transport and the kernel
 filesystem block client are the first consumers.
 
@@ -1669,18 +1689,20 @@ to, and the add applies the *send*-authority check `ipc_send` itself
 applies — the caller here is the sender, not the binder, so the `Port`
 kind's owner check does not fit. An unknown port and one the caller may
 not send to refuse with the same oracle-free `NotFound`. The member is
-ready when a send would **not** be refused for want of room: the mailbox
-is below capacity, the port is gone, or the caller no longer holds the
-send authority — the last two because a sender parked on either would wait
+ready when a send would **not** be refused for want of room: the caller's
+own lane at the port is below the port's per-sender depth, the port is gone,
+or the caller no longer holds the send authority — the last two because a sender parked on either would wait
 forever, and an unconditionally-ready member tells an unauthorised caller
 nothing about the mailbox. Readiness is a non-consuming, **level-triggered**
 peek; the woken sender's own `ipc_send` takes the slot. Level rather than
 an edge on the occupancy falling, because the member is armed *after* a
 send was refused: an edge seeded at that moment would already have passed
 if the receiver drained in between. The wake is **targeted** — a port
-records the tasks parked for its room, and a committed `ipc_recv` names
-exactly them, so a busy mailbox never disturbs an unrelated waiter — with
-one broadcast on port teardown, when the record dies with the port. Only
+records each task parked for its room with the process it waits as, and a
+committed `ipc_recv` names exactly the tasks waiting as the sender whose
+message it took, so a busy port never disturbs an unrelated waiter — with a
+broadcast on port teardown, when the record dies with the port, and one when
+more wait as a sender than a wake names. Only
 sets that contain a `PortRoom` member join the room wake queue. This is
 what lets the desktop hold an app-ward event a full mailbox refused (a
 window resize, a file-picker conclusion) and deliver it when the app
@@ -2172,7 +2194,7 @@ else a process of the caller's **own principal** (kernel-attested owner
 uid) needs none, else only a holder of **`CAP_PROC_CONTROL`** may act on
 another principal's process. On top of that target rule sits one more
 gate: **raising** service — asking for a level that outranks the one the
-scheduler currently records (`SchedPriority::outranks`) — always
+target's principal set (`SchedPriority::outranks`) — always
 requires `CAP_PROC_CONTROL`, whatever the target, so no user can weight
 their own work above other principals' fair share; lowering and
 re-stating the current level (an idempotent success) follow the plain
@@ -2184,15 +2206,23 @@ raise attempt — additionally emits one `PROCESS_PRIORITY_CHANGE` record
 (audit id 4037, [kernel audit events](kernel.md)) naming the caller task
 id, the target's pid and task id, the requested level, the deciding
 rule, and whether it was a raise; an own-child lowering stays unrecorded,
-exactly as own-child signal delivery does. The recorded level takes
-effect at the target's **next enqueue** through the one
-`SchedulerPolicy::set_priority` / `priority` contract every policy
+exactly as own-child signal delivery does. The level is the
+**process's** (`tairix_kernel_sec::ProcessLevel`, held with its threads):
+every thread of the target is brought to it, and a thread created later
+joins at it. It takes effect at each thread's **next enqueue** through the
+one `SchedulerPolicy::set_priority` / `priority` contract every policy
 implements (CFQ and EEVDF re-derive their 4:2:1 fair-share weight from
 it on every enqueue; MLFQ places the task in that band *now*, its
 demotion and anti-starvation boost rules still apply afterwards — the
 starvation guarantee is never suspended to pin a task low, see
-[the scheduler page](./scheduler.md)). A non-positive or unknown `pid`,
-or a target the scheduler has already drained, fails closed with
+[the scheduler page](./scheduler.md)). A process holding a seat's display
+(`display_acquire`) runs in the `High` band for exactly as long as it
+holds one — released, revoked or unplugged, it drops back to the level
+its principal set, one set meanwhile included — so the session that owns
+the screen keeps its frames however busy the applications under it are;
+that band is the kernel's, not a level anyone set, and raising the set
+level still needs the capability. A non-positive or unknown `pid`, or a
+target none of whose threads the scheduler still knows, fails closed with
 `NotFound` — never a guess — and a call before the process-signal
 producer is installed fails closed with `NotImplemented`. The reported
 level is observable: the sysinfo process record carries each process's

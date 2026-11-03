@@ -42,6 +42,12 @@ used by the compositing window manager (`userland/gui/wm`), the taskbar
   holds exactly as many as were counted. Marking costs a tile's bit however many changes
   land on it, so a scattered change (a screensaver's cells, a ray tracer's
   passes) is named as a few rectangles rather than thousands.
+- `StaleFrames` — what each frame of a presentation ring lacks of the picture:
+  a change is owed to every frame but the one it was drawn in, and
+  `bring_up_to_date` hands a frame everything it lacks before it carries a
+  present, owing nothing on if the update is refused. The display client keeps
+  its frames current through it and a window client its two frames, so both
+  copy the size of the changes rather than of the picture.
 - `desktop_modes` — the sizes a graphical desktop may take on an output: its
   native size first, then each standard VESA/CEA size smaller on both axes,
   no smaller than `DESKTOP_MIN`, within 1% of the output's shape. The session
@@ -71,7 +77,7 @@ vocabulary.
 ## Stability tier
 
 `experimental` — the Stage 7 desktop geometry seam. It is `no_std` with
-`alloc` and has no dependencies: `Region` and `Tiles` hold their rectangles
-and bits on the heap (a `Tiles` the heap refuses is `None`), and the rest
+`alloc` and has no dependencies: `Region`, `StaleFrames` and `Tiles` hold
+their rectangles and bits on the heap (a `Tiles` the heap refuses is `None`), and the rest
 allocates nothing. No `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).

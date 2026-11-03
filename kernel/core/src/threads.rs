@@ -434,6 +434,11 @@ where
             let _ = sched.stop(thread.0);
         }
     }
+    // Under the write lock, so a level changing meanwhile reaches this thread
+    // either here or through the change's own collection of the threads.
+    if let Some(level) = caps.level_of(process) {
+        let _ = sched.set_priority(thread.0, crate::sched::priority_of_level(level.effective()));
+    }
     Ok(())
 }
 
@@ -815,6 +820,44 @@ mod tests {
                 crate::procsignal::clear_kill_gate(id);
                 tairix_kernel_sched_api::release_task_id(id);
             }
+        }
+    }
+
+    /// A thread born into a process joins it at the level its threads run at,
+    /// whatever level the thread was spawned at.
+    #[test]
+    fn a_registering_thread_joins_its_processs_level() {
+        let sched = scheduler();
+        let body = |_: &mut tairix_kernel_sched_api::TaskContext| {
+            tairix_kernel_sched_api::TaskAction::Yield
+        };
+        let leader = sched.spawn(0, Priority::Normal, body).expect("admitted");
+        let newborn = sched
+            .spawn_parked(0, Priority::Normal, body)
+            .expect("admitted");
+        let (caps, _aspaces) = group_with_a_sibling(leader, newborn + 1);
+        crate::procsignal::clear_kill_gate(newborn);
+        crate::procsignal::install_gate(newborn, ProcessId(leader)).expect("a gate installs");
+        let level = caps
+            .read()
+            .level_of(ProcessId(leader))
+            .expect("a live group");
+        level.change().set(tairix_abi::SchedPriority::Low);
+        assert_eq!(
+            register_unless_dying(
+                &caps,
+                &sched,
+                SecTaskId(leader),
+                SecTaskId(newborn),
+                ProcessId(leader)
+            ),
+            Ok(())
+        );
+        assert_eq!(sched.priority(newborn), Ok(Priority::Low));
+        crate::procsignal::clear_kill_gate(newborn);
+        for id in [leader, newborn + 1] {
+            crate::procsignal::clear_kill_gate(id);
+            tairix_kernel_sched_api::release_task_id(id);
         }
     }
 
