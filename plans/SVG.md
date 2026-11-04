@@ -42,7 +42,7 @@ opens a drawing as a document.
 | S24 | `<text>` and `<tspan>`: the `x`/`y`/`dx`/`dy`/`rotate` lists, `text-anchor`, white-space and `xml:space`, `letter-spacing`/`word-spacing`, `textLength`/`lengthAdjust` | done |
 | S25 | The text property cascade beyond the `font-*` family: the baselines (`dominant-baseline`, `alignment-baseline`, `baseline-shift`), `text-decoration` | planned |
 | S26 | `<textPath>`: glyphs laid along a path, `startOffset`, `method`, `spacing`, `side` | planned |
-| S27 | Bidirectional text and shaping: UAX#9, `direction`/`unicode-bidi`, OpenType `GSUB`/`GPOS`, `writing-mode` and vertical text | planned |
+| S27 | Bidirectional text and shaping over the shared engine (`plans/BROWSER.md` BR3, built with this item if it comes first): `direction`/`unicode-bidi`, `writing-mode` and vertical text | planned |
 | S28 | The SVG 1.1 text leftovers: `<tref>`, and SVG fonts (`<font>`, `<glyph>`, `<altGlyph>`) | planned |
 | S29 | `<image>`: `href` and `data:` URIs, its own `preserveAspectRatio`, decoded through `lib/image` inside the parser sandbox, with a nested-document recursion bound | planned |
 | S30 | The filter region and graph: `<filter>`, `filterUnits`, `primitiveUnits`, the region rectangle, `color-interpolation-filters`, the artwork-tree filter node and the renderer's evaluator | planned |

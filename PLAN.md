@@ -162,7 +162,7 @@ plan's ledger. A `blocked` row names its blocker.
 | ZEROCONF | mDNS / DNS-SD and WS-Discovery: `discoveryd`, the `lib/discovery` client and catalogue, `dns-sd` (`plans/ZEROCONF.md`) | in progress |
 | SMB | SMB 3 network shares: `lib/smb`, the `smbfs` service, private and placed mounts, `mount -t smb`, `smbtree` (`plans/SMB.md`) | in progress |
 | KERBEROS | The Kerberos 5 client and its GSS-API mechanism (`plans/KERBEROS.md`) | planned |
-| TELNET | The `telnet` client (`plans/TELNET.md`) | blocked: T2 needs a TLS stream transport over `lib/crypto` |
+| TELNET | The `telnet` client (`plans/TELNET.md`) | blocked: T2 needs the TLS client engine, `lib/tls` (`plans/BROWSER.md` BR1) |
 | SSH | The SSH client, server and tools (`plans/SSH.md`) | in progress |
 | NETMAP | `netmap.app`, the network map and inventory, and the neighbour/route/traceroute read seams it needs (`plans/NETMAP.md`) | in progress |
 
@@ -189,6 +189,7 @@ plan's ledger. A `blocked` row names its blocker.
 | VIEW | The picture and document viewer (`plans/VIEW.md`) | in progress |
 | TEXTEDIT | `TextEdit.app`, the desktop editor, and the desktop facilities it needed (`plans/TEXTEDIT.md`) | blocked: TE13 needs a VFS primitive that replaces a file's content atomically through a held descriptor |
 | PAINT | `Paint.app`, the desktop image editor, and the shared document host (`plans/PAINT.md`) | in progress |
+| BROWSER | The first-party web browser, its JavaScript engine, and the TLS, HTTP, text-shaping and URL facilities it needs (`plans/BROWSER.md`) | planned |
 
 ### Desktop
 

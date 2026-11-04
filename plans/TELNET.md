@@ -200,9 +200,10 @@ Key facts for the next worker:
 
 ### T2 — `telnet` over TLS-fronted transports `[ ]`
 
-Not started, and deliberately not designed here. When `lib/crypto`'s TLS
-surface fronts a stream socket, a `telnets`-class transport becomes an
-in-place extension of `TelnetIo::connect` rather than a second client (§2.13).
+Not started, and deliberately not designed here. When `lib/tls`
+(`plans/BROWSER.md` BR1) fronts a stream socket, a `telnets`-class transport
+becomes an in-place extension of `TelnetIo::connect` rather than a second
+client (§2.13).
 It is named only so a future worker knows where it would go.
 
 ## 5. Tests, docs, and gate (binding)
