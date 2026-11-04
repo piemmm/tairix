@@ -2,6 +2,7 @@
 //! it binds and how it opens the volume that node's grant names.
 
 use tairix_abi::driver::block::Block;
+use tairix_abi::driver::filesystem::WriteRefusal;
 use tairix_abi::driver::DriverBindKey;
 use tairix_abi::volume::{FormatName, VolumeFsType};
 use tairix_abi::DriverError;
@@ -20,11 +21,15 @@ impl ServedFormat for Served {
 
     fn open<B: Block>(
         volume: B,
-        _read_only: bool,
+        read_only: bool,
         _budget: WritebackBudget,
     ) -> Result<Opened<Fat32<B>>, DriverError> {
+        let mut fs = Fat32::open(volume)?;
+        if read_only {
+            fs.refuse_writes(WriteRefusal::OpenedReadOnly);
+        }
         Ok(Opened {
-            fs: Fat32::open(volume)?,
+            fs,
             format: FormatName::Fat32,
             write_refusal: None,
         })

@@ -1275,7 +1275,7 @@ mod program {
                 open_and_pick(app, theme, scale);
                 return Routed::Served;
             }
-            WindowEvent::AppBarMenu { item } if tairix_window::is_quit(*item) => {
+            WindowEvent::AppBarMenu { item, .. } if tairix_window::is_quit(*item) => {
                 for window in app.windows.drain(..) {
                     window.close(app.client);
                 }
@@ -1494,6 +1494,7 @@ mod program {
             | WindowEvent::Minimized { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::AppBarEntered { .. }
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }

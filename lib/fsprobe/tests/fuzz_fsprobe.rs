@@ -148,7 +148,7 @@ fn exercise(bytes: Vec<u8>, block_size: u32, layout: Option<DiscLayout>) {
         let _ = (volume.label(), volume.identity(), volume.span_bytes());
     }
     if let Ok(Some(layout)) = adfs::identify(&mut dev) {
-        let _ = (layout.name(), layout.identity());
+        let _ = (layout.name(), layout.label(), layout.identity());
         if let adfs::Layout::NewMap { record, .. } = layout {
             let _ = record.map_offset();
             let nzones = u32::from(record.nzones);

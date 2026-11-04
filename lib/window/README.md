@@ -21,7 +21,9 @@ server and every app's client can never drift apart.
   so a client presenting faster than the desktop draws costs one conversion
   a frame, and no present waits on the desktop's frame work. A resize or a
   release drops what it supersedes, and a frame the host cannot show is
-  reported to it once, its change carried to the window's next present. A
+  reported to it once until the window next shows one and is tried again
+  with the next frame the desktop composes, never asking for one of its own;
+  a later present carries its change as well. A
   `SetBackdropBlur` takes the same owner check and reaches the same
   bridge (`WindowHost::backdrop_blur_set`), so an app frosts the backdrop
   of its own window and of no other. A `Present`, `SetBackdropBlur`, or
@@ -239,8 +241,10 @@ server and every app's client can never drift apart.
   from the caller's surface with what the other frame was presented with since
   (`tairix_geometry::StaleFrames`, the record the display client keeps for its
   own frames), converts the named rectangles through the one window-frame
-  codec, and presents exactly those. It re-attaches a released region and
-  sends it whole, and presents nothing while the window is hidden.
+  codec, and presents exactly those, drawing only once the window's previous
+  present is answered (`FrameRing`), since the session reads that frame until
+  then. It re-attaches a released region and sends it whole, and presents
+  nothing while the window is hidden or while the re-attach waits for room.
   `resize`'s ordering is the load-bearing part: the
   spare region is created and granted *first* and adopted only once the
   session has accepted the resize, so a refusal drops the spare and leaves the

@@ -1540,6 +1540,7 @@ fn the_reference_driver_supports_every_facet_method() {
     conformance::assert_security_forwards(&mut fs);
     conformance::assert_stats_forwards(&mut fs);
     conformance::assert_attrs_forwards(&mut fs);
+    conformance::assert_label_forwards(&mut fs);
 }
 
 #[test]
@@ -1557,6 +1558,7 @@ fn the_cache_forwards_every_facet_method() {
     conformance::assert_security_forwards(&mut cache);
     conformance::assert_stats_forwards(&mut cache);
     conformance::assert_attrs_forwards(&mut cache);
+    conformance::assert_label_forwards(&mut cache);
 }
 
 #[test]

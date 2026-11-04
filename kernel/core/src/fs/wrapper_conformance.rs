@@ -3,7 +3,7 @@
 //! A `Filesystem*` implementation that *wraps* an inner driver — the
 //! cache ([`CachedFs`](super::CachedFs)), the storage-group identity map,
 //! the boxed type-erased mount driver, a counting test shim — owes its
-//! inner's whole surface. Four of the facet methods carry trait defaults
+//! inner's whole surface. Six of the facet methods carry trait defaults
 //! that answer [`DriverError::Unsupported`] so a *format* with no such
 //! object can refuse honestly; in a wrapper that same default is a refusal
 //! the wrapper invented, and it fails closed, so nothing crashes and no
@@ -36,9 +36,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::boxed::Box;
 
 use tairix_abi::driver::filesystem::{
-    AllocationClass, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
-    FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeKind, NodeSecurity,
-    SecurityAcl, SecuritySubject, Unpinned, VolumeHost,
+    AllocationClass, DirVisit, FilesystemAttrsProvider, FilesystemLabel, FilesystemRead,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity,
+    NodeKind, NodeSecurity, SecurityAcl, SecuritySubject, Unpinned, VolumeHost, VolumeTitle,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_abi::{CapabilityId, SeekRegion};
@@ -513,6 +513,16 @@ pub fn assert_unrecorded_security_mapped<W: FilesystemRead + FilesystemSecurity 
 /// [`FilesystemStats`] reaches the inner driver.
 pub fn assert_stats_forwards<W: FilesystemStats + ?Sized>(wrapper: &mut W) {
     wrapper.stats().expect("`stats` is not being forwarded");
+}
+
+/// The volume's title is set and read back through the wrapper, on its inner
+/// driver.
+pub fn assert_label_forwards<W: FilesystemLabel + ?Sized>(wrapper: &mut W) {
+    let title = VolumeTitle::new("Conformance").expect("a title");
+    wrapper
+        .set_label(&title)
+        .expect("`set_label` is not being forwarded");
+    assert_eq!(wrapper.label(), Ok(title), "`label` is not being forwarded");
 }
 
 /// The attribute facet is handed out, and all four of its methods reach

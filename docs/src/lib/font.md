@@ -227,6 +227,12 @@ cut, so a shadow cut by an edge draws exactly the pixels the whole one would,
 and a run of any length costs no more memory than the surface it lands on. A
 block that cannot be allocated draws no shadow; the ink is still drawn.
 
+Text drawn the same way again and again — a desktop's names over a picture —
+need not be blurred each time: `BitmapFont::keep_run_shadow` blurs a run's
+shadow whole into a `KeptShadow`, and `KeptShadow::draw` lays it down wherever
+the run is drawn, through the same clip, drawing exactly the pixels
+`draw_run_shadow` draws there.
+
 `draw_run` draws a run given as pieces — a name, the ellipsis that ends it,
 the tail kept after the mark — as one: their shadow goes down as one block
 before any of their ink, so no piece's shadow lands on a neighbour's strokes,

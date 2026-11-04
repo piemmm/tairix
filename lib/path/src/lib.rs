@@ -201,6 +201,16 @@ pub struct Path {
 }
 
 impl Path {
+    /// The root of the volume `id`, nothing below it: `id::<volume-id>/`,
+    /// which names that volume and no other whatever alias it is shown by.
+    #[must_use]
+    pub const fn of_volume(id: VolumeId) -> Self {
+        Self {
+            root: Root::VolumeId(id),
+            components: Vec::new(),
+        }
+    }
+
     /// The root this path is anchored to.
     #[must_use]
     pub fn root(&self) -> &Root {
@@ -1150,6 +1160,19 @@ mod tests {
         assert_eq!(
             bare.prefix(0).as_deref(),
             Some("id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/")
+        );
+    }
+
+    #[test]
+    fn a_volumes_root_is_the_parse_of_its_canonical_spelling() {
+        let root = Path::of_volume(VolumeId::from_bytes(VOLUME_ID_BYTES));
+        let spelled = alloc::format!("id::{VOLUME_ID_TEXT}/");
+        assert_eq!(root.to_string(), spelled);
+        assert_eq!(parse(&spelled), Ok(root.clone()));
+        assert!(root.components().is_empty());
+        assert_eq!(
+            root.volume_id(),
+            Some(&VolumeId::from_bytes(VOLUME_ID_BYTES))
         );
     }
 

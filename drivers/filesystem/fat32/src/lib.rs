@@ -41,6 +41,11 @@
 //! every FAT mutation is mirrored across all FAT copies. No
 //! `unwrap`/`expect`/`panic!` and no `unsafe`.
 //!
+//! The volume label ([`FilesystemLabel`]) is read as the volume probe reads
+//! it and written to both places FAT keeps it: the root directory's label
+//! entry, where the probe reads it, and the boot sector's `BS_VolLab`, with
+//! its backup's.
+//!
 //! A file the kernel pins ([`FilesystemRead::pin`]) is reported under a token
 //! until its last unpin, since its own id is where its entry lies and a rename
 //! moves that; a removal deletes a pinned file's entry but keeps its chain
@@ -59,12 +64,14 @@
 
 use tairix_abi::driver::block::{Block, MAX_BLOCK_LEN};
 use tairix_abi::driver::filesystem::{
-    DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
-    FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind,
-    NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats,
+    DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemLabel, FilesystemRead,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity,
+    NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats, VolumeTitle,
+    WriteRefusal,
 };
 use tairix_abi::fs::FS_NAME_MAX;
 use tairix_abi::time::{DosTime, Time64};
+use tairix_abi::volume::VolumeFsType;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_bytedev::ByteDevice;
 use tairix_collections::RadixTree;
@@ -422,8 +429,7 @@ pub struct Fat32<B: Block> {
     /// open and maintained by the allocator and the chain-free path, so
     /// [`FilesystemStats::stats`] never re-scans the FAT.
     free_clusters: u64,
-    /// The volume's stable 16-byte identity, derived from the BPB volume
-    /// serial and label (see [`Fat32::volume_identity`]).
+    /// The volume's stable 16-byte identity (see [`Fat32::volume_identity`]).
     identity: [u8; 16],
     /// Where the last listing batch stopped in its directory's chain, so the
     /// next batch walks on from there rather than from the first cluster:
@@ -435,6 +441,10 @@ pub struct Fat32<B: Block> {
     host: Option<&'static dyn VolumeHost>,
     /// The kernel's holds on the mount's nodes.
     pins: Pins,
+    /// Why the volume takes no writes, once a reason is found: it is served
+    /// read-only, or a retitle failed part-way and may have left the copies
+    /// of its label disagreeing.
+    refusal: Option<WriteRefusal>,
 }
 
 /// The kernel's holds on a mount's nodes.
@@ -671,17 +681,12 @@ struct FileFacts {
     holder: Holder,
 }
 
-/// The volume's stable 16-byte identity, derived from the boot sector:
-/// the BPB volume serial + label when the extended boot signature declares
-/// them, else zeros. The one derivation lives in `lib/fsprobe`
-/// ([`tairix_fsprobe::fat32_identity_from_boot`]), which the volume
-/// manager's signature probe shares, so a probe-side fingerprint always
-/// names the identity this driver publishes.
-use tairix_fsprobe::fat32_identity_from_boot as identity_from_boot;
 use tairix_fsprobe::{
-    Fat32Bpb, FAT_ATTR_LONG_NAME as ATTR_LONG_NAME, FAT_ATTR_VOLUME_ID as ATTR_VOLUME_ID,
+    Fat32Bpb, Recognised, FAT32_BOOT_LABEL_AT as BOOT_LABEL_AT, FAT32_EXT_BOOT_SIG as EXT_BOOT_SIG,
+    FAT32_EXT_BOOT_SIG_AT as EXT_BOOT_SIG_AT, FAT32_SERIAL_AT as SERIAL_AT,
+    FAT_ATTR_LONG_NAME as ATTR_LONG_NAME, FAT_ATTR_VOLUME_ID as ATTR_VOLUME_ID,
     FAT_DELETED_ENTRY as DELETED_ENTRY, FAT_DIR_ENTRY_LEN as DIR_ENTRY_LEN,
-    FAT_END_OF_DIR as END_OF_DIR,
+    FAT_END_OF_DIR as END_OF_DIR, FAT_LABEL_LEN as LABEL_LEN, FAT_NO_LABEL as NO_LABEL,
 };
 
 /// One linear FAT scan counting the free data clusters, run once at open;
@@ -767,6 +772,18 @@ fn pick_cluster_bytes(total_bytes: u64, bps: u64) -> u64 {
 
 /// `FSInfo` sector (BPB offset 48): the format's customary sector 1.
 const FSINFO_SECTOR: u16 = 1;
+
+/// Boot-sector offset of the backup boot sector's number (`BPB_BkBootSec`).
+const BACKUP_BOOT_AT: usize = 50;
+
+/// `text`, at most [`LABEL_LEN`] bytes, as a label field: space padded.
+fn label_field(text: &[u8]) -> [u8; LABEL_LEN] {
+    let mut field = [b' '; LABEL_LEN];
+    for (slot, &byte) in field.iter_mut().zip(text) {
+        *slot = byte;
+    }
+    field
+}
 
 /// Backup boot sector (BPB offset 50): the format's customary sector 6,
 /// with the `FSInfo` copy at the following sector.
@@ -931,14 +948,16 @@ fn is_live_long_fragment(raw: &[u8; DIR_ENTRY_LEN]) -> bool {
     raw[0] != END_OF_DIR && raw[0] != DELETED_ENTRY && raw[11] == ATTR_LONG_NAME
 }
 
+/// The punctuation a short name may hold beside its letters and digits.
+const SHORT_NAME_PUNCTUATION: &[u8] = b"$%'-_@~`!(){}^#&";
+
 /// Map a name byte to a valid 8.3 short-name byte: ASCII letters are
-/// upper-cased, digits and a small safe set pass through, and everything
-/// else (including non-ASCII) becomes `_`.
+/// upper-cased, digits and [`SHORT_NAME_PUNCTUATION`] pass through, and
+/// everything else (including non-ASCII) becomes `_`.
 fn sanitize_short_char(byte: u8) -> u8 {
-    const SAFE: &[u8] = b"$%'-_@~`!(){}^#&";
     if byte.is_ascii_alphanumeric() {
         byte.to_ascii_uppercase()
-    } else if SAFE.contains(&byte) {
+    } else if SHORT_NAME_PUNCTUATION.contains(&byte) {
         byte
     } else {
         b'_'
@@ -1235,7 +1254,7 @@ impl LongName {
 
 impl<B: Block> Fat32<B> {
     /// Validate the FAT32 boot sector on `block` and bring the volume
-    /// online read-only.
+    /// online.
     ///
     /// FAT type is identified by the FAT32 boot-sector shape — a zero
     /// 16-bit FAT size and a zero root-entry count — rather than by
@@ -1288,7 +1307,7 @@ impl<B: Block> Fat32<B> {
             return Err(DriverError::BadMagic);
         }
 
-        let identity = identity_from_boot(&boot);
+        let identity = bpb.identity();
         let free_clusters = count_free_clusters(&mut dev, fat_start_byte, max_cluster)?;
 
         Ok(Self {
@@ -1309,20 +1328,35 @@ impl<B: Block> Fat32<B> {
             seek: None,
             host: None,
             pins: Pins::default(),
+            refusal: None,
         })
     }
 
-    /// The volume's stable 16-byte identity.
+    /// The volume's stable 16-byte identity, exactly as the volume probe
+    /// derives it ([`Fat32Bpb::identity`]).
     ///
-    /// FAT32 has no UUID, so this is content-derived: the BPB volume
-    /// serial (4 bytes) and label (11 bytes) when the extended boot
-    /// signature declares them, zero otherwise, closed by a constant tag
-    /// byte so the identity is never the reserved all-zero value. Stable
-    /// across re-inserts (the serial and label live on the medium);
+    /// FAT32 has no UUID, so this is content-derived: a digest of the BPB
+    /// volume serial, where the extended boot signature declares one, and
+    /// the geometry formatting fixes, neither of which a write or a relabel
+    /// changes. Stable across re-inserts, since both live on the medium;
     /// honestly weaker than a real UUID, as the format is.
     #[must_use]
     pub fn volume_identity(&self) -> [u8; 16] {
         self.identity
+    }
+
+    /// Refuse every change for `why`, whatever the volume would allow: a
+    /// volume served read-only.
+    pub(crate) fn refuse_writes(&mut self, why: WriteRefusal) {
+        self.refusal.get_or_insert(why);
+    }
+
+    /// Refuse a change once the volume takes no writes.
+    fn writable(&self) -> Result<(), DriverError> {
+        match self.refusal {
+            Some(_) => Err(DriverError::ReadOnly),
+            None => Ok(()),
+        }
     }
 
     /// Lay down a fresh, empty FAT32 volume on `block` and bring it
@@ -1414,6 +1448,7 @@ impl<B: Block> Fat32<B> {
             fat_count: num_fats,
             fat_sectors,
             root_cluster: 2,
+            serial: Some(serial.to_le_bytes()),
         };
         let fat_start_byte = bpb.fat_start_byte();
         let fat_size_bytes = fat_sectors * bps64;
@@ -1440,10 +1475,10 @@ impl<B: Block> Fat32<B> {
         put_le32(&mut boot, 36, fat_size_32);
         put_le32(&mut boot, 44, bpb.root_cluster);
         put_le16(&mut boot, 48, FSINFO_SECTOR);
-        put_le16(&mut boot, 50, BACKUP_BOOT_SECTOR);
-        boot[66] = 0x29; // extended boot signature
-        boot[67..71].copy_from_slice(&serial.to_le_bytes());
-        boot[71..82].copy_from_slice(b"NO NAME    ");
+        put_le16(&mut boot, BACKUP_BOOT_AT, BACKUP_BOOT_SECTOR);
+        boot[EXT_BOOT_SIG_AT] = EXT_BOOT_SIG;
+        boot[SERIAL_AT..BOOT_LABEL_AT].copy_from_slice(&serial.to_le_bytes());
+        boot[BOOT_LABEL_AT..BOOT_LABEL_AT + LABEL_LEN].copy_from_slice(&label_field(NO_LABEL));
         boot[82..90].copy_from_slice(b"FAT32   ");
         boot[510] = 0x55;
         boot[511] = 0xAA;
@@ -2335,28 +2370,7 @@ impl<B: Block> Fat32<B> {
             return Err(DriverError::NoSpace);
         }
         let checksum = short_name_checksum(&short);
-
-        // The end-of-entries mark moves to the slot after the entry. It is
-        // found before anything is written, so a broken chain fails the
-        // create cleanly, and written first, so the old mark ends the
-        // directory until the entry is whole. Past the chain's end no mark is
-        // needed: the clusters the entry grows into are zeroed.
-        if run.at_end {
-            let mut after = run.start;
-            let mut in_chain = true;
-            for _ in 0..total_slots {
-                in_chain = self.settle(&mut after)?;
-                if !in_chain {
-                    break;
-                }
-                after.intra += DIR_ENTRY_LEN as u64;
-                after.slot += 1;
-            }
-            if in_chain && after.slot < u64::from(MAX_DIR_SLOTS) && self.settle(&mut after)? {
-                self.dev
-                    .write(self.slot_byte(after), &[0u8; DIR_ENTRY_LEN])?;
-            }
-        }
+        self.mark_end_after(run, total_slots)?;
 
         // Physical order: the highest sequence (flagged last-logical) is
         // written first, descending to sequence 1, then the short entry.
@@ -2375,6 +2389,33 @@ impl<B: Block> Fat32<B> {
             span: total_slots,
             short_offset,
         })
+    }
+
+    /// Move the end-of-entries mark from `run`'s first slot, where an entry
+    /// of `slots` slots is about to go, to the slot after it. The mark is
+    /// found before anything is written, so a broken chain fails the change
+    /// cleanly, and written first, so the old mark ends the directory until
+    /// the entry is whole. Past the chain's end no mark is needed: the
+    /// clusters an entry grows into are zeroed.
+    fn mark_end_after(&mut self, run: FreeRun, slots: u64) -> Result<(), DriverError> {
+        if !run.at_end {
+            return Ok(());
+        }
+        let mut after = run.start;
+        let mut in_chain = true;
+        for _ in 0..slots {
+            in_chain = self.settle(&mut after)?;
+            if !in_chain {
+                break;
+            }
+            after.intra += DIR_ENTRY_LEN as u64;
+            after.slot += 1;
+        }
+        if in_chain && after.slot < u64::from(MAX_DIR_SLOTS) && self.settle(&mut after)? {
+            self.dev
+                .write(self.slot_byte(after), &[0u8; DIR_ENTRY_LEN])?;
+        }
+        Ok(())
     }
 
     /// Shared implementation of [`FilesystemWrite::write_at`].
@@ -2924,19 +2965,23 @@ impl<B: Block> FilesystemWrite for Fat32<B> {
         kind: NodeKind,
         _record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
+        self.writable()?;
         // FAT keeps no owner or mode, so the record has nowhere to go.
         self.create_child(dir, name, kind)
     }
 
     fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
+        self.writable()?;
         self.write_file(file, offset, data)
     }
 
     fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
+        self.writable()?;
         self.truncate_file(file, size)
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
+        self.writable()?;
         self.remove_child(dir, name)
     }
 
@@ -2947,6 +2992,7 @@ impl<B: Block> FilesystemWrite for Fat32<B> {
         dst_dir: NodeId,
         dst_name: &[u8],
     ) -> Result<(), DriverError> {
+        self.writable()?;
         self.rename_child(src_dir, src_name, dst_dir, dst_name)
     }
 
@@ -3003,6 +3049,205 @@ impl<B: Block> FilesystemStats for Fat32<B> {
             files: 0,
             files_free: 0,
         })
+    }
+}
+
+/// What a retitle writes in the root directory, decided before anything is
+/// written.
+#[derive(Clone, Copy)]
+enum EntryWrite {
+    /// These bytes over the label entry at this device byte: the new label,
+    /// or the entry deleted.
+    Over(u64, RawEntry),
+    /// A new label entry, these bytes, in this free run.
+    New(FreeRun, RawEntry),
+    /// Nothing: there is no label entry to delete.
+    Nothing,
+}
+
+/// Whether `raw` is a volume label entry, read as the volume probe reads
+/// one: the label attribute on an entry that is no long-name fragment.
+fn is_label(raw: &RawEntry) -> bool {
+    raw[11] & ATTR_LONG_NAME != ATTR_LONG_NAME && raw[11] & ATTR_VOLUME_ID != 0
+}
+
+/// `title` as a label field, or `None` for the empty title, which is no
+/// label. A label spells what a short name may — upper-case ASCII letters,
+/// digits, spaces and [`SHORT_NAME_PUNCTUATION`] — in at most eleven bytes,
+/// and neither opens nor closes with the space that pads the field. A
+/// lower-case letter is refused rather than folded, any other character
+/// because FAT records no code page to spell it in, and the placeholder
+/// formatters write for no label because it reads back as none.
+fn label_of(title: &VolumeTitle) -> Result<Option<[u8; LABEL_LEN]>, DriverError> {
+    let text = title.as_str().as_bytes();
+    let spelt = |byte: &u8| {
+        byte.is_ascii_uppercase()
+            || byte.is_ascii_digit()
+            || *byte == b' '
+            || SHORT_NAME_PUNCTUATION.contains(byte)
+    };
+    if !text.iter().all(spelt) || text.starts_with(b" ") || text.ends_with(b" ") || text == NO_LABEL
+    {
+        return Err(DriverError::OutOfRange);
+    }
+    if text.len() > LABEL_LEN {
+        return Err(DriverError::LengthOutOfRange);
+    }
+    Ok((!text.is_empty()).then(|| label_field(text)))
+}
+
+impl<B: Block> Fat32<B> {
+    /// What retitling the volume to `field` writes in its root directory,
+    /// within the first `window` bytes the volume probe reads the label from
+    /// ([`Fat32Bpb::label_window`]), so the probe, and
+    /// [`FilesystemLabel::label`] through it, read back what is written: the
+    /// first label entry before the entries end, rewritten or, for `None`,
+    /// deleted; with none, a new one in the first deleted slot or at the end
+    /// of the entries.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NoSpace`] for a new label entry the window has no slot
+    /// for.
+    fn entry_write(
+        &mut self,
+        window: usize,
+        field: Option<[u8; LABEL_LEN]>,
+    ) -> Result<EntryWrite, DriverError> {
+        let slots = (window / DIR_ENTRY_LEN) as u64;
+        let mut walk = DirCursor::at(self.layout.root_cluster);
+        let mut free = None;
+        while walk.pos.slot < slots {
+            let Some((at, raw)) = self.next_slot(&mut walk)? else {
+                break;
+            };
+            match raw[0] {
+                END_OF_DIR => {
+                    free.get_or_insert(FreeRun {
+                        start: at,
+                        at_end: true,
+                    });
+                    break;
+                }
+                DELETED_ENTRY => {
+                    free.get_or_insert(FreeRun {
+                        start: at,
+                        at_end: false,
+                    });
+                }
+                _ if is_label(&raw) => {
+                    let at = self.slot_byte(at);
+                    return Ok(EntryWrite::Over(at, self.relabelled(raw, field)));
+                }
+                _ => {}
+            }
+        }
+        match (free, field) {
+            (_, None) => Ok(EntryWrite::Nothing),
+            (Some(run), Some(field)) => {
+                let stamps = EntryStamps::at(self.now());
+                let raw = Self::build_short_entry(&field, ATTR_VOLUME_ID, 0, 0, stamps);
+                Ok(EntryWrite::New(run, raw))
+            }
+            (None, Some(_)) => Err(DriverError::NoSpace),
+        }
+    }
+
+    /// The label entry `raw` holding `field`, its last-write stamp now, or
+    /// deleted for `None`.
+    fn relabelled(&self, mut raw: RawEntry, field: Option<[u8; LABEL_LEN]>) -> RawEntry {
+        let Some(field) = field else {
+            raw[0] = DELETED_ENTRY;
+            return raw;
+        };
+        let stamps = EntryStamps {
+            written: self.written_now(),
+            ..EntryStamps::of(&raw)
+        };
+        Self::build_short_entry(&field, raw[11], 0, 0, stamps)
+    }
+
+    /// Where the boot sector `boot` and its backup keep the label
+    /// (`BS_VolLab`), each only where its extended boot signature declares the
+    /// field; the backup is read here.
+    fn boot_label_copies(
+        &mut self,
+        boot: &[u8; 512],
+        bpb: &Fat32Bpb,
+    ) -> Result<[Option<u64>; 2], DriverError> {
+        let declared = |sector: &[u8; 512]| sector[EXT_BOOT_SIG_AT] == EXT_BOOT_SIG;
+        let primary = declared(boot).then_some(BOOT_LABEL_AT as u64);
+        let backup = u64::from(le16(boot, BACKUP_BOOT_AT));
+        if backup == 0 || backup >= bpb.reserved_sectors {
+            return Ok([primary, None]);
+        }
+        let at = backup * u64::from(bpb.bytes_per_sector);
+        let mut copy = [0u8; 512];
+        self.dev.read(at, &mut copy)?;
+        let kept = Fat32Bpb::parse(&copy).is_some() && declared(&copy);
+        Ok([primary, kept.then_some(at + BOOT_LABEL_AT as u64)])
+    }
+
+    /// Write `kept` where `copies` say the boot sectors keep the label, then
+    /// `entry`: the root's label entry, which readers prefer, last.
+    fn write_label(
+        &mut self,
+        entry: EntryWrite,
+        copies: [Option<u64>; 2],
+        kept: &[u8; LABEL_LEN],
+    ) -> Result<(), DriverError> {
+        for at in copies.into_iter().flatten() {
+            self.dev.write(at, kept)?;
+        }
+        match entry {
+            EntryWrite::Over(at, raw) => self.dev.write(at, &raw),
+            EntryWrite::New(run, raw) => {
+                self.mark_end_after(run, 1)?;
+                let mut pos = run.start;
+                self.put_slot(&mut pos, &raw)?;
+                Ok(())
+            }
+            EntryWrite::Nothing => Ok(()),
+        }
+    }
+}
+
+/// FAT keeps a volume's label twice: in the root directory's label entry,
+/// which readers prefer, and in the boot sector and its backup. A retitle
+/// reads and refuses before it writes anything, then writes the boot
+/// sectors' copies and the entry last; one failing once it has begun
+/// writing leaves the volume refusing writes, damaged.
+impl<B: Block> FilesystemLabel for Fat32<B> {
+    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
+        let Some(Recognised::Volume(volume)) = tairix_fsprobe::recognise(&mut self.dev)? else {
+            return Err(DriverError::BadMagic);
+        };
+        if volume.fstype != VolumeFsType::Fat32 {
+            return Err(DriverError::BadMagic);
+        }
+        // FAT records no code page, so a byte past ASCII names no character.
+        if !volume.label().is_ascii() {
+            return Err(DriverError::OutOfRange);
+        }
+        let text = core::str::from_utf8(volume.label()).map_err(|_| DriverError::OutOfRange)?;
+        VolumeTitle::new(text).map_err(DriverError::from_errno)
+    }
+
+    fn set_label(&mut self, title: &VolumeTitle) -> Result<(), DriverError> {
+        let field = label_of(title)?;
+        self.writable()?;
+        let mut boot = [0u8; 512];
+        self.dev.read(0, &mut boot)?;
+        let bpb = Fat32Bpb::parse(&boot).ok_or(DriverError::BadMagic)?;
+        let (_, window) = bpb.label_window().ok_or(DriverError::BadMagic)?;
+        let entry = self.entry_write(window, field)?;
+        let copies = self.boot_label_copies(&boot, &bpb)?;
+        let kept = field.unwrap_or_else(|| label_field(NO_LABEL));
+        let written = self.write_label(entry, copies, &kept);
+        if written.is_err() {
+            self.refusal = Some(WriteRefusal::Damaged);
+        }
+        written
     }
 }
 

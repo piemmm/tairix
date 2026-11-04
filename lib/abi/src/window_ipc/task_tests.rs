@@ -7,7 +7,7 @@ fn words(args: &[&str]) -> ElevateWords {
 
 fn authorise(task: &SystemTask) -> WindowRequest {
     WindowRequest::Authorise {
-        window_id: 7,
+        window_id: core::num::NonZeroU64::new(7),
         task: *task,
     }
 }
@@ -28,6 +28,10 @@ fn every_task_round_trips_and_costs_what_it_carries() {
         SystemTask::ShowAddressing,
         SystemTask::ShowAccounts,
         SystemTask::SetClock,
+        SystemTask::Eject(words(&[
+            "id::07070707-0707-0707-0707-070707070707/",
+            "usb1",
+        ])),
     ] {
         let request = authorise(&task);
         let (frame, len) = encoded(&request);
@@ -43,6 +47,7 @@ fn a_task_that_takes_words_is_refused_without_one_either_way() {
         SystemTask::Configure(ElevateWords::NONE),
         SystemTask::ChangeAccount(ElevateWords::NONE),
         SystemTask::SetPassword(ElevateWords::NONE),
+        SystemTask::Eject(ElevateWords::NONE),
     ] {
         let mut frame = [0u8; WindowRequest::MAX_WIRE_LEN];
         assert_eq!(authorise(&task).encode(&mut frame), Err(Errno::OutOfRange));
@@ -78,7 +83,7 @@ fn a_malformed_task_is_refused_whole() {
         WindowRequest::from_bytes(&unknown[..len]),
         Err(Errno::OutOfRange)
     );
-    unknown[block + KIND_AT] = KIND_SET_CLOCK + 1;
+    unknown[block + KIND_AT] = KIND_EJECT + 1;
     assert_eq!(
         WindowRequest::from_bytes(&unknown[..len]),
         Err(Errno::OutOfRange)
@@ -122,20 +127,29 @@ fn a_malformed_task_is_refused_whole() {
     );
 }
 
+/// No window is the caller's icon-bar slot, on the request, on the take of
+/// what it printed, and on the answer.
 #[test]
-fn an_authorisation_names_a_window() {
+fn an_authorisation_with_no_window_is_its_slots() {
     let (mut frame, len) = encoded(&authorise(&SystemTask::SetClock));
     frame[8..16].fill(0);
     assert_eq!(
         WindowRequest::from_bytes(&frame[..len]),
-        Err(Errno::OutOfRange)
+        Ok(WindowRequest::Authorise {
+            window_id: None,
+            task: SystemTask::SetClock,
+        })
     );
-    let (mut take, take_len) = encoded(&WindowRequest::TakeAuthorisedOutput { window_id: 7 });
-    take[8..16].fill(0);
-    assert_eq!(
-        WindowRequest::from_bytes(&take[..take_len]),
-        Err(Errno::OutOfRange)
-    );
+    let take = WindowRequest::TakeAuthorisedOutput { window_id: None };
+    let (frame, take_len) = encoded(&take);
+    assert_eq!(frame[8..16], [0; 8]);
+    assert_eq!(WindowRequest::from_bytes(&frame[..take_len]), Ok(take));
+    let answer = WindowEvent::Authorised {
+        window_id: None,
+        outcome: AuthorisedOutcome::Ran { exit_code: 0 },
+    };
+    assert_eq!(answer.window_id(), None, "addressed to the application");
+    assert_eq!(WindowEvent::from_bytes(&answer.to_le_bytes()), Ok(answer));
 }
 
 #[test]
@@ -156,7 +170,7 @@ fn every_outcome_round_trips_in_one_event() {
         AuthorisedOutcome::Declined,
     ] {
         let event = WindowEvent::Authorised {
-            window_id: 7,
+            window_id: Some(7),
             outcome,
         };
         assert_eq!(event.window_id(), Some(7));
@@ -168,7 +182,7 @@ fn every_outcome_round_trips_in_one_event() {
 fn an_outcome_states_only_what_its_case_carries() {
     let frame = |outcome| {
         WindowEvent::Authorised {
-            window_id: 7,
+            window_id: Some(7),
             outcome,
         }
         .to_le_bytes()

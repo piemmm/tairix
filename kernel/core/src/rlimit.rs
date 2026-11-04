@@ -127,9 +127,10 @@ const MIN_IPC_QUEUE_BYTES: u64 = 16 << 20;
 
 /// The default `LimitKind::IpcQueueBytes` policy: a sixteenth of RAM.
 ///
-/// An endpoint is charged its worst case, and any sender can make that case
-/// real, so the bound is what keeps one process from parking a large share of
-/// the kernel heap in queues; the busiest service reserves a few MiB.
+/// A sender pays for what it has queued and not yet seen taken, its lanes
+/// included, and an owner for its endpoints' bookkeeping, so the bound is what
+/// keeps one process from parking a large share of the kernel heap in queues;
+/// the busiest service reserves a few MiB.
 #[must_use]
 pub const fn default_ipc_queue_bytes(installed_memory_bytes: u64) -> u64 {
     derived_bound(installed_memory_bytes, 16, MIN_IPC_QUEUE_BYTES)

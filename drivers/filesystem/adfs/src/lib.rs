@@ -3,7 +3,7 @@
 //! Attaches an Acorn ADFS / RISC OS `FileCore` volume sitting behind any
 //! [`tairix_abi::driver::block::Block`] device and exposes it through the
 //! versioned [`FilesystemRead`], [`FilesystemWrite`], [`FilesystemAttrs`],
-//! and [`FilesystemStats`]
+//! [`FilesystemStats`] and [`FilesystemLabel`]
 //! surfaces (new behaviour ships as a new trait, never by widening the
 //! frozen mount/unmount
 //! [`Filesystem`](tairix_abi::driver::filesystem::Filesystem)). It reports
@@ -69,16 +69,16 @@
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
-    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
-    NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats,
-    WriteRefusal,
+    FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned,
+    VolumeHost, VolumeStats, VolumeTitle, WriteRefusal,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_bytedev::ByteDevice;
 use tairix_collections::{HashMap, RadixTree};
 use tairix_fsmeta::preset::acorn;
-use tairix_fsprobe::adfs::Layout;
+use tairix_fsprobe::adfs::{Layout, NAME_LEN};
 use tairix_hash::BuildSipHash13;
 
 mod bigdir;
@@ -405,8 +405,8 @@ pub struct Adfs<B: Block> {
     /// The kernel's holds on the mount's objects.
     pins: Pins,
     /// Why the volume is served read-only, once a reason is found: at open
-    /// for a short device, on loading a directory for one this driver will
-    /// not write back.
+    /// for a short device or a read-only grant, on loading a directory for
+    /// one this driver will not write back, or once a retitle fails part-way.
     refusal: Option<WriteRefusal>,
 }
 
@@ -789,6 +789,12 @@ impl<B: Block> Adfs<B> {
             Some(_) => Err(DriverError::ReadOnly),
             None => Ok(()),
         }
+    }
+
+    /// Refuse every change for `why`, whatever the volume would allow: a
+    /// volume served read-only.
+    pub(crate) fn refuse_writes(&mut self, why: WriteRefusal) {
+        self.refusal.get_or_insert(why);
     }
 
     /// The root directory's node.
@@ -2557,6 +2563,52 @@ impl<B: Block> FilesystemStats for Adfs<B> {
             }
         }
     }
+}
+
+/// The disc's title is its name: the ten bytes the disc record keeps, or the
+/// old map spells across its two sectors, read through the one decode the
+/// probe labels the volume with. A retitle the disc fails, reading its map or
+/// writing it, leaves the volume refusing writes, damaged.
+impl<B: Block> FilesystemLabel for Adfs<B> {
+    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
+        let layout = tairix_fsprobe::adfs::identify(&mut self.volume)?;
+        let (label, len) = layout.ok_or(DriverError::BadMagic)?.label();
+        let text = core::str::from_utf8(&label[..len]).map_err(|_| DriverError::OutOfRange)?;
+        VolumeTitle::new(text).map_err(DriverError::from_errno)
+    }
+
+    fn set_label(&mut self, title: &VolumeTitle) -> Result<(), DriverError> {
+        let name = disc_name(title)?;
+        self.may_write()?;
+        let stored = match &mut self.backing {
+            Backing::Old { .. } => {
+                let mut map = OldMap::load(&mut self.volume)?;
+                map.set_name(name);
+                map.store(&mut self.volume)
+            }
+            Backing::New { map, boot_block } => {
+                map.set_disc_name(&mut self.volume, *boot_block, name)
+            }
+        };
+        if stored.is_err() {
+            self.refusal = Some(WriteRefusal::Damaged);
+        }
+        stored
+    }
+}
+
+/// `title` as a disc name: RISC OS's Latin-1, space padded to the ten bytes
+/// both maps keep. A space would read back as padding and RISC OS's specials
+/// as syntax, so either is refused, as is a character its Latin-1 lacks.
+fn disc_name(title: &VolumeTitle) -> Result<[u8; NAME_LEN], DriverError> {
+    let mut name = [b' '; NAME_LEN];
+    for (index, ch) in title.as_str().chars().enumerate() {
+        let byte = acorn::name_byte(ch)
+            .filter(|&byte| byte != b' ' && !acorn::RESERVED_NAME_BYTES.contains(&byte))
+            .ok_or(DriverError::OutOfRange)?;
+        *name.get_mut(index).ok_or(DriverError::LengthOutOfRange)? = byte;
+    }
+    Ok(name)
 }
 
 /// ADFS records no owner, mode or ACL: every node reports the one record an

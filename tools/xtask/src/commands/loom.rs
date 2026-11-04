@@ -108,9 +108,11 @@ pub const TARGETS: &[Target] = &[
         build: Build::SwappedAtomics,
         description: "a port's lock-free send fast path against its destroy: no \
                       delivered message outlives the drain, and a port seen \
-                      closed stays closed; and no thread waiting for room or an \
+                      closed stays closed; no thread waiting for room or an \
                       answer is stranded by the drain, answer or withdrawal \
-                      racing its wait",
+                      racing its wait; a caller waiting unparked on the \
+                      settle count always finds its answer; and a wait for \
+                      budget never sleeps through the release it waits for",
     },
     Target {
         package: "tairix-kernel-sched-mlfq",

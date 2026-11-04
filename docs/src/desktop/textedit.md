@@ -113,7 +113,10 @@ trusted picker. Each surface opens it read-write where the user may write
 it and says which; a file the user may not write, or one on a read-only volume
 — every picture `/System` ships — is handed over read-only
 (`tairix_browse::document::open_for`), and an open the hand-over refuses is
-stated in an alert. Save writes back through the handed-over descriptor; a
+stated in an alert. A window opened for a document stays off the screen while
+the document is read in, so it first appears showing it; only a read still
+going after a second shows the window first, saying that it is opening. Save
+writes back through the handed-over descriptor; a
 read-only or untitled document's Save is a Save as, whose picker delegates a
 write-only descriptor to a new or confirmed-replaced file. A descriptor goes
 with the window that holds it, one inherited at launch included, so a resident

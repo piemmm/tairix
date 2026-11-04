@@ -28,7 +28,7 @@
 
 use crate::blkio::{BlkMedium, BLK_MEDIUM_LEN};
 use crate::driver::block::{DiscLayout, DiscardCapability, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE};
-use crate::driver::filesystem::MountFlags;
+use crate::driver::filesystem::{MountFlags, VolumeTitle, VOLUME_TITLE_MAX};
 use crate::fs::{is_component, FS_NAME_MAX};
 use crate::le::{exact_len, put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::sysinfo::MOUNT_TARGET_MAX;
@@ -398,6 +398,10 @@ pub const VOLUME_ATTACH_MAX_LEN: usize = ATTACH_FIXED_LEN + VOLUME_NAME_MAX;
 /// Encoded length of a [`VolumeDetachRequest`]: the volume identity plus
 /// the [`DetachMode`] byte.
 pub const VOLUME_DETACH_LEN: usize = VOLUME_ID_LEN + 1;
+
+/// Maximum encoded length of a [`VolumeRetitleRequest`]: the volume identity,
+/// the title's length byte, and the longest title.
+pub const VOLUME_RETITLE_MAX_LEN: usize = VOLUME_ID_LEN + 1 + VOLUME_TITLE_MAX;
 
 /// The most one `volume_read` or `volume_write` moves: one served window,
 /// so a driver reads the data a call asks for in one transfer.
@@ -1044,6 +1048,66 @@ impl VolumeDetachRequest {
     }
 }
 
+/// A request to title the volume published as `volume_id` `title`: the label
+/// its filesystem records. The kernel decides who may; the frame only carries
+/// what is asked.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct VolumeRetitleRequest {
+    /// The volume's stable 16-byte identity, as the forest published it.
+    pub volume_id: [u8; VOLUME_ID_LEN],
+    /// The title asked for, empty to clear it.
+    pub title: VolumeTitle,
+}
+
+impl VolumeRetitleRequest {
+    /// Encode `self` into `buf`, returning the number of bytes written: the
+    /// identity, the title's length byte, then its bytes.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] for the reserved all-zero identity.
+    /// * [`Errno::BufferTooSmall`] if `buf` cannot hold the encoding.
+    pub fn encode(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        if self.volume_id == [0u8; VOLUME_ID_LEN] {
+            return Err(Errno::OutOfRange);
+        }
+        let title = self.title.as_str().as_bytes();
+        let len = VOLUME_ID_LEN + 1 + title.len();
+        let out = buf.get_mut(..len).ok_or(Errno::BufferTooSmall)?;
+        out[..VOLUME_ID_LEN].copy_from_slice(&self.volume_id);
+        out[VOLUME_ID_LEN] = self.title.len_byte();
+        out[VOLUME_ID_LEN + 1..].copy_from_slice(title);
+        Ok(len)
+    }
+
+    /// Decode a retitle request from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::LengthOutOfRange`] if `bytes` is not exactly as long as its
+    ///   length byte says, or that is past [`VOLUME_TITLE_MAX`].
+    /// * [`Errno::OutOfRange`] for the reserved all-zero identity, or a title
+    ///   that is not text with no control character.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
+        let (id, rest) = bytes
+            .split_first_chunk::<VOLUME_ID_LEN>()
+            .ok_or(Errno::LengthOutOfRange)?;
+        let (&len, text) = rest.split_first().ok_or(Errno::LengthOutOfRange)?;
+        if usize::from(len) != text.len() || text.len() > VOLUME_TITLE_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if *id == [0u8; VOLUME_ID_LEN] {
+            return Err(Errno::OutOfRange);
+        }
+        let text = core::str::from_utf8(text).map_err(|_| Errno::OutOfRange)?;
+        let title = VolumeTitle::new(text).map_err(|_| Errno::OutOfRange)?;
+        Ok(Self {
+            volume_id: *id,
+            title,
+        })
+    }
+}
+
 /// The fixed part of a [`ViewBindRequest`]: the volume's identity, the
 /// narrowing (4), and the subtree's and target's lengths (2 each).
 const VIEW_BIND_FIXED_LEN: usize = VOLUME_ID_LEN + 8;
@@ -1505,6 +1569,73 @@ mod tests {
         let n = req.encode(&mut buf).expect("encodes");
         assert_eq!(n, VOLUME_ATTACH_MAX_LEN);
         assert_eq!(VolumeAttachRequest::decode(&buf[..n]), Ok(req));
+    }
+
+    /// A retitle frame round-trips, and fails closed on the nil identity, a
+    /// length byte the frame does not match, a title past its bound, and a
+    /// title that is no text.
+    #[test]
+    fn a_retitle_request_round_trips_and_fails_closed() {
+        let req = VolumeRetitleRequest {
+            volume_id: [3; VOLUME_ID_LEN],
+            title: VolumeTitle::new("Café Disc").expect("a title"),
+        };
+        let mut buf = [0u8; VOLUME_RETITLE_MAX_LEN];
+        let n = req.encode(&mut buf).expect("encodes");
+        assert_eq!(VolumeRetitleRequest::decode(&buf[..n]), Ok(req));
+        let cleared = VolumeRetitleRequest {
+            title: VolumeTitle::EMPTY,
+            ..req
+        };
+        let m = cleared.encode(&mut buf).expect("encodes");
+        assert_eq!(m, VOLUME_ID_LEN + 1);
+        assert_eq!(VolumeRetitleRequest::decode(&buf[..m]), Ok(cleared));
+
+        let n = req.encode(&mut buf).expect("encodes");
+        for short in [0, VOLUME_ID_LEN, n - 1] {
+            assert_eq!(
+                VolumeRetitleRequest::decode(&buf[..short]),
+                Err(Errno::LengthOutOfRange),
+                "{short} bytes"
+            );
+        }
+        assert_eq!(
+            VolumeRetitleRequest::decode(&buf[..=n]),
+            Err(Errno::LengthOutOfRange),
+            "trailing bytes"
+        );
+        let mut nil = buf;
+        nil[..VOLUME_ID_LEN].fill(0);
+        assert_eq!(
+            VolumeRetitleRequest::decode(&nil[..n]),
+            Err(Errno::OutOfRange)
+        );
+        for bad in [0x07, 0xFF] {
+            let mut corrupt = buf;
+            corrupt[VOLUME_ID_LEN + 1] = bad;
+            assert_eq!(
+                VolumeRetitleRequest::decode(&corrupt[..n]),
+                Err(Errno::OutOfRange),
+                "{bad:#x}"
+            );
+        }
+        let past = VOLUME_TITLE_MAX + 1;
+        let mut long = alloc::vec![3u8; VOLUME_ID_LEN];
+        long.push(u8::try_from(past).expect("a length byte"));
+        long.resize(VOLUME_ID_LEN + 1 + past, b'x');
+        assert_eq!(
+            VolumeRetitleRequest::decode(&long),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            VolumeRetitleRequest {
+                volume_id: [0; VOLUME_ID_LEN],
+                ..req
+            }
+            .encode(&mut buf),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(req.encode(&mut buf[..n - 1]), Err(Errno::BufferTooSmall));
     }
 
     #[test]

@@ -82,7 +82,9 @@ be un-elidable to be real.
 
 It is a type rather than a convention for two reasons. There is no `DerefMut`,
 so the plain ring's non-scrubbing pops are out of reach and no later edit can
-bypass the scrub by accident — reads reach through `Deref` unchanged. And
+bypass the scrub by accident — reads reach through `Deref` unchanged, and pushes
+at either end are its own, so a record taken off the front that never reached
+its reader goes back there, into a slot a scrub already blanked. And
 because every slot is initialised from construction onward, and a `Copy` element
 has no way to un-initialise one, `backing_store` can hand out the whole store,
 vacated slots included. That is what lets a holder's own test prove the scrub

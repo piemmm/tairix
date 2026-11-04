@@ -10,6 +10,7 @@ const SLOT: u32 = 24;
 fn needs(wells: usize) -> Needs {
     Needs {
         wells,
+        clear: false,
         picker: 300,
         colour_controls: 0,
         recents: 0,
@@ -381,4 +382,114 @@ fn the_colour_pane_stacks_its_wells_controls_picker_and_recent_colours() {
 
 fn layout_short(theme: &Theme, needs: Needs) -> Layout {
     layout(theme, 900, 440, needs)
+}
+
+#[test]
+fn the_strip_seats_its_pop_out_at_its_right_end() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let gap = tairix_geometry::to_i32(theme.metrics().control_gap);
+    for wells in [17, MOST_WELLS] {
+        let layout = layout(theme, 900, 640, needs(wells));
+        let (strip, pop_out) = (layout.palette(), layout.pop_out());
+        assert_eq!(pop_out.right(), strip.right() - gap, "{wells}: at its end");
+        assert_eq!(
+            (pop_out.top(), pop_out.bottom()),
+            (strip.top() + gap, strip.bottom() - gap),
+            "{wells}: as tall as its inside"
+        );
+        assert_eq!(pop_out.width, pop_out.height, "{wells}: square");
+        for beside in [layout.wells_view(), layout.palette_bar()] {
+            assert!(
+                beside.is_empty() || beside.right() < pop_out.left(),
+                "{wells}: clear of the wells and their bar"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_floating_palette_is_a_near_square_grid_beside_the_window() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let mut panes = Arrangement::default();
+    panes.float(PaneKind::Palette);
+    let colours = Needs {
+        clear: true,
+        ..needs(17)
+    };
+    let floating = arranged(theme, 900, 640, colours, &panes);
+    assert_eq!(floating.columns(), 4, "sixteen colours four across");
+    let wells = floating.swatches();
+    assert_eq!(
+        (wells.width, wells.height),
+        (4 * MOST_WELL, 5 * MOST_WELL),
+        "the clear ink on a row of its own"
+    );
+    assert_eq!(floating.wells_view(), wells, "it never scrolls");
+    assert!(floating.palette_bar().is_empty() && floating.pop_out().is_empty());
+    let frame = floating.pane(PaneKind::Palette).expect("floating").frame;
+    assert_eq!(floating.palette(), frame);
+    assert_eq!(wells.intersection(&frame), wells);
+    assert!(
+        frame.intersection(&floating.window()).is_empty(),
+        "beside the window"
+    );
+    let docked = layout(theme, 900, 640, colours);
+    assert!(
+        floating.canvas().height > docked.canvas().height,
+        "the strip's room is the canvas's"
+    );
+}
+
+#[test]
+fn a_full_palette_floats_sixteen_across() {
+    let registry = ThemeRegistry::with_builtins();
+    let mut panes = Arrangement::default();
+    panes.float(PaneKind::Palette);
+    for (clear, rows) in [(false, 16), (true, 17)] {
+        let full = Needs {
+            clear,
+            ..needs(256 + usize::from(clear))
+        };
+        let floating = arranged(registry.active(), 900, 640, full, &panes);
+        assert_eq!(floating.columns(), 16, "masked: {clear}");
+        assert_eq!(
+            floating.swatches().height,
+            rows * MOST_WELL,
+            "masked: {clear}"
+        );
+    }
+}
+
+#[test]
+fn a_hidden_palette_claims_no_strip() {
+    let registry = ThemeRegistry::with_builtins();
+    let mut panes = Arrangement::default();
+    panes.hide(PaneKind::Palette);
+    let hidden = arranged(registry.active(), 900, 640, needs(17), &panes);
+    assert!(hidden.palette().is_empty() && hidden.wells_view().is_empty());
+    assert!(hidden.pop_out().is_empty());
+    assert_eq!(hidden.pane(PaneKind::Palette), None);
+    assert_eq!(hidden.horizontal_bar().bottom(), hidden.status().top());
+}
+
+#[test]
+fn the_least_window_lays_out_the_strip_it_was_floored_on() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let (width, height) = Layout::min_size(
+        theme,
+        Scale::ONE,
+        Faces::of(theme, Scale::ONE),
+        floor(),
+        |_| 1,
+    );
+    let least = layout(theme, width, height, needs(MOST_WELLS));
+    assert!(!least.pop_out().is_empty(), "the strip seats its pop-out");
+    assert_eq!(
+        least.canvas().height,
+        MIN_CANVAS,
+        "the strip is exactly as tall as the floor allowed it"
+    );
 }

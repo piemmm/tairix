@@ -9,8 +9,10 @@ settings all three read.
 This spec defers to its companions and MUST stay consistent with them:
 
 - **Desktop icons** — `plans/NEW-TASKBAR.md` T16 owns the desktop icon
-  surface and its grid. This document changes exactly one thing there: the
-  icon flow becomes a user setting (§4) instead of a fixed trailing column.
+  surface and its grid. This document sets where each icon stands on it
+  (§4): one the user put somewhere stands there, the others take the grid's
+  free cells, and the flow is a user setting instead of a fixed trailing
+  column.
   A desktop icon is a **shortcut** — a symlink to a bundle — not a taskbar
   pin: taskbar pinning does not exist, and applications reach the bar by
   running (`plans/NEW-TASKBAR.md` T6/T7).
@@ -59,8 +61,26 @@ requirements.
 
 ## Status
 
-**Built.** Deliverables P1–P10 below, with the one absent capability
-recorded in §8.
+| id | deliverable | status |
+|----|-------------|--------|
+| P1 | `lib/image`: baseline + progressive JPEG, reduced-scale decode | done |
+| P2 | `lib/raster`: the one RGBA8 resampler, consumed by the icon and wallpaper paths | done |
+| P3 | `lib/wallpaper`: settings document, catalog, fit geometry, shipped masters | done |
+| P4 | `tools/syshelp`: the wallpaper graphics family | done |
+| P5 | `lib/sandbox`: wallpaper render ops | done |
+| P6 | `lib/abi`: `pinboard_ipc` | done |
+| P7 | `lib/browse`: `GridFlow::ColumnsFromLeading` | done |
+| P8 | `userland/gui/session`: the pinboard | done (its menu is the shared chain, `plans/NEW-MENUS.md` M3.2) |
+| P9 | the Wallpaper pane in `userland/apps/settings`, over the session's two served requests | done, except the picked-directory listing (§8) |
+| P10 | docs, `AGENTS.md` §3, the `plans/` jump-sheet | done |
+| P11 | a `Desktop` folder no watch can follow: said once, read again after a save the desktop makes there and as the mount table moves | done |
+| P12 | a drop onto a `Desktop` folder no watch follows, shown when the dragging application's copy ends | blocked (§8): no event tells the session the copy ended; a completion signal from the dropping application is an open ABI decision |
+| P13 | resting desktop names legible on every ground: near-white over a dark halo on a picture, the luminance-picked ink on a flat backdrop | done |
+| P14 | free placement: an icon stands where it is put — carried across the desktop, dropped or saved onto it — its place kept per user in the session's private scope (§4) | done |
+| P15 | *Align to grid*: the `grid` key and the Wallpaper pane's row (§2, §4) | done |
+| P16 | the backdrop menu's *Tidy Up ▸ By Name / By Date / By Size* (§7) | done |
+
+§8 records the two capabilities that are absent.
 
 ---
 
@@ -77,8 +97,9 @@ lib/abi        pinboard_ipc: the apply rendezvous                (P6)
 lib/browse     GridFlow::ColumnsFromLeading                      (P7)
 userland/gui/session
                the pinboard: layer, menu, settings, service      (P8)
+               where each icon stands, and its record       (P14, P16)
 userland/apps/settings
-               the Wallpaper pane and its served pictures        (P9)
+               the Wallpaper pane and its served pictures   (P9, P15)
 docs           the pinboard page and every touched page          (P10)
 ```
 
@@ -115,6 +136,7 @@ One document, one engine, one writer.
   | `backdrop` | `theme`, or bare `rrggbb`                         | `theme`        |
   | `icons`    | `leading` \| `trailing`                           | `leading`      |
   | `sort`     | `name` \| `kind` \| `size` \| `date`              | `name`         |
+  | `grid`     | `true` \| `false`                                 | `false`        |
 
 - **Absent is not broken.** Publishing nothing is the ordinary fresh-account
   state: the defaults above apply, silently. A store the service could not
@@ -216,17 +238,92 @@ One document, one engine, one writer.
 
 The desktop keeps listing the user's `Desktop` folder exactly as it does
 today — the same `DirectorySource` seam, the same shared sort, the same
-content-type classifier, the same `GridView`, the same double-click engine.
-Two things change:
+content-type classifier, the same `GridView` cells, the same double-click
+engine. What it decides is where each icon stands.
 
-- **Flow is a setting.** `icons = leading` lays the grid out from the
+- **An icon stands where it is put.** One the user carries across the
+  desktop, drops or saves onto it, or tidies stands exactly there — no
+  snapping unless asked for, and over another if that is where it was put.
+  Each icon is drawn, hit and repainted as a rectangle of its own, the one
+  put down last on top whatever the sort, and the topmost met first; a hit or
+  a paint walks the icons the field shows and no more. Every other icon takes
+  the next free cell of the grid in listing order and keeps it while the
+  field stands; another resolution, scale, density or text size, or another
+  order or arrangement, flows them again. The grid is every whole cell the
+  work area holds; an icon with no free cell is left off it, as a cell the
+  edge would cut always was.
+- **Places are the user's own, kept in the session's private scope**: one
+  `pinboard.<fingerprint>` key per icon placed — the XXH64 of its name,
+  since the key grammar spells no file name — holding where it stands, in
+  `PLACE_UNITS` of the grid's pitch so the arrangement keeps its shape through
+  a new scale or density and measured across from the edge the icons were
+  arranged from when it was put there, its turn in the order icons were put
+  down, and the file it was. Only what the user placed is
+  kept, at most `MAX_PLACED`. The record is read and written behind the loop
+  through the launcher's `RecordMemory` (the durable, live and unconfirmed
+  copies, the latest edit winning), so a carry is one write when it is put
+  down and a tidy one write for every icon.
+- **The record follows the files.** A rename the watch reports — a name going
+  and another coming for the same file in one batch — keeps the place; a
+  delete forgets it. Once both the record and the folder have been read, a
+  place kept for a file renamed while the session was not running follows
+  its file, and one kept for a file gone is forgotten. A place the field no
+  longer holds whole — a narrower screen, a larger scale — is shown on the
+  free cell nearest it, so none piles onto another at the edge, and kept as it
+  was.
+- **A drop or a save lands where it is let go.** A drag over the bare desktop
+  offers what it carries; let go there, once the dragging application has been
+  told the drop landed there, the files that arrive within `LANDING_WAIT_NS`
+  stand as far from the drop as each picture was held from the press — the
+  pressed file, under its name or one its copy told apart from a name already
+  taken, at its own, and the others in the order they arrive, no more of them
+  than the drag carried — and a save dropped there stands under the pointer.
+  Every offset a drag states is held to the field before it is used. A file
+  that arrives later, or one a drop of one file did not name, takes the next
+  free cell.
+- **Carrying an icon is the desktop's own drag.** A press on an icon that
+  travels past the shared drag slop carries it, in memory alone, for as long
+  as the primary button is held (`SessionInputRouter::holds_primary`); the
+  release puts it down where it was let go, following first any motion routed
+  with it (`Desktop::follow_press`). Nothing under a carried icon lights.
+- **Align to grid** (`grid = true`) settles an icon put down — carried,
+  dropped or saved — onto the free cell nearest where it was let go, and onto
+  the nearest cell of all when none is free.
+- **Flow is a setting.** `icons = leading` numbers the cells from the
   top-left, filling downward and growing a new column to the right (the
-  arrangement Windows and KDE use, and the new default); `icons = trailing`
-  keeps the column hugging the trailing edge. This needs one new
-  `tairix_browse::GridFlow` variant, `ColumnsFromLeading` — the missing
-  fourth corner of an enum that already spells its mirror image.
+  arrangement Windows and KDE use, and the default); `icons = trailing` from
+  the trailing edge. This needs one `tairix_browse::GridFlow` variant,
+  `ColumnsFromLeading` — the missing fourth corner of an enum that already
+  spells its mirror image.
 - **Sort is a setting** drawn from the shared `SortMode`, so the desktop and
-  the file manager still agree on what "by name" means.
+  the file manager still agree on what "by name" means; it orders the icons
+  no one placed.
+- **The arrows move on the screen**: an arrow selects the nearest icon that
+  way, one off to the side counting its sideways distance twice, and meets
+  icons stacked exactly on one another in the order they are drawn; with
+  nothing selected, or the selection not shown, the first arrow selects the
+  first icon shown.
+
+A resting icon wears no plate, so its name sits straight on the backdrop and
+is drawn to read on whatever ground is there (P13). Over a picture, whose light
+under any one name the desktop cannot know, it is near-white over a dark halo;
+over a flat backdrop it takes whichever of near-white or near-black contrasts
+more with that colour, with no halo. The shell hands the paint the ground it
+actually lays down, so the ink changes when the picture arrives rather than
+when the setting does. A name on a state's plate keeps the theme's ink, and the
+halo is clipped to the icon's cell, so a cell's repaint still covers
+everything it drew. Each resting name's halo is blurred once and kept until
+the name, the scale or the theme changes, so a repaint — every frame of a
+crossfade — lays it down again rather than blurring it.
+
+A folder on a volume that records no changes — a network share, the stand-in
+of a volume that has gone away — is listed without a watch (P11). The desktop
+says so once until a watch joins again, on `stderr` and as
+`PINBOARD_UNFOLLOWED` (20036) on the system log, and reads the folder again
+after a save it made there and whenever the mount table moves, which arms a
+watch once the volume records changes again. A copy a dragging application
+makes into such a folder shows on the next of those reads, because no event
+tells the session when that copy ends (P12, §8).
 
 ## 5. Decoding, in the sandbox
 
@@ -345,6 +442,7 @@ application's. Its item set is closed:
 | `New Folder` | create a uniquely-named folder in `Desktop/` and re-list |
 | `Sort by …` | set `sort` (four marked items) |
 | `Arrange …` | set `icons` (two marked items) |
+| `Tidy Up ▸ By Name / By Date / By Size` | lay every icon out on the grid in that order from the arrangement's corner, and keep each there in one write; one past the cells flows onto a cell left free, never onto one the tidy gave another |
 | `Refresh` | re-list `Desktop/` now |
 | `Open Desktop Folder` | open the file manager on `Desktop/` |
 | `Change Background…` | open Settings at its Wallpaper pane |
@@ -359,7 +457,9 @@ forbids.
 A press on empty backdrop with button 2 does not disturb the selection; a
 press over an icon selects it first, so the menu always acts on what the
 user pointed at. Each row's id is its command's own position in the closed set
-above, so the gesture that leaves `Open` out shifts no other row's meaning. The
+above, so the gesture that leaves `Open` out shifts no other row's meaning; the
+three tidying orders sit on a plate of their own under *Tidy Up*, a row that
+only opens it. The
 sort order and the arrangement in force are shown as their group's chosen
 member — a bullet, disabled, with its reason stated — because choosing what
 already holds is a statement of where the desktop is rather than a command.
@@ -454,22 +554,18 @@ both blockers are decisions for the ABI owners:
 `WallpaperPath` itself already accepts any absolute session-view path, so
 nothing in the settings model needs to change.
 
-## 9. Deliverables
+**Outstanding — a drop into a `Desktop` folder no watch follows (P12).** A
+copy a dragging application makes into a folder whose volume records no
+changes shows only at the next read of it (§4): the mount table moving, a save
+the desktop makes there, or *Refresh*. By then `LANDING_WAIT_NS` has usually
+passed, so the files take free cells rather than standing where they were let
+go. No event tells the session when the copy ends, and the drag names only the
+item pressed, so a drop's other files are told only by arriving within the
+wait. Both want the dropping application to report what its drop made — a
+completion naming the files — which is an ABI decision for its owners and has
+not been taken.
 
-| id | deliverable | status |
-|----|-------------|--------|
-| P1 | `lib/image`: baseline + progressive JPEG, reduced-scale decode | done |
-| P2 | `lib/raster`: the one RGBA8 resampler, consumed by the icon and wallpaper paths | done |
-| P3 | `lib/wallpaper`: settings document, catalog, fit geometry, shipped masters | done |
-| P4 | `tools/syshelp`: the wallpaper graphics family | done |
-| P5 | `lib/sandbox`: wallpaper render ops | done |
-| P6 | `lib/abi`: `pinboard_ipc` | done |
-| P7 | `lib/browse`: `GridFlow::ColumnsFromLeading` | done |
-| P8 | `userland/gui/session`: the pinboard | done (its menu is the shared chain, `plans/NEW-MENUS.md` M3.2) |
-| P9 | the Wallpaper pane in `userland/apps/settings`, over the session's two served requests | done, except the picked-directory listing (§8) |
-| P10 | docs, `AGENTS.md` §3, the `plans/` jump-sheet | done |
-
-## 10. Tests
+## 9. Tests
 
 - **`lib/image`** — hand-built baseline and progressive streams, every
   refusal path, reduced-scale selection, and a fuzz harness over both
@@ -506,12 +602,49 @@ nothing in the settings model needs to change.
   settings in force, the id↔command inverse, the group breaks, and the rows a
   gesture leaves out shifting no id), each item's action, flow and sort changes
   re-laying the grid, an apply from a foreign uid refused, a wallpaper that
-  will not decode degrading to the backdrop. The menu's *behaviour* — opening,
+  will not decode degrading to the backdrop. Where an icon stands: a carried
+  icon lands exactly where it is put and the next session shows it there, and
+  so does one let go with motion still to route or carried and let go within
+  one batch, a press that never travels moves nothing, the grid's nearest free
+  cell taken where it is asked for and a held one passed over, an icon put
+  over another met first and the one put down last staying on top through a
+  new sort, a new file taking the next free cell and none moving for it, a
+  freed cell taken next, a rename keeping its place and a delete forgetting
+  it, a place off the screen shown on the free cell nearest it and kept as it
+  was, icons kept past a narrower field or at a larger scale each on a cell of
+  their own, a trailing arrangement's places kept against its edge, a tidy
+  laying every icon out in order in one change and one of more icons than
+  cells standing none on another, a new order flowing only the icons no one
+  placed, a save and a drop landing where they were let go — under a name its
+  copy told apart, and with offsets at the ends of the coordinate space — a
+  late file taking a free cell and a file a one-file drop did not name not
+  taken for it, a record read late moving only what it places, an icon put
+  down as the record arrives staying where it was put, a place kept for a
+  file renamed or gone while away followed or forgotten only once the store is
+  read, a place past the record's bound refused and the icon put back, the
+  arrows moving to the nearest icon that way, reaching every icon of a stack
+  and starting from the first shown where the selection is not, a burst of
+  desktop motion routed as one, and a name's halo blurred again only for a new
+  name, scale or theme. The record itself: a place round-tripped exactly with
+  its edge and turn, an unknown edge left out, a key the same in every
+  session and inside the key grammar, an unreadable place left out and named,
+  the bound refusing a set whole, a rename, a forget masked over machine
+  policy, and nothing stored over a record not read. The menu's *behaviour* — opening,
   clamping, choosing, dismissing — is the chain's and is tested there. The crossfade: a picture is
   invisible at the instant it is installed and stands alone once arrived, a
   frame part-way through is the mix of the two grounds (including in the
   outgoing picture's margins), the copy of the ground being left is released on
   arrival, and reduced motion arrives before it draws.
+- **The icons** — a resting name light over a halo on a picture and in the ink
+  its luminance favours on a flat backdrop, a selected one in the theme's ink;
+  a name the session made shown by reading an unfollowed folder again, and
+  nothing read for one made elsewhere or in a followed folder
+  (`userland/gui/session`); a label ink taking the theme foreground's place,
+  a shadowed name never drawing outside its tile, and a halo kept for it
+  drawing exactly what its shadow blurred in place draws (`lib/controls`,
+  `lib/font`); a
+  folder no volume records changes for reported unwatched like any other
+  refused watch (`lib/browse`).
 - **`userland/apps/settings`** — the gallery on the host: the candidate
   model (the "no picture" entry, a picture in effect from outside the
   catalog, which is offered but never asked for), one picture asked for at a
@@ -520,6 +653,7 @@ nothing in the settings model needs to change.
   placeholder, a press released away from its tile choosing nothing, and a
   choice reporting the picture without disturbing any other pinboard value.
   The pane name a launch target carries is unique, resolvable, and unknown
-  names resolve to nothing.
+  names resolve to nothing. *Align to grid* is off by default and posts the
+  pinboard keys, `grid` turned on and the rest as they were.
 - **QEMU** — the desktop vertical comes up with the default wallpaper drawn
   and the `Desktop` folder's icons over it.

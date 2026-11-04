@@ -52,6 +52,14 @@ keeps playing; brought back, it draws again. Ctrl-Z, which reaches it as a byte
 while its input is raw, pauses the stream, gives the terminal back and stops
 the process; continued, it plays on from the frame it paused on.
 
+A command the playback's mailbox refuses is held, behind any held before it,
+and sent when the mailbox's room member reports room in the mailbox or in the
+process's own IPC budget, or after `IPC_MEMORY_RETRY_NS` when the kernel had no
+memory for it. Nothing is held behind a stop and a suspend is held once; past
+the mailbox's own depth a further step is given up, and a key that never
+reached the playback is counted and stated once the interface has given the
+terminal back.
+
 Without the interface — no terminal, `--no-ui`, or `-q` — it plays on the same
 loop, and unless `-q` reports a one-line progress on a terminal's standard
 error while it holds the terminal.

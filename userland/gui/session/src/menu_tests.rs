@@ -1118,6 +1118,38 @@ fn clicking_a_submenu_row_keeps_its_plate_rather_than_acting() {
     assert_eq!(plates(&chain), 2);
 }
 
+/// Clicking a row whose whole purpose is its field keeps the field open and
+/// answers nothing; what the field commits is the answer.
+#[test]
+fn clicking_a_row_opened_for_its_field_keeps_the_field() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut model = ChainModel::new("Title");
+    model.push(
+        ChainRow::entry(
+            (id(1), id(2)),
+            ("Workbench", 9..9),
+            AppMenuSymbol::Rename,
+            MenuItem::new("Title"),
+        )
+        .opened_for_its_field(),
+    );
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, model, Point::new(40, 40), &g);
+    let (_, at) = settle_on(&mut chain, 0, 0, &g);
+    chain.handle(&PRESS, at, &g, 0);
+    let acted = chain.handle(&RELEASE, at, &g, 0);
+    assert_ne!(acted, ChainAction::Closed, "the row answers nothing itself");
+    assert!(chain.take_answers().is_empty());
+    assert!(
+        chain
+            .surfaces()
+            .iter()
+            .any(|surface| surface.kind == SurfaceKind::Entry),
+        "the field opened"
+    );
+}
+
 // --- the grab ------------------------------------------------------------
 
 #[test]

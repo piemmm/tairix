@@ -115,7 +115,7 @@ use tairix_abi::sysinfo::{
     MountRecord, NetInterfaceRatesRequest, PageRequest, PlatformCompatible, ProcessRecord,
     RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SelfAccountRecord,
     SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, ViewBindingRecord,
-    VolumeIoQueueRecord, VolumeIoStatsRecord, SYSINFO_REPLY_STATUS_LEN,
+    VolumeIoQueueRecord, VolumeIoStatsRecord, VolumeRemovalRecord, SYSINFO_REPLY_STATUS_LEN,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::touch::{
@@ -135,12 +135,13 @@ use tairix_abi::window_ipc::{
     decode_open_target_reply, decode_picked_name_reply, decode_wallpapers_reply,
     encode_drag_spot_reply, encode_drop_target_reply, encode_open_target_reply,
     encode_picked_name_reply, AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec,
-    AppBar, AppBarClick, AppMenu, AppMenuAsset, AppMenuBundle, AppMenuEntry, AppMenuEntryText,
-    AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
+    AppBar, AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem,
+    AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
     AppMenuShortcut, AppMenuSymbol, BundleRunPath, ClipboardKind, CursorShape, DocumentName,
-    DragAt, DragItems, DropOperation, DropSite, HandOverDocument, HandOverTarget, MenuOutcome,
-    MenuRefusal, PaneName, PickPurpose, PreviewOutcome, PreviewSubject, SaveEndings, ToolOver,
-    TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle,
+    DragAt, DragItems, DragPicture, DropOperation, DropSite, HandOverDocument, HandOverTarget,
+    IconAsset, MenuOutcome, MenuRefusal, PaneName, PickPurpose, PreviewOutcome, PreviewSubject,
+    SaveFormat, SaveFormats, ToolOver, TooltipText, WindowEvent, WindowRegion, WindowRequest,
+    WindowSizing, WindowTitle,
 };
 use tairix_abi::BUNDLE_ID_MAX;
 use tairix_abi::{
@@ -305,6 +306,14 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
         let redecoded = ViewBindingRecord::from_bytes(&rec.to_le_bytes())
             .expect("round-trip of an accepted record must succeed");
         assert_eq!(rec, redecoded);
+    }
+    if let Ok(rec) = VolumeRemovalRecord::from_bytes(bytes) {
+        let encoded = rec.to_le_bytes();
+        assert_eq!(
+            &encoded[..],
+            &bytes[..VolumeRemovalRecord::WIRE_LEN],
+            "an accepted removal was normalised"
+        );
     }
     if let Ok(board) = PlatformCompatible::decode(bytes) {
         let mut out = [0u8; PlatformCompatible::WIRE_MAX];
@@ -882,13 +891,13 @@ fn open_target_frames_with_flipped_bits_round_trip_or_are_refused() {
 }
 
 /// Drive every volume-frame decoder on `bytes` (one arm of [`exercise`]): an
-/// accepted attach, detach or control request is its own encoding, and an
-/// accepted description is too, short of a medium record this ABI does not
-/// define, which reads as none.
+/// accepted attach, detach, retitle or control request is its own encoding,
+/// and an accepted description is too, short of a medium record this ABI does
+/// not define, which reads as none.
 fn exercise_volume_requests(bytes: &[u8]) {
     use tairix_abi::volume::{
-        VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeInfo, VOLUME_ATTACH_MAX_LEN,
-        VOLUME_DETACH_LEN,
+        VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeInfo, VolumeRetitleRequest,
+        VOLUME_ATTACH_MAX_LEN, VOLUME_DETACH_LEN, VOLUME_RETITLE_MAX_LEN,
     };
     if let Ok(attach) = VolumeAttachRequest::decode(bytes) {
         let mut out = [0u8; VOLUME_ATTACH_MAX_LEN];
@@ -903,6 +912,13 @@ fn exercise_volume_requests(bytes: &[u8]) {
             .encode(&mut out)
             .expect("an accepted detach must re-encode");
         assert_eq!(&out[..len], bytes, "an accepted detach is canonical");
+    }
+    if let Ok(retitle) = VolumeRetitleRequest::decode(bytes) {
+        let mut out = [0u8; VOLUME_RETITLE_MAX_LEN];
+        let len = retitle
+            .encode(&mut out)
+            .expect("an accepted retitle must re-encode");
+        assert_eq!(&out[..len], bytes, "an accepted retitle is canonical");
     }
     if let Ok(ctl) = VolumeCtl::decode(bytes) {
         assert_eq!(
@@ -1820,6 +1836,7 @@ fn exercise_fsserve(bytes: &[u8]) {
         Request::Pin { node },
         Request::Unpin { pinned: node },
         Request::Flush,
+        Request::Label,
     ];
     for request in asked {
         let Ok(reply) = decode_reply(bytes, &request) else {
@@ -2403,6 +2420,9 @@ fn fsserve_request_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
         Request::Release {
             span: Span::new(0, tairix_abi::fsserve::FSSERVE_WINDOW_LEN).expect("a span"),
         },
+        Request::SetLabel {
+            title: tairix_abi::driver::filesystem::VolumeTitle::new("Disc 1").expect("a title"),
+        },
     ];
     requests
         .iter()
@@ -2464,6 +2484,12 @@ fn fsserve_reply_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
         (Op::GetAttr, Answer::Attr(Some(b"value"))),
         (Op::Pin, Answer::Node(node)),
         (Op::Unpin, Answer::Unpinned(Unpinned::Freed)),
+        (
+            Op::Label,
+            Answer::Label(
+                tairix_abi::driver::filesystem::VolumeTitle::new("Disc 1").expect("a title"),
+            ),
+        ),
     ] {
         let mut out = std::vec![0u8; 256];
         let len = encode_reply(op, state, Ok(answer), &mut out).expect("encodes");
@@ -3446,6 +3472,7 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
     seeds.extend(window_request_transient_seeds());
     seeds.extend(window_request_desktop_seeds());
     seeds.extend(window_request_text_seeds());
+    seeds.extend(begin_drag_seeds());
     seeds.extend(window_request_alert_seeds());
     seeds
 }
@@ -3528,6 +3555,54 @@ fn window_request_desktop_seeds() -> std::vec::Vec<WindowRequest> {
     ]
 }
 
+/// Drags of one item and of several, a picture placed and one placed nowhere,
+/// and one hiding an ending, so a flip lands on each count, flag, place, id
+/// length and hidden-ending byte.
+fn begin_drag_seeds() -> [WindowRequest; 3] {
+    [
+        WindowRequest::BeginDrag {
+            window_id: 3,
+            items: DragItems::new(
+                DocumentName::new("notes.txt").expect("a valid name"),
+                2,
+                false,
+                [
+                    drag_picture("text", Some((-20, 12))),
+                    drag_picture("folder", None),
+                ],
+            )
+            .expect("two items"),
+        },
+        WindowRequest::BeginDrag {
+            window_id: 3,
+            items: DragItems::new(
+                DocumentName::new("Prog").expect("a valid name"),
+                1,
+                true,
+                [drag_picture("file", Some((0, 0)))],
+            )
+            .expect("one openable file")
+            .with_filetype(tairix_abi::fs::Filetype::new(0xFFB)),
+        },
+        WindowRequest::BeginDrag {
+            window_id: 3,
+            items: DragItems::new(
+                DocumentName::new("Sprites,ff9").expect("a valid name"),
+                40,
+                false,
+                [
+                    drag_picture("image-sprite", Some((i32::MIN, i32::MAX))),
+                    drag_picture("image-png", None),
+                    drag_picture("folder", Some((300, -4))),
+                    drag_picture("application", None),
+                ],
+            )
+            .and_then(|items| items.with_hidden_ending(4))
+            .expect("forty items"),
+        },
+    ]
+}
+
 /// The seeds carrying variable-width text — a menu, a hand-over path, a
 /// tooltip — in their narrowest and widest forms, so a flip lands on each
 /// length prefix.
@@ -3537,32 +3612,17 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
             window_id: 3,
             purpose: PickPurpose::Save {
                 suggested: DocumentName::new("notes.txt").expect("a valid name"),
-                endings: SaveEndings::ANY,
+                formats: SaveFormats::ANY,
             },
         },
         WindowRequest::PickFile {
             window_id: 3,
             purpose: PickPurpose::Save {
                 suggested: DocumentName::new("Sprites,ff9").expect("a valid name"),
-                endings: fuzz_endings(),
+                formats: fuzz_formats(),
             },
         },
         WindowRequest::TakePickedName { window_id: 3 },
-        WindowRequest::BeginDrag {
-            window_id: 3,
-            items: DragItems::new(
-                DocumentName::new("notes.txt").expect("a valid name"),
-                2,
-                false
-            )
-            .expect("two items"),
-        },
-        WindowRequest::BeginDrag {
-            window_id: 3,
-            items: DragItems::new(DocumentName::new("Prog").expect("a valid name"), 1, true)
-                .expect("one openable file")
-                .with_filetype(tairix_abi::fs::Filetype::new(0xFFB)),
-        },
         WindowRequest::TakeDropTarget { window_id: 3 },
         WindowRequest::DragVerdict {
             window_id: 3,
@@ -3599,6 +3659,10 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
         WindowRequest::TakeMenuText {
             window_id: 3,
             open_id: 11,
+        },
+        WindowRequest::TakeAppBarText {
+            item: AppMenuItemId::new(3).expect("a valid id"),
+            revision: 2,
         },
         // Every hand-over shape: a bare launch, one carrying a document, so a
         // flip lands on the grant handle too, and one naming a pane.
@@ -3671,27 +3735,52 @@ fn window_request_alert_seeds() -> std::vec::Vec<WindowRequest> {
         },
         WindowRequest::CloseAlert { alert_id: 5 },
         WindowRequest::Authorise {
-            window_id: 3,
+            window_id: core::num::NonZeroU64::new(3),
             task: SystemTask::Configure(
                 tairix_abi::elevate::ElevateWords::new(&["os.loginType", "text"])
                     .expect("within bounds"),
             ),
         },
         WindowRequest::Authorise {
-            window_id: 3,
+            window_id: core::num::NonZeroU64::new(3),
             task: SystemTask::ShowAccounts,
         },
-        WindowRequest::TakeAuthorisedOutput { window_id: 3 },
+        WindowRequest::Authorise {
+            window_id: None,
+            task: SystemTask::Eject(
+                tairix_abi::elevate::ElevateWords::new(&[
+                    "id::07070707-0707-0707-0707-070707070707/",
+                    "usb1",
+                ])
+                .expect("within bounds"),
+            ),
+        },
+        WindowRequest::TakeAuthorisedOutput {
+            window_id: core::num::NonZeroU64::new(3),
+        },
     ]
 }
 
-/// Endings of both separators, so a flip lands on each count, length and
-/// ending byte.
-fn fuzz_endings() -> SaveEndings {
-    let mut endings = SaveEndings::ANY;
-    endings.push('.', "spr").expect("an extension");
-    endings.push(',', "ff9").expect("a RISC OS file type");
-    endings
+/// A dragged item's picture of the class `asset`, standing `from` the press.
+fn drag_picture(asset: &str, from: Option<(i32, i32)>) -> DragPicture {
+    DragPicture {
+        icon: IconAsset::new(asset).expect("a valid asset id"),
+        from,
+    }
+}
+
+/// A format typed by an extension and one by its file type alone, the second
+/// current, so a flip lands on each count, flag, file type, length and
+/// extension byte.
+fn fuzz_formats() -> SaveFormats {
+    let mut formats = SaveFormats::ANY;
+    let mut png = SaveFormat::new(tairix_abi::fs::Filetype::new(0xB60));
+    png.push_extension(".png").expect("an extension");
+    png.push_extension(".apng").expect("an extension");
+    formats.push(png, false).expect("a format");
+    let sprite = SaveFormat::new(tairix_abi::fs::Filetype::new(0xFF9));
+    formats.push(sprite, true).expect("a format");
+    formats
 }
 
 /// A row that both acts and opens a desktop-drawn field opening with its stem
@@ -3810,7 +3899,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
             AppMenuLabel::new("Backup").expect("a valid label"),
             AppMenuSymbol::Drive,
         )
-        .with_icon_asset(AppMenuAsset::new("disk-usb").expect("a valid asset id")),
+        .with_icon_asset(IconAsset::new("disk-usb").expect("a valid asset id")),
     ))
     .expect("room for the volume row");
     menu
@@ -3822,6 +3911,12 @@ fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
         WindowEvent::AppBarDefault.to_le_bytes(),
         WindowEvent::AppBarMenu {
             item: AppMenuItemId::new(7).expect("a valid id"),
+            revision: 4,
+        }
+        .to_le_bytes(),
+        WindowEvent::AppBarEntered {
+            item: AppMenuItemId::new(3).expect("a valid id"),
+            revision: 5,
         }
         .to_le_bytes(),
         WindowEvent::OpenRequested.to_le_bytes(),
@@ -3836,7 +3931,7 @@ fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
         }
         .to_le_bytes(),
         WindowEvent::Authorised {
-            window_id: 3,
+            window_id: Some(3),
             outcome: AuthorisedOutcome::Captured {
                 exit_code: 1,
                 len: 64,
@@ -3844,7 +3939,7 @@ fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
         }
         .to_le_bytes(),
         WindowEvent::Authorised {
-            window_id: 3,
+            window_id: None,
             outcome: AuthorisedOutcome::Declined,
         }
         .to_le_bytes(),
@@ -3854,6 +3949,13 @@ fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
             left_out: 1,
         }
         .to_le_bytes(),
+        WindowEvent::FilePicked {
+            window_id: 3,
+            handle: 9,
+            writable: true,
+        }
+        .to_le_bytes(),
+        WindowEvent::PickCancelled { window_id: 3 }.to_le_bytes(),
         WindowEvent::ToolMoved {
             window_id: 3,
             over: ToolOver::Parent { x: 10, y: 20 },
@@ -3918,6 +4020,7 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
         event_endpoint: 0xE117_0000_0000_0009,
         click: AppBarClick::Open,
         menu: fuzz_menu(AppMenu::EMPTY),
+        revision: 3,
     });
     // The seed is the frame a client actually sends — exactly the
     // declaration's own length. Feeding a padded buffer instead would be

@@ -188,6 +188,32 @@ A rename to a case variant of an entry's own name re-spells it where it stands
 — its place in the order is unchanged — and a rename replacing a sibling takes
 the spelling asked for.
 
+## Disc title
+
+The disc's name is its title (`FilesystemLabel`): up to ten characters of
+RISC OS's Latin-1, padded with spaces, which the probe and the driver both
+read as UTF-8 through the one decode they share (`tairix_fsprobe::adfs`), a
+byte RISC OS's Latin-1 leaves undefined ending the name as a control byte
+does, so the title a volume attaches with is the one it is later read as. A
+new map keeps it in the disc record,
+so a retitle rewrites zone 0 of both map copies, each check byte refreshed,
+and the boot block's copy, resealed, where the disc has one. An old map
+spells it a character at a time across its two sectors (`0x0F7`–`0x0FB` and
+`0x1F6`–`0x1FA`), both resealed; on a disc a Level 3 file server partitioned,
+those bytes are also the low bytes of its partition pointers, which a retitle
+overwrites. An eleventh character is refused as `LengthOutOfRange`, and a
+space — the name's padding — one of RISC OS's specials
+(`$ & % @ \ ^ : . # * " |`) or a character its Latin-1 lacks as `OutOfRange`;
+neither refusal writes anything. A title is no path component, so `.` and `/`
+are not exchanged in it as they are in a name. The empty title clears the
+name, and a volume served read-only refuses a retitle (`ReadOnly`). A retitle
+the disc fails, reading its map or writing it, keeps the name the volume held
+and leaves it refusing writes, damaged: a map the disc will not read back or
+take is no map to go on writing. The disc's identity is a digest of what formatting
+fixes — a new map's disc record without its disc id, boot option, name or big
+root's size, and an old map's size and directory form — so a retitle leaves
+it as it was, and two discs formatted alike share it.
+
 ## Served from user space
 
 On removable media the driver is served from user space ([Volumes served from user space](./served.md)): its `Run`

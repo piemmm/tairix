@@ -55,7 +55,7 @@ use tairix_abi::fs::{
 use tairix_abi::fsserve::{FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX, FSSERVE_WINDOW_LEN};
 use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
 use tairix_abi::memory::PAGE_SIZE;
-use tairix_abi::sysinfo::{MountAvailability, MountRecord};
+use tairix_abi::sysinfo::{MountAvailability, MountRecord, RemovedWrites, VolumeClass};
 use tairix_abi::time::Time64;
 use tairix_abi::volume::{DetachMode, VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use tairix_abi::{
@@ -204,6 +204,7 @@ fn audited_count(id: u32, volume: &str, key: &str) -> Vec<Option<u64>> {
 const ATTACH_REFUSED: u32 = 4173;
 const DETACHED: u32 = 4174;
 const DETACH_REFUSED: u32 = 4175;
+const EJECTED_AT_SEAT: u32 = 4213;
 const SURPRISE_REMOVED_CLEAN: u32 = 4176;
 const SURPRISE_REMOVED_LOST: u32 = 4178;
 const FORCE_UNMOUNTED: u32 = 4179;
@@ -272,6 +273,7 @@ fn admin() -> Principal<'static> {
         uid: 0,
         gid: 0,
         caps: &MountAuthority,
+        at_seat: false,
     }
 }
 
@@ -281,6 +283,7 @@ fn plain(uid: u32, gid: u32) -> Principal<'static> {
         uid,
         gid,
         caps: &NoCaps,
+        at_seat: false,
     }
 }
 
@@ -716,6 +719,11 @@ fn register_endpoint(id: u64, owner: u64) -> StdArc<CallEndpoint> {
 static TREE: HwTreeStore = HwTreeStore::new();
 const PUBLISHER: u32 = 2;
 
+/// A port a device can be pulled from, and the block-service node of the
+/// stick on it.
+const REMOVABLE_PORT: u32 = 3;
+const ON_REMOVABLE_PORT: u32 = 4;
+
 /// Whether the drivers started from now on defer their commits, as a driver
 /// with a monotonic clock does, rather than publishing every operation.
 static DEFER: AtomicBool = AtomicBool::new(false);
@@ -817,7 +825,7 @@ fn attach_served(
     request: &VolumeAttachRequest<'_>,
 ) -> Result<(), Errno> {
     let attached = VOLUME_SERVICE.attach(request, Some(PUBLISHER));
-    serve_published(facility);
+    serve_published(facility, PUBLISHER);
     attached
 }
 
@@ -847,10 +855,10 @@ fn undriven_volume_nodes(parent: u32) -> Vec<(u32, u64, VolumeFsType)> {
     found
 }
 
-/// Start a driver for every volume node none serves, each having served or
-/// refused its volume before this returns.
-fn serve_published(facility: &'static TestFacility) {
-    for (node, volume, fstype) in undriven_volume_nodes(PUBLISHER) {
+/// Start a driver for every volume node under `publisher` none serves, each
+/// having served or refused its volume before this returns.
+fn serve_published(facility: &'static TestFacility, publisher: u32) {
+    for (node, volume, fstype) in undriven_volume_nodes(publisher) {
         start_driver(facility, node, volume, fstype);
     }
 }
@@ -1020,6 +1028,45 @@ impl Driver {
     }
 }
 
+/// The seat's authority reaches a removable device's volume and nothing
+/// else; the mount authority reaches every volume.
+#[test]
+fn the_seats_authority_reaches_only_a_removable_volume() {
+    use crate::volume_service::DetachAuthority;
+    for class in [VolumeClass::Local, VolumeClass::Network, VolumeClass::Image] {
+        assert!(!DetachAuthority::Seat.reaches(class), "{class:?}");
+        assert!(DetachAuthority::Mount.reaches(class), "{class:?}");
+    }
+    assert!(DetachAuthority::Seat.reaches(VolumeClass::Removable));
+    assert!(DetachAuthority::Mount.reaches(VolumeClass::Removable));
+}
+
+/// The removal record keeps the newest removals, numbered without a gap, so a
+/// reader further behind than it keeps sees exactly how many it missed; a
+/// volume published under no identity names nothing a reader could join, and
+/// takes no number.
+#[test]
+fn the_removal_record_keeps_the_newest_numbered_in_turn() {
+    use super::Removals;
+    use tairix_abi::sysinfo::VOLUME_REMOVALS_KEPT;
+    let mut removals = Removals::new();
+    removals.record([0; 16], RemovedWrites::Lost);
+    let kept = u8::try_from(VOLUME_REMOVALS_KEPT).expect("fits");
+    for at in 1..=kept + 3 {
+        removals.record([at; 16], RemovedWrites::None);
+    }
+    let listed: Vec<_> = removals.kept.iter().copied().collect();
+    assert_eq!(listed.len(), VOLUME_REMOVALS_KEPT);
+    assert_eq!(listed[0].sequence(), 4, "the oldest three fell out");
+    assert_eq!(listed[0].volume_id(), [4; 16]);
+    assert!(listed
+        .windows(2)
+        .all(|pair| pair[1].sequence() == pair[0].sequence() + 1));
+    let newest = listed.last().expect("one kept");
+    assert_eq!(newest.sequence(), u64::from(kept) + 3);
+    assert_eq!(newest.volume_id(), [kept + 3; 16]);
+}
+
 #[test]
 fn a_reattached_mount_takes_its_new_posture_in_place() {
     let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
@@ -1115,6 +1162,27 @@ fn an_unwired_service_fails_closed() {
             &admin()
         ),
         Err(Errno::NotImplemented)
+    );
+    assert_eq!(
+        service.retitle(
+            &admin(),
+            &[7; 16],
+            &tairix_abi::driver::filesystem::VolumeTitle::EMPTY
+        ),
+        Err(Errno::NotImplemented)
+    );
+}
+
+/// The stand-in answers for a title with the device fault a vanished disk is,
+/// never the refusal of a format that keeps none.
+#[test]
+fn the_unavailable_stand_in_faults_its_title() {
+    use tairix_abi::driver::filesystem::{FilesystemLabel as _, VolumeTitle};
+    let mut fs = UnavailableFs;
+    assert_eq!(fs.label(), Err(DriverError::DeviceFault));
+    assert_eq!(
+        fs.set_label(&VolumeTitle::EMPTY),
+        Err(DriverError::DeviceFault)
     );
 }
 
@@ -1274,9 +1342,13 @@ fn boot() -> Booted {
     // The directory-watch registry production wires, so every volume the
     // scenarios attach claims its change table as a hot-plugged one does.
     let watches: &'static WatchRegistry = Box::leak(Box::new(WatchRegistry::new()));
+    let mut port = HwNode::new(REMOVABLE_PORT, HW_NODE_ROOT_ID, HwDeviceClass::Bus);
+    port.set_removable(true);
     TREE.seed(vec![
         HwNode::new(HW_NODE_ROOT_ID, HW_NODE_ROOT, HwDeviceClass::Root),
         HwNode::new(PUBLISHER, HW_NODE_ROOT_ID, HwDeviceClass::Storage),
+        port,
+        HwNode::new(ON_REMOVABLE_PORT, REMOVABLE_PORT, HwDeviceClass::Storage),
         crate::virtual_bus::node(),
         crate::volume_service::image_volumes_node(),
     ])
@@ -1407,6 +1479,11 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         Err(Errno::PermissionDenied),
         "a local volume is the mount authority's to detach"
     );
+    assert_eq!(
+        VOLUME_SERVICE.detach(&detach, &seated(member())),
+        Err(Errno::PermissionDenied),
+        "nor may the user at the seat eject a volume on a fixed port"
+    );
     VOLUME_SERVICE.detach(&detach, &admin()).expect("detach");
     assert_eq!(
         in_flight.lock().write_at(file, 0, b"lost"),
@@ -1469,6 +1546,8 @@ fn run_scenarios(window_ptr: *mut u8, facility: &'static TestFacility) {
     clean_surprise_removal_scenario(window_ptr, facility);
     pulling_a_partitioned_stick_retracts_every_volume_scenario(window_ptr, facility);
     forced_unmount_of_a_healthy_volume_scenario(window_ptr, facility);
+    the_user_at_the_seat_ejects_a_removable_volume_scenario(window_ptr, facility);
+    a_recovered_volume_lists_as_the_port_it_returned_on_scenario(window_ptr, facility);
     verified_reinsert_replays_scenario(window_ptr, facility);
     mutated_reinsert_conflicts_scenario(window_ptr, facility);
     sibling_volumes_share_one_client_scenario(window_ptr, facility);
@@ -1846,6 +1925,7 @@ fn a_volume_awaiting_its_driver_detaches_scenario(
     round.outcome.expect("the volume attaches");
     let (volume, node) = served_volume("wait1");
     assert_eq!(VOLUME_SERVICE.awaiting_server(volume), Ok(()));
+    let before = VOLUME_SERVICE.removals().expect("listed");
     VOLUME_SERVICE
         .detach(
             &VolumeDetachRequest {
@@ -1855,6 +1935,11 @@ fn a_volume_awaiting_its_driver_detaches_scenario(
             &admin(),
         )
         .expect("a volume no driver serves detaches plainly");
+    assert_eq!(
+        VOLUME_SERVICE.removals().expect("listed"),
+        before,
+        "an eject is no removal"
+    );
     assert_eq!(audited(DETACHED, "wait1"), [None]);
     assert!(!TREE.is_live(node), "its node is withdrawn");
     assert_eq!(
@@ -2307,6 +2392,11 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
             unflushed: Unflushed::DeviceWrite,
         },
     );
+    assert_eq!(
+        newest_removal(),
+        Some((identity, RemovedWrites::Held)),
+        "the removal is recorded, its writes held"
+    );
     let mut buf = [0u8; 32];
     assert_eq!(
         held.read(0, &mut buf),
@@ -2387,7 +2477,22 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
             .all(|r| r.source_bytes() != b"usb2"),
         "the force-unmounted volume leaves the mount snapshot"
     );
+    assert_eq!(
+        newest_removal(),
+        Some((identity, RemovedWrites::Held)),
+        "a detach is no removal"
+    );
     assert_every_attached_volume_is_served();
+}
+
+/// The newest removal the volume service lists: the removed volume's identity
+/// and what became of its writes.
+fn newest_removal() -> Option<([u8; 16], RemovedWrites)> {
+    VOLUME_SERVICE
+        .removals()
+        .expect("the service lists its removals")
+        .last()
+        .map(|removal| (removal.volume_id(), removal.writes()))
 }
 
 /// The link and attribute surfaces of the vanished `usb2` fault like every
@@ -2465,6 +2570,11 @@ fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
             unflushed: Unflushed::Nothing,
         },
     );
+    assert_eq!(
+        newest_removal(),
+        Some((identity, RemovedWrites::None)),
+        "a clean removal is recorded with nothing lost"
+    );
     let mut buf = [0u8; 32];
     assert_eq!(
         held.read(0, &mut buf),
@@ -2537,10 +2647,33 @@ fn pulling_a_partitioned_stick_retracts_every_volume_scenario(
     }
     assert_volume_reads("/Storage/pull1/hello.txt", b"first partition payload");
     assert_volume_reads("/Storage/pull2/hello.txt", b"second partition payload");
+    let before = VOLUME_SERVICE.removals().expect("listed");
 
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
     stop.store(true, Ordering::Relaxed);
     server.join().expect("server thread");
+
+    let after = VOLUME_SERVICE.removals().expect("listed");
+    let newest = before
+        .last()
+        .map_or(0, tairix_abi::sysinfo::VolumeRemovalRecord::sequence);
+    let added: Vec<_> = after
+        .iter()
+        .filter(|removal| removal.sequence() > newest)
+        .collect();
+    let mut removed: Vec<[u8; 16]> = added.iter().map(|removal| removal.volume_id()).collect();
+    removed.sort_unstable();
+    let mut both = vec![first_identity, second_identity];
+    both.sort_unstable();
+    assert_eq!(removed, both, "each volume the stick took is recorded once");
+    assert_eq!(
+        added
+            .iter()
+            .map(|removal| removal.sequence())
+            .collect::<Vec<_>>(),
+        [newest + 1, newest + 2],
+        "numbered in turn"
+    );
 
     for (identity, path) in [
         (first_identity, "/Storage/pull1/hello.txt"),
@@ -2740,7 +2873,7 @@ fn insert(
     device: ServedDevice,
 ) -> Inserted {
     let inserted = insert_unserved(window_ptr, facility, insertion, device);
-    serve_published(facility);
+    serve_published(facility, PUBLISHER);
     inserted
 }
 
@@ -3008,6 +3141,160 @@ fn forced_unmount_of_a_healthy_volume_scenario(
         None,
         "the force-detached identity no longer resolves"
     );
+}
+
+/// `principal`, as the user at the seat.
+fn seated(principal: Principal<'static>) -> Principal<'static> {
+    Principal {
+        at_seat: true,
+        ..principal
+    }
+}
+
+/// A removable device's volume is the seat user's to eject, as a plain
+/// detach and only once nothing holds it open; that authority reaches no
+/// other user and no forced detach.
+fn the_user_at_the_seat_ejects_a_removable_volume_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let endpoint_id = 0xB1D0_5E17_0000_0087_u64;
+    let endpoint = register_endpoint(endpoint_id, 0x70_1087);
+    let (image, identity) = fat32_image(0x0D15_C087, b"ejected payload");
+    let blocks = (image.data.len() / BLOCK_SIZE) as u64;
+    let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        StdArc::clone(&endpoint),
+        Window(window_ptr),
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0087), 8).expect("region");
+    VOLUME_SERVICE
+        .attach(
+            &VolumeAttachRequest {
+                endpoint: endpoint_id,
+                window: region,
+                first_lba: 0,
+                blocks,
+                fstype: VolumeFsType::Fat32,
+                name: b"eject1",
+            },
+            Some(ON_REMOVABLE_PORT),
+        )
+        .expect("the stick's volume attaches");
+    serve_published(facility, ON_REMOVABLE_PORT);
+
+    let detach = |mode| VolumeDetachRequest {
+        volume_id: identity,
+        mode,
+    };
+    assert_eq!(
+        VOLUME_SERVICE.detach(&detach(DetachMode::Plain), &member()),
+        Err(Errno::PermissionDenied),
+        "a user away from the seat may not eject it"
+    );
+    assert_eq!(
+        VOLUME_SERVICE.detach(&detach(DetachMode::Force), &seated(member())),
+        Err(Errno::PermissionDenied),
+        "the seat's authority does not reach a forced detach"
+    );
+    let held = Descriptor::open(0, "/Storage/eject1/hello.txt", OpenFlags::READ).expect("opens");
+    assert_eq!(
+        VOLUME_SERVICE.detach(&detach(DetachMode::Plain), &seated(member())),
+        Err(Errno::Busy),
+        "a volume in use is refused to the seat as to anyone"
+    );
+    drop(held);
+    assert!(audited_levels(EJECTED_AT_SEAT, "eject1").is_empty());
+    VOLUME_SERVICE
+        .detach(&detach(DetachMode::Plain), &seated(member()))
+        .expect("the user at the seat ejects it");
+    assert_eq!(
+        audited_levels(EJECTED_AT_SEAT, "eject1"),
+        [Level::Info],
+        "the eject is audited as the seat's"
+    );
+    assert_eq!(VOLUME_FOREST.resolve(&identity), None);
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("server thread");
+    assert!(
+        device.lock().unwrap().flushes >= 1,
+        "an eject commits the device cache"
+    );
+}
+
+/// A volume recovered over its re-inserted device takes its class from the
+/// port the device came back on, not the one it left: the stand-in answering
+/// it until its driver serves it is listed so already, and once served it is
+/// the user at the seat's to eject.
+fn a_recovered_volume_lists_as_the_port_it_returned_on_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let round = dirty_yank_round(
+        window_ptr,
+        facility,
+        &YankScenario {
+            owner: 0x70_1088,
+            endpoint_id: 0xB1D0_5E17_0000_0088,
+            serial: 0x0D15_C088,
+            region_task: 0x70_0088,
+            name: b"usb88",
+            unflushed: Unflushed::DeviceWrite,
+        },
+    );
+    assert_eq!(mount_record(b"usb88").class(), VolumeClass::Local);
+    let endpoint_id = 0xB1D0_5E17_0000_0089_u64;
+    let endpoint = register_endpoint(endpoint_id, 0x70_1089);
+    let blocks = (round.pristine.len() / BLOCK_SIZE) as u64;
+    let pristine = RamBlock {
+        data: round.pristine,
+    };
+    let device = StdArc::new(Mutex::new(ServedDevice::new(pristine)));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        StdArc::clone(&endpoint),
+        Window(window_ptr),
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0089), 8).expect("region");
+    VOLUME_SERVICE
+        .attach(
+            &VolumeAttachRequest {
+                endpoint: endpoint_id,
+                window: region,
+                first_lba: 0,
+                blocks,
+                fstype: VolumeFsType::Fat32,
+                name: b"usb88",
+            },
+            Some(ON_REMOVABLE_PORT),
+        )
+        .expect("the re-insert recovers the volume");
+    let standing = mount_record(b"usb88");
+    assert_eq!(standing.availability(), MountAvailability::Recovering);
+    assert_eq!(
+        standing.class(),
+        VolumeClass::Removable,
+        "the stand-in lists it as the port it came back on"
+    );
+    serve_published(facility, ON_REMOVABLE_PORT);
+    assert_eq!(mount_record(b"usb88").class(), VolumeClass::Removable);
+    drop(round.held);
+    VOLUME_SERVICE
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: round.identity,
+                mode: DetachMode::Plain,
+            },
+            &seated(member()),
+        )
+        .expect("the user at the seat ejects it");
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("server thread");
 }
 
 /// Assert the file on the mounted volume at `path` holds exactly `expected`.
@@ -4705,6 +4992,7 @@ fn a_network_volume_is_presented_as_its_principal_may_ask_scenario(
         uid: MEMBER_UID,
         gid: STORAGE_GID,
         caps: &MountAuthority,
+        at_seat: false,
     };
     let stat = |uid| {
         FS_SERVICE

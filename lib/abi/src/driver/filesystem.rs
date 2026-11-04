@@ -1593,6 +1593,65 @@ pub trait FilesystemStats {
     fn stats(&mut self) -> Result<VolumeStats, DriverError>;
 }
 
+/// The most bytes a [`VolumeTitle`] holds: the longest title any supported
+/// format records in UTF-8, UDF's logical volume identifier of 126 eight-bit
+/// characters of up to two bytes each. Each format refuses a title longer than
+/// its own.
+pub const VOLUME_TITLE_MAX: usize = 252;
+
+/// A volume's title — the label its filesystem records — as text: at most
+/// [`VOLUME_TITLE_MAX`] bytes of UTF-8 with no control character, empty where
+/// none is set.
+pub type VolumeTitle = crate::bounded_text::BoundedText<0, VOLUME_TITLE_MAX>;
+
+/// The volume's title, read and set as text.
+///
+/// A **versioned `abi-v1` extension**, separate from the other filesystem
+/// traits. Every mountable driver implements it; both methods default to
+/// [`DriverError::Unsupported`], the answer of a driver that serves no title,
+/// and a forwarding wrapper forwards both.
+///
+/// The driver only stores the title it is given; who may retitle a volume is
+/// decided kernel-side before the driver is reached.
+///
+/// # Capabilities
+///
+/// Calls are reached only through the kernel-issued [`DriverHandle`] the host
+/// minted at load time
+/// ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)).
+pub trait FilesystemLabel {
+    /// The volume's title, empty where none is set.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] where the driver serves no title.
+    /// * [`DriverError::DeviceFault`] or [`DriverError::MediumError`] on an
+    ///   unrecoverable read.
+    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
+        Err(DriverError::Unsupported)
+    }
+
+    /// Store `title` as the volume's title, published with the next
+    /// [`FilesystemWrite::flush`]. A refusal writes nothing; a write that
+    /// fails part-way leaves the volume refusing writes, damaged.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] where the format stores no title.
+    /// * [`DriverError::ReadOnly`] for a volume that takes no writes.
+    /// * [`DriverError::LengthOutOfRange`] for a title longer than the format
+    ///   stores.
+    /// * [`DriverError::OutOfRange`] for a character the format cannot store.
+    /// * [`DriverError::NoSpace`] where the format has no room left to record
+    ///   the title.
+    /// * [`DriverError::DeviceFault`] or [`DriverError::MediumError`] on an
+    ///   unrecoverable write.
+    fn set_label(&mut self, title: &VolumeTitle) -> Result<(), DriverError> {
+        let _ = title;
+        Err(DriverError::Unsupported)
+    }
+}
+
 /// A wall clock for a filesystem driver's tests, so no driver's suite carries
 /// its own [`VolumeHost`].
 #[cfg(feature = "test-util")]
@@ -2603,5 +2662,29 @@ mod tests {
         assert!(reported.avail_blocks <= reported.free_blocks);
         assert!(reported.free_blocks <= reported.total_blocks);
         assert_eq!((reported.files, reported.files_free), (0, 0));
+    }
+
+    /// Keeps no title: both methods left to their defaults.
+    struct Untitled;
+
+    impl FilesystemLabel for Untitled {}
+
+    #[test]
+    fn a_driver_keeping_no_title_refuses_it_both_ways_and_a_title_keeps_its_bound() {
+        let mut fs = Untitled;
+        assert_eq!(fs.label(), Err(DriverError::Unsupported));
+        assert_eq!(
+            fs.set_label(&VolumeTitle::EMPTY),
+            Err(DriverError::Unsupported)
+        );
+        assert!(VolumeTitle::new(&"x".repeat(VOLUME_TITLE_MAX)).is_ok());
+        assert!(
+            VolumeTitle::new(&"é".repeat(126)).is_ok(),
+            "UDF's longest title, 126 two-byte characters"
+        );
+        assert_eq!(
+            VolumeTitle::new(&"x".repeat(VOLUME_TITLE_MAX + 1)),
+            Err(crate::Errno::LengthOutOfRange)
+        );
     }
 }

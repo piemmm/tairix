@@ -854,8 +854,9 @@ renderer, and Settings asks it.
   its regions, so reopening windows can neither queue decodes ahead of
   another client's nor pin regions in the desktop. The loop holds the
   *mapping* and the desk holds the request.
-- **The pane** is an ordinary form of two groups: the four pinboard settings
-  (fit, backdrop, icon flow, sort) from the same `Setting` registry as
+- **The pane** is an ordinary form of two groups: the five pinboard settings
+  (fit, backdrop, icon flow, sort, align to grid) from the same `Setting`
+  registry as
   Appearance's, then the *Desktop Picture* chooser (DS19), both posting
   `SettingsKey::PINBOARD` through DS3's merge, so they cannot disturb the
   appearance keys. A `Composition` names the key group it renders, which is
@@ -1417,7 +1418,7 @@ What it guarantees:
 - **Who may see who notified.** The session remembers at most
   `NOTIFY_SOURCES_MAX` sources seen since it started and answers them through
   the `QueryNotifySources` window request to its own Settings application
-  alone (`is_settings_surface`: the attested
+  alone (`notify::is_own_component`: the attested
   `tairix_taskbar::system::SETTINGS_BUNDLE` under the session's own publisher). The reply is the shared name-list codec the cursor
   sets already used, now one definition for both.
 - **The intake is bounded and keyed on the instance.** The notification area

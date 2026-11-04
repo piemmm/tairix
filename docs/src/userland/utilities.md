@@ -495,11 +495,15 @@ the bundled `Help/` documents.
 `tairix-unmount` is `mount`'s counterpart (`plans/DEVICES.md` D4b):
 `unmount NAME` takes the volume mounted under `NAME` out of service.
 `NAME` is the volume's catalog name (`usb1`), a directory it is mounted on
-(`/Storage/usb1`, or the one `mount IMAGE DIR` bound it at), or the source it
-was mounted from — a disk image's file name — resolved through the same
+(`/Storage/usb1`, or the one `mount IMAGE DIR` bound it at), the source it
+was mounted from — a disk image's file name — or its durable root
+(`id::<volume-id>`), resolved through the same
 ungated `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries the other tools use
 (`tairix_procinfo::Namespace`), whose records carry each mount's stable
-16-byte volume identity, availability and owner. A path names the binding at
+16-byte volume identity, availability and owner. A durable root names the
+volume carrying that identity and no other, so one named by it — as the file
+manager names a device it asks an administrator to eject — is never another
+put in its place under the same catalog name. A path names the binding at
 it, never one above it. A file name two users' images share resolves to the
 caller's own; one two of either could mean, or one the listing keeps only the
 start of (`MountRecord::source_cut`), names no volume and says to name it by
@@ -514,7 +518,8 @@ is named by its catalog entry, and a miss beside one says so rather than
 "not mounted". The resolved identity is handed to the kernel's
 `volume_detach` path through the injected `Detacher` seam. The kernel is the
 policy point (`AGENTS.md` §5.4): the user who attached a disk image or a
-network share may detach it, any other volume needs `CAP_FS_MOUNT`, and the
+network share may detach it, the user at the machine's seat may plainly detach
+a removable device's volume, any other volume needs `CAP_FS_MOUNT`, and the
 kernel flushes the filesystem and the device, retracts the mount, withdraws
 the durable `id::` root, and audits every decision. A successful detach writes nothing, matching
 the established `umount` behaviour (`AGENTS.md` §16.7).
@@ -525,7 +530,7 @@ the established `umount` behaviour (`AGENTS.md` §16.7).
 unmount [-f | --force] [--] NAME
 
   NAME          the volume to detach (catalog name, a directory it is mounted on,
-                or a disk image's file name)
+                a disk image's file name, or its durable root id::<volume-id>)
   -f, --force   force-unmount: revoke open files, discard retained uncommitted data
   -h, -?, --help  show the command's own short help
 ```
@@ -586,8 +591,8 @@ alone.
 
 Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` + `CAP_FS_MOUNT`.
 `cargo test -p tairix-unmount` drives the parser, the resolver (catalog
-name, mount-point path, a source another user's image shares, unknown name,
-non-detachable mounts), the
+name, mount-point path, durable root, a source another user's image shares,
+unknown name, non-detachable mounts), the
 force flag reaching the kernel, the refusal paths with and without the
 fd-3 suggestion, the service-failure path, and the thirteen-locale
 `OPTIONS` pinning of the bundled `Help/` documents.
@@ -1030,10 +1035,10 @@ capability database, and the sequence is encoded through the one shared
 `lib/vt` vocabulary — never a hand-rolled escape string. Fail-closed: an
 unknown `TERM` degrades to the dumb baseline, which cannot clear, and
 the tool reports that on stderr (exit `1`) instead of printing escape
-garbage. `-x` (the GNU "do not clear the scrollback" switch) is accepted
-for script compatibility; a TAIRiX console keeps no scrollback, so the
-output is identical with and without it — the divergence is documented
-in the tool's `Help/` documents. `-h`/`-?` render the tool's own short
+garbage. Where the terminal can (`E3`), it then erases the saved lines
+— the scrollback — as the standard `clear` does, last so the rows a
+display erase hands them go too; `-x` keeps them.
+`-h`/`-?` render the tool's own short
 help through the shared `lib/help` engine.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no

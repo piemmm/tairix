@@ -186,13 +186,31 @@ pub enum TaskbarResponse {
     /// menu pixel and holds no menu state.
     OpenMenu(MenuRequest),
     /// A row of the menu an application declared was chosen. The embedder
-    /// relays the application's own row id back to it; the bar never
-    /// interprets one.
+    /// relays the application's own row id, and the revision of the
+    /// declaration the menu was opened from, back to it; the bar never
+    /// interprets either.
     AppMenuChosen {
         /// The process that declared the menu.
         owner: ProcId,
         /// The id the application gave the chosen row.
         item: AppMenuItemId,
+        /// The application's own number for the declaration the menu was
+        /// opened from.
+        revision: u32,
+    },
+    /// The user committed the quick-entry field of a row of the menu an
+    /// application declared. The embedder holds `text` for the application
+    /// to pull and tells it the row; the bar never interprets either.
+    AppMenuEntered {
+        /// The process that declared the menu.
+        owner: ProcId,
+        /// The id the application gave the committed row.
+        item: AppMenuItemId,
+        /// The application's own number for the declaration the menu was
+        /// opened from.
+        revision: u32,
+        /// What the user committed.
+        text: alloc::string::String,
     },
     /// The pointer came to rest on a running application's slot whose
     /// application owns more than one window. The embedder builds one cell

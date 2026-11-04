@@ -10,10 +10,10 @@
 //! 2. [`registry`] — the named-port registry mapping an
 //!    [`port::EndpointId`] to the kernel-owned [`port::Port`] bound to
 //!    it, so the syscall dispatcher can resolve the endpoint carried in
-//!    an [`tairix_abi::ipc::IpcMessageHeader`] to a live port. It owns
-//!    no lock of its own (the synchronisation policy lives with
-//!    `kernel/core`'s `KernelState`, mirroring `kernel/sec`'s
-//!    `CapTable`).
+//!    an [`tairix_abi::ipc::IpcMessageHeader`] to a live port. Its one
+//!    lock guards its index of the ports each sender uses; the rest of its
+//!    synchronisation policy lives with `kernel/core`'s `KernelState`,
+//!    mirroring `kernel/sec`'s `CapTable`.
 //! 3. [`shmem`] — explicit, capability-gated shared-memory objects
 //!    backed by kernel/mem-tracked allocations. Revocation tears down
 //!    every live mapping atomically.
@@ -42,6 +42,8 @@
 //! description.
 
 #![no_std]
+// `Arc::try_new`, so the registry makes its sender index fallibly.
+#![feature(allocator_api)]
 // The `loom` model-checking build compiles only the interleaving harnesses,
 // so items only production reaches read as dead there.
 #![cfg_attr(loom, allow(dead_code))]
@@ -61,11 +63,12 @@ pub mod shmem;
 
 pub use audit::AuditEvent;
 pub use call::{
-    CallEndpoint, CallEndpointLimits, CallTicket, ReceivedCall, RecvCall, ReplyOutcome, Woken,
+    CallEndpoint, CallEndpointLimits, CallTicket, ReceivedCall, RecvCall, ReplyOutcome, SettleMark,
+    Woken,
 };
 pub use lanes::RoomWake;
 pub use notify::{NotificationChannel, NotificationFlags};
-pub use port::{EndpointId, Message, Port};
+pub use port::{EndpointId, Message, Port, Room};
 pub use registry::PortRegistry;
 pub use shmem::{SharedMemory, ShmemHandle, ShmemId, ShmemMapping};
 
@@ -78,4 +81,14 @@ fn queue_reservation(endpoint: usize, entry: usize, max_payload: u64, capacity: 
     bytes(capacity)
         .saturating_mul(max_payload.saturating_add(bytes(entry)))
         .saturating_add(bytes(endpoint))
+}
+
+/// The capacity a list of `capacity` grows to so it holds `needed`: doubled,
+/// so growth is amortised, but never past `most`, the most it can ever hold.
+fn grown_capacity(capacity: usize, needed: usize, most: usize) -> usize {
+    if needed <= capacity {
+        capacity
+    } else {
+        capacity.saturating_mul(2).min(most).max(needed)
+    }
 }

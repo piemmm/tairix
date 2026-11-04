@@ -1,11 +1,11 @@
 //! TAIRiX `clear` — clear the terminal screen (`plans/APPS.md`).
 //!
 //! The TAIRiX counterpart of the ncurses `clear` tool: it writes the byte
-//! sequence that moves the cursor home and erases the display, and nothing
-//! else. Which bytes those are is decided by the inherited `TERM` through
-//! the compiled-in capability database (`lib/termcap`), and the sequence is
-//! encoded through the one shared escape vocabulary (`lib/vt`) — never a
-//! hand-rolled escape string.
+//! sequence that moves the cursor home and erases the display, then the
+//! scrollback where the terminal can, and nothing else. Which bytes those are
+//! is decided by the inherited `TERM` through the compiled-in capability
+//! database (`lib/termcap`), and the sequence is encoded through the one
+//! shared escape vocabulary (`lib/vt`) — never a hand-rolled escape string.
 //!
 //! # What this crate is
 //!
@@ -17,12 +17,12 @@
 //!   caller fails honestly instead of emitting sequences the terminal does
 //!   not understand.
 //!
-//! # Divergence from ncurses `clear`
+//! # The scrollback
 //!
-//! GNU/ncurses `clear -x` skips the scrollback-erase (`E3`) extension. A
-//! TAIRiX console keeps no scrollback, so there is nothing to skip: `-x` is
-//! accepted for script compatibility and the output is identical with and
-//! without it. Documented in the tool's `Help/` documents.
+//! Where the terminal can (`E3`), it erases the terminal's saved lines — the
+//! scrollback — after the display, as the standard `clear` does: a terminal
+//! may keep the rows a display erase removes as saved lines, so those go too.
+//! `-x` keeps them.
 //!
 //! # Layering & safety
 //!
@@ -53,8 +53,11 @@ pub const USAGE: &str = "usage: clear [-x] [-h | -?]";
 /// One thing the `clear` tool can do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
-    /// Clear the screen.
-    Run,
+    /// Clear the screen, and the scrollback unless it is kept.
+    Run {
+        /// Whether `-x` asked for the scrollback to be kept.
+        keep_scrollback: bool,
+    },
     /// Render `clear`'s own short help (`-h`/`-?`/`--help`): the `NAME`,
     /// `SYNOPSIS`, and compact `OPTIONS` of its Help document, through the
     /// same engine as any other command's short help (plans/APPS.md).
@@ -99,29 +102,30 @@ const OPTIONS: &[Opt<Flag>] = &[
 /// [`Command`].
 ///
 /// The grammar is `clear [-x] [-h | -?]`, read as GNU's `getopt_long` reads it
-/// ([`Scan`]). The help switches (`-h`, `-?`, `--help`) answer at once. `-x`
-/// is accepted, as often as it is given, for GNU/ncurses compatibility ("do
-/// not clear the scrollback"); a TAIRiX console keeps no scrollback, so the
-/// behaviour is identical with and without it. The tool takes no operands.
+/// ([`Scan`]). The help switches (`-h`, `-?`, `--help`) answer at once. `-x`,
+/// as often as it is given, keeps the scrollback. The tool takes no operands.
 ///
 /// # Errors
 ///
 /// * [`ClearError::Option`] — an option `getopt` refuses, in its words.
 /// * [`ClearError::ExtraOperand`] — an operand.
 pub fn parse(args: &[&str]) -> Result<Command, ClearError> {
+    let mut keep_scrollback = false;
     for arg in Scan::new(OPTIONS, args, Order::Permute) {
         match arg.map_err(ClearError::Option)? {
             Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
-            Arg::Opt(Flag::KeepScrollback, _) => {}
+            Arg::Opt(Flag::KeepScrollback, _) => keep_scrollback = true,
             Arg::Operand(operand) => return Err(ClearError::ExtraOperand(String::from(operand))),
         }
     }
-    Ok(Command::Run)
+    Ok(Command::Run { keep_scrollback })
 }
 
 /// The encoded clear sequence for the capability profile `caps`: move the
-/// cursor home, then erase the whole display — the shared `lib/vt`
-/// operations the profile's terminal accepts.
+/// cursor home and erase the whole display, then erase the saved lines where
+/// the terminal can and `keep_scrollback` does not ask to keep them — last,
+/// so the rows a terminal keeps from the display erase go too — the shared
+/// `lib/vt` operations the profile's terminal accepts.
 ///
 /// Returns `None` when the terminal can neither address the cursor nor
 /// erase (the fail-closed dumb baseline an unknown `TERM` degrades to):
@@ -129,18 +133,19 @@ pub fn parse(args: &[&str]) -> Result<Command, ClearError> {
 /// the failure honestly rather than writing bytes that would print as
 /// garbage.
 #[must_use]
-pub fn clear_bytes(caps: &Capabilities) -> Option<Vec<u8>> {
+pub fn clear_bytes(caps: &Capabilities, keep_scrollback: bool) -> Option<Vec<u8>> {
     if !(caps.cursor_addressing && caps.erase) {
         return None;
     }
+    let saved = (caps.erase_saved_lines && !keep_scrollback).then_some(Op::EraseSavedLines);
+    let ops = [
+        Op::CursorPosition { row: 1, col: 1 },
+        Op::EraseInDisplay(EraseMode::All),
+    ]
+    .into_iter()
+    .chain(saved);
     let mut bytes = Vec::new();
-    encode_all_into(
-        &[
-            Op::CursorPosition { row: 1, col: 1 },
-            Op::EraseInDisplay(EraseMode::All),
-        ],
-        &mut bytes,
-    );
+    encode_all_into(&ops.collect::<Vec<_>>(), &mut bytes);
     Some(bytes)
 }
 
@@ -155,17 +160,23 @@ mod tests {
     use super::{clear_bytes, parse, ClearError, Command};
 
     #[test]
-    fn no_arguments_clears() {
-        assert_eq!(parse(&[]), Ok(Command::Run));
+    fn no_arguments_clears_the_scrollback_too() {
+        assert_eq!(
+            parse(&[]),
+            Ok(Command::Run {
+                keep_scrollback: false
+            })
+        );
     }
 
     #[test]
-    fn dash_x_is_accepted() {
-        // `-x` is the GNU "keep the scrollback" switch; a TAIRiX console
-        // keeps none, so it parses to the same command.
-        assert_eq!(parse(&["-x"]), Ok(Command::Run));
+    fn dash_x_keeps_the_scrollback() {
+        let kept = Ok(Command::Run {
+            keep_scrollback: true,
+        });
+        assert_eq!(parse(&["-x"]), kept);
         // ncurses `clear` takes a repeated `-x` as readily as a single one.
-        assert_eq!(parse(&["-x", "-x"]), Ok(Command::Run));
+        assert_eq!(parse(&["-x", "-x"]), kept);
     }
 
     #[test]
@@ -207,20 +218,33 @@ mod tests {
     }
 
     #[test]
-    fn clear_bytes_emits_home_then_erase_on_a_capable_terminal() {
-        for term in [TermType::Xterm256Color, TermType::Vt100] {
-            let bytes = clear_bytes(&term.capabilities()).expect("terminal can clear");
-            // `CUP` home then `ED` all: the ncurses `clear` sequence,
-            // through the shared vocabulary.
-            assert_eq!(bytes, b"\x1b[1;1H\x1b[2J");
-        }
+    fn clear_bytes_erases_the_saved_lines_last_where_the_terminal_can() {
+        // `CUP` home and `ED` all, then `E3`: the standard `clear` sequence,
+        // through the shared vocabulary, the saved lines last so the rows a
+        // terminal keeps from the display erase go too.
+        let xterm = TermType::Xterm256Color.capabilities();
+        assert_eq!(
+            clear_bytes(&xterm, false).expect("terminal can clear"),
+            b"\x1b[1;1H\x1b[2J\x1b[3J"
+        );
+        assert_eq!(
+            clear_bytes(&xterm, true).expect("terminal can clear"),
+            b"\x1b[1;1H\x1b[2J",
+            "-x keeps the scrollback"
+        );
+        // A terminal without `E3` is sent no erase it cannot read.
+        let vt100 = TermType::Vt100.capabilities();
+        assert_eq!(
+            clear_bytes(&vt100, false).expect("terminal can clear"),
+            b"\x1b[1;1H\x1b[2J"
+        );
     }
 
     #[test]
     fn clear_bytes_refuses_the_dumb_baseline() {
         // An unknown `TERM` degrades to `Dumb`, which cannot clear: the
         // tool must fail honestly, never print escape garbage.
-        assert_eq!(clear_bytes(&TermType::Dumb.capabilities()), None);
+        assert_eq!(clear_bytes(&TermType::Dumb.capabilities(), false), None);
     }
 
     /// Every locale's `OPTIONS` section documents exactly the switches this

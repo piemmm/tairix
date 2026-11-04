@@ -32,6 +32,8 @@ use tairix_writeback::TestVolumeHost;
 
 use crate::{Affs, FormatOptions, SPARE_BLOCKS};
 
+mod label;
+
 const RECORD: NodeSecurity = NodeSecurity::new(0o644, 0, 0);
 
 /// Every request this binary makes, metered per thread, so a test can bound
@@ -988,6 +990,55 @@ fn a_full_volume_refuses_the_write_and_stays_consistent() {
     drop(check_fs(fs));
 }
 
+/// A write of nothing changes nothing, at or past the end of a file alike.
+#[test]
+fn an_empty_write_past_the_end_leaves_the_size_alone() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let empty = make(&mut fs, root, "empty", &[]);
+    fs.write_all(empty, 24_062, &[]).expect("nothing to write");
+    assert_eq!(fs.node_info(empty).expect("info").size, 0);
+    let short = make(&mut fs, root, "short", b"abc");
+    fs.write_all(short, 3, &[]).expect("nothing to write");
+    fs.write_all(short, 9_000, &[]).expect("nothing to write");
+    assert_eq!(read_whole(&mut fs, short), b"abc");
+    drop(check_fs(fs));
+}
+
+/// A file made on a volume with no block left for its header is refused, and
+/// leaves no entry for a later lookup or removal to find.
+#[test]
+fn a_create_on_a_full_volume_is_refused_and_leaves_no_entry() {
+    let mut fs = floppy(1);
+    let root = fs.root();
+    let filler = make(&mut fs, root, "filler", &[]);
+    let mut blocks = fs.stats().expect("stats").free_blocks as usize;
+    while blocks > 0 {
+        match fs.write_all(filler, 0, &vec![7u8; blocks * 512]) {
+            Ok(()) => break,
+            Err(DriverError::NoSpace) => blocks -= 1,
+            Err(err) => panic!("filling: {err:?}"),
+        }
+    }
+    let mut made = 0;
+    let refused = loop {
+        match fs.create(
+            root,
+            alloc::format!("f{made}").as_bytes(),
+            NodeKind::RegularFile,
+            &RECORD,
+        ) {
+            Ok(_) => made += 1,
+            Err(err) => break err,
+        }
+    };
+    assert_eq!(refused, DriverError::NoSpace);
+    let name = alloc::format!("f{made}");
+    assert_eq!(fs.lookup(root, name.as_bytes()), Err(DriverError::NotFound));
+    assert_eq!(fs.remove(root, name.as_bytes()), Err(DriverError::NotFound));
+    drop(check_fs(fs));
+}
+
 #[test]
 fn security_is_unrecorded_and_unsettable() {
     let mut fs = floppy(1);
@@ -1102,6 +1153,40 @@ fn a_damaged_bitmap_block_stops_the_allocation() {
     );
 }
 
+/// Write `data` at `offset` to the root's file `name`, made first where
+/// absent, as `model` records the file: a volume with no room for a new
+/// file's header or for the data leaves both as they were, and a write of
+/// nothing changes nothing, past the end too. Whether the file exists now.
+fn write_modelled(
+    fs: &mut Affs<MemDisk>,
+    model: &mut BTreeMap<String, Vec<u8>>,
+    (name, offset, data): (&str, usize, &[u8]),
+    step: u32,
+) -> bool {
+    let root = fs.root();
+    let file = match fs.lookup(root, name.as_bytes()) {
+        Ok(file) => file,
+        Err(_) => match fs.create(root, name.as_bytes(), NodeKind::RegularFile, &RECORD) {
+            Ok(file) => file,
+            Err(DriverError::NoSpace) => return false,
+            Err(err) => panic!("step {step}: making {name}: {err:?}"),
+        },
+    };
+    let entry = model.entry(String::from(name)).or_default();
+    match fs.write_all(file, offset as u64, data) {
+        Ok(()) if data.is_empty() => {}
+        Ok(()) => {
+            if entry.len() < offset + data.len() {
+                entry.resize(offset + data.len(), 0);
+            }
+            entry[offset..offset + data.len()].copy_from_slice(data);
+        }
+        Err(DriverError::NoSpace) => {}
+        Err(err) => panic!("step {step}: writing {name}: {err:?}"),
+    }
+    true
+}
+
 #[test]
 fn a_model_of_random_changes_is_kept_and_checks_out() {
     let mut rng = Prng::new(tairix_fuzzseed::start(
@@ -1119,21 +1204,7 @@ fn a_model_of_random_changes_is_kept_and_checks_out() {
                     let offset = rng.below(30_000);
                     let len = rng.below(9_000);
                     let data = pattern(len, step as u8);
-                    let file = match fs.lookup(root, name.as_bytes()) {
-                        Ok(file) => file,
-                        Err(_) => make(&mut fs, root, &name, &[]),
-                    };
-                    let entry = model.entry(name.clone()).or_default();
-                    match fs.write_all(file, offset as u64, &data) {
-                        Ok(()) => {
-                            if entry.len() < offset + len {
-                                entry.resize(offset + len, 0);
-                            }
-                            entry[offset..offset + len].copy_from_slice(&data);
-                        }
-                        Err(DriverError::NoSpace) => {}
-                        Err(err) => panic!("step {step}: {err:?}"),
-                    }
+                    write_modelled(&mut fs, &mut model, (&name, offset, &data), step);
                 }
                 2 => {
                     if let Ok(file) = fs.lookup(root, name.as_bytes()) {
@@ -2458,22 +2529,7 @@ fn a_model_of_changes_across_many_long_files_is_kept_and_checks_out() {
                 0 | 1 => {
                     let offset = rng.below(600_000);
                     let data = pattern(rng.below(64_000), step as u8);
-                    let file = match fs.lookup(root, name.as_bytes()) {
-                        Ok(file) => file,
-                        Err(_) => make(&mut fs, root, &name, &[]),
-                    };
-                    let entry = model.entry(name.clone()).or_default();
-                    match fs.write_all(file, offset as u64, &data) {
-                        Ok(()) => {
-                            if entry.len() < offset + data.len() {
-                                entry.resize(offset + data.len(), 0);
-                            }
-                            entry[offset..offset + data.len()].copy_from_slice(&data);
-                        }
-                        Err(DriverError::NoSpace) => {}
-                        Err(err) => panic!("DOS\\{dos_type} step {step}: {err:?}"),
-                    }
-                    true
+                    write_modelled(&mut fs, &mut model, (&name, offset, &data), step)
                 }
                 2 => match fs.lookup(root, name.as_bytes()) {
                     Ok(file) => {

@@ -31,9 +31,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
-    FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned, VolumeHost,
-    VolumeStats,
+    FilesystemAttrsProvider, FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats,
+    FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity,
+    Unpinned, VolumeHost, VolumeStats, VolumeTitle,
 };
 use tairix_abi::fs::{SeekRegion, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_SYMLINK_MAX};
 use tairix_abi::fsserve::{
@@ -614,6 +614,7 @@ impl ServedFs {
         };
         arm(liveness.judged_at);
         let outcome = loop {
+            let mark = self.endpoint.settle_mark();
             match self
                 .endpoint
                 .take_reply(claimant, ticket, now_ns(), self.audit)
@@ -636,11 +637,14 @@ impl ServedFs {
                 arm(liveness.judged_at);
             }
             // With no scheduler to park on (a host test, where the driver
-            // runs on another thread) the wait degrades to a cooperative
-            // spin, exactly as `SleepLock` does; never a steady state on a
-            // running kernel.
+            // runs on another thread) the wait spins; never a steady state on
+            // a running kernel.
             if task.is_none() || !park_calling_task() {
-                core::hint::spin_loop();
+                self.endpoint.await_settle(mark, || {
+                    task.is_some_and(|task| {
+                        crate::procsignal::kill_pending(task) || now_ns() >= liveness.judged_at
+                    })
+                });
             }
         };
         if let Some(task) = task {
@@ -1087,6 +1091,21 @@ impl FilesystemStats for ServedFs {
         self.ask(&Request::Stats, |_, answer| match answer {
             Answer::Stats(stats) => Ok(stats),
             _ => Err(DriverError::DeviceFault),
+        })
+    }
+}
+
+impl FilesystemLabel for ServedFs {
+    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
+        self.ask(&Request::Label, |_, answer| match answer {
+            Answer::Label(title) => Ok(title),
+            _ => Err(DriverError::DeviceFault),
+        })
+    }
+
+    fn set_label(&mut self, title: &VolumeTitle) -> Result<(), DriverError> {
+        self.ask(&Request::SetLabel { title: *title }, |_, answer| {
+            done(answer)
         })
     }
 }

@@ -93,6 +93,7 @@ pub const fn menu_symbol_icon(symbol: AppMenuSymbol) -> IconKind {
         S::PixelGrid => IconKind::PixelGrid,
         S::Panes => IconKind::Panes,
         S::ResetPanes => IconKind::ResetPanes,
+        S::Float => IconKind::PopOut,
         S::Display => IconKind::Layout,
         S::LargeIcons => IconKind::LargeIcons,
         S::SmallIcons => IconKind::SmallIcons,
@@ -268,6 +269,7 @@ pub(crate) const fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::Grid => GRID,
         IconKind::Panes => PANES,
         IconKind::ResetPanes => TURN_BACK,
+        IconKind::PopOut => POP_OUT,
         IconKind::Layout => LAYOUT,
         IconKind::LargeIcons => LARGE_TILES,
         IconKind::SmallIcons => SMALL_TILES,
@@ -771,6 +773,16 @@ const PANES: &[Mark] = &[line(&[
 const TURN_BACK: &[Mark] = &[line(&[
     Outline::Path("M4 12A8 8 0 1 0 6.34 6.34L4 8.6"),
     Outline::Path("M4 3.6V8.6H9"),
+])];
+
+/// A small window, an arrow leaving it for the corner above.
+const POP_OUT: &[Mark] = &[line(&[
+    Outline::Path(
+        "M4.5 11H11.5A1.5 1.5 0 0 1 13 12.5V19.5A1.5 1.5 0 0 1 11.5 21H4.5A1.5 1.5 0 0 1 3 19.5V12.5A1.5 1.5 0 0 1 4.5 11Z",
+    ),
+    Outline::Path("M3 14.5H13"),
+    Outline::Path("M16 8L21 3"),
+    Outline::Path("M15.5 3H21V8.5"),
 ])];
 
 /// A window divided into its panels.

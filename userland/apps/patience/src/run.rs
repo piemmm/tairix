@@ -309,6 +309,7 @@ mod program {
                 event_endpoint: self.endpoint,
                 click: AppBarClick::RaiseOrOpen,
                 menu,
+                revision: 0,
             };
             match tairix_window::declare_app_bar(self.window.client(), Ok(bar)) {
                 Ok(()) => self.declared = Some(menu),
@@ -335,7 +336,7 @@ mod program {
                         let _ = self.open(game, now_ns);
                     }
                 }
-                WindowEvent::AppBarMenu { item } => {
+                WindowEvent::AppBarMenu { item, .. } => {
                     if tairix_window::is_quit(item) {
                         concluded.quit = true;
                     } else {
@@ -397,6 +398,7 @@ mod program {
                 // for no picker, and opens no surface of another kind, so none
                 // of their outcomes can arrive.
                 WindowEvent::AlternateCloseRequested { .. }
+                | WindowEvent::AppBarEntered { .. }
                 | WindowEvent::MenuClosed { .. }
                 | WindowEvent::Key { .. }
                 | WindowEvent::Focus { .. }

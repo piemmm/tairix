@@ -36,15 +36,17 @@ mock channel.
 driver binary is built for. It binds its node's reserved device-channel
 endpoint **restricted-sender on `CAP_AUDIO_DEVICE`**, publishes the `tairix,audiochan`
 hardware-tree node the device manager hands to the mixer, and parks on a wait
-set over `{call endpoint, device interrupt}`, handing each wake to the
-dispatcher.
+set over `{call endpoint, device interrupt}` and the room of any port a held
+notification waits on, handing each wake to the dispatcher.
 
 `Channel` is that claimed and published channel without the loop, for a
 driver whose device also serves another protocol from the same thread — an
 HDMI transmitter's encoder link beside its audio endpoint
 (`tairix_encoder::serve_with_audio`). The other protocol's loop parks on the
 channel's endpoint too, and calls `on_call` when it wakes and `on_event` after
-anything that may have changed what the device reports.
+anything that may have changed what the device reports; before each wait it
+lets `rooms` arm the room members the channel needs, and calls `on_room` when
+one wakes or the pause for kernel memory has run.
 
 ## The cyclic engine
 
@@ -135,13 +137,30 @@ A call that waited on the device — a codec verb, a control request — may hav
 consumed the very wake an elapsed period raised, and a stream whose last
 period is never serviced never reports its drain.
 
+## What the mixer is owed
+
+A notification is not dropped because the mixer's port refused it. One refused
+for want of room, or for the driver's own IPC budget, is held and sent when the
+port's room member reports room, which the kernel raises for either; one the
+kernel had no memory for waits on a one-shot pause, since nothing reports
+memory freeing. A port already owed something takes the next notification
+behind it, never around it. An endpoint holds at most one notification of each
+kind — the newest clock pair, drain, connector change and fault each supersede
+the one held, and a held loss absorbs the next, its frames summed at the later
+position — so the store is bounded by the protocol's own endpoint ceiling, and
+what is held goes in the order it happened, each to wherever its endpoint
+reports when it is offered. A refusal for good is given up and recorded (event
+29013) each time the running total doubles; a port gone with its mixer loses
+nobody anything.
+
 ## Nothing spins
 
 Between events the process parks on its wait set. The device's event sources
 are masked whenever nothing is attached — so a device left clocking cannot
 storm a driver with nowhere to put frames — and released again on the mixer's
 next `Service`. The device's own period interrupt is the only timer in the
-stack.
+stack, beside the one-shot pause before a notification the kernel had no memory
+for is offered again.
 
 ## Fail closed
 

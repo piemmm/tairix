@@ -458,6 +458,9 @@ pub enum IconKind {
     Panes,
     /// An arrow turning back round, for putting the panes back.
     ResetPanes,
+    /// A small window with an arrow leaving it, for floating what a window
+    /// holds out into a window of its own.
+    PopOut,
     /// A window divided into panels, for how a window shows its items.
     Layout,
     /// Four large tiles, for large icons.
@@ -869,6 +872,7 @@ impl IconKind {
             "grid" => Self::Grid,
             "panes" => Self::Panes,
             "reset-panes" => Self::ResetPanes,
+            "pop-out" => Self::PopOut,
             "layout" => Self::Layout,
             "large-icons" => Self::LargeIcons,
             "small-icons" => Self::SmallIcons,
@@ -1284,6 +1288,7 @@ impl IconKind {
             Self::TextCsv => 289,
             Self::TextMakefile => 290,
             Self::FileManager => 291,
+            Self::PopOut => 292,
         }
     }
 
@@ -1593,6 +1598,7 @@ impl IconKind {
             Self::TextCsv => "text-csv",
             Self::TextMakefile => "text-x-makefile",
             Self::FileManager => "file-manager",
+            Self::PopOut => "pop-out",
         }
     }
 }
@@ -1922,6 +1928,7 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::Grid
         | IconKind::Panes
         | IconKind::ResetPanes
+        | IconKind::PopOut
         | IconKind::Layout
         | IconKind::LargeIcons
         | IconKind::SmallIcons

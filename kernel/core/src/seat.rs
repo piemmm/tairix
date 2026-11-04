@@ -106,14 +106,14 @@ struct InputChannel<const CAP: usize, const REC: usize> {
 
 /// The desktop keyboard channel: [`KeyInput`] records, drained by
 /// `keyboard_read`.
-type KeyboardChannel = InputChannel<KEYBOARD_CHANNEL_CAPACITY, { KeyInput::WIRE_LEN }>;
+type KeyboardChannel = InputChannel<KEYBOARD_CHANNEL_CAPACITY, { InputKind::Key.wire_len() }>;
 
 /// The desktop pointer channel: [`TimedPointer`] records, drained by
 /// `pointer_read`.
-type PointerChannel = InputChannel<POINTER_CHANNEL_CAPACITY, { TimedPointer::WIRE_LEN }>;
+type PointerChannel = InputChannel<POINTER_CHANNEL_CAPACITY, { InputKind::Pointer.wire_len() }>;
 
 /// The desktop touch channel: [`TouchFrame`]s, drained by `touch_read`.
-type TouchChannel = InputChannel<TOUCH_CHANNEL_CAPACITY, { TouchFrame::WIRE_LEN }>;
+type TouchChannel = InputChannel<TOUCH_CHANNEL_CAPACITY, { InputKind::Touch.wire_len() }>;
 
 impl<const CAP: usize, const REC: usize> InputChannel<CAP, REC> {
     const fn new() -> Self {
@@ -137,13 +137,23 @@ impl<const CAP: usize, const REC: usize> InputChannel<CAP, REC> {
         // dropped rather than asserted so no path here can panic.
         let _ = ring.try_push_back(*record);
     }
+}
 
-    /// Whether the channel currently holds at least one undrained record
-    /// (the `SeatInput` wait-set readiness probe; a peek — nothing is
-    /// consumed).
-    fn pending(&self) -> bool {
-        !self.ring.lock().is_empty()
-    }
+/// A desktop input channel with its record width erased, so one drain, one
+/// put-back and one purge serve every [`InputKind`].
+trait InputQueue {
+    /// Drain one record into `out`, zeroing the drained slot, answering
+    /// whether one was taken. An `out` narrower than a record takes nothing.
+    fn drain_one(&self, out: &mut [u8]) -> bool;
+
+    /// Put back `record`, drained but never delivered, at the front where it
+    /// was. A full ring keeps what it holds instead: the record is older than
+    /// all of it, and overflow drops the oldest.
+    fn restore(&self, record: &[u8]);
+
+    /// Whether the channel holds an undrained record (the `SeatInput`
+    /// wait-set readiness probe; nothing is consumed).
+    fn pending(&self) -> bool;
 
     /// Discard every queued record, zeroing the whole backing store.
     ///
@@ -153,25 +163,41 @@ impl<const CAP: usize, const REC: usize> InputChannel<CAP, REC> {
     /// longer the holder's (zero-on-free). At the **acquire**, because an
     /// incoming owner must never be able to read a record it did not
     /// produce, whatever path ended the previous lease.
-    fn purge(&self) {
-        self.ring.lock().purge();
-    }
+    fn purge(&self);
+}
 
-    /// Drain one record into `out`, zeroing the drained slot, and return the
-    /// number of bytes written (`REC`, or `0` when empty).
-    ///
-    /// `out` is assumed to be at least `REC` bytes (the caller checks the
-    /// bound first).
-    fn drain_one(&self, out: &mut [u8]) -> usize {
-        let Some(mut record) = self.ring.lock().pop_front() else {
-            return 0;
+impl<const CAP: usize, const REC: usize> InputQueue for InputChannel<CAP, REC> {
+    fn drain_one(&self, out: &mut [u8]) -> bool {
+        let Some(out) = out.get_mut(..REC) else {
+            return false;
         };
-        out[..REC].copy_from_slice(&record);
+        let Some(mut record) = self.ring.lock().pop_front() else {
+            return false;
+        };
+        out.copy_from_slice(&record);
         // The record left the ring by value, so the copy the pop handed back
         // is itself a place a typed character can sit; it is wiped before the
         // frame goes, leaving the cleartext only in the caller's buffer.
         record.zeroize();
-        REC
+        true
+    }
+
+    fn restore(&self, record: &[u8]) {
+        let Ok(record) = <&[u8; REC]>::try_from(record) else {
+            return;
+        };
+        let mut ring = self.ring.lock();
+        if !ring.is_full() {
+            let _ = ring.try_push_front(*record);
+        }
+    }
+
+    fn pending(&self) -> bool {
+        !self.ring.lock().is_empty()
+    }
+
+    fn purge(&self) {
+        self.ring.lock().purge();
     }
 }
 
@@ -208,7 +234,7 @@ struct SeatSlot {
     /// [`NULL_CONSOLE_INPUT`], which fails closed.
     text_sink: &'static (dyn ConsoleInput + 'static),
     /// The desktop keyboard channel — the seat's desktop keyboard sink.
-    channel: KeyboardChannel,
+    keys: KeyboardChannel,
     /// The desktop pointer channel — the seat's desktop pointer sink.
     pointer: PointerChannel,
     /// The desktop touch channel — the seat's desktop touch sink.
@@ -228,7 +254,7 @@ impl SeatSlot {
         Self {
             state: SpinLock::new(SeatState::new(ConsoleIndex(0))),
             text_sink,
-            channel: KeyboardChannel::new(),
+            keys: KeyboardChannel::new(),
             pointer: PointerChannel::new(),
             touch: TouchChannel::new(),
             debounce: SpinLock::new(DeviceDebounce::new()),
@@ -236,14 +262,45 @@ impl SeatSlot {
         }
     }
 
+    /// The `kind` channel, its record width erased.
+    fn queue(&self, kind: InputKind) -> &dyn InputQueue {
+        match kind {
+            InputKind::Key => &self.keys,
+            InputKind::Pointer => &self.pointer,
+            InputKind::Touch => &self.touch,
+        }
+    }
+
     /// Discard every desktop input channel's queued records, zeroing them.
     ///
-    /// One call for all three, so no lease transition can remember to purge
+    /// One call for every kind, so no lease transition can remember to purge
     /// the keystrokes and forget the pointer trail or the touches.
     fn purge_channels(&self) {
-        self.channel.purge();
-        self.pointer.purge();
-        self.touch.purge();
+        for kind in InputKind::ALL {
+            self.queue(kind).purge();
+        }
+    }
+
+    /// Queue `record` on `channel` while the seat is held, answering whether
+    /// it was. The route is decided and the record delivered under one hold
+    /// of the state: input routed to the outgoing owner must never land after
+    /// the next owner acquired, the one way it could cross principals despite
+    /// the purge.
+    fn queue_if_held<const CAP: usize, const REC: usize>(
+        &self,
+        channel: &InputChannel<CAP, REC>,
+        record: &[u8; REC],
+    ) -> bool {
+        let state = self.state.lock();
+        let held = matches!(state.route(), Route::Desktop(_));
+        if held {
+            channel.push(record);
+        }
+        drop(state);
+        if held {
+            crate::waitq::seat_input_wake();
+        }
+        held
     }
 
     /// One wire-encodable snapshot of this seat, taken under its state lock
@@ -431,20 +488,37 @@ pub struct SeatRegistry {
     first_touch_delivery: AtomicBool,
 }
 
-/// The input kind a first-delivery witness attributes
-/// ([`SeatRegistry::note_first_delivery`]): which class of input driver
-/// proved itself live.
+/// The kind of a desktop input record: the seat channel that carries it and
+/// the first-delivery witness ([`SeatRegistry::note_first_delivery`]) its
+/// class of driver fires.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum DeliveredInputKind {
-    /// A keyboard key edge (`key_inject`).
+pub enum InputKind {
+    /// A keyboard key edge (`key_inject` → `keyboard_read`).
     Key,
-    /// A pointer motion or button record (`pointer_inject`).
+    /// A pointer motion or button record (`pointer_inject` →
+    /// `pointer_read`).
     Pointer,
-    /// A touch frame (`touch_inject`).
+    /// A touch frame (`touch_inject` → `touch_read`).
     Touch,
 }
 
-impl DeliveredInputKind {
+impl InputKind {
+    /// Every kind, so what holds for all of a seat's channels is said once.
+    pub const ALL: [Self; 3] = [Self::Key, Self::Pointer, Self::Touch];
+
+    /// The widest record of any kind: a staging buffer this long holds each.
+    pub const WIDEST: usize = {
+        let mut widest = 0;
+        let mut at = 0;
+        while at < Self::ALL.len() {
+            if Self::ALL[at].wire_len() > widest {
+                widest = Self::ALL[at].wire_len();
+            }
+            at += 1;
+        }
+        widest
+    };
+
     /// The stable `kind` field value the audit witness carries.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -452,6 +526,17 @@ impl DeliveredInputKind {
             Self::Key => "key",
             Self::Pointer => "pointer",
             Self::Touch => "touch",
+        }
+    }
+
+    /// The length of one record of this kind, on its channel and in the
+    /// reader's buffer.
+    #[must_use]
+    pub const fn wire_len(self) -> usize {
+        match self {
+            Self::Key => KeyInput::WIRE_LEN,
+            Self::Pointer => TimedPointer::WIRE_LEN,
+            Self::Touch => TouchFrame::WIRE_LEN,
         }
     }
 }
@@ -659,40 +744,32 @@ impl SeatRegistry {
     ///   be enqueued there but the sink refuses it.
     pub fn inject(&self, seat_id: u64, record: KeyInput) -> Result<usize, Errno> {
         let slot = self.resolve(seat_id)?;
-        let state = slot.state.lock();
-        let route = state.route();
-        match route {
-            Route::Desktop(_) => {
-                let bytes = record.to_le_bytes();
-                // Decide and deliver under one guard: a record routed to
-                // the *outgoing* owner must never land in the channel after
-                // the next owner has acquired it, which is the one way a
-                // keystroke could cross principals despite the purge.
-                slot.channel.push(&bytes);
-                drop(state);
-                // Wake the seat owner parked on a `SeatInput` wait-set
-                // member; it drains the channel and parks again when empty.
-                crate::waitq::seat_input_wake();
-            }
-            Route::Text(_) => {
-                // The text sink is a console input queue an interrupt
-                // handler also pushes to, so the seat guard is dropped
-                // first and only the queue's own lock is taken here.
-                drop(state);
-                let mut out = [0u8; MAX_KEY_BYTES];
-                // The shared map; an over-long sequence cannot occur for a
-                // `MAX_KEY_BYTES` buffer, so a `BufferTooSmall` here would be
-                // a map bug, surfaced rather than hidden.
-                let n = encode_key_input(&record, &mut out).map_err(|_| Errno::BufferTooSmall)?;
-                if n > 0 {
-                    // A short push (the bounded type-ahead queue is near
-                    // full) is best-effort; a sink that accepts no input
-                    // fails closed.
-                    slot.text_sink.push(&out[..n])?;
-                }
-            }
+        // A key edge can carry a typed character, so each staged copy of it
+        // is wiped once delivered.
+        let mut bytes = record.to_le_bytes();
+        let queued = slot.queue_if_held(&slot.keys, &bytes);
+        bytes.zeroize();
+        if queued {
+            return Ok(KeyInput::WIRE_LEN);
         }
-        Ok(KeyInput::WIRE_LEN)
+        // The text sink is a console input queue an interrupt handler also
+        // pushes to, so only that queue's own lock is taken.
+        let mut typed = [0u8; MAX_KEY_BYTES];
+        // The shared map cannot overrun a `MAX_KEY_BYTES` buffer, so its
+        // refusal is a map bug, surfaced rather than hidden. A short push to
+        // the bounded type-ahead queue is best-effort; a sink that accepts no
+        // input fails closed.
+        let pushed = match encode_key_input(&record, &mut typed) {
+            Ok(0) => Ok(()),
+            Ok(n) => typed
+                .get(..n)
+                .ok_or(Errno::BufferTooSmall)
+                .and_then(|sequence| slot.text_sink.push(sequence))
+                .map(drop),
+            Err(_) => Err(Errno::BufferTooSmall),
+        };
+        typed.zeroize();
+        pushed.map(|()| KeyInput::WIRE_LEN)
     }
 
     /// Route one decoded pointer event, which the process `injector`'s device
@@ -736,20 +813,12 @@ impl SeatRegistry {
         {
             return Ok(PointerInput::WIRE_LEN);
         }
-        let state = slot.state.lock();
-        if let Route::Desktop(_) = state.route() {
-            let bytes = TimedPointer {
-                input: record,
-                at_ns: at_ns.unwrap_or(now_ns),
-            }
-            .to_le_bytes();
-            // Decided and delivered under one guard, exactly as for a key
-            // edge: a pointer trail never crosses a lease boundary.
-            slot.pointer.push(&bytes);
-            drop(state);
-            // Wake the seat owner parked on a `SeatInput` wait-set member.
-            crate::waitq::seat_input_wake();
+        let bytes = TimedPointer {
+            input: record,
+            at_ns: at_ns.unwrap_or(now_ns),
         }
+        .to_le_bytes();
+        slot.queue_if_held(&slot.pointer, &bytes);
         Ok(PointerInput::WIRE_LEN)
     }
 
@@ -765,16 +834,10 @@ impl SeatRegistry {
     /// - [`Errno::NotFound`] — no live seat has that id.
     pub fn inject_touch(&self, seat_id: u64, frame: &TouchFrame) -> Result<usize, Errno> {
         let slot = self.resolve(seat_id)?;
-        let state = slot.state.lock();
-        if let Route::Desktop(_) = state.route() {
-            let mut bytes = frame.to_le_bytes();
-            // Decided and delivered under one guard: touches never cross a
-            // lease boundary.
-            slot.touch.push(&bytes);
-            drop(state);
-            bytes.zeroize();
-            crate::waitq::seat_input_wake();
-        }
+        // Contacts can spell what was typed on an on-screen keyboard.
+        let mut bytes = frame.to_le_bytes();
+        slot.queue_if_held(&slot.touch, &bytes);
+        bytes.zeroize();
         Ok(TouchFrame::WIRE_LEN)
     }
 
@@ -794,122 +857,93 @@ impl SeatRegistry {
     /// noise — secret hygiene). It carries no event content; only the fact
     /// of the kind's first delivery.
     #[must_use]
-    pub fn note_first_delivery(&self, kind: DeliveredInputKind) -> bool {
+    pub fn note_first_delivery(&self, kind: InputKind) -> bool {
         let latch = match kind {
-            DeliveredInputKind::Key => &self.first_key_delivery,
-            DeliveredInputKind::Pointer => &self.first_pointer_delivery,
-            DeliveredInputKind::Touch => &self.first_touch_delivery,
+            InputKind::Key => &self.first_key_delivery,
+            InputKind::Pointer => &self.first_pointer_delivery,
+            InputKind::Touch => &self.first_touch_delivery,
         };
         latch
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
-    /// Drain one decoded key event from seat `seat_id`'s keyboard channel
-    /// into `out` for the kernel-attested `owner`, returning the bytes
-    /// written — one [`KeyInput`] record, or `0` when the channel is
-    /// drained (`keyboard_read`).
+    /// Take one `kind` record off seat `seat_id`'s channel into `out` for the
+    /// kernel-attested `owner`, answering the lease it was taken under, or
+    /// `None` when the channel is empty (`keyboard_read`, `pointer_read`,
+    /// `touch_read`).
     ///
-    /// The drain is owner-gated through the seat's live lease
-    /// ([`SeatState::access`]): only the task that acquired the seat may
-    /// take records off its desktop channel, so a second holder of
-    /// `CAP_INPUT_READ` — even the owner of *another* seat — can never
-    /// siphon this session's keystrokes.
-    ///
-    /// # Errors
-    ///
-    /// - [`Errno::BufferTooSmall`] — `out` cannot hold a whole record
-    ///   ([`KeyInput::WIRE_LEN`] bytes); the kernel never writes a partial
-    ///   record.
-    /// - [`Errno::NotFound`] — no live seat has that id.
-    /// - [`Errno::SeatNotOwner`] — `owner` does not hold the seat.
-    /// - [`Errno::SeatRevoked`] — `owner`'s lease was revoked.
-    pub fn read_key(&self, seat_id: u64, owner: SeatOwner, out: &mut [u8]) -> Result<usize, Errno> {
-        if out.len() < KeyInput::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        self.drain_leased(seat_id, owner, out, |slot, out| slot.channel.drain_one(out))
-    }
-
-    /// Drain one decoded pointer event from seat `seat_id`'s pointer
-    /// channel into `out` for the kernel-attested `owner`, returning the
-    /// bytes written — one [`TimedPointer`] record, or `0` when the channel
-    /// is drained (`pointer_read`).
-    ///
-    /// The drain is owner-gated through the seat's live lease
-    /// ([`SeatState::access`]) exactly like [`Self::read_key`]: only the
-    /// task that acquired the seat may take records off its pointer
-    /// channel, so a second holder of `CAP_INPUT_READ` — even the owner of
-    /// *another* seat — can never observe this session's pointer stream.
+    /// Only the task that acquired the seat may take its records, so a second
+    /// holder of `CAP_INPUT_READ` — even the owner of *another* seat — never
+    /// observes this session's input. The lease is checked and the record
+    /// taken under one hold of the seat's state: a revoke, a new owner's
+    /// acquire and its first input all take that hold too, so none lands
+    /// between the check and the drain to hand the new owner's input to the
+    /// old.
     ///
     /// # Errors
     ///
-    /// - [`Errno::BufferTooSmall`] — `out` cannot hold a whole record
-    ///   ([`TimedPointer::WIRE_LEN`] bytes); the kernel never writes a
-    ///   partial record.
+    /// - [`Errno::BufferTooSmall`] — `out` cannot hold a whole record; the
+    ///   kernel never writes a partial one.
     /// - [`Errno::NotFound`] — no live seat has that id.
     /// - [`Errno::SeatNotOwner`] — `owner` does not hold the seat.
     /// - [`Errno::SeatRevoked`] — `owner`'s lease was revoked.
-    pub fn read_pointer(
+    pub fn read(
         &self,
         seat_id: u64,
         owner: SeatOwner,
+        kind: InputKind,
         out: &mut [u8],
-    ) -> Result<usize, Errno> {
-        if out.len() < TimedPointer::WIRE_LEN {
+    ) -> Result<Option<Lease>, Errno> {
+        if out.len() < kind.wire_len() {
             return Err(Errno::BufferTooSmall);
         }
-        self.drain_leased(seat_id, owner, out, |slot, out| slot.pointer.drain_one(out))
+        let (lease, taken) =
+            self.under_lease(seat_id, owner, |slot| slot.queue(kind).drain_one(out))?;
+        Ok(taken.then_some(lease))
     }
 
-    /// Drain one touch frame from seat `seat_id`'s touch channel into `out`
-    /// for the kernel-attested `owner`, returning the bytes written — one
-    /// [`TouchFrame`], or `0` when the channel is drained (`touch_read`).
-    ///
-    /// Owner-gated through the seat's live lease exactly like
-    /// [`Self::read_pointer`].
-    ///
-    /// # Errors
-    ///
-    /// - [`Errno::BufferTooSmall`] — `out` cannot hold a whole frame.
-    /// - [`Errno::NotFound`] — no live seat has that id.
-    /// - [`Errno::SeatNotOwner`] — `owner` does not hold the seat.
-    /// - [`Errno::SeatRevoked`] — `owner`'s lease was revoked.
-    pub fn read_touch(
+    /// Run `op` on seat `seat_id` with `owner`'s lease checked in the same
+    /// hold of the seat's state, answering the lease and what `op` returned.
+    fn under_lease<R>(
         &self,
         seat_id: u64,
         owner: SeatOwner,
-        out: &mut [u8],
-    ) -> Result<usize, Errno> {
-        if out.len() < TouchFrame::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        self.drain_leased(seat_id, owner, out, |slot, out| slot.touch.drain_one(out))
-    }
-
-    /// Drain one record of seat `seat_id` into `out` through `drain` for the
-    /// kernel-attested `owner`, the lease checked and the record taken under
-    /// one hold of the seat's state: a revoke, a new owner's acquire and its
-    /// first input all take that hold too, so none lands between the check
-    /// and the drain to hand the new owner's input to the old.
-    fn drain_leased(
-        &self,
-        seat_id: u64,
-        owner: SeatOwner,
-        out: &mut [u8],
-        drain: impl FnOnce(&SeatSlot, &mut [u8]) -> usize,
-    ) -> Result<usize, Errno> {
+        op: impl FnOnce(&SeatSlot) -> R,
+    ) -> Result<(Lease, R), Errno> {
         let slot = self.resolve(seat_id)?;
         let state = slot.state.lock();
-        state.access(owner).map_err(seat_errno)?;
-        let drained = drain(&slot, out);
+        let lease = state.access(owner).map_err(seat_errno)?;
+        let done = op(&slot);
         drop(state);
-        Ok(drained)
+        Ok((lease, done))
     }
 
-    /// The task currently holding seat `seat_id`, if any
-    /// (test/introspection aid; the routing itself always consults the
-    /// live lease). `None` for an unowned *or* unknown seat.
+    /// Put `record`, a `kind` record [`Self::read`] took under `lease` that
+    /// never reached its reader, back at the front of its channel.
+    ///
+    /// Only while that very lease is live: once it has ended, the purge that
+    /// ended it decided the record's fate, and a later lease — even the same
+    /// owner's — must never be handed input from an earlier one.
+    pub fn restore(&self, seat_id: u64, lease: Lease, kind: InputKind, record: &[u8]) {
+        let Ok(slot) = self.resolve(seat_id) else {
+            return;
+        };
+        let state = slot.state.lock();
+        if state.verify(lease).is_err() {
+            return;
+        }
+        slot.queue(kind).restore(record);
+        drop(state);
+        // Another of the owner's threads may have parked while the record
+        // was out.
+        crate::waitq::seat_input_wake();
+    }
+
+    /// The task currently holding seat `seat_id`, if any: whose login the
+    /// user at the seat is judged by, which lets that user eject a removable
+    /// volume. Input routing consults the live lease instead. `None` for an
+    /// unowned *or* unknown seat.
     #[must_use]
     pub fn owner(&self, seat_id: u64) -> Option<SeatOwner> {
         let slot = self.resolve(seat_id).ok()?;
@@ -1208,7 +1242,9 @@ impl SeatRegistry {
         if slot.state.lock().access(owner).is_err() {
             return true;
         }
-        slot.channel.pending() || slot.pointer.pending() || slot.touch.pending()
+        InputKind::ALL
+            .into_iter()
+            .any(|kind| slot.queue(kind).pending())
     }
 
     /// The live seat-lease gate for the client holding `lease` — the one
@@ -1306,27 +1342,17 @@ mod tests {
         let seat = super::SeatRegistry::new(&super::NULL_CONSOLE_INPUT);
         seat.acquire(super::SEAT_PRIMARY, super::SeatOwner(7))
             .expect("acquired");
-        let mut out = [0u8; 4];
-        let held_while_draining = seat
-            .drain_leased(
-                super::SEAT_PRIMARY,
-                super::SeatOwner(7),
-                &mut out,
-                |slot, _| usize::from(slot.state.is_locked()),
-            )
+        let (_, held_while_draining) = seat
+            .under_lease(super::SEAT_PRIMARY, super::SeatOwner(7), |slot| {
+                slot.state.is_locked()
+            })
             .expect("the owner reads");
-        assert_eq!(held_while_draining, 1, "the drain ran under the hold");
+        assert!(held_while_draining, "the drain ran under the hold");
         let drained = core::cell::Cell::new(false);
         assert_eq!(
-            seat.drain_leased(
-                super::SEAT_PRIMARY,
-                super::SeatOwner(8),
-                &mut out,
-                |_, _| {
-                    drained.set(true);
-                    0
-                }
-            ),
+            seat.under_lease(super::SEAT_PRIMARY, super::SeatOwner(8), |_| {
+                drained.set(true);
+            }),
             Err(tairix_abi::Errno::SeatNotOwner)
         );
         assert!(!drained.get(), "a reader without the lease drains nothing");
@@ -1337,7 +1363,7 @@ mod tests {
         let mut buf = [0u8; TimedPointer::WIRE_LEN];
         let mut drained = alloc::vec::Vec::new();
         while seat
-            .read_pointer(SEAT_PRIMARY, owner, &mut buf)
+            .take(InputKind::Pointer, SEAT_PRIMARY, owner, &mut buf)
             .expect("drained")
             != 0
         {
@@ -1462,6 +1488,21 @@ mod tests {
     use crate::test_sink::TestSink;
     use alloc::boxed::Box;
     use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode};
+
+    impl SeatRegistry {
+        /// One `kind` record off seat `seat_id` for `owner`: its length, or
+        /// `0` when the channel is empty.
+        fn take(
+            &self,
+            kind: InputKind,
+            seat_id: u64,
+            owner: SeatOwner,
+            out: &mut [u8],
+        ) -> Result<usize, Errno> {
+            self.read(seat_id, owner, kind, out)
+                .map(|lease| lease.map_or(0, |_| kind.wire_len()))
+        }
+    }
 
     const WM: SeatOwner = SeatOwner(7);
     const INTRUDER: SeatOwner = SeatOwner(9);
@@ -1809,19 +1850,19 @@ mod tests {
 
             let mut key = [0u8; KeyInput::WIRE_LEN];
             assert_eq!(
-                seat.read_key(SEAT_PRIMARY, INTRUDER, &mut key),
+                seat.take(InputKind::Key, SEAT_PRIMARY, INTRUDER, &mut key),
                 Ok(0),
                 "the previous session's keystroke is gone"
             );
             let mut ptr = [0u8; TimedPointer::WIRE_LEN];
             assert_eq!(
-                seat.read_pointer(SEAT_PRIMARY, INTRUDER, &mut ptr),
+                seat.take(InputKind::Pointer, SEAT_PRIMARY, INTRUDER, &mut ptr),
                 Ok(0),
                 "the previous session's pointer trail is gone"
             );
             let mut touch = [0u8; TouchFrame::WIRE_LEN];
             assert_eq!(
-                seat.read_touch(SEAT_PRIMARY, INTRUDER, &mut touch),
+                seat.take(InputKind::Touch, SEAT_PRIMARY, INTRUDER, &mut touch),
                 Ok(0),
                 "the previous session's touches are gone"
             );
@@ -1893,7 +1934,7 @@ mod tests {
         assert!(seat.input_ready(SEAT_PRIMARY, WM));
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         assert_eq!(
-            seat.read_key(SEAT_PRIMARY, WM, &mut buf),
+            seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf),
             Ok(KeyInput::WIRE_LEN)
         );
         assert!(!seat.input_ready(SEAT_PRIMARY, WM));
@@ -1912,7 +1953,7 @@ mod tests {
         assert!(seat.input_ready(SEAT_PRIMARY, WM));
         let mut pbuf = [0u8; TimedPointer::WIRE_LEN];
         assert_eq!(
-            seat.read_pointer(SEAT_PRIMARY, WM, &mut pbuf),
+            seat.take(InputKind::Pointer, SEAT_PRIMARY, WM, &mut pbuf),
             Ok(TimedPointer::WIRE_LEN)
         );
         assert!(!seat.input_ready(SEAT_PRIMARY, WM));
@@ -1924,7 +1965,7 @@ mod tests {
         assert!(seat.input_ready(SEAT_PRIMARY, WM));
         let mut tbuf = [0u8; TouchFrame::WIRE_LEN];
         assert_eq!(
-            seat.read_touch(SEAT_PRIMARY, WM, &mut tbuf),
+            seat.take(InputKind::Touch, SEAT_PRIMARY, WM, &mut tbuf),
             Ok(TouchFrame::WIRE_LEN)
         );
         assert!(!seat.input_ready(SEAT_PRIMARY, WM));
@@ -2014,7 +2055,7 @@ mod tests {
         assert_eq!(seat.inject(SEAT_PRIMARY, record), Ok(KeyInput::WIRE_LEN));
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         assert_eq!(
-            seat.read_key(SEAT_PRIMARY, WM, &mut buf),
+            seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf),
             Ok(KeyInput::WIRE_LEN)
         );
         assert_eq!(KeyInput::from_bytes(&buf), Ok(record));
@@ -2050,12 +2091,12 @@ mod tests {
         assert_eq!(seat.inject(SEAT_PRIMARY, record), Ok(KeyInput::WIRE_LEN));
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         let n = seat
-            .read_key(SEAT_PRIMARY, WM, &mut buf)
+            .take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf)
             .expect("owner drains");
         assert_eq!(n, KeyInput::WIRE_LEN);
         assert_eq!(KeyInput::from_bytes(&buf), Ok(record));
         // Drained: the channel is now empty.
-        assert_eq!(seat.read_key(SEAT_PRIMARY, WM, &mut buf), Ok(0));
+        assert_eq!(seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf), Ok(0));
     }
 
     #[test]
@@ -2071,11 +2112,11 @@ mod tests {
         // Neither another task nor a reader of an unowned channel may
         // siphon the owner's keystrokes; the record stays queued.
         assert_eq!(
-            seat.read_key(SEAT_PRIMARY, INTRUDER, &mut buf),
+            seat.take(InputKind::Key, SEAT_PRIMARY, INTRUDER, &mut buf),
             Err(Errno::SeatNotOwner)
         );
         assert_eq!(
-            seat.read_key(SEAT_PRIMARY, WM, &mut buf)
+            seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf)
                 .expect("owner drains"),
             KeyInput::WIRE_LEN
         );
@@ -2086,7 +2127,7 @@ mod tests {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         assert_eq!(
-            seat.read_key(SEAT_PRIMARY, WM, &mut buf),
+            seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf),
             Err(Errno::SeatNotOwner)
         );
     }
@@ -2144,14 +2185,14 @@ mod tests {
         // kinds latch independently: a delivered keystroke says nothing
         // about the pointer path.
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
-        assert!(seat.note_first_delivery(DeliveredInputKind::Key));
-        assert!(!seat.note_first_delivery(DeliveredInputKind::Key));
-        assert!(seat.note_first_delivery(DeliveredInputKind::Pointer));
-        assert!(!seat.note_first_delivery(DeliveredInputKind::Pointer));
-        assert!(!seat.note_first_delivery(DeliveredInputKind::Key));
-        assert!(seat.note_first_delivery(DeliveredInputKind::Touch));
-        assert!(!seat.note_first_delivery(DeliveredInputKind::Touch));
-        assert_eq!(DeliveredInputKind::Touch.as_str(), "touch");
+        assert!(seat.note_first_delivery(InputKind::Key));
+        assert!(!seat.note_first_delivery(InputKind::Key));
+        assert!(seat.note_first_delivery(InputKind::Pointer));
+        assert!(!seat.note_first_delivery(InputKind::Pointer));
+        assert!(!seat.note_first_delivery(InputKind::Key));
+        assert!(seat.note_first_delivery(InputKind::Touch));
+        assert!(!seat.note_first_delivery(InputKind::Touch));
+        assert_eq!(InputKind::Touch.as_str(), "touch");
     }
 
     #[test]
@@ -2161,7 +2202,7 @@ mod tests {
             .expect("fresh seat is acquirable");
         let mut buf = [0u8; KeyInput::WIRE_LEN - 1];
         assert_eq!(
-            seat.read_key(SEAT_PRIMARY, WM, &mut buf),
+            seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf),
             Err(Errno::BufferTooSmall)
         );
     }
@@ -2185,7 +2226,7 @@ mod tests {
         );
         let mut buf = [0u8; TimedPointer::WIRE_LEN];
         let n = seat
-            .read_pointer(SEAT_PRIMARY, WM, &mut buf)
+            .take(InputKind::Pointer, SEAT_PRIMARY, WM, &mut buf)
             .expect("owner drains");
         assert_eq!(n, TimedPointer::WIRE_LEN);
         assert_eq!(
@@ -2193,7 +2234,10 @@ mod tests {
             Ok(record)
         );
         // Drained: the channel is now empty.
-        assert_eq!(seat.read_pointer(SEAT_PRIMARY, WM, &mut buf), Ok(0));
+        assert_eq!(
+            seat.take(InputKind::Pointer, SEAT_PRIMARY, WM, &mut buf),
+            Ok(0)
+        );
     }
 
     #[test]
@@ -2219,7 +2263,10 @@ mod tests {
         seat.acquire(SEAT_PRIMARY, WM)
             .expect("fresh seat is acquirable");
         let mut buf = [0u8; TimedPointer::WIRE_LEN];
-        assert_eq!(seat.read_pointer(SEAT_PRIMARY, WM, &mut buf), Ok(0));
+        assert_eq!(
+            seat.take(InputKind::Pointer, SEAT_PRIMARY, WM, &mut buf),
+            Ok(0)
+        );
     }
 
     #[test]
@@ -2243,11 +2290,11 @@ mod tests {
         // Holding CAP_INPUT_READ alone is not enough: the drain is gated on
         // the live lease, so the record stays queued for the owner.
         assert_eq!(
-            seat.read_pointer(SEAT_PRIMARY, INTRUDER, &mut buf),
+            seat.take(InputKind::Pointer, SEAT_PRIMARY, INTRUDER, &mut buf),
             Err(Errno::SeatNotOwner)
         );
         assert_eq!(
-            seat.read_pointer(SEAT_PRIMARY, WM, &mut buf)
+            seat.take(InputKind::Pointer, SEAT_PRIMARY, WM, &mut buf)
                 .expect("owner drains"),
             TimedPointer::WIRE_LEN
         );
@@ -2258,7 +2305,7 @@ mod tests {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         let mut buf = [0u8; TimedPointer::WIRE_LEN];
         assert_eq!(
-            seat.read_pointer(SEAT_PRIMARY, WM, &mut buf),
+            seat.take(InputKind::Pointer, SEAT_PRIMARY, WM, &mut buf),
             Err(Errno::SeatNotOwner)
         );
     }
@@ -2270,7 +2317,7 @@ mod tests {
             .expect("fresh seat is acquirable");
         let mut buf = [0u8; TimedPointer::WIRE_LEN - 1];
         assert_eq!(
-            seat.read_pointer(SEAT_PRIMARY, WM, &mut buf),
+            seat.take(InputKind::Pointer, SEAT_PRIMARY, WM, &mut buf),
             Err(Errno::BufferTooSmall)
         );
     }
@@ -2302,7 +2349,7 @@ mod tests {
         // surviving record is the second pushed (dx == 1).
         let mut buf = [0u8; TimedPointer::WIRE_LEN];
         assert_eq!(
-            seat.read_pointer(SEAT_PRIMARY, WM, &mut buf),
+            seat.take(InputKind::Pointer, SEAT_PRIMARY, WM, &mut buf),
             Ok(TimedPointer::WIRE_LEN)
         );
         assert_eq!(
@@ -2324,9 +2371,12 @@ mod tests {
             Ok(KeyInput::WIRE_LEN)
         );
         let mut buf = [0u8; TimedPointer::WIRE_LEN];
-        assert_eq!(seat.read_pointer(SEAT_PRIMARY, WM, &mut buf), Ok(0));
         assert_eq!(
-            seat.read_key(SEAT_PRIMARY, WM, &mut buf),
+            seat.take(InputKind::Pointer, SEAT_PRIMARY, WM, &mut buf),
+            Ok(0)
+        );
+        assert_eq!(
+            seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf),
             Ok(KeyInput::WIRE_LEN)
         );
     }
@@ -2341,30 +2391,33 @@ mod tests {
         );
         let mut buf = [0u8; TouchFrame::WIRE_LEN];
         assert_eq!(
-            seat.read_touch(SEAT_PRIMARY, WM, &mut buf),
+            seat.take(InputKind::Touch, SEAT_PRIMARY, WM, &mut buf),
             Err(Errno::SeatNotOwner)
         );
         seat.acquire(SEAT_PRIMARY, WM)
             .expect("fresh seat is acquirable");
-        assert_eq!(seat.read_touch(SEAT_PRIMARY, WM, &mut buf), Ok(0));
+        assert_eq!(
+            seat.take(InputKind::Touch, SEAT_PRIMARY, WM, &mut buf),
+            Ok(0)
+        );
         let frame = touch_at(2);
         assert_eq!(
             seat.inject_touch(SEAT_PRIMARY, &frame),
             Ok(TouchFrame::WIRE_LEN)
         );
         assert_eq!(
-            seat.read_touch(SEAT_PRIMARY, INTRUDER, &mut buf),
+            seat.take(InputKind::Touch, SEAT_PRIMARY, INTRUDER, &mut buf),
             Err(Errno::SeatNotOwner),
             "the frame stays queued for the owner"
         );
         assert_eq!(
-            seat.read_touch(SEAT_PRIMARY, WM, &mut buf),
+            seat.take(InputKind::Touch, SEAT_PRIMARY, WM, &mut buf),
             Ok(TouchFrame::WIRE_LEN)
         );
         assert_eq!(TouchFrame::from_bytes(&buf), Ok(frame));
         let mut short = [0u8; TouchFrame::WIRE_LEN - 1];
         assert_eq!(
-            seat.read_touch(SEAT_PRIMARY, WM, &mut short),
+            seat.take(InputKind::Touch, SEAT_PRIMARY, WM, &mut short),
             Err(Errno::BufferTooSmall)
         );
         assert_eq!(
@@ -2385,13 +2438,18 @@ mod tests {
         }
         let mut buf = [0u8; TouchFrame::WIRE_LEN];
         assert_eq!(
-            seat.read_touch(SEAT_PRIMARY, WM, &mut buf),
+            seat.take(InputKind::Touch, SEAT_PRIMARY, WM, &mut buf),
             Ok(TouchFrame::WIRE_LEN)
         );
         assert_eq!(TouchFrame::from_bytes(&buf), Ok(touch_at(1)));
         // The touch channel never answers a pointer or key drain.
         assert_eq!(
-            seat.read_pointer(SEAT_PRIMARY, WM, &mut buf[..TimedPointer::WIRE_LEN]),
+            seat.take(
+                InputKind::Pointer,
+                SEAT_PRIMARY,
+                WM,
+                &mut buf[..TimedPointer::WIRE_LEN]
+            ),
             Ok(0)
         );
     }
@@ -2413,11 +2471,83 @@ mod tests {
         // was evicted, so the oldest surviving record is the second pushed.
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         let n = seat
-            .read_key(SEAT_PRIMARY, WM, &mut buf)
+            .take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf)
             .expect("owner drains");
         assert_eq!(n, KeyInput::WIRE_LEN);
         let first = KeyInput::from_bytes(&buf).expect("valid record");
         assert_eq!(first, press_char('b'));
+    }
+
+    /// Every key record `owner` can take off the boot seat, oldest first.
+    fn keys_left(seat: &SeatRegistry, owner: SeatOwner) -> alloc::vec::Vec<KeyInput> {
+        let mut buf = [0u8; KeyInput::WIRE_LEN];
+        let mut left = alloc::vec::Vec::new();
+        while seat.take(InputKind::Key, SEAT_PRIMARY, owner, &mut buf) == Ok(KeyInput::WIRE_LEN) {
+            left.push(KeyInput::from_bytes(&buf).expect("valid record"));
+        }
+        left
+    }
+
+    /// A record put back under the lease it was taken under is the next one
+    /// out, ahead of what arrived meanwhile, and it is delivered once.
+    #[test]
+    fn a_record_put_back_under_its_lease_is_read_again_first() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM).expect("acquired");
+        assert!(seat.inject(SEAT_PRIMARY, press_char('a')).is_ok());
+        let mut buf = [0u8; KeyInput::WIRE_LEN];
+        let lease = seat
+            .read(SEAT_PRIMARY, WM, InputKind::Key, &mut buf)
+            .expect("the owner reads")
+            .expect("a record was queued");
+        assert!(seat.inject(SEAT_PRIMARY, press_char('b')).is_ok());
+        seat.restore(SEAT_PRIMARY, lease, InputKind::Key, &buf);
+        assert_eq!(keys_left(&seat, WM), [press_char('a'), press_char('b')]);
+    }
+
+    /// Once the lease a record was taken under has ended, putting it back
+    /// does nothing: the next lease — even the same owner's — never receives
+    /// input from an earlier one.
+    #[test]
+    fn a_record_put_back_after_its_lease_ended_is_dropped() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM).expect("acquired");
+        assert!(seat.inject(SEAT_PRIMARY, press_char('s')).is_ok());
+        let mut buf = [0u8; KeyInput::WIRE_LEN];
+        let lease = seat
+            .read(SEAT_PRIMARY, WM, InputKind::Key, &mut buf)
+            .expect("the owner reads")
+            .expect("a record was queued");
+        seat.release(SEAT_PRIMARY, WM, ReleaseSurface::Text)
+            .expect("released");
+        seat.acquire(SEAT_PRIMARY, WM).expect("acquired again");
+        assert!(seat.inject(SEAT_PRIMARY, press_char('t')).is_ok());
+        seat.restore(SEAT_PRIMARY, lease, InputKind::Key, &buf);
+        assert_eq!(keys_left(&seat, WM), [press_char('t')]);
+    }
+
+    /// A record put back into a channel that filled meanwhile is the oldest
+    /// of all, so it goes as overflow would have taken it, and nothing queued
+    /// after it is displaced.
+    #[test]
+    fn a_full_channel_keeps_what_it_holds_over_a_record_put_back() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM).expect("acquired");
+        let typed = |i: usize| press_char(char::from(b'a' + u8::try_from(i % 26).unwrap()));
+        for i in 0..KEYBOARD_CHANNEL_CAPACITY {
+            assert!(seat.inject(SEAT_PRIMARY, typed(i)).is_ok());
+        }
+        let mut buf = [0u8; KeyInput::WIRE_LEN];
+        let lease = seat
+            .read(SEAT_PRIMARY, WM, InputKind::Key, &mut buf)
+            .expect("the owner reads")
+            .expect("a record was queued");
+        assert!(seat
+            .inject(SEAT_PRIMARY, typed(KEYBOARD_CHANNEL_CAPACITY))
+            .is_ok());
+        seat.restore(SEAT_PRIMARY, lease, InputKind::Key, &buf);
+        let after: alloc::vec::Vec<_> = (1..=KEYBOARD_CHANNEL_CAPACITY).map(typed).collect();
+        assert_eq!(keys_left(&seat, WM), after);
     }
 
     #[test]
@@ -2432,7 +2562,7 @@ mod tests {
         // only once; afterwards it is a plain non-owner.
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         assert_eq!(
-            seat.read_key(SEAT_PRIMARY, WM, &mut buf),
+            seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf),
             Err(Errno::SeatRevoked)
         );
         // Input routes to the text foreground, never a stale desktop channel.
@@ -2582,7 +2712,10 @@ mod tests {
             Err(Errno::NotFound)
         );
         assert_eq!(seat.inject(42, press_char('a')), Err(Errno::NotFound));
-        assert_eq!(seat.read_key(42, WM, &mut buf), Err(Errno::NotFound));
+        assert_eq!(
+            seat.take(InputKind::Key, 42, WM, &mut buf),
+            Err(Errno::NotFound)
+        );
         assert_eq!(
             seat.switch_foreground(42, ConsoleIndex(0)),
             Err(Errno::NotFound)
@@ -2649,22 +2782,22 @@ mod tests {
         // plain non-owner on the other, so no cross-seat siphoning.
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         assert_eq!(
-            seat.read_key(SEAT_PRIMARY, INTRUDER, &mut buf),
+            seat.take(InputKind::Key, SEAT_PRIMARY, INTRUDER, &mut buf),
             Err(Errno::SeatNotOwner)
         );
         assert_eq!(
-            seat.read_key(second, WM, &mut buf),
+            seat.take(InputKind::Key, second, WM, &mut buf),
             Err(Errno::SeatNotOwner)
         );
-        seat.read_key(SEAT_PRIMARY, WM, &mut buf)
+        seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf)
             .expect("boot-seat owner drains");
         assert_eq!(KeyInput::from_bytes(&buf), Ok(press_char('a')));
-        seat.read_key(second, INTRUDER, &mut buf)
+        seat.take(InputKind::Key, second, INTRUDER, &mut buf)
             .expect("hotplug-seat owner drains");
         assert_eq!(KeyInput::from_bytes(&buf), Ok(press_char('b')));
         // Each drain emptied only its own seat's channel.
-        assert_eq!(seat.read_key(SEAT_PRIMARY, WM, &mut buf), Ok(0));
-        assert_eq!(seat.read_key(second, INTRUDER, &mut buf), Ok(0));
+        assert_eq!(seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf), Ok(0));
+        assert_eq!(seat.take(InputKind::Key, second, INTRUDER, &mut buf), Ok(0));
     }
 
     #[test]
@@ -2680,11 +2813,11 @@ mod tests {
         // seat's lease is untouched.
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         assert_eq!(
-            seat.read_key(second, INTRUDER, &mut buf),
+            seat.take(InputKind::Key, second, INTRUDER, &mut buf),
             Err(Errno::SeatRevoked)
         );
         assert_eq!(seat.owner(SEAT_PRIMARY), Some(WM));
-        assert_eq!(seat.read_key(SEAT_PRIMARY, WM, &mut buf), Ok(0));
+        assert_eq!(seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf), Ok(0));
     }
 
     #[test]

@@ -6,8 +6,9 @@
 # CAP_FS_ACCESS reads the tool's own bundle's Help/ documents through
 # the secured VFS; CAP_FS_MOUNT is the tool's job — the kernel's
 # volume_detach path requires the mount authority for any volume but a
-# disk image or network share the caller attached, and re-checks it on
-# every call. The mount and view listings it resolves names against
+# disk image or network share the caller attached, or a removable
+# device's volume the user at the seat plainly detaches, and re-checks it
+# on every call. The mount and view listings it resolves names against
 # come from the ungated sysinfo-v1 MOUNT_LIST and VIEW_LIST queries
 # served by sysinfod. It reads no standard input.
 id = "os.tairix.unmount"

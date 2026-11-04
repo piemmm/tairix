@@ -54,15 +54,20 @@ exception.
   side of the same discipline: `id` names a port the caller may post to,
   admitted by the *send*-authority check `ipc_send` applies (the caller is
   a sender, not the binder, so the `Port` kind's owner check does not
-  fit), refusing the same oracle-free `NotFound`. It is ready when a send
-  would not be refused for want of room — below capacity, port gone, or
-  send authority lost — as a non-consuming, **level-triggered** peek: the
+  fit), refusing the same oracle-free `NotFound`. It is ready when a send of
+  the port's largest message would be admitted — the sender's own lane below
+  the port's per-sender depth, and all it holds within its limit with that
+  message; port gone; or send authority lost —
+  as a non-consuming, **level-triggered** peek: the
   member is armed *after* a send was refused, so an edge on the occupancy
   falling would already have passed if the receiver drained in between and
-  the sender would park forever. The wake is targeted (a port records the
-  tasks parked for its room; a committed `ipc_recv` names exactly them),
-  with one broadcast on teardown, and only sets holding a `PortRoom`
-  member join the queue. It is what lets a sender hold an event the
+  the sender would park forever. The wake is targeted (a port records each
+  task parked for its room with the sender it waits as; a committed
+  `ipc_recv` names those waiting as the sender it took from, and a teardown
+  or an admission every task waiting at that port; one short of budget waits
+  on the kernel's budget queue under its process, which any release of that
+  process's charges wakes), and only sets holding a
+  `PortRoom` member join the queue. It is what lets a sender hold an event the
   receiver must not lose — a window resize, a picker conclusion — instead
   of dropping it or polling for capacity (the desktop's app-ward
   hold-back, `plans/OPEN-DEFECTS.md` D35).
@@ -146,7 +151,8 @@ speculative:
   click, and a bounded `AppMenu` (≤ 32 rows a plate, ≤ 64 in all, ≤ 4 plates
   deep, ≤ 36 label bytes, a session-rendered `Info` row), and it is
   idempotent-replace. Its
-  two answers — `WindowEvent::AppBarDefault` and `AppBarMenu { item }` — are
+  two answers — `WindowEvent::AppBarDefault` and
+  `AppBarMenu { item, revision }` — are
   likewise **application-scoped**, which is why `WindowEvent::window_id()`
   returns `Option<u64>` and why `WindowServer` has two delivery paths that
   each refuse the other's events: `deliver_app_event` addresses a bar event
@@ -335,8 +341,8 @@ Done (code + host coverage). What now holds:
   header carry the surface.
 - **Protocol**: `WindowRequest::PickFile { window_id, purpose }` (op 4,
   status reply = acceptance only; the purpose is `Open` or
-  `Save { suggested, endings }`, the endings what the requester can write)
-  and the conclusions
+  `Save { suggested, formats }`, the formats what the requester can write and
+  the one the document is in) and the conclusions
   `WindowEvent::FilePicked { window_id, handle, writable }` (kind 5,
   non-zero handle, `writable` a 0/1 byte) / `WindowEvent::PickCancelled`
   (kind 6), with the chosen name

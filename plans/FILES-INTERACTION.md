@@ -63,6 +63,8 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 | FI37 | The Home place is the full-colour Home folder wherever a place is pictured, the icon-bar menu included | done |
 | FI38 | A name may be shown without the ending the settings hide — an application's `.app` by default — and renames with it restored; items whose names begin with a dot are listed only when asked | done |
 | FI39 | An untyped file typed by its content, read lazily for entries in view (a sprite area by the length its header states, as `tairix_image::recognise` does), so it shows its type's icon, opens in, and drops onto the application that claims that type | planned |
+| FI40 | A volume that leaves takes its windows to the place above it at once; one disconnected without being ejected is stated in one alert for every volume that went together, by the kernel's word; a re-read its device refused is decided by the mount table, stated once a volume; windows that come to one place leave one window there | done |
+| FI41 | A carried drag shows what it carries as the listing does: one item as its large tile held where it was pressed, several as a gathering stack of smaller pictures wearing their count, the pressed entry in front | done |
 
 ## FI1 — item names one point smaller
 
@@ -147,7 +149,43 @@ beneath the surface holding the keyboard.
 The manager compares a request's location with each browser window's location
 (the canonical component spelling every location passes through) before opening
 anything; a match is activated instead of opened. A refused activation opens a
-window after all, stating the refusal, so the folder still appears.
+window after all, so the folder still appears, and the window it could not raise
+closes. After each turn's listings and watch reports in which a window came
+somewhere, opened or closed, or a set still waits on a busy window, browser
+windows showing one place converge on one (`departed::duplicates`): the one
+holding the keyboard,
+else the one the user last came there in — in front — else, of windows that only
+climbed there, the one there longest. A busy window (a gesture, question or
+notice, an operation, a write, a held clipboard, a navigation under way, an
+undecided refusal) is never closed, so its set converges once it is idle.
+
+## FI40 — volumes leaving
+
+- **The kernel's word.** Whether a volume left without being ejected is read
+  from `SysinfoQueryId::VOLUME_REMOVALS` (`VolumeRemovalRecord`, numbered from
+  1 since boot), never inferred from a volume gone from the mount table. The
+  kernel records a removal before the table moves, and every places read reads
+  the table and then the removals, so a volume seen leaving is seen removed.
+  The first read marks where the file manager began; each later removal is
+  stated once (`departed::Removals`).
+- **One alert.** The removals one read brings, named as the rail showed them
+  (or as the table still lists one whose writes are held), are stated in one
+  application alert (`NoticeSource::Disconnected`): a warning, or an error
+  where some writes were lost.
+- **Windows leave.** A window within a volume the rail offered and the new read
+  does not — gone, or listed unavailable — goes straight to the place above
+  the volume (`Browser::leave`), with no alert of its own.
+- **Refused re-reads.** A window's re-read of its own folder refused for the
+  folder's absence (`NotFound`, `Stale`, `DeviceOffline`, …) climbs, as a
+  folder the watch reports gone does. One its device refuses (`DeviceFault`,
+  `MediumError`) is held (`Doubt`) until a places read asked for after it
+  lands: the volume gone, the window leaves; being ridden out (`Recovering` —
+  its device, or its driver, coming back), it waits for the read that brings
+  it back and reads the folder again once; still attached and serving, its
+  volume is named in one alert for every window it refused
+  (`NoticeSource::Unreadable`).
+  Places reads are numbered so an older read in flight never decides a newer
+  refusal.
 
 ## FI7 — selection
 
@@ -204,10 +242,18 @@ grows it (`tairix_browse::marquee`).
 The session carries every drag. What it can drop on, and what it tells the
 source, are new.
 
-- **The drag carries items, not a name.** `BeginDrag` names the first item, the
-  count, and whether the drag is one openable file (`DragItems`); an icon-bar
-  slot is offered only to that last kind. A drag of a selected entry carries
-  the selection.
+- **The drag carries items, not a name.** `BeginDrag` names the entry pressed,
+  the count, and whether the drag is one openable file (`DragItems`); an
+  icon-bar slot is offered only to that last kind. A drag of a selected entry
+  carries the selection, the entry pressed leading (`gesture::drag_order`).
+- **The drag shows what it carries as the listing does** (FI41). Each of the
+  first `DRAG_SHOWN_MAX` items crosses as its class picture and where that
+  picture stood from the press, the lead with the ending the window hides: the
+  session shows one item as its large tile, held where it was pressed, and
+  several as a stack of smaller pictures gathering from where they stood, the
+  front card wearing the count (`docs/src/desktop/session.md`). Bundle icons,
+  thumbnails, folder content cards and sprites do not cross — they would need
+  a path or the window's pixels to — so the class picture stands in.
 - **The source decides every folder drop.** While the pointer is over one of
   the source client's own windows (the engine's attested ownership decides),
   or over the desktop, the session reports where — once per input batch,

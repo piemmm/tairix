@@ -56,7 +56,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tairix_abi::driver::filesystem::{
     DirVisit, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
     FilesystemStats, FilesystemWrite, MountFlags, NodeId, NodeIdentity, NodeInfo,
-    NodeKind as DriverNodeKind, NodeTimes, VolumeHost, VolumeStats,
+    NodeKind as DriverNodeKind, NodeTimes, VolumeHost, VolumeStats, VolumeTitle,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::fs::{Access as Wanted, NodeExpect};
@@ -187,6 +187,8 @@ struct DriverEntry<F: 'static> {
     owner: Option<MountOwner>,
     /// What kind of volume it is.
     class: VolumeClass,
+    /// The title the mount listing gives it: its filesystem's label.
+    title: VolumeTitle,
     /// The fail-closed stand-in answers for it while the volume is away.
     stand_in: bool,
 }
@@ -196,7 +198,9 @@ struct Filing {
     watch: Option<ClaimRef>,
     owner: Option<MountOwner>,
     class: VolumeClass,
-    stand_in: bool,
+    /// For a stand-in, the availability its volume is listed with while the
+    /// stand-in answers it.
+    stand_in: Option<MountAvailability>,
 }
 
 /// One registered volume's snapshot facts, as [`LateFilesystem::entries`]
@@ -212,6 +216,7 @@ struct SnapshotEntry<F: 'static> {
     usage: Arc<SpinLock<VolumeStats>>,
     owner: Option<MountOwner>,
     class: VolumeClass,
+    title: VolumeTitle,
 }
 
 /// What a registration names its volume by.
@@ -408,7 +413,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             watch,
             owner,
             class,
-            stand_in: false,
+            stand_in: None,
         };
         self.register_under(handle, driver, names, nodes, filing)
     }
@@ -456,7 +461,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             watch,
             owner: None,
             class: VolumeClass::Local,
-            stand_in: false,
+            stand_in: None,
         };
         self.register_under(handle, driver, names, nodes, filing)
     }
@@ -464,7 +469,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// [`register_with_nodes`](Self::register_with_nodes) the fail-closed
     /// stand-in `driver` for the volume `handle` serves, under its own
     /// registration `nodes`, marked so [`reach`](Self::reach) says the volume
-    /// is away until a driver serves it again.
+    /// is away until a driver serves it again, and listed as `availability`
+    /// from the same instant: the mount table never shows a volume whose
+    /// every operation already fails as one that serves.
     ///
     /// # Errors
     ///
@@ -475,12 +482,39 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         driver: F,
         names: VolumeNames<'_>,
         nodes: Arc<VolumeNodes>,
+        availability: MountAvailability,
     ) -> Result<Arc<DriverLock<F>>, RegisterError> {
         let filing = Filing {
             watch: None,
             owner: None,
             class: VolumeClass::Local,
-            stand_in: true,
+            stand_in: Some(availability),
+        };
+        self.register_under(handle, driver, names, nodes, filing)
+    }
+
+    /// [`register`](Self::register) the fail-closed stand-in `driver` for a
+    /// volume of `class` being recovered over its re-inserted device, under a
+    /// fresh registration, so a descriptor held across its absence answers
+    /// stale, and listed as `availability` until its driver serves it again.
+    ///
+    /// # Errors
+    ///
+    /// As [`register`](Self::register).
+    pub fn register_recovery_stand_in(
+        &self,
+        handle: DriverHandle,
+        driver: F,
+        names: VolumeNames<'_>,
+        class: VolumeClass,
+        availability: MountAvailability,
+    ) -> Result<Arc<DriverLock<F>>, RegisterError> {
+        let nodes = self.registration(VolumeNodes::new)?;
+        let filing = Filing {
+            watch: None,
+            owner: None,
+            class,
+            stand_in: Some(availability),
         };
         self.register_under(handle, driver, names, nodes, filing)
     }
@@ -528,7 +562,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             watch: None,
             owner,
             class: VolumeClass::Network,
-            stand_in: false,
+            stand_in: None,
         };
         self.insert(handle, shared, names, filing)
     }
@@ -565,7 +599,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             source: copy(source)?,
             fstype: copy(fstype)?,
             volume_id,
-            availability: MountAvailability::Available,
+            availability: stand_in.unwrap_or(MountAvailability::Available),
             io: None,
             writeback: WritebackDue::empty(),
             watch,
@@ -574,7 +608,8 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             served: None,
             owner,
             class,
-            stand_in,
+            title: VolumeTitle::EMPTY,
+            stand_in: stand_in.is_some(),
         };
         // Taken before the entry is visible, so the fast path takes them and
         // cannot park — the surprise-removal path registers a stand-in from a
@@ -589,11 +624,12 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                 return Err(RegisterError::AlreadyRegistered);
             }
             if let Some(at) = at {
-                // Who attached the volume, and what kind it is, are the
-                // registration's, so a driver replaced in place keeps them.
+                // Who attached the volume, what kind it is and its title are
+                // the registration's, so a driver replaced in place keeps them.
                 let entry = DriverEntry {
                     owner: drivers[at].owner,
                     class: drivers[at].class,
+                    title: drivers[at].title,
                     ..entry
                 };
                 Some(core::mem::replace(&mut drivers[at], entry))
@@ -882,6 +918,27 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         Ok(())
     }
 
+    /// Record the title the volume registered for `handle` is listed under:
+    /// its filesystem's label.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] when `handle` names no registered volume
+    /// (fail closed — nothing is titled).
+    pub fn set_title(&self, handle: DriverHandle, title: VolumeTitle) -> Result<(), Errno> {
+        let handle = handle.as_u64();
+        let mut drivers = self.drivers.lock();
+        let entry = drivers
+            .iter_mut()
+            .find(|e| e.handle == handle)
+            .ok_or(Errno::NotImplemented)?;
+        if entry.title != title {
+            entry.title = title;
+            crate::notice::mounts_changed();
+        }
+        Ok(())
+    }
+
     /// Attach the served device's live readings `io` to the volume registered
     /// for `handle`, so the mount snapshot reflects the backing device's
     /// reported health (`Degraded`/`Recovering`) while the volume is still
@@ -1142,6 +1199,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                     usage: Arc::clone(&e.usage),
                     owner: e.owner,
                     class: e.class,
+                    title: e.title,
                 });
             }
         }
@@ -3314,7 +3372,7 @@ where
             ) else {
                 continue;
             };
-            let record = record.with_class(entry.class);
+            let record = record.with_class(entry.class).with_title(entry.title);
             records.push(match entry.owner {
                 Some(owner) => record.with_owner(owner),
                 None => record,

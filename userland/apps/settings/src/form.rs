@@ -4,7 +4,7 @@
 //! One definition of each settable, and the panes that each select a subset
 //! of it: Appearance offers light/dark and the interface axes, Accessibility
 //! groups the same rows the way a reader looking for them would, and
-//! Wallpaper the pinboard's own four. A reader looks for contrast in either
+//! Wallpaper the pinboard's own five. A reader looks for contrast in either
 //! of the first two, so neither pane may carry its own copy of what contrast
 //! *is* — the label, the sentence beneath it, the choices it offers, and the
 //! key it writes all live here once.
@@ -199,6 +199,8 @@ pub enum Setting {
     Icons,
     /// The order the `Desktop` folder's icons are sorted in.
     Sort,
+    /// Whether an icon put down on the desktop settles onto its grid.
+    AlignToGrid,
     /// Which cursor set the pointer is drawn from.
     CursorSet,
     /// How large the pointer is drawn.
@@ -259,6 +261,7 @@ impl Setting {
             Self::Backdrop => SettingsKey::Backdrop,
             Self::Icons => SettingsKey::Icons,
             Self::Sort => SettingsKey::Sort,
+            Self::AlignToGrid => SettingsKey::Grid,
             Self::CursorSet => SettingsKey::CursorSet,
             Self::CursorSize => SettingsKey::CursorSize,
             Self::CursorShadow => SettingsKey::CursorShadow,
@@ -298,6 +301,7 @@ impl Setting {
             Self::Backdrop => "Backdrop",
             Self::Icons => "Icons",
             Self::Sort => "Sort",
+            Self::AlignToGrid => "Align to grid",
             Self::CursorSet => "Pointer set",
             Self::CursorSize => "Pointer size",
             Self::CursorShadow => "Pointer shadow",
@@ -323,6 +327,7 @@ impl Setting {
 
     /// The sentence beneath the label: what choosing this actually does.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // One sentence per setting: a table, not logic.
     pub const fn description(self) -> &'static str {
         match self {
             Self::Appearance => "Whether windows, menus and the icon bar are drawn light or dark.",
@@ -355,8 +360,15 @@ impl Setting {
             Self::Backdrop => {
                 "The flat colour behind the picture, and instead of it wherever it does not reach."
             }
-            Self::Icons => "The corner the desktop's icons are arranged from.",
-            Self::Sort => "The order the Desktop folder's icons are listed in.",
+            Self::Icons => {
+                "The corner icons are laid out from: where one with no place of its own goes, \
+                 and where Tidy Up starts."
+            }
+            Self::Sort => "The order icons with no place of their own are laid out in.",
+            Self::AlignToGrid => {
+                "An icon put down on the desktop settles into the nearest free place on its \
+                 grid. Off, it stays exactly where it is put."
+            }
             Self::CursorSet => {
                 "Which artwork the pointer is drawn from. Standard is the built-in set."
             }
@@ -446,6 +458,7 @@ impl Setting {
             Self::Backdrop => list(backdrop_choices(settings.backdrop)),
             Self::Icons => list(pick(&IconFlow::ALL, settings.icons, icon_flow_label)),
             Self::Sort => list(pick(&IconSort::ALL, settings.sort, icon_sort_label)),
+            Self::AlignToGrid => list(pick(&SWITCH, settings.align_to_grid, switch_label)),
             Self::CursorSet => list(cursor_set_choices(settings.cursor_set, offered.cursor_sets)),
             Self::CursorSize => list(pick(
                 &CursorSize::ALL,
@@ -553,6 +566,7 @@ impl Setting {
             ),
             Self::Icons => set(&IconFlow::ALL, index, &mut settings.icons),
             Self::Sort => set(&IconSort::ALL, index, &mut settings.sort),
+            Self::AlignToGrid => set(&SWITCH, index, &mut settings.align_to_grid),
             Self::CursorSet => set(
                 &cursor_set_ladder(settings.cursor_set, offered.cursor_sets),
                 index,
@@ -1637,6 +1651,7 @@ const WALLPAPER_GROUPS: [GroupSpec; 2] = [
             Declared::Desktop(Setting::Backdrop),
             Declared::Desktop(Setting::Icons),
             Declared::Desktop(Setting::Sort),
+            Declared::Desktop(Setting::AlignToGrid),
         ],
         pictures: None,
         footnote: None,

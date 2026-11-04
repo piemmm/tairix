@@ -14,8 +14,9 @@ pub enum Command {
     /// when a clean commit is impossible.
     Unmount {
         /// The volume's catalog name (`usb1`), a directory it is mounted on
-        /// (`/Storage/usb1`), or the file name of the disk image it was
-        /// mounted from, resolved against the mount and view listings.
+        /// (`/Storage/usb1`), the file name of the disk image it was mounted
+        /// from, or its durable root (`id::<volume-id>`), resolved against the
+        /// mount and view listings.
         name: String,
         /// `true` for `-f`/`--force`.
         force: bool,
@@ -47,7 +48,8 @@ const OPTIONS: &[Opt<Flag>] = &[
 /// prefix, `--` ending them.
 ///
 /// * `NAME` — the volume to detach: its catalog name, a directory it is
-///   mounted on, or the file name of the disk image it was mounted from.
+///   mounted on, the file name of the disk image it was mounted from, or its
+///   durable root, `id::<volume-id>`.
 /// * `-f` / `--force` — force-unmount: retract the volume even when its
 ///   uncommitted data cannot be committed, deliberately discarding the
 ///   retained set (an audited, capability-gated kernel decision).

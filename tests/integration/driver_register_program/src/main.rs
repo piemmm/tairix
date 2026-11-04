@@ -139,9 +139,8 @@ mod program {
 
         // The production `ipc_send` path: kernel-side endpoint resolution,
         // payload bound, copy-in from this process's own address space,
-        // and the per-send capability check. A
-        // negative return is `-errno`.
-        if tairix_rt::ipc_send(endpoint, &reply.to_le_bytes()) < 0 {
+        // and the per-send capability check.
+        if tairix_rt::ipc_send(endpoint, &reply.to_le_bytes()).is_err() {
             return 13;
         }
         0

@@ -20,7 +20,7 @@ use tairix_bytedev::ByteDevice;
 use tairix_fsprobe::adfs::{
     link_bits, seal_boot_block, zone_check, zone_start_bit, DiscRecord, MapCopy, BOOT_BLOCK_OFFSET,
     BOOT_BLOCK_SIZE, CROSS_CHECK_BYTE, CROSS_CHECK_SUM, DISC_RECORD_SIZE, FRAG_ROOT, FREELINK_BIT,
-    ZONE_CHECK_BYTE, ZONE_HEADER_SIZE,
+    NAME_LEN, ZONE_CHECK_BYTE, ZONE_HEADER_SIZE,
 };
 
 /// Largest map sector (zone) size: `log2secsize` is at most 10.
@@ -798,18 +798,55 @@ impl NewMap {
         boot_block: bool,
         new_size: u32,
     ) -> Result<(), DriverError> {
-        self.record.root_size = new_size;
+        let record = DiscRecord {
+            root_size: new_size,
+            ..self.record
+        };
+        self.store_record(volume, boot_block, record)
+    }
+
+    /// Rewrite the disc record's disc name, as [`Self::set_root_size`]
+    /// rewrites its root size.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block access.
+    /// * [`DriverError::BadMagic`] if zone 0 no longer validates.
+    pub fn set_disc_name<B: Block>(
+        &mut self,
+        volume: &mut ByteDevice<B>,
+        boot_block: bool,
+        name: [u8; NAME_LEN],
+    ) -> Result<(), DriverError> {
+        let record = DiscRecord {
+            disc_name: name,
+            ..self.record
+        };
+        self.store_record(volume, boot_block, record)
+    }
+
+    /// Write `record` into zone 0 of both copies, its check byte refreshed,
+    /// and, when `boot_block`, into the boot block, resealed, and hold it as
+    /// the map's once it is written: a write that fails leaves the map
+    /// holding the record it had.
+    fn store_record<B: Block>(
+        &mut self,
+        volume: &mut ByteDevice<B>,
+        boot_block: bool,
+        record: DiscRecord,
+    ) -> Result<(), DriverError> {
         let mut staged = self.load_zone(volume, 0)?;
-        let encoded = self.record.encode();
+        let encoded = record.encode();
         staged.bytes[ZONE_HEADER_SIZE..ZONE_HEADER_SIZE + DISC_RECORD_SIZE]
             .copy_from_slice(&encoded);
         self.store_zone(volume, 0, &mut staged)?;
         if boot_block {
             let mut block = [0u8; BOOT_BLOCK_SIZE];
             volume.read(BOOT_BLOCK_OFFSET, &mut block)?;
-            seal_boot_block(&mut block, &self.record);
+            seal_boot_block(&mut block, &record);
             volume.write(BOOT_BLOCK_OFFSET, &block)?;
         }
+        self.record = record;
         Ok(())
     }
 

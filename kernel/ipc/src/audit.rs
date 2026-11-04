@@ -16,7 +16,7 @@
 //! | 3001 | Error | `PORT_CREATE_DENIED`          | A port-creation request was refused (creator lacks bind authority). |
 //! | 3002 | Info  | `PORT_DESTROYED`              | A port was destroyed (any subsequent send fails closed). `drained` counts the messages discarded with it, `refused` the sends refused over its life because its owner admitted another sender. |
 //! | 3003 | Info  | `PORT_REGISTERED`             | A port was bound into the named-port registry under its `EndpointId`. |
-//! | 3004 | Error | `PORT_REGISTER_DENIED`        | A registration was refused because the `EndpointId` was already bound. |
+//! | 3004 | Error | `PORT_REGISTER_DENIED`        | A registration was refused: the `EndpointId` was already bound, or the first registration could not make the registry's index of the ports each sender uses. |
 //! | 3005 | Info  | `PORT_UNREGISTERED`           | A port was removed from the registry and destroyed. |
 //! | 3006 | Info  | `PORT_NAME_PUBLISHED`         | A well-known name was bound to an endpoint in the registry. |
 //! | 3007 | Error | `PORT_NAME_PUBLISH_DENIED`    | A name binding was refused (name already bound, or its endpoint is not registered). |
@@ -50,6 +50,7 @@
 //! | 3051 | Info  | `CALL_POSTER_VANISHED`        | A caller task exited with calls still in flight on this endpoint; the kernel cancelled them (queued requests dropped before service, in-service tickets retired so the server's reply fails closed, unclaimed replies discarded). |
 //! | 3052 | Info  | `CALL_ENDPOINT_GRANTS_REVOKED` | A destroyed endpoint's delegated per-endpoint grants were revoked. |
 //! | 3060 | Error | `PAYLOAD_ALLOC_FAILED`        | The kernel heap could not hold the wiped-on-drop copy of a port send, call post, or reply, so the transfer failed closed. |
+//! | 3061 | Debug | `IPC_SENDER_LIMIT_REACHED`    | A send or post was refused `LimitExceeded`: it would carry its sender past its own `ipc-queue-bytes` limit, its lane's growth included, or the caller already holds `IPC_SENDER_DEPTH_MAX` answers it has not collected. |
 //!
 //! Adding a new event requires assigning the next free identifier in
 //! this file and appending a row to the table in
@@ -72,7 +73,8 @@ pub enum AuditEvent {
     PortDestroyed,
     /// A port was bound into the named-port registry.
     PortRegistered,
-    /// A registration was refused because the `EndpointId` was already bound.
+    /// A registration was refused: the `EndpointId` was already bound, or the
+    /// registry could not make its index of the ports each sender uses.
     PortRegisterDenied,
     /// A port was removed from the registry and destroyed.
     PortUnregistered,
@@ -184,11 +186,14 @@ pub enum AuditEvent {
     /// reply.
     CallTimedOut,
     /// A send or post was refused because it would carry the sender past its
-    /// own `ipc-queue-bytes` limit
+    /// own `ipc-queue-bytes` limit, its lane's growth included, or because the
+    /// caller already holds
+    /// [`IPC_SENDER_DEPTH_MAX`](tairix_abi::ipc::IPC_SENDER_DEPTH_MAX) answers
+    /// it has not collected
     /// ([`Errno::LimitExceeded`](tairix_abi::Errno::LimitExceeded)).
     ///
     /// Every sender pays for the traffic it has queued and not seen consumed,
-    /// so this is the sender's own budget refusing it, never the receiver's
+    /// so this is the sender's own limits refusing it, never the receiver's
     /// state. Recorded at `Debug` with the other back-pressure events: a
     /// sender flooding an endpoint must not turn each refusal into an alert.
     IpcSenderLimitReached,
@@ -514,6 +519,7 @@ mod tests {
         assert_eq!(AuditEvent::CallPosterVanished.id(), EventId(3051));
         assert_eq!(AuditEvent::CallEndpointGrantsRevoked.id(), EventId(3052));
         assert_eq!(AuditEvent::CallTimedOut.id(), EventId(3053));
+        assert_eq!(AuditEvent::IpcSenderLimitReached.id(), EventId(3061));
     }
 
     #[test]
@@ -557,6 +563,7 @@ mod tests {
             AuditEvent::CallEndpointGrantsRevoked,
             AuditEvent::CallTimedOut,
             AuditEvent::PayloadAllocFailed,
+            AuditEvent::IpcSenderLimitReached,
         ] {
             let id = ev.id().0;
             assert!(
@@ -614,6 +621,7 @@ mod tests {
         use tairix_log::Level;
         assert_eq!(AuditEvent::MailboxFull.level(), Level::Debug);
         assert_eq!(AuditEvent::CallQueueFull.level(), Level::Debug);
+        assert_eq!(AuditEvent::IpcSenderLimitReached.level(), Level::Debug);
         assert!(AuditEvent::MailboxFull.level() < Level::Error);
         assert!(AuditEvent::CallQueueFull.level() < Level::Error);
         // A genuine denial on the very same paths stays at `Error`.

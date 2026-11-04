@@ -413,6 +413,15 @@ impl<T: Copy, const N: usize> SecretRing<T, N> {
         self.ring.try_push_back(value)
     }
 
+    /// Prepend `value` at the front, into a slot a scrub left blank.
+    ///
+    /// # Errors
+    ///
+    /// [`CapacityError`] carrying `value` back when the ring is full.
+    pub fn try_push_front(&mut self, value: T) -> Result<(), CapacityError<T>> {
+        self.ring.try_push_front(value)
+    }
+
     /// Append as much of `items` as fits at the back, returning how many were
     /// taken.
     pub fn push_slice(&mut self, items: &[T]) -> usize {

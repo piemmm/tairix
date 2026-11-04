@@ -36,7 +36,7 @@ mod kernel {
     use tairix_itest_witness::{field_str, names_bundle};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_kernel_core::seat::DeliveredInputKind;
+    use tairix_kernel_core::seat::InputKind;
     use tairix_kernel_core::AuditEvent;
     use tairix_log::{Event, Sink};
     use tairix_test_appbar_qemu_aarch64::BAR_APP_NAME;
@@ -80,7 +80,7 @@ mod kernel {
             // announcements in this transcript.
             SerialSink::new().write_event(event);
             if event.id.0 == AuditEvent::InputDelivered.id().0 {
-                if field_str(event, "kind") == Some(DeliveredInputKind::Touch.as_str()) {
+                if field_str(event, "kind") == Some(InputKind::Touch.as_str()) {
                     self.touched.store(true, Ordering::Release);
                 }
             } else if event.id.0 == tairix_appload::events::APP_LOADED.0 {

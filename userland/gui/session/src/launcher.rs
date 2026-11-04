@@ -2,13 +2,15 @@
 //! T22): what a launch from it asks for and counts as, what it shows running,
 //! and the account's own record of it, kept off the loop.
 //!
-//! [`LauncherMemory`] is pure. The record lives in this session's private
-//! app-data scope, a store away, so the session's private-store worker reads
-//! and writes it ([`load_personal`], [`store_personal`]) and hands back what
-//! came of it. This holds what the store last answered — the durable record —
-//! and the edits it has not yet confirmed, replays them in order over it for
-//! what the launcher shows — the live record — and says what to read or write
-//! next. Nothing is stored before the record is read.
+//! [`RecordMemory`] is pure, and holds any record this session keeps in its
+//! private app-data scope ([`Kept`]): the launcher's, and where the user put
+//! their desktop icons ([`crate::pinboard`]). The record is a store away, so
+//! the session's private-store worker reads and writes it ([`load_kept`],
+//! [`store_personal`]) and hands back what came of it. The memory holds what
+//! the store last answered — the durable record — and the edits it has not yet
+//! confirmed, replays them in order over it for what is shown — the live
+//! record — and says what to read or write next. Nothing is stored before the
+//! record is read.
 
 use alloc::collections::BTreeSet;
 use alloc::string::String;
@@ -45,7 +47,7 @@ pub fn elevated_launch(entry: &LibraryEntry, attested: &AppIdentity) -> Authoris
         requester: attested.name.clone(),
         bundle: Some(bundle),
         purpose: String::from(RUN_ELEVATED_PURPOSE),
-        window: None,
+        asker: None,
     }
 }
 
@@ -85,6 +87,64 @@ pub fn running_bundles(strip: &[AppGroup], launched: &LaunchTable) -> BTreeSet<S
 /// refused, and the caller says so.
 pub const MAX_UNCONFIRMED: usize = 64;
 
+/// A record this session keeps in its private scope, one store key per item:
+/// what a [`RecordMemory`] asks of it.
+pub trait Kept: Clone + Default + Eq + core::fmt::Debug {
+    /// One change the record takes.
+    type Edit: Clone + Eq + core::fmt::Debug;
+    /// Why the record had no room for an edit.
+    type Full: Copy + Eq + core::fmt::Debug;
+    /// The refusal of an edit past [`MAX_UNCONFIRMED`] held ones.
+    const OVERFULL: Self::Full;
+
+    /// Read the record out of a scope's effective settings, ignoring keys
+    /// outside it and leaving out every item it refuses, answered by key.
+    fn read<'a>(settings: impl Iterator<Item = (&'a str, &'a str)>) -> (Self, Vec<String>);
+
+    /// Make `edit`, answering the store keys whose value it changed.
+    ///
+    /// # Errors
+    ///
+    /// The record's refusal of an edit it has no room for; nothing changed.
+    fn make(&mut self, edit: &Self::Edit) -> Result<Vec<String>, Self::Full>;
+
+    /// What the store is to keep under `key`, `None` to keep nothing.
+    fn kept(&self, key: &str) -> Option<String>;
+
+    /// Take what the store answered under `key`, answering `false` for a value
+    /// the record cannot read. A key outside the record changes nothing.
+    fn take(&mut self, key: &str, value: Option<&str>) -> bool;
+}
+
+impl Kept for Personal {
+    type Edit = Edit;
+    type Full = RecordFull;
+    const OVERFULL: RecordFull = RecordFull;
+
+    fn read<'a>(settings: impl Iterator<Item = (&'a str, &'a str)>) -> (Self, Vec<String>) {
+        Self::load(settings)
+    }
+
+    fn make(&mut self, edit: &Edit) -> Result<Vec<String>, RecordFull> {
+        Ok(self.apply(edit)?.iter().map(key_of).collect())
+    }
+
+    fn kept(&self, key: &str) -> Option<String> {
+        self.stored(&entry_keyed(key)?)
+    }
+
+    fn take(&mut self, key: &str, value: Option<&str>) -> bool {
+        entry_keyed(key).is_none_or(|id| self.adopt(&id, value).is_ok())
+    }
+}
+
+/// The program the launcher record's `key` names, `None` for a key outside it.
+fn entry_keyed(key: &str) -> Option<EntryId> {
+    key.strip_prefix(KEY_PREFIX)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|id| EntryId::new(id).ok())
+}
+
 /// What reading the record produced: the record, or none when the store could
 /// not be read, and a ready-to-print line for each record left out.
 pub struct LoadedPersonal {
@@ -95,35 +155,50 @@ pub struct LoadedPersonal {
     pub warnings: Vec<String>,
 }
 
-/// Read the account's record out of this session's private scope.
-pub fn load_personal(host: &mut dyn AppDataHost) -> LoadedPersonal {
+/// Read the record `R` out of this session's private scope: the record, and
+/// the key of each item it left out.
+///
+/// # Errors
+///
+/// The app-data service's refusal, which leaves no record to store over.
+pub fn load_kept<R: Kept>(host: &mut dyn AppDataHost) -> Result<(R, Vec<String>), Errno> {
     let store = SettingsStore::open_without_defaults(host);
     if let Some(err) = store.store_refusal() {
-        return LoadedPersonal {
+        return Err(err);
+    }
+    let settings = store.settings();
+    Ok(R::read(
+        settings.iter().map(|setting| (setting.key, setting.value)),
+    ))
+}
+
+/// Read the account's record out of this session's private scope.
+pub fn load_personal(host: &mut dyn AppDataHost) -> LoadedPersonal {
+    match load_kept::<Personal>(host) {
+        Ok((personal, refused)) => LoadedPersonal {
+            personal: Some(personal),
+            warnings: refused
+                .into_iter()
+                .map(|key| {
+                    alloc::format!(
+                        "desktop: the launcher record `{key}` is not one kept; left out\n"
+                    )
+                })
+                .collect(),
+        },
+        Err(err) => LoadedPersonal {
             personal: None,
             warnings: alloc::vec![alloc::format!(
                 "desktop: the launcher's record could not be read ({err:?}); favourites and \
                  frequent use wait until it can\n"
             )],
-        };
-    }
-    let settings = store.settings();
-    let (personal, refused) =
-        Personal::load(settings.iter().map(|setting| (setting.key, setting.value)));
-    LoadedPersonal {
-        personal: Some(personal),
-        warnings: refused
-            .into_iter()
-            .map(|key| {
-                alloc::format!("desktop: the launcher record `{key}` is not one kept; left out\n")
-            })
-            .collect(),
+        },
     }
 }
 
 /// Write `changes` — each a key and the value to keep, `None` to keep nothing
 /// — into this session's private scope, and answer what the store then holds
-/// for each.
+/// for each: the one writer of every record kept there.
 ///
 /// A removal that leaves a lower layer's record showing — machine policy
 /// seeding a favourite — is masked with [`FORGOTTEN`], so what was removed
@@ -192,33 +267,37 @@ struct Reading {
     wait_ns: u64,
 }
 
-/// The account's record, kept between the launcher and the store. See the
+/// A record kept between its surface and the store. See the
 /// [module docs](self).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LauncherMemory {
-    durable: Option<Personal>,
-    live: Personal,
-    unconfirmed: Vec<Edit>,
+pub struct RecordMemory<R: Kept> {
+    durable: Option<R>,
+    live: R,
+    unconfirmed: Vec<R::Edit>,
     in_flight: Option<InFlight>,
     asked: u64,
     reading: Reading,
-    /// Whether the live record moved since the launcher was last told.
+    /// Whether the live record moved since its surface was last told.
     moved: bool,
 }
 
-impl Default for LauncherMemory {
+/// The account's record of its program library, kept between the launcher
+/// and the store.
+pub type LauncherMemory = RecordMemory<Personal>;
+
+impl<R: Kept> Default for RecordMemory<R> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl LauncherMemory {
+impl<R: Kept> RecordMemory<R> {
     /// A record not yet read, its first read due at once.
     #[must_use]
     pub fn new() -> Self {
         Self {
             durable: None,
-            live: Personal::new(),
+            live: R::default(),
             unconfirmed: Vec::new(),
             in_flight: None,
             asked: 0,
@@ -232,7 +311,7 @@ impl LauncherMemory {
     }
 
     /// Whether the live record moved since this was last asked — the cue to
-    /// hand the launcher its shelf again.
+    /// hand its surface the record again.
     pub fn take_moved(&mut self) -> bool {
         core::mem::take(&mut self.moved)
     }
@@ -243,17 +322,11 @@ impl LauncherMemory {
         self.durable.is_some()
     }
 
-    /// What the launcher shows: the durable record with every unconfirmed
+    /// What the surface shows: the durable record with every unconfirmed
     /// edit replayed over it.
     #[must_use]
-    pub const fn live(&self) -> &Personal {
+    pub const fn live(&self) -> &R {
         &self.live
-    }
-
-    /// The shelf the launcher draws at the wall-clock second `now`.
-    #[must_use]
-    pub fn shelf(&self, now: Option<i64>) -> Shelf {
-        self.live.shelf(now)
     }
 
     /// Whether a read is due at `now_ns`; answering `true` marks it asked.
@@ -267,10 +340,10 @@ impl LauncherMemory {
 
     /// Adopt what a read at `now_ns` produced: the record, or none — a read
     /// tried again after a wait that doubles each time, up to its bound.
-    pub fn loaded(&mut self, now_ns: u64, personal: Option<Personal>) {
+    pub fn loaded(&mut self, now_ns: u64, record: Option<R>) {
         self.reading.asked = false;
-        if let Some(personal) = personal {
-            self.durable = Some(personal);
+        if let Some(record) = record {
+            self.durable = Some(record);
             self.replay();
         } else {
             self.reading.next_ns = now_ns.saturating_add(self.reading.wait_ns);
@@ -282,13 +355,13 @@ impl LauncherMemory {
     ///
     /// # Errors
     ///
-    /// [`RecordFull`] for an edit the record has no room for, or one past
+    /// The record's refusal of an edit it has no room for, or of one past
     /// [`MAX_UNCONFIRMED`] held edits; nothing changed.
-    pub fn apply(&mut self, edit: Edit) -> Result<(), RecordFull> {
+    pub fn apply(&mut self, edit: R::Edit) -> Result<(), R::Full> {
         if self.unconfirmed.len() >= MAX_UNCONFIRMED {
-            return Err(RecordFull);
+            return Err(R::OVERFULL);
         }
-        self.live.apply(&edit)?;
+        self.live.make(&edit)?;
         self.unconfirmed.push(edit);
         self.moved = true;
         Ok(())
@@ -302,14 +375,10 @@ impl LauncherMemory {
             return None;
         }
         let mut replayed = self.durable.clone()?;
-        let mut touched: Vec<EntryId> = Vec::new();
+        let mut touched = BTreeSet::new();
         for edit in &self.unconfirmed {
-            if let Ok(changed) = replayed.apply(edit) {
-                for id in changed {
-                    if !touched.contains(&id) {
-                        touched.push(id);
-                    }
-                }
+            if let Ok(changed) = replayed.make(edit) {
+                touched.extend(changed);
             }
         }
         self.asked = self.asked.wrapping_add(1);
@@ -320,8 +389,11 @@ impl LauncherMemory {
         Some(StoreAsk {
             number: self.asked,
             changes: touched
-                .iter()
-                .map(|id| (key_of(id), replayed.stored(id)))
+                .into_iter()
+                .map(|key| {
+                    let value = replayed.kept(&key);
+                    (key, value)
+                })
                 .collect(),
         })
     }
@@ -353,15 +425,8 @@ impl LauncherMemory {
         let mut unreadable = Vec::new();
         if let (Ok(answers), Some(durable)) = (result, self.durable.as_mut()) {
             for (key, value) in answers {
-                let Some(id) = key
-                    .strip_prefix(KEY_PREFIX)
-                    .and_then(|rest| rest.strip_prefix('.'))
-                    .and_then(|id| EntryId::new(id).ok())
-                else {
-                    continue;
-                };
-                if durable.adopt(&id, value.as_deref()).is_err() {
-                    let _ = durable.adopt(&id, None);
+                if !durable.take(&key, value.as_deref()) {
+                    durable.take(&key, None);
                     unreadable.push(key);
                 }
             }
@@ -375,7 +440,7 @@ impl LauncherMemory {
     /// longer has room for is dropped.
     fn replay(&mut self) {
         let mut live = self.durable.clone().unwrap_or_default();
-        self.unconfirmed.retain(|edit| live.apply(edit).is_ok());
+        self.unconfirmed.retain(|edit| live.make(edit).is_ok());
         self.moved |= live != self.live;
         self.live = live;
     }
@@ -399,6 +464,14 @@ impl LauncherMemory {
             return park_ns;
         }
         park_ns.min(self.reading.next_ns.saturating_sub(now_ns))
+    }
+}
+
+impl RecordMemory<Personal> {
+    /// The shelf the launcher draws at the wall-clock second `now`.
+    #[must_use]
+    pub fn shelf(&self, now: Option<i64>) -> Shelf {
+        self.live.shelf(now)
     }
 }
 

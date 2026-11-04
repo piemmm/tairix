@@ -254,6 +254,7 @@ fn the_proxy_forwards_the_whole_driver_surface() {
     assert_security_forwards(&mut served.fs);
     assert_stats_forwards(&mut served.fs);
     assert_attrs_forwards(&mut served.fs);
+    crate::fs::wrapper_conformance::assert_label_forwards(&mut served.fs);
 }
 
 #[test]

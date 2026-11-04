@@ -87,8 +87,8 @@ rule forbids. If the proper implementation depends on prerequisite work (an ABI
 event that does not exist, a routing seam that is missing), that prerequisite is
 completed as part of the same change; if it genuinely cannot be, the conflict is
 raised with the User (`AGENTS.md` §15.7), never papered over with a temporary
-gap. A wheel event that genuinely has nothing to scroll (a live terminal screen
-that keeps no scrollback) is a *correct, complete* answer, not a deferral — but
+gap. A wheel event that genuinely has nothing to scroll (a view already at the
+end of what it shows) is a *correct, complete* answer, not a deferral — but
 "there is nowhere to route this yet" is not.
 
 ### Do not remove a control's genuinely useful public API

@@ -31,8 +31,9 @@ Stability tier: **experimental** (the surface grows stage by stage under
 
 `Capabilities` records, for one terminal: the colour depth (`ColorDepth` — one
 of none, the 16 ANSI colours, the 256-colour palette, or 24-bit truecolour),
-whether it can address the cursor, erase, set a scroll region, switch to an
-alternate screen, show and hide the cursor, and set its title; its
+whether it can address the cursor, erase, erase its saved lines (`E3`), set a
+scroll region, switch to an alternate screen, show and hide the cursor, and set
+its title; its
 mouse-reporting support (`MouseSupport`); whether it supports bracketed paste;
 and the keys it sends (`KeyInput`, including the arrow keys as `ArrowKeys`).
 
@@ -107,4 +108,5 @@ infrastructure outside `userland/gui/*`, so a headless image links it freely
 Tests (`AGENTS.md` §7) live next to the code (`src/tests.rs`): one capability
 test per `TermType`, an "unknown / empty `TERM` falls back safely" test, a
 `term_name` ↔ `from_term` round-trip, the `ColorDepth::supports` depth checks,
-and the `no_record_emits_a_sequence_absent_from_vt` guarantee.
+the saved-lines erase referenced exactly where a record claims it, and the
+`no_record_emits_a_sequence_absent_from_vt` guarantee.

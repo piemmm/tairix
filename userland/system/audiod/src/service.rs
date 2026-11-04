@@ -65,22 +65,27 @@ use crate::controls::{direction_slot, Controls, Tenant};
 use crate::device::{self, Device, Stream, StreamOpen};
 use crate::events;
 use crate::region::RegionHost;
+use crate::wakes::{Wake, Wakes};
 
 /// The client wake-up transport.
 ///
 /// One `ipc_send` to a stream's notify mailbox: the live service backs it
-/// with `tairix_rt::ipc_send` and host tests with a recording double. A wake
-/// that does not land costs a late refill, never correctness, so it has no
-/// result.
+/// with `tairix_rt::ipc_send` and host tests with a recording double. Its
+/// refusal is answered, so the service holds what waiting would deliver
+/// ([`Wakes`]).
 pub trait Notifier {
-    /// Deliver `frame` to `endpoint`, best effort.
-    fn notify(&mut self, endpoint: u64, frame: &[u8]);
+    /// Deliver `frame` to `endpoint`.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal of the send.
+    fn notify(&mut self, endpoint: u64, frame: &[u8]) -> Result<(), Errno>;
 }
 
 /// The one mixer, router and audio authority.
 pub struct AudioService<H: RegionHost, N: Notifier, C: MonotonicClock> {
     regions: H,
-    notifier: N,
+    notifier: Wakes<N>,
     clock: C,
     /// Bound devices by slot; a reaped device leaves its slot vacant for the
     /// next bind, so a slot's notify port and wake token stay its own.
@@ -105,7 +110,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
     pub fn new(regions: H, notifier: N, clock: C) -> Self {
         Self {
             regions,
-            notifier,
+            notifier: Wakes::new(notifier),
             clock,
             devices: Vec::new(),
             streams: Vec::new(),
@@ -116,6 +121,12 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             changes: 0,
             room: Room::Withheld,
         }
+    }
+
+    /// The wakes the service owes its clients: what the serve loop watches room
+    /// for and offers again.
+    pub fn wakes(&mut self) -> &mut Wakes<N> {
+        &mut self.notifier
     }
 
     /// Follow the seat's display lease: hold every stream outside the room it
@@ -964,7 +975,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                     self.streams[index].xrun_frames =
                         self.streams[index].xrun_frames.saturating_add(lost_frames);
                     self.streams[index].xruns = self.streams[index].xruns.saturating_add(1);
-                    device::send(&mut self.notifier, port, notify);
+                    self.notifier.wake(port, notify);
                 }
             }
             AudioChannelNotify::Drained { endpoint, position } => {
@@ -1241,7 +1252,12 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
 
     /// Move each draining stream on `(device_index, slot)` to `Idle`; one the
     /// room holds has not played out and keeps draining.
-    fn settle_streams(device_index: usize, slot: usize, streams: &mut [Stream], notifier: &mut N) {
+    fn settle_streams(
+        device_index: usize,
+        slot: usize,
+        streams: &mut [Stream],
+        notifier: &mut dyn Wake,
+    ) {
         for stream in streams.iter_mut() {
             if !stream.on(device_index, slot) || stream.held || !stream.is_draining() {
                 continue;
@@ -1593,7 +1609,11 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 geometry,
             },
         )?;
-        if !fallible::reserve(&mut self.streams, 1) {
+        // Holding what its client may be owed must not allocate on the period
+        // path either.
+        if !fallible::reserve(&mut self.streams, 1)
+            || !self.notifier.make_room(self.streams.len() + 1)
+        {
             return Err(Errno::OutOfMemory);
         }
         self.streams.push(stream);
@@ -1920,6 +1940,8 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
     fn close(&mut self, caller: &Origin, stream_id: u64, sink: &dyn Sink) -> Result<(), Errno> {
         let index = self.owned(caller, stream_id)?;
         let stream = self.streams.remove(index);
+        self.notifier
+            .forget(stream.grant.notify_endpoint, stream.id);
         if let Some(region) = stream.region {
             self.regions.release(region);
         }

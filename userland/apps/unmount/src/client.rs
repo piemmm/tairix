@@ -124,8 +124,10 @@ pub fn run(
     }
 }
 
-/// Resolve `name` against the namespace: a path — any name holding a slash,
-/// or `.` or `..` — names the binding at the place it spells, a catalog entry
+/// Resolve `name` against the namespace: a volume's durable root
+/// (`id::<volume-id>`) names the volume carrying that identity, whatever it
+/// is mounted as; any other path — a name holding a slash, or `.` or `..` —
+/// names the binding at the place it spells, a catalog entry
 /// or a directory a volume was bound at, matched as spelled and canonicalised
 /// only when that names none, so a volume that no longer answers is still
 /// named by where it is mounted; a bare word names the catalog entry it
@@ -141,6 +143,21 @@ fn resolve(
     transport: &dyn Transport,
 ) -> Result<Resolved, UnmountError> {
     let namespace = Namespace::read(transport)?;
+    let unseen = || {
+        if namespace.volumes().iter().any(MountRecord::is_withheld) {
+            UnmountError::NotShown(String::from(name))
+        } else {
+            UnmountError::NotFound(String::from(name))
+        }
+    };
+    if let Some(id) = volume_root(name) {
+        return namespace
+            .volumes()
+            .iter()
+            .find(|volume| volume.volume_id() == id)
+            .map(Resolved::of)
+            .ok_or_else(unseen);
+    }
     let bound_at = |at: &str| -> Option<&ViewBindingRecord> {
         namespace
             .views()
@@ -171,13 +188,6 @@ fn resolve(
             .map(Resolved::of)
             .ok_or_else(|| UnmountError::NotFound(String::from(name)));
     }
-    let unseen = || {
-        if namespace.volumes().iter().any(MountRecord::is_withheld) {
-            UnmountError::NotShown(String::from(name))
-        } else {
-            UnmountError::NotFound(String::from(name))
-        }
-    };
     if path {
         return Err(unseen());
     }
@@ -185,6 +195,16 @@ fn resolve(
         UnmountError::NotFound(_) => unseen(),
         err => err,
     })
+}
+
+/// The identity `name` spells as a volume's durable root, `id::<volume-id>`
+/// with nothing below it, or `None` for any other name.
+fn volume_root(name: &str) -> Option<[u8; VOLUME_ID_LEN]> {
+    let path = tairix_path::parse(name).ok()?;
+    match path.root() {
+        Root::VolumeId(id) if path.components().is_empty() => Some(*id.as_bytes()),
+        _ => None,
+    }
 }
 
 /// The view path `name` spells, nothing resolved: a `.` dropped, a relative
@@ -658,6 +678,48 @@ mod tests {
                 force: false,
             }]
         );
+    }
+
+    /// A volume's durable root names that volume and no other, with a slash
+    /// after it or without: a stick put in its place under the same catalog
+    /// name is not it, and nothing is detached.
+    #[test]
+    fn a_durable_root_names_exactly_its_volume() {
+        let root = alloc::format!("id::{}", tairix_path::VolumeId::from_bytes([1u8; 16]));
+        for spelled in [root.clone(), alloc::format!("{root}/")] {
+            let detacher = MemDetacher::new();
+            run_args(
+                &["--", spelled.as_str()],
+                &table(),
+                &detacher,
+                &Recorder::new(),
+            )
+            .expect("detaches");
+            assert_eq!(
+                detacher.detached.borrow().as_slice(),
+                &[Detached {
+                    volume_id: [1u8; 16],
+                    force: false,
+                }]
+            );
+        }
+        let swapped = Fixture::of(alloc::vec![record(
+            b"usb1",
+            b"/Storage/usb1",
+            MountAvailability::Available,
+            [9u8; 16],
+        )]);
+        let detacher = MemDetacher::new();
+        assert!(matches!(
+            run_args(
+                &["--", root.as_str()],
+                &swapped,
+                &detacher,
+                &Recorder::new()
+            ),
+            Err(UnmountError::NotFound(_))
+        ));
+        assert!(detacher.detached.borrow().is_empty());
     }
 
     /// Two users' disk images may share a file name, and the listing shows

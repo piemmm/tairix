@@ -36,6 +36,21 @@ pub(crate) fn fills(icon: &VectorIcon) -> Vec<IconLayer> {
     layers
 }
 
+/// Every kind's asset id is one an application may name it by, so a
+/// picture it carries — a dragged item's, a menu row's — is never refused for
+/// its spelling, and reads back as the kind it named.
+#[test]
+fn every_asset_id_is_one_an_application_may_name() {
+    for kind in ALL_KINDS {
+        let id = kind.asset_id();
+        assert!(
+            tairix_abi::window_ipc::IconAsset::new(id).is_ok(),
+            "{kind:?}: {id:?}"
+        );
+        assert_eq!(IconKind::for_asset(id), kind, "{id:?}");
+    }
+}
+
 #[test]
 fn index_is_the_position_in_the_kind_table() {
     for (position, kind) in ALL_KINDS.iter().enumerate() {

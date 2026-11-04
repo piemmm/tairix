@@ -1184,6 +1184,15 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn volume_retitle(
+        &self,
+        _c: &CallerContext<'_>,
+        _request: u64,
+        _request_len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn volume_read(
         &self,
         _c: &CallerContext<'_>,

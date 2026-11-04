@@ -751,8 +751,10 @@ What it now guarantees:
   account and 16 MiB in all (then one `Lost` notice), 4096 sessions in all;
   one doorbell outstanding per session, authenticated by the service's uid and
   rung only on a port the kernel attests the opening process owns
-  (`call_peer_port`). A doorbell a full port refuses is owed, never lost, and
-  the port watched for room only while one is owed there.
+  (`call_peer_port`). A doorbell its port refuses for room or the service's
+  budget is owed, never lost, and the port watched for room only while one is
+  owed there; one the kernel had no memory for is offered again after
+  `IPC_MEMORY_RETRY_NS`, and one refused for good is counted and recorded.
   An account is charged for its subscriptions and the questions it left still
   stopping, and held to half of `MAX_QUESTIONS`, asserted at build time; one
   charged its `ACCOUNT_FLOOR` (a sixteenth) raises a fresh question only while

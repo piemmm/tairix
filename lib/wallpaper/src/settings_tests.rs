@@ -41,6 +41,7 @@ fn defaults_match_the_documented_table() {
     assert_eq!(settings.backdrop, Backdrop::Theme);
     assert_eq!(settings.icons, IconFlow::Leading);
     assert_eq!(settings.sort, IconSort::Name);
+    assert!(!settings.align_to_grid, "an icon stays where it is put");
 }
 
 #[test]
@@ -107,6 +108,7 @@ fn every_key_moved() -> DesktopSettings {
         backdrop: Backdrop::Colour(Rgb::new(0xaa, 0xbb, 0xcc)),
         icons: IconFlow::Trailing,
         sort: IconSort::Size,
+        align_to_grid: true,
         appearance: Appearance::Dark,
         contrast: Contrast::High,
         density: Density::Comfortable,
@@ -161,6 +163,7 @@ fn the_render_is_canonical_and_round_trips() {
          backdrop = aabbcc\n\
          icons = trailing\n\
          sort = size\n\
+         grid = true\n\
          appearance = dark\n\
          contrast = high\n\
          density = comfortable\n\
@@ -504,6 +507,18 @@ fn every_icon_flow_and_sort_round_trips() {
 }
 
 #[test]
+fn the_grid_switch_reads_both_spellings_and_round_trips() {
+    assert!(read("grid = on\n").expect("on").align_to_grid);
+    assert!(!read("grid = false\n").expect("false").align_to_grid);
+    let settings = DesktopSettings {
+        align_to_grid: true,
+        ..DesktopSettings::default()
+    };
+    assert!(rendered(&settings).contains("grid = true\n"));
+    assert_eq!(read(&rendered(&settings)).expect("re-reads"), settings);
+}
+
+#[test]
 fn comments_and_blank_lines_are_ignored() {
     let text = "\
 # comment
@@ -561,6 +576,7 @@ fn an_invalid_value_is_refused_for_every_key() {
         ("backdrop = notacolour", SettingsKey::Backdrop),
         ("icons = upward", SettingsKey::Icons),
         ("sort = alphabetical", SettingsKey::Sort),
+        ("grid = sometimes", SettingsKey::Grid),
     ] {
         let document = alloc::format!("{text}\n");
         assert_eq!(

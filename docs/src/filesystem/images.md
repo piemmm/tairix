@@ -232,6 +232,28 @@ whole ([System Information API](../abi/sysinfo.md)).
 - **`mount IMAGE [TARGET]`** mounts one from a terminal, and
   **`unmount NAME`** detaches it ([utilities](../userland/utilities.md)).
 
+## Title
+
+A volume's title is the label its filesystem records (`FilesystemLabel`,
+[driver traits](../abi/driver_traits.md)). The mount table lists it
+(`MountRecord::title`): the probe's label as the volume attaches, cut between
+characters to `VOLUME_TITLE_MAX` bytes, and nothing for a label that is not
+text. Its owner alone retitles it, not even a holder of `CAP_FS_MOUNT`
+(`VolumeService::retitle`): the volume is held against every other operation
+while its driver writes the label and flushes it, and the new title is listed
+once the driver holds it, its writeback publishing it should the flush fail.
+The label it replaces is never read first, so a label no title spells is
+replaced as any other is. The catalog name does not move while the volume is
+attached; the next attach names it from the new label. No format's identity
+takes in its label, so a retitled volume is still the attachment it was, and
+its file attached again answers `AlreadyAttached`. A retitle is refused
+`Busy` while an operation holds the volume, `DeviceOffline` while no driver
+serves it, `NotSupported` for a format keeping no title (ISO 9660, an archive)
+or a volume no disk image holds, and `ReadOnly` for a volume taking no writes;
+a title its format cannot store is the driver's `LengthOutOfRange` or
+`OutOfRange`, and one it has no room for its `NoSpace`. The title is withheld with the source from a principal the
+volume is kept from.
+
 ## Audit
 
 | Id | Name | What happened |
@@ -243,3 +265,5 @@ whole ([System Information API](../abi/sysinfo.md)).
 | 4324 | `fs.image.detach_refused` | a detach was refused (`cause`) |
 | 4325 | `fs.image.retired` | retired with its file's volume, or its driver lost (`cause`, `outcome`) |
 | 4326 | `fs.image.archive_commit` | an archive commit left work undone (`archive`, `cause`: `next_kept`, the next archive kept under its own name after a replace the medium stopped partway; `record_stale`, a record taken during the commit not carried; `not_durable`, the directory not yet durable; `next_left`, an uncommitted next archive not taken back out) |
+| 4327 | `fs.image.retitled` | its owner retitled it (`cause`: `owner`) |
+| 4328 | `fs.image.retitle_refused` | a retitle was refused (`cause`: `not_owner`, `volume_busy`, `volume_unserved`, `untitled_format`, `read_only`, `title_refused`, `flush_failed`) |

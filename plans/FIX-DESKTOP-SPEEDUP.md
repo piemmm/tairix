@@ -1034,11 +1034,11 @@ The desktop layer is the **bottom** of the stack, so marking all of it
 recomposites every window above it and drops every frosted backdrop over it.
 `DesktopOutcome::redraw` is **deleted**: `set_focused`, `pointer_moved`,
 `pointer_left`, `press`, `context_press` and `key` each take a
-`tairix_geometry::Region` sink and add the *cell rectangle* of every icon whose
+`tairix_geometry::Region` sink and add the *rectangle* of every icon whose
 appearance changed — hover left and hover taken, old selection and new, the
 selected icon whose focus ring appeared or disappeared. One private
-`Desktop::mark_cell` spells that rule once, and `IconTile::render` draws strictly
-inside its cell, so the cell is the whole of repainting the icon. A gesture that
+`Desktop::mark_icon` spells that rule once, and `IconTile::render` draws strictly
+inside the icon's rectangle, so it is the whole of repainting the icon. A gesture that
 changes nothing visible adds nothing and composes **no frame**.
 
 `Compositor::repaint_desktop(area, paint)` hands the painter the rectangles of
@@ -1047,11 +1047,11 @@ still painted whole, holding no pixels a partial paint could preserve.
 `DesktopShell::present_desktop_area` paints each rectangle under a narrowed
 surface clip, and `present_desktop` is now the whole-screen case of the same call
 — kept for the changes that genuinely alter the whole layer: bring-up, a new
-wallpaper, a theme switch and adopted settings. A re-list reports cells like any
-other change (`Desktop::relist_into`): the column's pitch is fixed, so an index
-keeps its cell whatever the listing. So does text drawn provisionally landing
+wallpaper, a theme switch and adopted settings. A re-list reports icons like any
+other change (`Desktop::relist_into`): an icon still listed stands where it
+stood, so the icons are compared by name. So does text drawn provisionally landing
 (`DesktopShell::present_desktop_text`): the names are the layer's only text and
-each is drawn inside its own tile, so a landing owes the shown cells — repainting
+each is drawn inside its own tile, so a landing owes the shown icons — repainting
 the layer whole for it recomposed the screen and every frost above it each time
 the font service answered.
 

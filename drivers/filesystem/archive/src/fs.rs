@@ -750,6 +750,9 @@ fn supported(kept: bool) -> Result<(), DriverError> {
     }
 }
 
+/// An archive records no title.
+impl<A: VolumeAccess> tairix_abi::driver::filesystem::FilesystemLabel for ArchiveFs<A> {}
+
 impl<A: VolumeAccess> FilesystemStats for ArchiveFs<A> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
         // What the archive could grow into is its own volume's, which a

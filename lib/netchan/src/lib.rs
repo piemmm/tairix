@@ -15,13 +15,15 @@
 //!   so the whole control plane is exercised on the host against a mock
 //!   device. [`Drain`] is its interrupt-path counterpart: the whole
 //!   mask/unmask/stop policy as a state machine over
-//!   [`ServiceReport`](tairix_abi::driver::net_ring::ServiceReport)s.
+//!   [`ServiceReport`](tairix_abi::driver::net_ring::ServiceReport)s; and
+//!   [`Notifier`] holds a receive notify the stack's port refused until it
+//!   can be posted.
 //! * `serve` — the freestanding process loop the driver binary hands its
 //!   opened device to: claim a reserved device-channel endpoint, publish the
 //!   [`NETCHAN_NODE_COMPATIBLE`](tairix_abi::driver::net_channel::NETCHAN_NODE_COMPATIBLE)
 //!   hardware-tree node carrying it, and park on
-//!   a wait set over {call endpoint, device interrupt} for the life of the
-//!   driver. Compiled only for the bare-metal targets a driver binary is
+//!   a wait set over {call endpoint, device interrupt, room for a refused
+//!   notify} for the life of the driver. Compiled only for the bare-metal targets a driver binary is
 //!   built for; the host build carries just the pure handler.
 //!
 //! # Fail closed
@@ -36,7 +38,9 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+mod notifier;
 mod server;
+pub use notifier::Notifier;
 pub use server::{Drain, DrainAction, DrainStep, Drained, Masked, NetChannelServer};
 
 #[cfg(target_os = "none")]

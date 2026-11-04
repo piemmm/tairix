@@ -8,7 +8,7 @@ use super::{
     REPLAY_ACCOUNT_RATE, WSD_SOURCE_BURST,
 };
 use crate::decoder::Decoder;
-use crate::events::{DECODER_STARTED, REQUEST_DENIED};
+use crate::events::{DECODER_STARTED, DOORBELLS_LOST, REQUEST_DENIED};
 use crate::grants::Grants;
 use crate::query::QUESTIONS_PER_REQUEST;
 use crate::questions::FLOOR_RESERVE;
@@ -26,6 +26,7 @@ use tairix_abi::discovery_ipc::{
     decode_doorbell, decode_id_reply, Answer, Change, CollectReply, DiscoveryRequest, Entry,
     Families, Query, ServiceTypeField, Transport, DISCOVERY_MAX_REPLY, REQUESTS_PER_ACCOUNT,
 };
+use tairix_abi::ipc::IPC_MEMORY_RETRY_NS;
 use tairix_abi::net::{
     SocketAddr, SocketDatagram, SocketDelivery, SocketId, SocketLinkEvent, SocketStreamEvent,
     StreamCloseReason,
@@ -86,7 +87,8 @@ struct World {
     sent: Vec<([u8; IF_NAME_LEN], SocketAddr, Vec<u8>)>,
     wsd_sent: Vec<([u8; IF_NAME_LEN], SocketAddr, Vec<u8>)>,
     rings: Vec<(u64, u32)>,
-    ring_full: bool,
+    /// What refuses every doorbell post, if anything does.
+    ring_refusal: Option<Errno>,
     watched: Vec<ProcId>,
     /// Fetch connections opened, by socket.
     opened: Vec<(SocketId, [u8; IF_NAME_LEN], SocketAddr)>,
@@ -158,8 +160,8 @@ impl Host for FakeHost {
 
     fn ring(&mut self, port: u64, doorbell: &[u8]) -> Result<(), Errno> {
         let mut world = self.0.borrow_mut();
-        if world.ring_full {
-            return Err(Errno::WouldBlock);
+        if let Some(refused) = world.ring_refusal {
+            return Err(refused);
         }
         let session = decode_doorbell(doorbell).expect("a doorbell");
         world.rings.push((port, session));
@@ -1261,6 +1263,114 @@ fn end_to_end_a_link_that_goes_down_flushes_what_was_learned_on_it() {
         [(request, "flush", Vec::new())]
     );
     assert_eq!(world.0.borrow().rings.len(), 2);
+}
+
+/// Hear the hall printer announced at `now`: an answer to a browse of
+/// `_ipp._tcp`, which rings its session.
+fn hear_printer(front: &mut RealFront, now: u64) {
+    deliver(
+        front,
+        now,
+        &from(9, true, &response(&[printer(b"Hall", 4500)])),
+    );
+    turn(front, now);
+}
+
+/// What one sync of the room watches did: the ports watched and unwatched.
+fn room_watches(front: &mut RealFront) -> (Vec<u64>, Vec<u64>) {
+    let (mut watched, mut unwatched) = (Vec::new(), Vec::new());
+    front.sync_room_watches(
+        &mut |port| {
+            watched.push(port);
+            true
+        },
+        &mut |port| unwatched.push(port),
+    );
+    (watched, unwatched)
+}
+
+/// A doorbell the service's own IPC budget refused is owed, its port watched
+/// for room, and posted on the room wake. Regression: a `LimitExceeded` was
+/// taken as rung, so the client was never told its answers waited.
+#[test]
+fn end_to_end_a_doorbell_the_budget_refused_is_posted_on_the_room_wake() {
+    let (mut front, _, world) = real();
+    let who = origin(
+        25,
+        &[CapabilityId::NET, CapabilityId::NET_DISCOVER_ALL],
+        None,
+    );
+    let (session, request) = browse(&mut front, 0, &who).unwrap();
+    world.0.borrow_mut().ring_refusal = Some(Errno::LimitExceeded);
+    hear_printer(&mut front, MS);
+    assert!(world.0.borrow().rings.is_empty(), "refused");
+    assert_eq!(room_watches(&mut front), (vec![PORT], vec![]));
+    world.0.borrow_mut().ring_refusal = None;
+    front.retry_rings();
+    assert_eq!(world.0.borrow().rings, [(PORT, session)]);
+    assert_eq!(room_watches(&mut front), (vec![], vec![PORT]));
+    assert_eq!(
+        collected(&mut front, &who, session),
+        [(request, "added", b"Hall".to_vec())]
+    );
+}
+
+/// A doorbell the kernel had no memory for is owed with no port watched, its
+/// retry timed into the front's wake, and posted once the retry falls due.
+/// Regression: an `OutOfMemory` was taken as rung, so the client was never
+/// told its answers waited.
+#[test]
+fn end_to_end_a_doorbell_refused_for_memory_is_posted_once_its_retry_falls_due() {
+    let (mut front, _, world) = real();
+    let who = origin(
+        26,
+        &[CapabilityId::NET, CapabilityId::NET_DISCOVER_ALL],
+        None,
+    );
+    let (session, _) = browse(&mut front, 0, &who).unwrap();
+    world.0.borrow_mut().ring_refusal = Some(Errno::OutOfMemory);
+    hear_printer(&mut front, MS);
+    assert_eq!(
+        room_watches(&mut front),
+        (vec![], vec![]),
+        "no room is watched"
+    );
+    front.on_wake(MS).expect("keys draw");
+    let due = MS + IPC_MEMORY_RETRY_NS;
+    assert!(front.wake_at().is_some_and(|at| at <= due));
+    world.0.borrow_mut().ring_refusal = None;
+    front.on_wake(due - 1).expect("keys draw");
+    assert!(world.0.borrow().rings.is_empty(), "not yet due");
+    front.on_wake(due).expect("keys draw");
+    assert_eq!(world.0.borrow().rings, [(PORT, session)]);
+}
+
+/// A doorbell refused for good is given up on: recorded once, offered again
+/// on neither a room wake nor a retry, and its answers left for a collect.
+#[test]
+fn end_to_end_a_doorbell_refused_for_good_is_recorded_once_and_never_offered_again() {
+    let (mut front, sink, world) = real();
+    let who = origin(
+        27,
+        &[CapabilityId::NET, CapabilityId::NET_DISCOVER_ALL],
+        None,
+    );
+    let (session, request) = browse(&mut front, 0, &who).unwrap();
+    world.0.borrow_mut().ring_refusal = Some(Errno::MessageTooLarge);
+    hear_printer(&mut front, MS);
+    front.on_wake(MS).expect("keys draw");
+    assert_eq!(sink.count(DOORBELLS_LOST), 1);
+    assert_eq!(room_watches(&mut front), (vec![], vec![]));
+    world.0.borrow_mut().ring_refusal = None;
+    front.retry_rings();
+    let later = MS + IPC_MEMORY_RETRY_NS;
+    front.on_wake(later).expect("keys draw");
+    assert!(world.0.borrow().rings.is_empty(), "never offered again");
+    assert_eq!(sink.count(DOORBELLS_LOST), 1, "recorded once");
+    assert_eq!(
+        collected(&mut front, &who, session),
+        [(request, "added", b"Hall".to_vec())]
+    );
 }
 
 /// Copies of one record renew it once a second however many arrive, so a

@@ -7,8 +7,8 @@
 //! A terminal window is not an application: the application is the emulator,
 //! and each of its windows is one hosted shell. So this is **one process
 //! with a `Vec` of windows** — each carrying its own pseudo-terminal, shell
-//! child, screen model, retained picture, look, and overlay — parked on one
-//! wait-set that carries one event mailbox for the whole process plus that
+//! child, screen model, retained picture, and look — and the one Settings
+//! window, parked on one wait-set that carries one event mailbox for the whole process plus that
 //! window's own shell-output and child members. Opening another window costs
 //! a pty, a spawn, a frame region, and two wait-set members; it costs no
 //! second process, no second event mailbox, and no second icon-bar slot.
@@ -76,9 +76,9 @@ mod program {
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
-    use tairix_abi::driver::display::{DamageRect, DisplayMode};
+    use tairix_abi::driver::display::DamageRect;
     use tairix_abi::window_ipc::{
-        AppMenuItemId, MenuOutcome, PointerAction, WindowEvent, WindowRegion,
+        AppMenuItemId, DialogModality, MenuOutcome, PointerAction, WindowEvent, WindowRegion,
     };
     use tairix_abi::{Errno, ProcId, Signal, WaitSetOp, WaitSourceKind};
     use tairix_font::BitmapFont;
@@ -100,11 +100,11 @@ mod program {
     use tairix_terminal::profile::{Invalidation, Profile};
     use tairix_terminal::render::Screen;
     use tairix_terminal::scheme::Painted;
-    use tairix_terminal::settings::{preferred_extent, Settings, SheetOutcome};
+    use tairix_terminal::settings::{preferred_extent, Settings, SheetOutcome, SETTINGS_TITLE};
     use tairix_terminal::sheet::SheetScreen;
     use tairix_terminal::{
-        shell_env, shell_reap, shell_wires, win_sizing, EndingShell, EndingShells, ShellReap,
-        ShellSource, Terminal, TERM,
+        shell_env, shell_reap, shell_wires, win_sizing, EndingShell, EndingShells, Reshaped,
+        ShellReap, ShellSource, Terminal, TERM,
     };
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_users::DEFAULT_SHELL;
@@ -221,35 +221,30 @@ mod program {
         profile
     }
 
-    /// The settings sheet and the popup window it is drawn in.
+    /// The settings sheet and the window it is drawn in.
     ///
-    /// The sheet is never drawn into the terminal's own window: it lives in
-    /// its own undecorated popup surface stacked directly above it, so
-    /// shrinking the terminal cannot clip it. At most one is open at a time
-    /// and it is modal — every event delivered for the popup's own window id
-    /// routes to it, and a press that lands on the terminal instead dismisses
-    /// it without reaching the shell.
-    struct Overlay {
+    /// The terminal has one, a modeless dialog of the window it was opened
+    /// from: every event delivered for its own window id routes to it, and
+    /// the terminal windows go on taking input while it is up.
+    struct SettingsWindow {
         /// The sheet itself. Boxed because it dwarfs everything around it,
         /// so the one allocation happens when Settings opens.
         sheet: Box<Settings>,
         /// The sheet's picture, retained between frames, and the rectangle it
         /// owes the next paint. Every edit reports into this and repaints only
-        /// what it reported; a drag would otherwise re-derive the whole sheet
-        /// per pointer sample.
+        /// what it reported.
         picture: SheetScreen,
-        /// The popup's own channel-side state: the window-channel id its
-        /// events arrive under, its shared frame region, and the geometry both
-        /// are shaped as — which is also the popup-local viewport the overlay
+        /// Its channel-side state, whose geometry is the viewport the sheet
         /// is laid out and hit-tested in.
         pane: WindowPane,
-        /// Set once the overlay has asked to go. The loop closes the popup
-        /// and releases the region; the routing itself holds no window
-        /// client.
+        /// The terminal window it is a dialog of, which takes it down with it.
+        owner: u64,
+        /// Set once the sheet has asked to go. The loop closes the window;
+        /// the routing itself holds no window client.
         dismissed: bool,
     }
 
-    impl Overlay {
+    impl SettingsWindow {
         /// Bring the sheet's own copy up to `profile` wherever it has fallen
         /// behind — a store answer, an edit made in another window or from the
         /// menu — reporting the rows that change.
@@ -261,16 +256,61 @@ mod program {
             }
         }
 
-        /// The popup-local viewport the overlay occupies.
+        /// The viewport the sheet occupies: the window's whole client.
         fn viewport(&self) -> Rect {
             let mode = self.pane.mode();
             Rect::new(0, 0, mode.width_px, mode.height_px)
         }
 
-        /// Close the popup; its frame region is unmapped by its own drop.
+        /// Fit the window to a `width` × `height` client: what the session
+        /// refit it to, or what a new scale wants. A new size owes a whole
+        /// paint, and one the picture or the session cannot take keeps the
+        /// current one, which the sheet scrolls within; the size in force owes
+        /// nothing.
+        fn refit(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            (width, height): (u32, u32),
+        ) {
+            let mode = *self.pane.mode();
+            if (width, height) == (mode.width_px, mode.height_px) {
+                return;
+            }
+            let Some(picture) = SheetScreen::new(width, height) else {
+                return;
+            };
+            if self.pane.resize(client, &app::mode_for(width, height)) == app::Fitted::Adopted {
+                self.picture = picture;
+            }
+        }
+
+        /// Close the window; its frame region is unmapped by its own drop.
         fn close(self, client: &mut WindowClient<app::RtWindowTransport>) {
             let _ = self.pane.close(client);
         }
+    }
+
+    /// Close the Settings window when it is a dialog of terminal window
+    /// `owner`, which is closing; answers whether it was, since closing it
+    /// settles what it last showed however it closes.
+    fn close_settings_of(
+        settings: &mut Option<SettingsWindow>,
+        owner: u64,
+        client: &mut WindowClient<app::RtWindowTransport>,
+    ) -> bool {
+        let Some(held) = settings.take_if(|held| held.owner == owner) else {
+            return false;
+        };
+        held.close(client);
+        true
+    }
+
+    /// The client extent the Settings window wants at `desktop`'s scale,
+    /// capped by its screen.
+    fn settings_extent(desktop: &Desktop) -> (u32, u32) {
+        let screen = desktop.screen();
+        let (width, height) = preferred_extent(desktop.scale());
+        (width.min(screen.width), height.min(screen.height))
     }
 
     /// Ask the desktop to open this window's menu at the press that asked
@@ -313,115 +353,90 @@ mod program {
         }
     }
 
-    /// The offset that centres an `inner` extent within an `outer` one,
-    /// negative when the inner extent is the larger of the two.
-    fn centre_offset(outer: u32, inner: u32) -> i32 {
-        // Display extents halved stay far inside `i32`; a mode that says
-        // otherwise centres at the origin rather than wrapping.
-        i32::try_from((i64::from(outer) - i64::from(inner)) / 2).unwrap_or(0)
-    }
-
-    /// Open `sheet` in its own popup window above `parent`, drawn once.
+    /// Open the Settings window over `sheet` as a modeless dialog of
+    /// terminal window `owner`, at the extent the sheet wants, drawn once.
     ///
-    /// The popup is exactly the size the sheet wants — its full preferred
-    /// panel, measured against the screen rather than the parent window, so
-    /// it is never shrunk by its owner — centred over the parent's client. A
-    /// window smaller than the sheet therefore yields a negative offset,
-    /// which is a legitimate request: the session resolves it against the
-    /// parent's screen position and clamps the whole popup on screen, so the
-    /// entire sheet stays visible however small the terminal is.
-    ///
-    /// `None` — with the reason already on `stderr` — leaves no overlay open:
-    /// a refusal shows nothing and the terminal carries on.
-    #[allow(clippy::too_many_arguments)] // Sizing a popup needs the whole drawing context.
-    fn open_overlay(
+    /// `None` — with the reason already on `stderr` — opens nothing, and the
+    /// terminal carries on.
+    fn open_settings(
         client: &mut WindowClient<app::RtWindowTransport>,
-        parent: u64,
-        server: ProcId,
+        (owner, server): (u64, ProcId),
         event_endpoint: u64,
         sheet: Box<Settings>,
-        parent_mode: &DisplayMode,
         theme: &Theme,
         desktop: &Desktop,
-    ) -> Option<Overlay> {
-        let scale = desktop.scale();
-        let screen = desktop.screen();
-        let (want_w, want_h) = preferred_extent(scale);
-        // Its own preferred size, capped only by the screen it must fit on;
-        // the sheet's panel fills whatever the popup is.
-        let extent = (want_w.min(screen.width), want_h.min(screen.height));
-        let offset = (
-            centre_offset(parent_mode.width_px, extent.0),
-            centre_offset(parent_mode.height_px, extent.1),
-        );
-        if extent.0 == 0 || extent.1 == 0 {
-            app::report(OWN_WORD, "settings sheet has no drawable extent; not shown");
-            return None;
-        }
-        let mode = app::mode_for(extent.0, extent.1);
-        let Some(picture) = SheetScreen::new(extent.0, extent.1) else {
+    ) -> Option<SettingsWindow> {
+        let (width, height) = settings_extent(desktop);
+        if width == 0 || height == 0 {
             app::report(
                 OWN_WORD,
-                "settings sheet picture could not be allocated; not shown",
+                "settings window has no drawable extent; not shown",
+            );
+            return None;
+        }
+        let Some(picture) = SheetScreen::new(width, height) else {
+            app::report(
+                OWN_WORD,
+                "settings window picture could not be allocated; not shown",
             );
             return None;
         };
-        let pane =
-            match WindowPane::open_popup(client, parent, server, event_endpoint, &mode, offset) {
-                Ok(pane) => pane,
-                Err(err) => {
-                    app::report(OWN_WORD, format_args!("{err}; settings sheet not shown"));
-                    return None;
-                }
-            };
-        let mut overlay = Overlay {
+        let pane = match WindowPane::open_dialog(
+            client,
+            (owner, server),
+            event_endpoint,
+            &app::mode_for(width, height),
+            DialogModality::Modeless,
+            SETTINGS_TITLE,
+        ) {
+            Ok(pane) => pane,
+            Err(err) => {
+                app::report(OWN_WORD, format_args!("{err}; settings window not shown"));
+                return None;
+            }
+        };
+        let mut window = SettingsWindow {
             sheet,
             picture,
             pane,
+            owner,
             dismissed: false,
         };
-        if present_overlay(&mut overlay, theme, scale, client).is_err() {
-            app::report(OWN_WORD, "settings sheet present refused; not shown");
-            overlay.close(client);
+        if present_settings(&mut window, theme, desktop.scale(), client).is_err() {
+            app::report(OWN_WORD, "settings window present refused; not shown");
+            window.close(client);
             return None;
         }
-        Some(overlay)
+        Some(window)
     }
 
-    /// Paint whatever `overlay` owes and present exactly that rectangle.
-    ///
-    /// The picture is retained and transparent where the sheet's centred panel
-    /// does not reach, so the terminal shows through around it exactly as it
-    /// did when the sheet was drawn in-window — and an edit costs the
-    /// rectangle its controls reported rather than the whole sheet. A region
-    /// the session released holds none of the pixels a partial present would
-    /// leave standing, so it is drawn whole instead.
-    fn present_overlay(
-        overlay: &mut Overlay,
+    /// Paint whatever the Settings window owes and present exactly that
+    /// rectangle. A region the session released holds none of the pixels a
+    /// partial present would leave standing, so it is drawn whole instead.
+    fn present_settings(
+        window: &mut SettingsWindow,
         theme: &Theme,
         scale: Scale,
         client: &mut WindowClient<app::RtWindowTransport>,
     ) -> Result<(), Errno> {
-        if overlay.pane.content_released() {
-            overlay.picture.invalidate();
+        if window.pane.content_released() {
+            window.picture.invalidate();
         }
-        let viewport = overlay.viewport();
-        let painted = overlay
-            .picture
-            .paint(&overlay.sheet, viewport, scale, theme);
+        let viewport = window.viewport();
+        let painted = window.picture.paint(&window.sheet, viewport, scale, theme);
         if painted.is_empty() {
             return Ok(());
         }
-        let Some(damage) = damage_in(overlay.pane.mode(), painted) else {
+        let Some(damage) = damage_in(window.pane.mode(), painted) else {
             // Nothing of the paint survives the clip, so these pixels were
             // never shown: cover the sheet next time rather than leave the
             // picture silently ahead of the screen.
-            overlay.picture.invalidate();
+            window.picture.invalidate();
             return Ok(());
         };
-        overlay
+        window
             .pane
-            .present(client, overlay.picture.surface(), damage)
+            .present(client, window.picture.surface(), damage)
     }
 
     /// One window's shell channel: the master end of its own kernel
@@ -589,8 +604,8 @@ mod program {
     ///
     /// Each window is independent of its siblings in every way but the
     /// user's profile (which is the *user's*, not a window's) and the one
-    /// event mailbox they share. So a shell exiting, a resize, or an overlay
-    /// opening reaches exactly one of them.
+    /// event mailbox they share. So a shell exiting or a resize reaches
+    /// exactly one of them.
     struct TerminalWindow {
         /// Its channel-side state: the window-channel id its events arrive
         /// under, its shared frame region, and the geometry both are shaped
@@ -610,33 +625,19 @@ mod program {
         screen: Screen,
         /// How this window's screen currently looks.
         look: Look,
-        /// Its one open settings sheet, if any.
-        overlay: Option<Overlay>,
         /// The open id of this window's unanswered menu, if one is up.
         ///
         /// The desktop mints one per gesture and never reuses it, so an
         /// answer that names anything else belongs to a gesture already
         /// settled and is not acted on.
         menu: Option<u64>,
+        /// Whether an event the drain applied changed what the window shows,
+        /// so it is painted once the drain is applied rather than once per
+        /// event.
+        unpainted: bool,
     }
 
     impl TerminalWindow {
-        /// Install `overlay` as this window's one sheet, closing whatever it
-        /// replaces.
-        ///
-        /// Assigning over a live one would drop it without closing its popup,
-        /// leaving a session-side window on screen for ever.
-        fn set_overlay(
-            &mut self,
-            client: &mut WindowClient<app::RtWindowTransport>,
-            overlay: Option<Overlay>,
-        ) {
-            if let Some(held) = self.overlay.take() {
-                held.close(client);
-            }
-            self.overlay = overlay;
-        }
-
         /// The wait-set token of this window's shell-output stream member.
         const fn shell_token(&self) -> u64 {
             WINDOW_TOKEN_BASE + self.slot * 2
@@ -647,7 +648,8 @@ mod program {
             WINDOW_TOKEN_BASE + self.slot * 2 + 1
         }
 
-        /// Bring this window's picture up to date and present what changed.
+        /// Bring this window's picture up to date and present what changed,
+        /// the screen first taking the size last asked of it.
         ///
         /// A region the session released while the window was hidden is
         /// re-attached first, so this paints into a live one.
@@ -655,6 +657,8 @@ mod program {
             &mut self,
             client: &mut WindowClient<app::RtWindowTransport>,
         ) -> Result<(), Errno> {
+            self.settle();
+            self.unpainted = false;
             present_frame(
                 &self.terminal,
                 &mut self.look,
@@ -664,20 +668,59 @@ mod program {
             )
         }
 
-        /// Close this window, its sheet, and its pty master, handing back
-        /// its shell child; the frame regions are unmapped by their own drops.
+        /// Give the screen the size last asked of it, telling the shell a size
+        /// only once the screen has taken it.
+        fn settle(&mut self) {
+            match self.terminal.settle() {
+                Reshaped::Unchanged => {}
+                Reshaped::Took { cols, rows } => {
+                    let _ = tairix_rt::pty_set_size(self.pty_master, rows, cols);
+                }
+                Reshaped::Refused => app::report(
+                    OWN_WORD,
+                    "the screen could not take its window's new size; it keeps the one it had",
+                ),
+            }
+        }
+
+        /// Fit the window to the client the session granted, snapped down to
+        /// whole cells so no partial-cell strip is left at its right or bottom
+        /// edge: the frame region is re-mapped now, and the screen takes its
+        /// grid when the window is next painted, so a burst of samples costs
+        /// one reflow. Snapping is idempotent, so the `Resized` a re-map draws
+        /// back snaps to the size in force and changes nothing; a size the
+        /// session or the region cannot take keeps the current one.
+        fn refit(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            (width_px, height_px): (u32, u32),
+        ) {
+            let (width, height) = snap_to_cells(width_px, height_px, self.look.font);
+            let current = *self.pane.mode();
+            if (width, height) == (current.width_px, current.height_px) {
+                return;
+            }
+            if self.pane.resize(client, &app::mode_for(width, height)) == app::Fitted::Adopted {
+                let (cols, rows) = grid_dims(width, height, self.look.font);
+                self.terminal.resize(cols, rows);
+                // What the passes remember is the shape of the old screen; a
+                // resized one must not ghost it.
+                self.look.pipeline.clear();
+                self.unpainted = true;
+            }
+        }
+
+        /// Close this window and its pty master, handing back its shell child;
+        /// the frame region is unmapped by its own drop.
         ///
         /// The master is closed here rather than left to process exit,
         /// because a process that keeps running must not hold a dead
         /// window's descriptors.
         fn release(
-            mut self,
+            self,
             client: &mut WindowClient<app::RtWindowTransport>,
             set: u64,
         ) -> EndingShell {
-            if let Some(open) = self.overlay.take() {
-                open.close(client);
-            }
             // Read before the pane is consumed, which moves it out of `self`.
             let shell = EndingShell {
                 token: Some(self.child_token()),
@@ -765,6 +808,8 @@ mod program {
         env: &'a [Vec<u8>],
         /// Where the shell of a window that fails to open is left to be reaped.
         ending: &'a mut EndingShells,
+        /// How many lines its scrollback keeps.
+        scrollback: usize,
         /// The workers its screen effects spread across.
         pool: &'static EffectPool,
     }
@@ -793,15 +838,24 @@ mod program {
     /// no process load and leaves no shell behind to reap. Every refusal
     /// answers its reason and closes what it had opened, so the caller has only
     /// its window to take back down.
-    fn open_shell(cols: u16, rows: u16, env: &[Vec<u8>]) -> Result<HostedShell, &'static str> {
+    fn open_shell(
+        cols: u16,
+        rows: u16,
+        env: &[Vec<u8>],
+        scrollback: usize,
+    ) -> Result<HostedShell, &'static str> {
         let Ok((pty_master, pty_slave)) = tairix_rt::pty_create(rows, cols) else {
             return Err("no pseudo-terminal could be had for its shell");
         };
-        let Some(terminal) = Terminal::new(cols, rows, PtyShell { master: pty_master }) else {
+        let shell = PtyShell { master: pty_master };
+        let Some(mut terminal) = Terminal::new(cols, rows, shell, scrollback) else {
             let _ = tairix_rt::fs_close(pty_master);
             let _ = tairix_rt::fs_close(pty_slave);
             return Err("there is not enough memory for its screen");
         };
+        // Held to the band in force from its first line, not from the next
+        // change.
+        terminal.shed_for(tairix_rt::pressure::gauge().band());
         let attach = shell_wires(pty_slave);
         let env: Vec<&[u8]> = env.iter().map(Vec::as_slice).collect();
         let pid = tairix_rt::spawn_attached(DEFAULT_SHELL.as_bytes(), &attach, &[b"elsh"], &env);
@@ -882,7 +936,7 @@ mod program {
             }
         };
 
-        let shell = match open_shell(cols, rows, ctx.env) {
+        let shell = match open_shell(cols, rows, ctx.env, ctx.scrollback) {
             Ok(shell) => shell,
             Err(why) => {
                 let _ = pane.close(ctx.client);
@@ -898,8 +952,8 @@ mod program {
             terminal: shell.terminal,
             screen,
             look,
-            overlay: None,
             menu: None,
+            unpainted: false,
         };
         // The child member first, so from here every failure can hand the
         // shell over to be reaped when it exits.
@@ -947,9 +1001,8 @@ mod program {
     /// so the next frame's diff still describes the text rather than the
     /// effect's own churn.
     ///
-    /// An open overlay is *not* drawn here: it lives in its own popup window
-    /// above this one, so the screen effects can never wobble a menu or a
-    /// settings control, and shrinking this window cannot clip one.
+    /// The Settings window is *not* drawn here: it is a window of its own, so
+    /// the screen effects can never wobble a settings control.
     fn present_frame<S, T>(
         terminal: &Terminal<S>,
         look: &mut Look,
@@ -1116,6 +1169,7 @@ mod program {
         // terminal stays on its icon-bar slot, where a click asks again.
         let mut next_slot: u64 = 0;
         let mut windows: Vec<TerminalWindow> = Vec::new();
+        let mut settings: Option<SettingsWindow> = None;
         match open_window(WindowContext {
             client: &mut client,
             event_endpoint,
@@ -1127,6 +1181,7 @@ mod program {
             desktop: &desktop,
             env: &env,
             ending: &mut ending,
+            scrollback: usize::from(publication.live().scrollback_lines),
             pool,
         }) {
             Ok(first) => {
@@ -1166,10 +1221,9 @@ mod program {
                     .animated(open.look.effects, open.look.scale.percent())
             });
             next_frame_ns = frame_due(animated, next_frame_ns, now, desktop.refresh());
-            let held = windows
-                .iter_mut()
-                .filter_map(|open| open.overlay.as_mut()?.sheet.repeat_deadline(now))
-                .min();
+            let held = settings
+                .as_mut()
+                .and_then(|held| held.sheet.repeat_deadline(now));
             let timeout = next_frame_ns
                 .into_iter()
                 .chain(held)
@@ -1178,27 +1232,20 @@ mod program {
             let woke = match app::park_for(set, timeout) {
                 Ok(Some(wake)) => wake,
                 Ok(None) => {
-                    // A deadline elapsed: a held scrollbar press in a sheet,
-                    // the animation's next frame, or both.
+                    // A deadline elapsed: a held scrollbar press in the
+                    // sheet, the animation's next frame, or both.
                     let now = tairix_rt::clock_get();
                     let (theme, scale) = (themes.active(), desktop.scale());
-                    for open in &mut windows {
-                        let Some(overlay) = open.overlay.as_mut() else {
-                            continue;
-                        };
-                        let viewport = overlay.viewport();
-                        let stepped = overlay.sheet.repeat(
-                            now,
-                            viewport,
-                            scale,
-                            theme,
-                            overlay.picture.sink(),
-                        );
-                        if stepped && present_overlay(overlay, theme, scale, &mut client).is_err() {
+                    if let Some(held) = settings.as_mut() {
+                        let viewport = held.viewport();
+                        let stepped =
+                            held.sheet
+                                .repeat(now, viewport, scale, theme, held.picture.sink());
+                        if stepped && present_settings(held, theme, scale, &mut client).is_err() {
                             break 'serve app::fail(
                                 OWN_WORD,
                                 app::EXIT_CHANNEL_LOST,
-                                "overlay present refused",
+                                "settings present refused",
                             );
                         }
                     }
@@ -1230,23 +1277,17 @@ mod program {
             match woke {
                 Wake::Event => {
                     let outcome = drain_events(
-                        &mut windows,
+                        (&mut windows, &mut settings),
                         &mut publication,
                         &desktop,
                         themes.active(),
                         &mut events,
                         &mut client,
                     );
-                    // An overlay that has asked to go leaves before anything
-                    // this same outcome opens, so a menu row that chose
-                    // *Settings* replaces its popup rather than stacking a
-                    // second one over it.
-                    for open in &mut windows {
-                        if open.overlay.as_ref().is_some_and(|held| held.dismissed) {
-                            if let Some(held) = open.overlay.take() {
-                                held.close(&mut client);
-                            }
-                        }
+                    // A Settings window that has asked to go leaves before
+                    // anything this same outcome opens.
+                    if let Some(held) = settings.take_if(|held| held.dismissed) {
+                        held.close(&mut client);
                     }
                     match apply_outcome(
                         outcome,
@@ -1263,6 +1304,7 @@ mod program {
                             publisher: &publisher,
                             env: &env,
                             ending: &mut ending,
+                            settings: &mut settings,
                             pool,
                         },
                     ) {
@@ -1294,6 +1336,7 @@ mod program {
                             publisher: &publisher,
                             env: &env,
                             ending: &mut ending,
+                            settings: &mut settings,
                             pool,
                         },
                     ) {
@@ -1331,6 +1374,7 @@ mod program {
                                 publisher: &publisher,
                                 env: &env,
                                 ending: &mut ending,
+                                settings: &mut settings,
                                 pool,
                             },
                         ) {
@@ -1347,8 +1391,17 @@ mod program {
                     // The passes' buffers are whole screens of per-pixel
                     // state that only matter while an effect is on, so they
                     // give first under pressure; the next frame starts clean.
+                    // The scrollback is held to the new band until it moves.
+                    let band = tairix_rt::pressure::gauge().band();
                     for open in &mut windows {
                         open.look.pipeline.clear();
+                        if open.terminal.shed_for(band) && open.present(&mut client).is_err() {
+                            break 'serve app::fail(
+                                OWN_WORD,
+                                app::EXIT_CHANNEL_LOST,
+                                "present refused",
+                            );
+                        }
                     }
                 }
                 Wake::PressureUnchanged => {}
@@ -1379,17 +1432,54 @@ mod program {
                     // The shell this window hosted is gone, or going, so the
                     // window is: hosting it was the window's whole purpose.
                     // Its siblings keep running.
-                    match ended {
-                        ShellEnd::Running => {}
+                    let owned = match ended {
+                        ShellEnd::Running => false,
                         ShellEnd::Lost(reason) => {
                             break 'serve app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
                         }
                         ShellEnd::Exited(reason) => {
-                            windows.remove(index).close(&mut client, set);
+                            let closing = windows.remove(index);
+                            let owned =
+                                close_settings_of(&mut settings, closing.pane.id(), &mut client);
+                            closing.close(&mut client, set);
                             report_launch_failure(reason);
+                            owned
                         }
                         ShellEnd::OutputEnded => {
-                            windows.remove(index).hang_up(&mut client, set, &mut ending);
+                            let closing = windows.remove(index);
+                            let owned =
+                                close_settings_of(&mut settings, closing.pane.id(), &mut client);
+                            closing.hang_up(&mut client, set, &mut ending);
+                            owned
+                        }
+                    };
+                    // The Settings window closing with its owner settles what
+                    // it last showed, as its own close does.
+                    if owned {
+                        match apply_outcome(
+                            EventOutcome::ProfileChanged { settled: true },
+                            &mut windows,
+                            &mut client,
+                            AppContext {
+                                set,
+                                event_endpoint,
+                                server,
+                                next_slot: &mut next_slot,
+                                publication: &mut publication,
+                                themes: &mut themes,
+                                desktop: &mut desktop,
+                                publisher: &publisher,
+                                env: &env,
+                                ending: &mut ending,
+                                settings: &mut settings,
+                                pool,
+                            },
+                        ) {
+                            Applied::Running => {}
+                            Applied::Ended => break 'serve 0,
+                            Applied::Lost(reason) => {
+                                break 'serve app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
+                            }
                         }
                     }
                 }
@@ -1494,11 +1584,10 @@ mod program {
     /// window, and repaint only what it asked for.
     ///
     /// Every window is reached because the profile is the *user's* rather than
-    /// one window's, and every open sheet follows it for the same reason: a
-    /// second window's sheet showing values nothing is using would be as wrong
-    /// as the pixels behind it. A sheet presents only what it owes, so the one
-    /// the user is dragging in shows its knob move and the rest cost nothing
-    /// unless their copy fell behind.
+    /// one window's, and the Settings window follows it for the same reason: a
+    /// sheet showing values nothing is using would be as wrong as the pixels
+    /// behind it. It presents only what it owes, so a drag in it shows its knob
+    /// move and costs nothing more.
     ///
     /// The scoping is what makes a drag smooth. A slider delivers one of these
     /// per motion sample, and the four kinds of work cost wildly different
@@ -1530,21 +1619,25 @@ mod program {
             if changed.metrics() {
                 let mode = *open.pane.mode();
                 let (cols, rows) = grid_dims(mode.width_px, mode.height_px, open.look.font);
-                let _ = open.terminal.resize(cols, rows);
-                let _ = tairix_rt::pty_set_size(open.pty_master, rows, cols);
+                open.terminal.resize(cols, rows);
             }
             if changed.metrics() || changed.painted() {
                 // A new face or new colours: every retained pixel is stale,
                 // and the cell diff can see neither.
                 open.screen.invalidate();
             }
-            if changed.repaints() {
+            // Lines let go under a view scrolled back move what it shows.
+            let shed = changed.scrollback()
+                && open
+                    .terminal
+                    .set_scrollback_limit(usize::from(profile.scrollback_lines));
+            if changed.repaints() || shed {
                 open.present(client).map_err(|_| ())?;
             }
-            if let Some(held) = open.overlay.as_mut() {
-                held.follow(&profile, theme, scale);
-                present_overlay(held, theme, scale, client).map_err(|_| ())?;
-            }
+        }
+        if let Some(held) = ctx.settings.as_mut() {
+            held.follow(&profile, theme, scale);
+            present_settings(held, theme, scale, client).map_err(|_| ())?;
         }
         Ok(())
     }
@@ -1572,16 +1665,16 @@ mod program {
             apply_blur(client, open.pane.id(), &profile);
             let mode = *open.pane.mode();
             let (cols, rows) = grid_dims(mode.width_px, mode.height_px, open.look.font);
-            let _ = open.terminal.resize(cols, rows);
-            let _ = tairix_rt::pty_set_size(open.pty_master, rows, cols);
+            open.terminal.resize(cols, rows);
             open.screen.invalidate();
             open.present(client).map_err(|_| ())?;
-            if let Some(held) = open.overlay.as_mut() {
-                // New colours and new metrics leave nothing on the sheet
-                // standing, and no control reported that.
-                held.picture.invalidate();
-                present_overlay(held, theme, scale, client).map_err(|_| ())?;
-            }
+        }
+        if let Some(held) = ctx.settings.as_mut() {
+            // New colours and new metrics leave nothing on the sheet
+            // standing, and a new scale wants a new extent.
+            held.picture.invalidate();
+            held.refit(client, settings_extent(ctx.desktop));
+            present_settings(held, theme, scale, client).map_err(|_| ())?;
         }
         Ok(())
     }
@@ -1611,6 +1704,8 @@ mod program {
         env: &'a [Vec<u8>],
         /// The shells of closed windows, still to be reaped.
         ending: &'a mut EndingShells,
+        /// The Settings window, while it is open.
+        settings: &'a mut Option<SettingsWindow>,
         /// The workers every window's screen effects spread across.
         pool: &'static EffectPool,
     }
@@ -1643,6 +1738,13 @@ mod program {
         // the screen is already current, which is the common case.
         if apply_profile_change(windows, client, &mut ctx).is_err() {
             return Applied::Lost("present refused");
+        }
+        // A window the drain's events changed is painted here, once however
+        // many of them changed it.
+        for open in windows.iter_mut().filter(|open| open.unpainted) {
+            if open.present(client).is_err() {
+                return Applied::Lost("present refused");
+            }
         }
         applied
     }
@@ -1686,6 +1788,7 @@ mod program {
                     desktop: ctx.desktop,
                     env: ctx.env,
                     ending: ctx.ending,
+                    scrollback: usize::from(ctx.publication.live().scrollback_lines),
                     pool: ctx.pool,
                 }) {
                     Ok(opened) => {
@@ -1705,6 +1808,9 @@ mod program {
                 Applied::Running
             }
             EventOutcome::Quit => {
+                if let Some(held) = ctx.settings.take() {
+                    held.close(client);
+                }
                 for open in windows.drain(..) {
                     open.hang_up(client, ctx.set, ctx.ending);
                 }
@@ -1714,10 +1820,20 @@ mod program {
                 let Some(index) = index(windows, window) else {
                     return Applied::Running;
                 };
+                let owned = close_settings_of(ctx.settings, window, client);
                 windows.remove(index).hang_up(client, ctx.set, ctx.ending);
                 // The terminal is not its windows: it keeps its icon-bar
                 // slot with none open, and a click there opens the next.
-                // Only *Quit* ends it.
+                // Only *Quit* ends it. A Settings window that closed with this
+                // one settles what it last showed, as its own close does.
+                if owned {
+                    return dispatch_outcome(
+                        EventOutcome::ProfileChanged { settled: true },
+                        windows,
+                        client,
+                        ctx,
+                    );
+                }
                 Applied::Running
             }
             EventOutcome::OpenMenu { window, at } => {
@@ -1728,35 +1844,62 @@ mod program {
                 Applied::Running
             }
             EventOutcome::OpenSheet { window } => {
-                let Some(index) = index(windows, window) else {
+                // The terminal has one Settings window: asked for again, from
+                // any window, it comes forward.
+                if let Some(held) = ctx.settings.as_ref() {
+                    if let Err(err) = client.activate_window(held.pane.id()) {
+                        app::report(
+                            OWN_WORD,
+                            format_args!(
+                                "the settings window could not be brought forward ({err})"
+                            ),
+                        );
+                    }
                     return Applied::Running;
-                };
-                let mode = *windows[index].pane.mode();
-                let sheet = Box::new(Settings::new(ctx.publication.live()));
-                let opened = open_overlay(
+                }
+                if index(windows, window).is_none() {
+                    return Applied::Running;
+                }
+                *ctx.settings = open_settings(
                     client,
-                    window,
-                    ctx.server,
+                    (window, ctx.server),
                     ctx.event_endpoint,
-                    sheet,
-                    &mode,
+                    Box::new(Settings::new(ctx.publication.live())),
                     ctx.themes.active(),
                     ctx.desktop,
                 );
-                windows[index].set_overlay(client, opened);
                 Applied::Running
             }
-            EventOutcome::OverlayChanged { window } => {
+            EventOutcome::SettingsChanged => {
+                // Only the sheet's own pixels moved, so no terminal window is
+                // touched.
+                let scale = ctx.desktop.scale();
+                if let Some(held) = ctx.settings.as_mut() {
+                    if present_settings(held, ctx.themes.active(), scale, client).is_err() {
+                        return Applied::Lost("settings present refused");
+                    }
+                }
+                Applied::Running
+            }
+            EventOutcome::SettingsResized {
+                width_px,
+                height_px,
+            } => {
+                let scale = ctx.desktop.scale();
+                if let Some(held) = ctx.settings.as_mut() {
+                    held.refit(client, (width_px, height_px));
+                    if present_settings(held, ctx.themes.active(), scale, client).is_err() {
+                        return Applied::Lost("settings present refused");
+                    }
+                }
+                Applied::Running
+            }
+            EventOutcome::ViewMoved { window } => {
                 let Some(index) = index(windows, window) else {
                     return Applied::Running;
                 };
-                // Only the overlay's own pixels moved, so the terminal's
-                // window is left exactly as it is.
-                let scale = ctx.desktop.scale();
-                if let Some(open) = windows[index].overlay.as_mut() {
-                    if present_overlay(open, ctx.themes.active(), scale, client).is_err() {
-                        return Applied::Lost("overlay present refused");
-                    }
+                if windows[index].present(client).is_err() {
+                    return Applied::Lost("present refused");
                 }
                 Applied::Running
             }
@@ -1815,49 +1958,6 @@ mod program {
                 // write reverts — stated on `stderr`, never silently kept.
                 adopt_published(windows, client, &mut *ctx)
             }
-            EventOutcome::Resized {
-                window,
-                width_px,
-                height_px,
-            } => {
-                let Some(index) = index(windows, window) else {
-                    return Applied::Running;
-                };
-                // Re-map the frame region at the new client size, reshape the
-                // grid, and tell the shell (via the pty window size) so its
-                // prompt and any full-screen program re-lay-out. A refused or
-                // unallocatable re-map keeps the current window rather than
-                // failing the app: the grid and pty size are only updated
-                // once the new region is adopted, so the screen never claims
-                // a geometry the surface cannot hold.
-                //
-                // The granted client is first snapped down to a whole number
-                // of cells, so no partial-cell strip of dead background is
-                // left at the right or bottom edge. Snapping is idempotent,
-                // so the size this re-maps to is already snapped and the
-                // `Resized` it draws back snaps to itself: one step, and it
-                // cannot oscillate. Re-mapping is skipped entirely when the
-                // snapped size is the one already in force.
-                let open = &mut windows[index];
-                let (snapped_w, snapped_h) = snap_to_cells(width_px, height_px, open.look.font);
-                let current = *open.pane.mode();
-                if (snapped_w, snapped_h) == (current.width_px, current.height_px) {
-                    return Applied::Running;
-                }
-                let new_mode = app::mode_for(snapped_w, snapped_h);
-                if open.pane.resize(client, &new_mode) == app::Fitted::Adopted {
-                    let (cols, rows) = grid_dims(snapped_w, snapped_h, open.look.font);
-                    let _ = open.terminal.resize(cols, rows);
-                    let _ = tairix_rt::pty_set_size(open.pty_master, rows, cols);
-                    // What the passes remember is the shape of the old
-                    // screen; a resized one must not ghost it.
-                    open.look.pipeline.clear();
-                    if open.present(client).is_err() {
-                        return Applied::Lost("present refused");
-                    }
-                }
-                Applied::Running
-            }
             EventOutcome::DesktopChanged => {
                 // The scale and/or appearance changed, which restyles every
                 // pixel and re-sizes every face, so the whole surface is the
@@ -1899,11 +1999,21 @@ mod program {
             /// The window to repaint.
             window: u64,
         },
-        /// Only this window's open overlay's own pixels changed; re-present
-        /// its popup and leave the window alone.
-        OverlayChanged {
-            /// The window whose overlay moved.
+        /// This window's view moved over its scrollback: what changed is
+        /// painted and presented, as for shell output.
+        ViewMoved {
+            /// The window whose view moved.
             window: u64,
+        },
+        /// Only the Settings window's own pixels changed; re-present it and
+        /// leave every terminal window alone.
+        SettingsChanged,
+        /// The session fitted the Settings window to a new client extent.
+        SettingsResized {
+            /// The new client width.
+            width_px: u32,
+            /// The new client height.
+            height_px: u32,
         },
         /// A secondary press asked for this window's menu at this
         /// client-local point; the caller asks the desktop to open it there.
@@ -1913,10 +2023,11 @@ mod program {
             /// Where the press landed, relative to the client origin.
             at: Point,
         },
-        /// The *Settings* command asked for the settings sheet over this
-        /// window; the caller opens its popup over the client.
+        /// The *Settings* command asked for the Settings window from this
+        /// window: the caller opens it as a dialog of this window, or brings
+        /// the one already open forward.
         OpenSheet {
-            /// The window the sheet belongs to.
+            /// The window the command was chosen in.
             window: u64,
         },
         /// The user changed a setting: adopt what it made stale in every
@@ -1934,19 +2045,6 @@ mod program {
         /// The settings worker answered: adopt the profile the store now
         /// holds, or state why it refused the write.
         ProfilePublished,
-        /// The window manager resized this window to a new client size (a
-        /// drag-resize that settled, or a maximize/restore); the caller
-        /// re-maps its frame region, reshapes its grid, and updates its pty
-        /// window size. Any events queued behind it re-report on the next
-        /// wake (the port readiness is level-triggered).
-        Resized {
-            /// The resized window.
-            window: u64,
-            /// New client width in pixels.
-            width_px: u32,
-            /// New client height in pixels.
-            height_px: u32,
-        },
         /// The desktop changed (screen size, scale, or appearance); already
         /// adopted, along with the theme registry, before this is raised. It
         /// is a property of the seat, so it reaches every window.
@@ -1982,27 +2080,27 @@ mod program {
                 terminal.clear();
                 EventOutcome::Repaint { window }
             }
+            Command::ClearScrollback => {
+                terminal.clear_scrollback();
+                EventOutcome::ViewMoved { window }
+            }
             Command::Close => EventOutcome::CloseWindow { window },
         }
     }
 
-    /// Route the pointer input one event delivered for the open sheet's own
-    /// popup window carries — a move and a press or release, or a wheel turn
-    /// — into that sheet.
-    ///
-    /// The coordinates in a popup's events are popup-local, so the sheet is
-    /// hit-tested against the popup's own viewport — the extent it was opened
-    /// at — and never against the terminal window's.
-    fn route_overlay_pointer(
-        overlay: &mut Overlay,
+    /// Route the pointer input one event delivered for the Settings window
+    /// carries — a move and a press or release, or a wheel turn — into its
+    /// sheet, hit-tested against that window's own client.
+    fn route_settings_pointer(
+        window: &mut SettingsWindow,
         publication: &mut Publication<Profile>,
         input: impl IntoIterator<Item = InputEvent>,
         scale: Scale,
         theme: &Theme,
-    ) -> OverlayRouting {
-        let viewport = overlay.viewport();
-        let mut routing = OverlayRouting::Nothing;
-        let Overlay { sheet, picture, .. } = overlay;
+    ) -> SettingsRouting {
+        let viewport = window.viewport();
+        let mut routing = SettingsRouting::Nothing;
+        let SettingsWindow { sheet, picture, .. } = window;
         let damage = picture.sink();
         for event in input {
             let was = *sheet.profile();
@@ -2013,82 +2111,80 @@ mod program {
             publication.edit(&was, sheet.profile());
             match outcome {
                 SheetOutcome::Ignored => {}
-                SheetOutcome::Changed => routing = OverlayRouting::Redraw,
-                SheetOutcome::Edited => routing = OverlayRouting::Edited,
-                SheetOutcome::Settled => routing = OverlayRouting::Settled,
-                SheetOutcome::Restore => return OverlayRouting::Restore,
-                SheetOutcome::Dismissed => return OverlayRouting::Closed,
+                SheetOutcome::Changed => routing = SettingsRouting::Redraw,
+                SheetOutcome::Edited => routing = SettingsRouting::Edited,
+                SheetOutcome::Settled => routing = SettingsRouting::Settled,
+                SheetOutcome::Restore => return SettingsRouting::Restore,
+                SheetOutcome::Dismissed => return SettingsRouting::Closed,
             }
         }
         routing
     }
 
-    /// Route one key press delivered for the open sheet's own popup window
-    /// into that sheet.
-    fn route_overlay_key(
-        overlay: &mut Overlay,
+    /// Route one key press delivered for the Settings window into its sheet.
+    fn route_settings_key(
+        window: &mut SettingsWindow,
         publication: &mut Publication<Profile>,
         key: tairix_abi::input::KeyInput,
         scale: Scale,
         theme: &Theme,
-    ) -> OverlayRouting {
+    ) -> SettingsRouting {
         let InputEvent::KeyPressed { key, modifiers } = key_input_event(key) else {
-            return OverlayRouting::Nothing;
+            return SettingsRouting::Nothing;
         };
-        let viewport = overlay.viewport();
-        let Overlay { sheet, picture, .. } = overlay;
+        let viewport = window.viewport();
+        let SettingsWindow { sheet, picture, .. } = window;
         let damage = picture.sink();
         let was = *sheet.profile();
         let outcome = sheet.on_key(key, modifiers, viewport, scale, theme, damage);
         publication.edit(&was, sheet.profile());
         match outcome {
-            SheetOutcome::Ignored => OverlayRouting::Nothing,
-            SheetOutcome::Changed => OverlayRouting::Redraw,
-            SheetOutcome::Edited => OverlayRouting::Edited,
-            SheetOutcome::Settled => OverlayRouting::Settled,
-            SheetOutcome::Restore => OverlayRouting::Restore,
-            SheetOutcome::Dismissed => OverlayRouting::Closed,
+            SheetOutcome::Ignored => SettingsRouting::Nothing,
+            SheetOutcome::Changed => SettingsRouting::Redraw,
+            SheetOutcome::Edited => SettingsRouting::Edited,
+            SheetOutcome::Settled => SettingsRouting::Settled,
+            SheetOutcome::Restore => SettingsRouting::Restore,
+            SheetOutcome::Dismissed => SettingsRouting::Closed,
         }
     }
 
-    /// What the drain does with what routing an event into `held` concluded
-    /// for `window`: an outcome to end the drain on, or `None` to read on with
+    /// What the drain does with what routing an event into `held`
+    /// concluded: an outcome to end the drain on, or `None` to read on with
     /// the redraw or live edit it owes folded in.
     ///
     /// Closing settles whatever the sheet was last showing, so an edit the
-    /// user made and then dismissed is still written.
-    fn overlay_concluded(
-        routing: OverlayRouting,
-        held: &mut Overlay,
-        window: u64,
-        redrawn: &mut Option<u64>,
+    /// user made and then closed the window on is still written.
+    fn settings_concluded(
+        routing: SettingsRouting,
+        held: &mut SettingsWindow,
+        redrawn: &mut bool,
         edited: &mut bool,
     ) -> Option<EventOutcome> {
         match routing {
-            OverlayRouting::Nothing => None,
-            OverlayRouting::Redraw => {
-                *redrawn = Some(window);
+            SettingsRouting::Nothing => None,
+            SettingsRouting::Redraw => {
+                *redrawn = true;
                 None
             }
-            OverlayRouting::Edited => {
+            SettingsRouting::Edited => {
                 *edited = true;
                 None
             }
-            OverlayRouting::Settled => Some(EventOutcome::ProfileChanged { settled: true }),
-            OverlayRouting::Restore => Some(EventOutcome::ProfileRestored),
-            OverlayRouting::Closed => {
+            SettingsRouting::Settled => Some(EventOutcome::ProfileChanged { settled: true }),
+            SettingsRouting::Restore => Some(EventOutcome::ProfileRestored),
+            SettingsRouting::Closed => {
                 held.dismissed = true;
                 Some(EventOutcome::ProfileChanged { settled: true })
             }
         }
     }
 
-    /// What routing an event into the open settings sheet concluded.
+    /// What routing an event into the Settings window concluded.
     #[derive(Copy, Clone)]
-    enum OverlayRouting {
+    enum SettingsRouting {
         /// Nothing to do.
         Nothing,
-        /// The sheet's own pixels changed; re-present its popup.
+        /// The sheet's own pixels changed; re-present its window.
         Redraw,
         /// The sheet edited the profile while the interaction continues: show
         /// it, write nothing.
@@ -2108,8 +2204,8 @@ mod program {
     /// said at least one is pending).
     ///
     /// One mailbox serves the whole process, so each event is demuxed on the
-    /// window id it carries — the terminal window, or the popup one of them
-    /// has open — and an event that carries **no** window id is
+    /// window id it carries — a terminal window, or the Settings window — and
+    /// an event that carries **no** window id is
     /// application-scoped: an icon-bar click or menu outcome, which names the
     /// emulator rather than any one of its windows.
     ///
@@ -2124,7 +2220,7 @@ mod program {
     /// sizes the drag already passed, once the button came up.
     #[allow(clippy::too_many_lines)] // One dispatch over the whole window vocabulary; splitting it would hide the routing order.
     fn drain_events(
-        windows: &mut [TerminalWindow],
+        (windows, settings): (&mut [TerminalWindow], &mut Option<SettingsWindow>),
         publication: &mut Publication<Profile>,
         desktop: &Desktop,
         theme: &Theme,
@@ -2132,7 +2228,7 @@ mod program {
         client: &mut WindowClient<app::RtWindowTransport>,
     ) -> EventOutcome {
         let scale = desktop.scale();
-        let mut redrawn: Option<u64> = None;
+        let mut redrawn = false;
         // A drag delivers many samples and one paint is worth all of them, so
         // an unsettled edit folds here and the whole drain concludes in one
         // outcome; `Publication` measures what that owes the screen, so
@@ -2159,7 +2255,7 @@ mod program {
             // it never declared names no command and is dropped.
             match event {
                 WindowEvent::AppBarDefault => return EventOutcome::NewWindow,
-                WindowEvent::AppBarMenu { item } => {
+                WindowEvent::AppBarMenu { item, .. } => {
                     return match bar_command(item) {
                         Some(BarCommand::NewWindow) => EventOutcome::NewWindow,
                         Some(BarCommand::Quit) => EventOutcome::Quit,
@@ -2169,38 +2265,32 @@ mod program {
                 _ => {}
             }
             // Everything else is window-scoped: resolve which of
-            // this process's windows (or which window's popup) it
-            // belongs to. An id neither names is a window that has
-            // just closed, and the event has nowhere to land.
-            let Some(window_id) = event.window_id() else {
+            // this process's windows it belongs to. An id none names is a
+            // window that has just closed, and the event has nowhere to land.
+            let Some(window) = event.window_id() else {
                 continue;
             };
-            let Some(index) = windows.iter().position(|open| {
-                open.pane.id() == window_id
-                    || open
-                        .overlay
-                        .as_ref()
-                        .is_some_and(|held| held.pane.id() == window_id)
-            }) else {
+            if let Some(held) = settings.as_mut().filter(|held| held.pane.id() == window) {
+                let routed = settings_event(
+                    held,
+                    event,
+                    publication,
+                    (scale, theme),
+                    (&mut redrawn, &mut edited),
+                );
+                if let Some(outcome) = routed {
+                    return outcome;
+                }
+                continue;
+            }
+            let Some(index) = windows.iter().position(|open| open.pane.id() == window) else {
                 continue;
             };
             let open = &mut windows[index];
-            let window = open.pane.id();
-            let for_popup = window != window_id;
             match event {
-                WindowEvent::Key { key, .. } if for_popup => {
-                    let Some(held) = open.overlay.as_mut() else {
-                        continue;
-                    };
-                    let routing = route_overlay_key(held, publication, key, scale, theme);
-                    if let Some(outcome) =
-                        overlay_concluded(routing, held, window, &mut redrawn, &mut edited)
-                    {
-                        return outcome;
-                    }
-                }
                 WindowEvent::Key { key, .. } => match route_key(&mut open.terminal, key) {
                     KeyRouting::Nothing => {}
+                    KeyRouting::ViewMoved => open.unpainted = true,
                     KeyRouting::Command(command) => {
                         return finish(
                             run_command(command, window, &mut open.terminal, publication),
@@ -2210,37 +2300,12 @@ mod program {
                     }
                     KeyRouting::ShellGone => return EventOutcome::CloseWindow { window },
                 },
-                WindowEvent::Pointer { x, y, action, .. } if for_popup => {
-                    let Some(held) = open.overlay.as_mut() else {
-                        continue;
-                    };
-                    let input = pointer_input_events(action, pointer_point(x, y));
-                    let routing = route_overlay_pointer(held, publication, input, scale, theme);
-                    if let Some(outcome) =
-                        overlay_concluded(routing, held, window, &mut redrawn, &mut edited)
-                    {
-                        return outcome;
-                    }
-                }
-                // The wheel over the open sheet scrolls its body.
-                WindowEvent::Scrolled { x, y, dx, dy, .. } if for_popup => {
-                    let Some(held) = open.overlay.as_mut() else {
-                        continue;
-                    };
-                    let input = scroll_input_events(pointer_point(x, y), dx, dy);
-                    let routing = route_overlay_pointer(held, publication, input, scale, theme);
-                    if let Some(outcome) =
-                        overlay_concluded(routing, held, window, &mut redrawn, &mut edited)
-                    {
-                        return outcome;
-                    }
-                }
                 // The one answer the desktop owes an open. An id
                 // that names anything else answers a gesture already
                 // settled, so acting on it would run a stale command.
                 WindowEvent::MenuClosed {
                     open_id, outcome, ..
-                } if !for_popup && open.menu == Some(open_id) => {
+                } if open.menu == Some(open_id) => {
                     open.menu = None;
                     match outcome {
                         MenuOutcome::Chosen(item) => {
@@ -2265,18 +2330,10 @@ mod program {
                     }
                 }
                 WindowEvent::Pointer { x, y, action, .. } => {
-                    // The sheet is modal, so a press that lands on
-                    // the terminal instead dismisses it and reaches
-                    // nothing else. Otherwise a secondary press asks
-                    // the desktop for this window's menu at that
-                    // point; the screen is the shell's, so every other
-                    // pointer event is a no-op.
-                    if let Some(held) = open.overlay.as_mut() {
-                        if matches!(action, PointerAction::Pressed(_)) {
-                            held.dismissed = true;
-                            return EventOutcome::Continue;
-                        }
-                    } else if action
+                    // A secondary press asks the desktop for this window's
+                    // menu at that point; the screen is the shell's, so every
+                    // other pointer event is a no-op.
+                    if action
                         == PointerAction::Pressed(tairix_abi::input::PointerButtonCode::Secondary)
                     {
                         return EventOutcome::OpenMenu {
@@ -2285,54 +2342,34 @@ mod program {
                         };
                     }
                 }
-                // A popup wears no close control, so a close asked of
-                // one can only be the session tearing it down: let the
-                // overlay go rather than closing the window.
-                WindowEvent::CloseRequested { .. } if for_popup => {
-                    if let Some(held) = open.overlay.as_mut() {
-                        held.dismissed = true;
-                    }
-                    return EventOutcome::Continue;
-                }
                 WindowEvent::CloseRequested { .. } => return EventOutcome::CloseWindow { window },
-                // The session dropped a window's pixels under memory
-                // pressure: repaint whichever window lost them.
-                WindowEvent::RedrawRequested { .. } if for_popup => {
-                    return EventOutcome::OverlayChanged { window }
+                // The wheel moves the view over the scrollback; the emulator
+                // reports no mouse input to the program. A burst of turns is
+                // painted once, when the drain is applied.
+                WindowEvent::Scrolled { dy, .. } => {
+                    if open.terminal.scroll_wheel(dy) {
+                        open.unpainted = true;
+                    }
                 }
+                // The session dropped the window's pixels under memory
+                // pressure.
                 WindowEvent::RedrawRequested { .. } => return EventOutcome::Repaint { window },
                 // Nobody can see this window, so the session gave its
                 // copy of the pixels back and unmapped the region. Let
                 // go of this side too — the pages go only when both do
                 // — and paint nothing: the redraw request that follows
                 // the window being shown again re-attaches a fresh
-                // region and fills it. A popup is never hidden, so
-                // only the top-level window's region is released here.
-                WindowEvent::ContentReleased { .. } => {
-                    if !for_popup {
-                        open.pane.release_frames();
-                    }
-                }
-                // The window manager resized the window (a live
-                // drag-resize sample, or a maximize/restore): hand the
-                // new client size back to the caller, which re-maps
-                // the frame region, reshapes the grid, and updates the
-                // pty window size. A run of drag samples has already
-                // folded to its newest in the shared reader, so this
-                // reshapes once per size the grid actually takes.
-                // Returning here leaves any events queued behind it
-                // for the next wake (level-triggered peek).
+                // region and fills it.
+                WindowEvent::ContentReleased { .. } => open.pane.release_frames(),
+                // The window manager resized the window (a live drag-resize
+                // sample, or a maximize/restore). A run of samples queued
+                // together has already folded to its newest in the shared
+                // reader.
                 WindowEvent::Resized {
                     width_px,
                     height_px,
                     ..
-                } if !for_popup => {
-                    return EventOutcome::Resized {
-                        window,
-                        width_px,
-                        height_px,
-                    }
-                }
+                } => open.refit(client, (width_px, height_px)),
                 // Focus changes repaint nothing; the screen is
                 // shell-driven. The terminal never requests a pick, so
                 // a pick conclusion is a session bug and is ignored (an
@@ -2348,10 +2385,6 @@ mod program {
                 // with the event itself. An icon-bar event was handled
                 // before the window demux. These are honest no-ops,
                 // not deferred work.
-                //
-                // A `Resized` for a popup is likewise nothing: a popup
-                // is neither decorated nor resizable, so it has no size
-                // of its own for the session to change.
                 //
                 // A secondary press on Close asks to leave what the
                 // window is showing; the terminal has nothing to leave
@@ -2371,6 +2404,7 @@ mod program {
                 WindowEvent::AlternateCloseRequested { .. }
                 | WindowEvent::AppBarDefault
                 | WindowEvent::AppBarMenu { .. }
+                | WindowEvent::AppBarEntered { .. }
                 | WindowEvent::MenuClosed { .. }
                 // The layer-surface feeds and a tool window's moves address
                 // surfaces this application never opens, so none can arrive
@@ -2381,13 +2415,8 @@ mod program {
                 | WindowEvent::LayerPointer { .. }
                 | WindowEvent::ToolMoved { .. }
                 | WindowEvent::Focus { .. }
-                // The emulator keeps no scrollback and reports no mouse
-                // input to the program, so a wheel over the screen itself
-                // has nothing to move.
-                | WindowEvent::Scrolled { .. }
                 | WindowEvent::Minimized { .. }
                 | WindowEvent::OpenRequested
-                | WindowEvent::Resized { .. }
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
                 | WindowEvent::FolderPicked { .. }
@@ -2411,19 +2440,91 @@ mod program {
         BarCommand::from_item(item)
     }
 
-    /// Fold a pending overlay redraw into `outcome`: a command that concluded
-    /// nothing still re-presents the popup when an earlier event in the same
-    /// drain changed that window's overlay pixels.
-    fn finish(outcome: EventOutcome, redrawn: Option<u64>, edited: bool) -> EventOutcome {
+    /// Fold a pending Settings redraw into `outcome`: a command that
+    /// concluded nothing still re-presents the Settings window when an
+    /// earlier event in the same drain changed its pixels.
+    fn finish(outcome: EventOutcome, redrawn: bool, edited: bool) -> EventOutcome {
         match (outcome, edited, redrawn) {
-            // A profile edit outranks a bare overlay redraw: applying it
-            // re-presents the sheet anyway, so the redraw is not also owed.
+            // A profile edit outranks a bare redraw: applying it re-presents
+            // the sheet anyway, so the redraw is not also owed.
             (EventOutcome::Continue, true, _) => EventOutcome::ProfileChanged { settled: false },
-            (EventOutcome::Continue, false, Some(window)) => {
-                EventOutcome::OverlayChanged { window }
-            }
+            (EventOutcome::Continue, false, true) => EventOutcome::SettingsChanged,
             (other, _, _) => other,
         }
+    }
+
+    /// Apply one event delivered for the Settings window: an outcome to end
+    /// the drain on, or `None` to read on with what it owes folded in.
+    fn settings_event(
+        held: &mut SettingsWindow,
+        event: WindowEvent,
+        publication: &mut Publication<Profile>,
+        (scale, theme): (Scale, &Theme),
+        (redrawn, edited): (&mut bool, &mut bool),
+    ) -> Option<EventOutcome> {
+        let routing = match event {
+            WindowEvent::Key { key, .. } => {
+                route_settings_key(held, publication, key, scale, theme)
+            }
+            WindowEvent::Pointer { x, y, action, .. } => {
+                let input = pointer_input_events(action, pointer_point(x, y));
+                route_settings_pointer(held, publication, input, scale, theme)
+            }
+            // The wheel over the sheet scrolls its body.
+            WindowEvent::Scrolled { x, y, dx, dy, .. } => {
+                let input = scroll_input_events(pointer_point(x, y), dx, dy);
+                route_settings_pointer(held, publication, input, scale, theme)
+            }
+            // Its close control is the *Done* button's.
+            WindowEvent::CloseRequested { .. } => SettingsRouting::Closed,
+            WindowEvent::RedrawRequested { .. } => {
+                held.picture.invalidate();
+                SettingsRouting::Redraw
+            }
+            // Hidden with its owner: the region goes back as a terminal
+            // window's does, and the redraw that follows its showing again
+            // fills a fresh one.
+            WindowEvent::ContentReleased { .. } => {
+                held.pane.release_frames();
+                SettingsRouting::Nothing
+            }
+            WindowEvent::Resized {
+                width_px,
+                height_px,
+                ..
+            } => {
+                return Some(EventOutcome::SettingsResized {
+                    width_px,
+                    height_px,
+                })
+            }
+            // The keyboard coming or going, a minimise with its owner, and
+            // a secondary press on Close change nothing it shows; the rest
+            // address surfaces and requests the sheet never makes.
+            WindowEvent::Focus { .. }
+            | WindowEvent::Minimized { .. }
+            | WindowEvent::AlternateCloseRequested { .. }
+            | WindowEvent::AppBarDefault
+            | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::AppBarEntered { .. }
+            | WindowEvent::MenuClosed { .. }
+            | WindowEvent::TerrainChanged { .. }
+            | WindowEvent::AlertClosed { .. }
+            | WindowEvent::Authorised { .. }
+            | WindowEvent::LayerPointer { .. }
+            | WindowEvent::ToolMoved { .. }
+            | WindowEvent::OpenRequested
+            | WindowEvent::FilePicked { .. }
+            | WindowEvent::PickCancelled { .. }
+            | WindowEvent::FolderPicked { .. }
+            | WindowEvent::DragOver { .. }
+            | WindowEvent::DragEnded { .. }
+            | WindowEvent::SaveOffered { .. }
+            | WindowEvent::SaveOfferEnded { .. }
+            | WindowEvent::PreviewRendered { .. }
+            | WindowEvent::Pinch { .. } => SettingsRouting::Nothing,
+        };
+        settings_concluded(routing, held, redrawn, edited)
     }
 
     /// What routing a key press delivered for the terminal's own window
@@ -2433,15 +2534,18 @@ mod program {
         Nothing,
         /// A terminal accelerator named this command.
         Command(Command),
+        /// The view moved over the scrollback.
+        ViewMoved,
         /// The shell can no longer accept input.
         ShellGone,
     }
 
     /// Route one key press delivered for the terminal's own window: a
-    /// terminal accelerator claims it, else it is shell input.
+    /// terminal accelerator claims it, then a scrolling chord, else it is
+    /// shell input, which brings the view back to the live screen first.
     ///
-    /// A key for the open overlay's popup never reaches here — it arrives
-    /// under the popup's own window id and is routed there.
+    /// A key for the Settings window never reaches here — it arrives under
+    /// that window's own id and is routed there.
     fn route_key<S: ShellSource>(
         terminal: &mut Terminal<S>,
         key: tairix_abi::input::KeyInput,
@@ -2450,6 +2554,13 @@ mod program {
         if let InputEvent::KeyPressed { key, modifiers } = input {
             if let Some(command) = Command::accelerator(key, modifiers) {
                 return KeyRouting::Command(command);
+            }
+            if let Some(moved) = terminal.view_key(key, modifiers) {
+                return if moved {
+                    KeyRouting::ViewMoved
+                } else {
+                    KeyRouting::Nothing
+                };
             }
         }
         // The one shared layout-to-tty rule; a release encodes zero bytes
@@ -2460,10 +2571,15 @@ mod program {
         };
         match bytes.get(..n) {
             Some(slice) if n > 0 => {
+                let moved = terminal.view_to_bottom();
                 if terminal.send(slice).is_err() {
                     return KeyRouting::ShellGone;
                 }
-                KeyRouting::Nothing
+                if moved {
+                    KeyRouting::ViewMoved
+                } else {
+                    KeyRouting::Nothing
+                }
             }
             _ => KeyRouting::Nothing,
         }

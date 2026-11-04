@@ -103,14 +103,17 @@ use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
-    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, MountFlags, NameMatching,
-    NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned, VolumeStats, WriteRefusal,
+    FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    MountFlags, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned,
+    VolumeStats, VolumeTitle, WriteRefusal,
 };
 use tairix_abi::fsserve::{is_served_endpoint, ServeOffer};
 use tairix_abi::hwtree::HwDeviceClass;
 use tairix_abi::imageattach::ImageAttach;
 use tairix_abi::netattach::{AttachReply, FsserveCtl, NetworkAttach, NetworkOffer, OfferId};
-use tairix_abi::sysinfo::{MountAvailability, VolumeClass};
+use tairix_abi::sysinfo::{
+    MountAvailability, RemovedWrites, VolumeClass, VolumeRemovalRecord, VOLUME_REMOVALS_KEPT,
+};
 use tairix_abi::volume::{
     DetachMode, FormatName, VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeFsType,
     VolumeInfo,
@@ -118,6 +121,7 @@ use tairix_abi::volume::{
 use tairix_abi::{DriverError, DriverHandle, Errno, HwMatchKey, HwNode, HwResource, SeekRegion};
 use tairix_bytedev::ByteDevice;
 use tairix_fsprobe::{Evidence, ProbedVolume, Recognised};
+use tairix_inline::RingBuf;
 use tairix_kernel_core::callreg::EndpointVanishObserver;
 use tairix_kernel_core::devres::installed_shared_mem_facility;
 use tairix_kernel_core::fs::blkclient::BlkClient;
@@ -185,6 +189,10 @@ const VOLUME_DETACHED: EventId = EventId(4174);
 /// Audit event: a runtime volume detach was refused; the volume stays
 /// attached and no data was discarded.
 const VOLUME_DETACH_REFUSED: EventId = EventId(4175);
+
+/// Audit event: a removable device's volume was detached on the authority of
+/// the user at the seat rather than the mount authority.
+const VOLUME_EJECTED_AT_SEAT: EventId = EventId(4213);
 
 /// What a [`VOLUME_DETACH_REFUSED`] record says, whatever refused the detach.
 const DETACH_REFUSED: &str = "volume-service: runtime volume detach refused";
@@ -280,6 +288,10 @@ impl Availability {
 /// One attached runtime volume: the facts detach and surprise removal
 /// need.
 struct AttachedVolume {
+    /// What it lists as, by the port its device last came in on: a removable
+    /// device's, on a port it can be pulled from while the machine runs, which
+    /// the user at the seat may eject, or a fixed one.
+    class: VolumeClass,
     /// The volume's published 16-byte identity.
     id: [u8; 16],
     /// The catalog name the root is projected under.
@@ -533,6 +545,16 @@ impl FilesystemStats for UnavailableFs {
     }
 }
 
+impl FilesystemLabel for UnavailableFs {
+    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
+    fn set_label(&mut self, _title: &VolumeTitle) -> Result<(), DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+}
+
 impl FilesystemAttrs for UnavailableFs {
     fn get_attr(
         &mut self,
@@ -609,6 +631,38 @@ pub struct RuntimeVolumeService {
     network: network::NetworkVolumes,
     /// The volumes disk-image files hold.
     images: image::ImageVolumes,
+    /// The most recent surprise removals. A spin lock, taken alone, for the
+    /// same reason as the registry's.
+    removals: SpinLock<Removals>,
+}
+
+/// The most recent surprise removals of device-backed volumes, oldest first,
+/// each numbered in the order it happened since boot.
+struct Removals {
+    /// The number the next removal takes.
+    next: u64,
+    kept: RingBuf<VolumeRemovalRecord, VOLUME_REMOVALS_KEPT>,
+}
+
+impl Removals {
+    const fn new() -> Self {
+        Self {
+            next: 1,
+            kept: RingBuf::new(),
+        }
+    }
+
+    /// Record that the volume published as `id` went with its device, the
+    /// writes it had not given it having come to `writes`. A volume published
+    /// under no identity names nothing a reader could join, and is not
+    /// recorded.
+    fn record(&mut self, id: [u8; 16], writes: RemovedWrites) {
+        let Ok(removal) = VolumeRemovalRecord::new(self.next, id, writes) else {
+            return;
+        };
+        self.next = self.next.saturating_add(1);
+        self.kept.push_back_overwrite(removal);
+    }
 }
 
 /// One served block device's place in the registry: the lock every whole
@@ -703,12 +757,30 @@ enum Removal {
     Publication,
 }
 
+/// Whose authority a detach of a device's volume rests on.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum DetachAuthority {
+    /// The mount authority, which reaches every volume.
+    Mount,
+    /// The user at the seat, which reaches a removable device's volume alone.
+    Seat,
+}
+
+impl DetachAuthority {
+    fn reaches(self, class: VolumeClass) -> bool {
+        self == Self::Mount || class == VolumeClass::Removable
+    }
+}
+
 /// How a detach's claim on its volume went.
 enum DetachClaim<'a> {
     /// Claimed, with the entry's facts.
     Held(VolumeClaim<'a>, DetachTarget),
     /// The volume left the registry while the detach waited for its device.
     Gone,
+    /// The detach's authority does not reach the volume; its name for the
+    /// refusal.
+    Unauthorised(String),
     /// Another operation holds the volume, or moved it to a device this
     /// detach does not hold; the volume's name for the refusal.
     Busy(String),
@@ -718,6 +790,7 @@ enum DetachClaim<'a> {
 /// snapshotted out of the registry so the work below never runs under its
 /// guard.
 struct ServeTarget {
+    class: VolumeClass,
     id: [u8; 16],
     name: String,
     path: Path,
@@ -730,6 +803,18 @@ struct ServeTarget {
     mounted_as: Option<FormatName>,
     served: Arc<ServedVolume>,
     conflicted: bool,
+}
+
+/// What a device's volume published through hardware-tree node `publisher`
+/// lists as: a removable device's when the node, or a node above it, sits on a
+/// port it can be pulled from while the machine runs, as a stick on a USB hub
+/// does, else a local one.
+fn device_class(tree: &HwTreeStore, publisher: u32) -> VolumeClass {
+    if tree.on_removable_port(publisher) {
+        VolumeClass::Removable
+    } else {
+        VolumeClass::Local
+    }
 }
 
 /// Publish into `tree` the node a volume of `fstype` is served through, as
@@ -783,6 +868,7 @@ impl RuntimeVolumeService {
             next_served: AtomicU64::new(1),
             network: network::NetworkVolumes::new(),
             images: image::ImageVolumes::new(),
+            removals: SpinLock::new(Removals::new()),
         }
     }
 
@@ -1088,6 +1174,7 @@ impl RuntimeVolumeService {
         let path = entry.path.owned().map_err(VfsError::to_errno)?;
         entry.claimed = true;
         let target = ServeTarget {
+            class: entry.class,
             id: entry.id,
             name,
             path,
@@ -1109,14 +1196,23 @@ impl RuntimeVolumeService {
         ))
     }
 
-    /// Claim the volume `id` for a detach holding the device `held` (`None`
-    /// for one whose device is gone): it must still be on that device, or
-    /// have lost its device, and no other operation may hold it.
-    fn claim_for_detach(&self, id: &[u8; 16], held: Option<(u64, u64)>) -> DetachClaim<'_> {
+    /// Claim the volume `id` for a detach on `authority` holding the device
+    /// `held` (`None` for one whose device is gone): the authority must reach
+    /// it, it must still be on that device or have lost its device, and no
+    /// other operation may hold it.
+    fn claim_for_detach(
+        &self,
+        id: &[u8; 16],
+        held: Option<(u64, u64)>,
+        authority: DetachAuthority,
+    ) -> DetachClaim<'_> {
         let mut state = self.state.lock();
         let Some(volume) = state.iter_mut().find(|v| v.id == *id) else {
             return DetachClaim::Gone;
         };
+        if !authority.reaches(volume.class) {
+            return DetachClaim::Unauthorised(volume.name.clone());
+        }
         let on_held =
             !volume.availability.device_present() || held == Some((volume.endpoint, volume.window));
         if volume.claimed || !on_held {
@@ -1139,6 +1235,14 @@ impl RuntimeVolumeService {
             },
             target,
         )
+    }
+
+    /// Whether the attached device volume `id` is on a removable port.
+    fn removable(&self, id: &[u8; 16]) -> bool {
+        self.state
+            .lock()
+            .iter()
+            .any(|volume| volume.id == *id && volume.class == VolumeClass::Removable)
     }
 
     /// The name of volume `id` and the device it is attached over: `None`
@@ -1222,6 +1326,7 @@ impl RuntimeVolumeService {
                 offer.format.as_str(),
                 target.id,
                 device.health.clone(),
+                target.class,
             )
             .map_err(|()| ("handle_in_use", Errno::Busy))
         };
@@ -1544,6 +1649,7 @@ fn reattach(
 /// when the handle is already registered (fail closed — the caller unwinds);
 /// the `set_io_source` cannot miss, the handle having just been registered by
 /// the one operation that holds it.
+#[allow(clippy::too_many_arguments)] // The one registration: every fact the listing shows of the volume.
 fn register_with_health(
     handle: DriverHandle,
     driver: Box<dyn KernelFs>,
@@ -1552,6 +1658,7 @@ fn register_with_health(
     fstype: &str,
     volume_id: [u8; 16],
     health: VolumeIoSource,
+    class: VolumeClass,
 ) -> Result<(), ()> {
     let names = VolumeNames {
         source,
@@ -1559,7 +1666,7 @@ fn register_with_health(
         volume_id,
     };
     LATE_FILESYSTEM
-        .register_served(handle, driver, names, watch, None, VolumeClass::Local)
+        .register_served(handle, driver, names, watch, None, class)
         .map_err(|_| ())?;
     let _ = LATE_FILESYSTEM.set_io_source(handle, health);
     Ok(())
@@ -1947,6 +2054,7 @@ impl VolumeService for RuntimeVolumeService {
             .new_served(window, device.read_only)
             .map_err(|err| refused("served_volume_unbuilt", err))?;
         let volume = AttachedVolume {
+            class: device_class(wiring.tree, publisher),
             id: probed.identity,
             name: String::from(name),
             path,
@@ -2000,11 +2108,19 @@ impl VolumeService for RuntimeVolumeService {
                 self.network.detach(wiring, request, caller, held)
             });
         }
-        if !caller.may_mount() {
-            let name = self
-                .attached_device(&request.volume_id)
-                .map(|(name, _)| name);
-            let Some(name) = name else {
+        // The user at the seat may eject a removable device's volume, and
+        // only as a plain detach: a volume still in use is refused as one is.
+        // The claim decides; this refuses short of the device's lock a detach
+        // the claim would refuse.
+        let authority = if caller.may_mount() {
+            DetachAuthority::Mount
+        } else if caller.at_seat
+            && request.mode == DetachMode::Plain
+            && self.removable(&request.volume_id)
+        {
+            DetachAuthority::Seat
+        } else {
+            let Some((name, _)) = self.attached_device(&request.volume_id) else {
                 return Err(Errno::NotFound);
             };
             return Err(Self::refuse_detach(
@@ -2014,8 +2130,8 @@ impl VolumeService for RuntimeVolumeService {
                 Errno::PermissionDenied,
                 request.mode,
             ));
-        }
-        self.detach_volume(&request.volume_id, request.mode, wiring.audit)
+        };
+        self.detach_volume(&request.volume_id, request.mode, authority, wiring.audit)
     }
 
     fn read(
@@ -2190,6 +2306,37 @@ impl VolumeService for RuntimeVolumeService {
         let wiring = self.wiring()?;
         self.attach_image_volume(wiring, caller, source, attach, answer)
     }
+
+    fn removals(&self) -> Result<Vec<VolumeRemovalRecord>, Errno> {
+        self.wiring()?;
+        let mut kept = Vec::new();
+        kept.try_reserve_exact(VOLUME_REMOVALS_KEPT)
+            .map_err(|_| Errno::OutOfMemory)?;
+        kept.extend(self.removals.lock().kept.iter().copied());
+        Ok(kept)
+    }
+
+    fn retitle(
+        &self,
+        caller: &Principal<'_>,
+        volume_id: &[u8; 16],
+        title: &VolumeTitle,
+    ) -> Result<(), Errno> {
+        let wiring = self.wiring()?;
+        if self.images.holds(volume_id) {
+            return self.retitle_image(wiring.audit, caller, volume_id, title);
+        }
+        // Only a disk image has an owner to retitle it: a device's volume has
+        // none, and a share's title is its server's.
+        let attached = self.network.holds(volume_id)
+            || self.attached_device(volume_id).is_some()
+            || LATE_FILESYSTEM.volume_of(volume_id).is_some();
+        Err(if attached {
+            Errno::NotSupported
+        } else {
+            Errno::NotFound
+        })
+    }
 }
 
 impl RuntimeVolumeService {
@@ -2233,6 +2380,7 @@ impl RuntimeVolumeService {
         &self,
         id: &[u8; 16],
         mode: DetachMode,
+        authority: DetachAuthority,
         audit: &'static (dyn Sink + Sync),
     ) -> Result<(), Errno> {
         let refuse = |name: &str, cause: &'static str, errno: Errno| -> Errno {
@@ -2251,12 +2399,15 @@ impl RuntimeVolumeService {
             .transpose()
             .map_err(|errno| refuse(&named, "registry_full", errno))?;
         let _op = pin.as_ref().map(|pin| pin.op.lock());
-        let (_claim, target) = match self.claim_for_detach(id, device) {
+        let (_claim, target) = match self.claim_for_detach(id, device, authority) {
             DetachClaim::Held(claim, target) => (claim, target),
             // Detached, or retracted by a surprise removal, while this waited:
             // the goal state is reached.
             DetachClaim::Gone => return Ok(()),
             DetachClaim::Busy(name) => return Err(refuse(&name, "volume_busy", Errno::Busy)),
+            DetachClaim::Unauthorised(name) => {
+                return Err(refuse(&name, "no_mount_authority", Errno::PermissionDenied))
+            }
         };
         let DetachTarget {
             name,
@@ -2364,7 +2515,7 @@ impl RuntimeVolumeService {
         }
         self.retract(id);
         drop(fs);
-        audit_detach_outcome(audit, &name, Forced::of(discarded, open));
+        audit_detach_outcome(audit, &name, Forced::of(discarded, open), authority);
         Ok(())
     }
 }
@@ -2494,9 +2645,24 @@ fn record_retired(
     );
 }
 
-/// Audit a completed detach: the clean withdrawal, or the force-unmount and
-/// what it gave up.
-fn audit_detach_outcome(audit: &'static (dyn Sink + Sync), name: &str, forced: Option<Forced>) {
+/// Audit a completed detach on `authority`: the clean withdrawal, or the
+/// force-unmount and what it gave up, and a removable device's volume ejected
+/// by the user at the seat.
+fn audit_detach_outcome(
+    audit: &'static (dyn Sink + Sync),
+    name: &str,
+    forced: Option<Forced>,
+    authority: DetachAuthority,
+) {
+    if authority == DetachAuthority::Seat {
+        RuntimeVolumeService::audit_event(
+            audit,
+            VOLUME_EJECTED_AT_SEAT,
+            "volume-service: removable volume ejected by the user at the seat",
+            name,
+            None,
+        );
+    }
     let Some(forced) = forced else {
         RuntimeVolumeService::audit_event(
             audit,
@@ -2889,8 +3055,9 @@ impl RuntimeVolumeService {
     /// device: verify and replay ([`Self::attempt_replay`]), then serve the
     /// volume in place — same handle, mount path, catalog name, and
     /// published root — over a fresh served volume and node, writable when
-    /// proven and read-only with the retained set kept when not. The
-    /// stand-in answers the mount until the new driver serves it. The caller
+    /// proven and read-only with the retained set kept when not, and of the
+    /// class the port the device came back on gives it. The stand-in, listed
+    /// so, answers the mount until the new driver serves it. The caller
     /// holds the re-inserted device's operation lock and the claim on
     /// `target`, whose release applies a surprise removal that landed while
     /// the volume was rebuilt.
@@ -2944,26 +3111,29 @@ impl RuntimeVolumeService {
             self.retire_served(Some(&served), None);
             refused(cause, errno)
         })?;
+        let class = device_class(wiring.tree, publisher);
+        let names = VolumeNames {
+            source: &target.name,
+            fstype: target.format.as_str(),
+            volume_id: target.id,
+        };
+        let availability = if conflict {
+            MountAvailability::RecoveryConflict
+        } else {
+            MountAvailability::Recovering
+        };
         let _ = LATE_FILESYSTEM.unregister(target.handle);
-        let _ = LATE_FILESYSTEM.register(
+        let _ = LATE_FILESYSTEM.register_recovery_stand_in(
             target.handle,
             Box::new(UnavailableFs),
-            &target.name,
-            target.format.as_str(),
-            target.id,
-            None,
+            names,
+            class,
+            availability,
         );
         drop(held);
         let _ = LATE_FILESYSTEM.set_io_source(target.handle, device.health.clone());
-        let _ = LATE_FILESYSTEM.set_availability(
-            target.handle,
-            if conflict {
-                MountAvailability::RecoveryConflict
-            } else {
-                MountAvailability::Recovering
-            },
-        );
         if let Some(entry) = self.state.lock().iter_mut().find(|v| v.id == target.id) {
+            entry.class = class;
             entry.endpoint = request.endpoint;
             entry.window = request.window;
             entry.served = Some(Arc::clone(&served));
@@ -3080,8 +3250,21 @@ impl RuntimeVolumeService {
         }
     }
 
-    /// Carry out one volume's surprise-removal `outcome`.
+    /// Carry out one volume's surprise-removal `outcome`. It is recorded
+    /// before the mount table moves, so a reader that finds the volume gone
+    /// finds why too.
     fn apply_vanish(&self, outcome: VanishOutcome, audit: &'static (dyn Sink + Sync)) {
+        let (id, writes) = match &outcome {
+            VanishOutcome::Clean(entry) => (entry.id, RemovedWrites::None),
+            VanishOutcome::Unavailable { id, pending, .. } => (
+                *id,
+                match pending {
+                    Pending::Retained(_) => RemovedWrites::Held,
+                    Pending::Lost(_) => RemovedWrites::Lost,
+                },
+            ),
+        };
+        self.removals.lock().record(id, writes);
         match outcome {
             VanishOutcome::Clean(entry) => {
                 // No sleeping lock may be taken here, so the registration is
@@ -3114,9 +3297,9 @@ impl RuntimeVolumeService {
                 // marked unavailable, so the mount snapshot never shows the
                 // vanished volume as healthy.
                 self.retire_served(served.as_deref(), node);
-                Self::stand_in(handle, &name, format, id);
-                let _ = LATE_FILESYSTEM.set_availability(
+                Self::stand_in(
                     handle,
+                    (&name, format, id),
                     match pending {
                         Pending::Retained(_) => MountAvailability::UnavailableDirty,
                         Pending::Lost(_) => MountAvailability::UnavailableLost,
@@ -3161,18 +3344,28 @@ impl RuntimeVolumeService {
 
 impl RuntimeVolumeService {
     /// Put the fail-closed stand-in in the place of the driver registered for
-    /// `handle`, under its registration, so a descriptor opened through it
-    /// answers the device fault rather than going stale, and no operation
-    /// finds the handle unregistered in between. Parks on nothing.
-    fn stand_in(handle: DriverHandle, name: &str, format: FormatName, id: [u8; 16]) {
-        if let Some(nodes) = LATE_FILESYSTEM.nodes(handle) {
+    /// `handle`, under its registration, listing the volume as `availability`
+    /// from the same instant, so a descriptor opened through it answers the
+    /// device fault rather than going stale, and no operation finds the
+    /// handle unregistered in between. Parks on nothing.
+    fn stand_in(
+        handle: DriverHandle,
+        (name, format, id): (&str, FormatName, [u8; 16]),
+        availability: MountAvailability,
+    ) {
+        let stood = LATE_FILESYSTEM.nodes(handle).is_some_and(|nodes| {
             let names = VolumeNames {
                 source: name,
                 fstype: format.as_str(),
                 volume_id: id,
             };
-            let _ =
-                LATE_FILESYSTEM.register_stand_in(handle, Box::new(UnavailableFs), names, nodes);
+            LATE_FILESYSTEM
+                .register_stand_in(handle, Box::new(UnavailableFs), names, nodes, availability)
+                .is_ok()
+        });
+        // Without its stand-in the volume is still listed for what it is.
+        if !stood {
+            let _ = LATE_FILESYSTEM.set_availability(handle, availability);
         }
     }
 
@@ -3215,18 +3408,18 @@ impl RuntimeVolumeService {
             return;
         };
         let unpublished = LATE_FILESYSTEM.holds_unpublished(handle);
-        Self::stand_in(handle, &name, format, id);
-        if let Some(device) = self.device_for(endpoint, window) {
-            let _ = LATE_FILESYSTEM.set_io_source(handle, device.health);
-        }
-        let _ = LATE_FILESYSTEM.set_availability(
+        Self::stand_in(
             handle,
+            (&name, format, id),
             if conflicted {
                 MountAvailability::RecoveryConflict
             } else {
                 MountAvailability::Recovering
             },
         );
+        if let Some(device) = self.device_for(endpoint, window) {
+            let _ = LATE_FILESYSTEM.set_io_source(handle, device.health);
+        }
         self.retire_images_on(handle);
         Self::audit_event(
             wiring.audit,

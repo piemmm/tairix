@@ -247,7 +247,7 @@ const fn largest_body() -> usize {
 }
 
 /// Wire length of a [`NetChannelNotify`] frame: magic (4) + version (2) +
-/// link (1) + back-pressure (1) + cumulative filtered count (8).
+/// link-changed (1) + back-pressure (1) + cumulative filtered count (8).
 pub const NET_CHANNEL_NOTIFY_LEN: usize = 16;
 
 /// A device-channel control request the stack issues to the driver's
@@ -770,13 +770,17 @@ impl NetChannelRequest {
 /// harvested frames into the shared region. *Which* channel woke is the
 /// port it arrived on.
 ///
-/// It carries the two things the driver knows and the stack would otherwise
-/// have to ask for, so a receive that needs no transmit costs no call at
-/// all:
+/// It carries what the driver knows and the stack would otherwise have to
+/// ask for, so a receive that needs no transmit costs no call at all:
 ///
-/// * `link` — the device's live link state. Without it a link change on an
-///   otherwise idle interface would go unseen until some unrelated transmit
-///   provoked a doorbell, and a bond failover keys on exactly that report.
+/// * `link_changed` — the driver saw the device's link change since it last
+///   reported the link. The stack must issue a [`NetChannelRequest::Service`]
+///   to learn it: the link travels only on the reply, which is ordered with
+///   every other report the stack asks for, so a notify that waited in the
+///   port can never set an older link over a newer one. Without the flag a
+///   change on an otherwise idle interface would go unseen until some
+///   unrelated transmit provoked a doorbell, and a bond failover keys on
+///   exactly that report.
 /// * `back_pressure` — the driver has masked its completion source and only
 ///   a [`NetChannelRequest::Service`] can release it. The stack must issue
 ///   one after draining, even with nothing to transmit, or the device stays
@@ -789,15 +793,16 @@ impl NetChannelRequest {
 ///   the last transmit happened to observe.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct NetChannelNotify {
-    /// The device's link state as the driver last observed it.
-    pub link: LinkState,
+    /// The device's link changed since the driver last reported it; a
+    /// `Service` reply carries the new one.
+    pub link_changed: bool,
     /// The driver masked its completion source; a `Service` is needed to
     /// release it.
     pub back_pressure: bool,
     /// Frames the device's receive pre-filter has shed since it was opened
     /// — the same cumulative counter
     /// [`ServiceReport::filtered`](super::net_ring::ServiceReport::filtered)
-    /// carries, so a consumer keeps the latest value it saw from either.
+    /// carries, so a consumer keeps the largest value it saw from either.
     pub filtered: u64,
 }
 
@@ -805,6 +810,10 @@ pub struct NetChannelNotify {
 const NOTIFY_BACK_PRESSURE: u8 = 1;
 /// Wire byte for a notify reporting none.
 const NOTIFY_FLOWING: u8 = 0;
+/// Wire byte for a notify reporting a link change.
+const NOTIFY_LINK_CHANGED: u8 = 1;
+/// Wire byte for a notify reporting none.
+const NOTIFY_LINK_STEADY: u8 = 0;
 
 impl NetChannelNotify {
     /// Encoded length of the notify frame.
@@ -816,9 +825,10 @@ impl NetChannelNotify {
         let mut out = [0u8; NET_CHANNEL_NOTIFY_LEN];
         put_u32(&mut out, 0, NET_CHANNEL_NOTIFY_MAGIC);
         put_u16(&mut out, 4, NET_CHANNEL_VERSION_V1);
-        out[6] = match self.link {
-            LinkState::Up => LINK_UP,
-            LinkState::Down => LINK_DOWN,
+        out[6] = if self.link_changed {
+            NOTIFY_LINK_CHANGED
+        } else {
+            NOTIFY_LINK_STEADY
         };
         out[7] = if self.back_pressure {
             NOTIFY_BACK_PRESSURE
@@ -836,7 +846,7 @@ impl NetChannelNotify {
     /// * [`Errno::BufferTooSmall`] — shorter than [`NET_CHANNEL_NOTIFY_LEN`].
     /// * [`Errno::BadMagic`] — wrong magic.
     /// * [`Errno::AbiVersionUnsupported`] — not [`NET_CHANNEL_VERSION_V1`].
-    /// * [`Errno::OutOfRange`] — an undefined link or flag byte.
+    /// * [`Errno::OutOfRange`] — an undefined flag byte.
     pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < NET_CHANNEL_NOTIFY_LEN {
             return Err(Errno::BufferTooSmall);
@@ -847,20 +857,21 @@ impl NetChannelNotify {
         if read_u16(bytes, 4) != NET_CHANNEL_VERSION_V1 {
             return Err(Errno::AbiVersionUnsupported);
         }
-        let link = match bytes[6] {
-            LINK_UP => LinkState::Up,
-            LINK_DOWN => LinkState::Down,
+        // An undefined flag byte is refused rather than guessed: reading one
+        // as "steady" or "flowing" would leave a link change unseen or a
+        // masked device wedged.
+        let link_changed = match bytes[6] {
+            NOTIFY_LINK_CHANGED => true,
+            NOTIFY_LINK_STEADY => false,
             _ => return Err(Errno::OutOfRange),
         };
-        // An undefined flag byte is refused rather than read as "flowing":
-        // guessing here would leave a masked device wedged.
         let back_pressure = match bytes[7] {
             NOTIFY_BACK_PRESSURE => true,
             NOTIFY_FLOWING => false,
             _ => return Err(Errno::OutOfRange),
         };
         Ok(Self {
-            link,
+            link_changed,
             back_pressure,
             filtered: read_u64(bytes, 8),
         })
@@ -1418,11 +1429,11 @@ mod tests {
 
     #[test]
     fn notify_round_trips_and_fails_closed() {
-        for link in [LinkState::Up, LinkState::Down] {
+        for link_changed in [false, true] {
             for back_pressure in [false, true] {
                 for filtered in [0, 1, u64::MAX] {
                     let notify = NetChannelNotify {
-                        link,
+                        link_changed,
                         back_pressure,
                         filtered,
                     };
@@ -1432,7 +1443,7 @@ mod tests {
             }
         }
         let frame = NetChannelNotify {
-            link: LinkState::Up,
+            link_changed: false,
             back_pressure: false,
             filtered: 0,
         }
@@ -1440,8 +1451,7 @@ mod tests {
         let mut bad = frame;
         bad[0] ^= 0xFF;
         assert_eq!(NetChannelNotify::decode(&bad), Err(Errno::BadMagic));
-        // An undefined link or flag byte is refused, never read as a
-        // default: guessing "flowing" would leave a masked device wedged.
+        // An undefined flag byte is refused, never read as a default.
         let mut bad = frame;
         bad[6] = 0xFF;
         assert_eq!(NetChannelNotify::decode(&bad), Err(Errno::OutOfRange));

@@ -1316,6 +1316,9 @@ impl<B: Block> FilesystemAttrsProvider for Iso9660<B> {
     }
 }
 
+/// A disc is never written, and its volume identifier is not served.
+impl<B: Block> tairix_abi::driver::filesystem::FilesystemLabel for Iso9660<B> {}
+
 impl<B: Block> FilesystemStats for Iso9660<B> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
         Ok(VolumeStats {

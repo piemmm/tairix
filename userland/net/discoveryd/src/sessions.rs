@@ -6,11 +6,14 @@
 //! answers queue. What clients hold is bounded: sessions and requests per
 //! account and sessions in all, the answers queued per session, per account
 //! and in all. A request whose updates find no room is told so once, after
-//! everything queued before the loss. A doorbell a full port refuses is
-//! owed, and the port watched for room only while one is owed there. An
-//! answer reaches its request, a call its session, an exit its owner's
-//! sessions, a retry the sessions owed a doorbell, and a collect the losses
-//! its session owes, by id or by list: nothing here is a scan of the table.
+//! everything queued before the loss. A doorbell its port refuses for room,
+//! or for this service's own IPC budget, is owed, and the port watched for
+//! room only while one is owed there; one the kernel had no memory for is
+//! owed with no port watched and offered again once a pause has run; one
+//! refused for good is given up on and counted. An answer reaches its
+//! request, a call its session, an exit its owner's sessions, a retry the
+//! sessions owed a doorbell, and a collect the losses its session owes, by
+//! id or by list: nothing here is a scan of the table.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -19,11 +22,13 @@ use tairix_abi::discovery_ipc::{
     CollectWriter, Entry, COLLECT_MIN_CAPACITY, ENTRY_MAX, REQUESTS_PER_ACCOUNT,
     SESSIONS_PER_ACCOUNT, SESSION_QUEUE_BYTES,
 };
+use tairix_abi::ipc::{MemoryPause, SendWait, Sent};
 use tairix_abi::net_ipc::IF_NAME_LEN;
 use tairix_abi::{Errno, ProcId};
 use tairix_collections::HashMap;
 use tairix_hash::BuildFastHash;
 use tairix_inline::ArrayVec;
+use tairix_log::Doubling;
 
 use crate::query::QUESTIONS_PER_REQUEST;
 
@@ -115,9 +120,8 @@ pub struct Session {
     /// A doorbell is outstanding: the client has not yet collected
     /// everything it was rung for.
     rung: bool,
-    /// Answers wait and the doorbell could not be posted for want of room in
-    /// the client's port.
-    ring_owed: bool,
+    /// Answers wait and the doorbell was refused for what this waits on.
+    ring_owed: Option<SendWait>,
     /// Where the session sits in [`Sessions::owed`], while it is listed.
     owed_at: Option<usize>,
 }
@@ -142,6 +146,12 @@ pub struct Sessions {
     owed: Vec<u32>,
     /// The client ports owed doorbells ring, for the owner to watch for room.
     rooms: Rooms,
+    /// Owed doorbells that wait on kernel memory.
+    starved: usize,
+    /// The pause after which those are offered again, once one has begun.
+    pause: MemoryPause,
+    /// Doorbells refused for good.
+    doorbells_lost: Doubling,
     next_id: u32,
     /// Bytes every queue holds together.
     queued: usize,
@@ -155,6 +165,9 @@ impl Default for Sessions {
             owners: HashMap::with_hasher(BuildFastHash::new()),
             owed: Vec::new(),
             rooms: Rooms::default(),
+            starved: 0,
+            pause: MemoryPause::new(),
+            doorbells_lost: Doubling::new(),
             next_id: 0,
             queued: 0,
         }
@@ -170,6 +183,7 @@ impl Sessions {
         let mut queued = 0;
         let mut accounts: BTreeMap<u32, (usize, usize, usize)> = BTreeMap::new();
         let mut owed_ports: BTreeMap<u64, u32> = BTreeMap::new();
+        let mut starved = 0;
         for (&id, session) in &self.table {
             assert_eq!(session.id, id);
             queued += session.queue.len();
@@ -190,9 +204,22 @@ impl Sessions {
             {
                 assert!(session.lost.contains(&request.id), "a loss owed unlisted");
             }
+            assert_eq!(
+                session.owed_at.is_some(),
+                session.ring_owed.is_some(),
+                "a doorbell owed and listed apart"
+            );
+            assert!(
+                !(session.rung && session.ring_owed.is_some()),
+                "rung and owed at once"
+            );
             if let Some(at) = session.owed_at {
                 assert_eq!(self.owed.get(at), Some(&id), "an owed session out of place");
-                *owed_ports.entry(session.port).or_default() += 1;
+            }
+            match session.ring_owed {
+                Some(SendWait::Room) => *owed_ports.entry(session.port).or_default() += 1,
+                Some(SendWait::Memory) => starved += 1,
+                None => {}
             }
             assert!(
                 self.owners
@@ -203,6 +230,11 @@ impl Sessions {
         }
         assert_eq!(self.queued, queued);
         assert!(self.queued <= QUEUED_BYTES_MAX);
+        assert_eq!(self.starved, starved, "starved doorbells miscounted");
+        assert!(
+            self.starved > 0 || self.pause.ends().is_none(),
+            "a retry timed for nothing"
+        );
         let recorded: BTreeMap<u32, (usize, usize, usize)> = self
             .accounts
             .iter()
@@ -302,7 +334,7 @@ impl Sessions {
             losses_owed: 0,
             lost: Vec::new(),
             rung: false,
-            ring_owed: false,
+            ring_owed: None,
             owed_at: None,
         };
         // Room for each was reserved above, so none of these can fail.
@@ -522,58 +554,72 @@ impl Sessions {
             .ring
     }
 
-    /// Record how posting a doorbell to session `id` went.
+    /// Record how posting a doorbell to session `id` went: one refused for
+    /// room, the service's budget or kernel memory is owed until it is
+    /// posted; one to a port that is gone is dropped, its owner's exit
+    /// closing the session; one refused for good is given up on and counted.
     pub fn rang(&mut self, id: u32, result: Result<(), Errno>) {
-        let Some(session) = self.table.get_mut(&id) else {
-            return;
-        };
-        if result == Err(Errno::WouldBlock) {
-            session.rung = false;
-            session.ring_owed = true;
-            if session.owed_at.is_none() {
-                // Room for every open session was reserved at its open, so
-                // neither of these allocates.
-                session.owed_at = Some(self.owed.len());
-                self.owed.push(id);
-                self.rooms.owe(session.port);
-            }
-        } else {
-            // Posted, or to a port that is gone and takes nothing — its
-            // owner's exit closes the session.
-            session.ring_owed = false;
-            unlist(&mut self.table, &mut self.owed, &mut self.rooms, id);
+        if self.table.contains_key(&id) {
+            self.settle(id, result);
         }
     }
 
     /// Bring the owner's watches on client ports in line with the doorbells
-    /// owed: `watch` a port once a doorbell is owed there, reporting whether
+    /// owed for room: `watch` a port once one is owed there, reporting whether
     /// the watch took, and `unwatch` it once none is. Only ports whose count
-    /// crossed zero since the last call are visited; a refused watch is tried
-    /// again at that port's next owed doorbell.
+    /// crossed zero since the last call are visited. The doorbells owed at a
+    /// port whose watch is refused wait on the memory retry instead, since
+    /// nothing else would wake them, and the watch is tried again once one is
+    /// owed there for room.
     pub fn sync_rooms(&mut self, watch: &mut dyn FnMut(u64) -> bool, unwatch: &mut dyn FnMut(u64)) {
-        self.rooms.sync(watch, unwatch);
-    }
-
-    /// Post every doorbell owed through `ring`, which is given the port and
-    /// the session; one refused again for want of room stays owed.
-    pub fn retry_owed(&mut self, ring: &mut dyn FnMut(u64, u32) -> Result<(), Errno>) {
-        // Backwards, so the entry an unlisting moves into a visited place has
-        // been visited too.
+        if !self.rooms.sync(watch, unwatch) {
+            return;
+        }
+        // Backwards, as `offer` goes; moving a doorbell to the retry keeps it
+        // listed in place.
         for at in (0..self.owed.len()).rev() {
-            let id = self.owed[at];
-            let still_owed = self.table.get_mut(&id).is_some_and(|session| {
-                if session.rung || !session.ring_owed {
-                    return session.ring_owed;
-                }
-                let blocked = ring(session.port, session.id) == Err(Errno::WouldBlock);
-                session.ring_owed = blocked;
-                session.rung = !blocked;
-                blocked
+            let Some(&id) = self.owed.get(at) else {
+                continue;
+            };
+            let unwatched = self.table.get(&id).is_some_and(|session| {
+                session.ring_owed == Some(SendWait::Room) && self.rooms.unwatched(session.port)
             });
-            if !still_owed {
-                unlist(&mut self.table, &mut self.owed, &mut self.rooms, id);
+            if unwatched {
+                self.owe(id, Some(SendWait::Memory));
             }
         }
+    }
+
+    /// Post every doorbell owed for room through `ring`, which is given the
+    /// port and the session: the room wake's work. One refused again stays
+    /// owed for whatever refused it this time.
+    pub fn retry_owed(&mut self, ring: &mut dyn FnMut(u64, u32) -> Result<(), Errno>) {
+        self.offer(SendWait::Room, ring);
+    }
+
+    /// The memory retry at `now`: once the pause begun for the doorbells the
+    /// kernel had no memory for has run, offer each again through `ring`, as
+    /// [`Self::retry_owed`] offers those owed for room; and while any is still
+    /// owed so, keep a pause running. Nothing reports kernel memory freeing,
+    /// so this is the only way such a doorbell is posted.
+    pub fn retry_starved(&mut self, now: u64, ring: &mut dyn FnMut(u64, u32) -> Result<(), Errno>) {
+        if self.pause.ran_out(|| now) {
+            self.offer(SendWait::Memory, ring);
+        }
+        self.pause.keep(self.starved > 0, || now);
+    }
+
+    /// When [`Self::retry_starved`] next offers a doorbell, while one waits
+    /// on kernel memory and its pause has begun.
+    #[must_use]
+    pub const fn retry_at(&self) -> Option<u64> {
+        self.pause.ends()
+    }
+
+    /// How many doorbells have been given up on, once the count has doubled
+    /// since it was last reported.
+    pub fn lost_to_report(&mut self) -> Option<u64> {
+        self.doorbells_lost.take_due()
     }
 
     /// The requests the account `uid` holds.
@@ -585,7 +631,7 @@ impl Sessions {
 
     /// Drop session `id` and everything counted for it.
     fn remove(&mut self, id: u32) -> Option<Session> {
-        unlist(&mut self.table, &mut self.owed, &mut self.rooms, id);
+        self.owe(id, None);
         let session = self.table.remove(&id)?;
         self.queued = self.queued.saturating_sub(session.queue.len());
         if let Some(account) = self.accounts.get_mut(&session.uid) {
@@ -605,6 +651,72 @@ impl Sessions {
             }
         }
         Some(session)
+    }
+
+    /// Offer through `ring` every doorbell owed for `wait`. Backwards, so the
+    /// entry an unlisting moves into a visited place has been visited too.
+    fn offer(&mut self, wait: SendWait, ring: &mut dyn FnMut(u64, u32) -> Result<(), Errno>) {
+        for at in (0..self.owed.len()).rev() {
+            let Some(&id) = self.owed.get(at) else {
+                continue;
+            };
+            let Some(port) = self
+                .table
+                .get(&id)
+                .filter(|session| session.ring_owed == Some(wait))
+                .map(|session| session.port)
+            else {
+                continue;
+            };
+            self.settle(id, ring(port, id));
+        }
+    }
+
+    /// Take `posted`, how offering session `id`'s doorbell went, into its
+    /// state: owed for what refused it, else answered for and so rung.
+    fn settle(&mut self, id: u32, posted: Result<(), Errno>) {
+        let wait = owed_after(posted, &mut self.doorbells_lost);
+        if let Some(session) = self.table.get_mut(&id) {
+            session.rung = wait.is_none();
+        }
+        self.owe(id, wait);
+    }
+
+    /// Bring session `id`'s doorbell to owing `wait`: listed while it is
+    /// owed, its port counted while it waits for room, and counted starved
+    /// while it waits for memory, the pause ending with the last.
+    fn owe(&mut self, id: u32, wait: Option<SendWait>) {
+        let Some(session) = self.table.get_mut(&id) else {
+            return;
+        };
+        let was = core::mem::replace(&mut session.ring_owed, wait);
+        let (port, listed) = (session.port, session.owed_at.is_some());
+        if was == wait {
+            return;
+        }
+        match was {
+            Some(SendWait::Room) => self.rooms.unowe(port),
+            Some(SendWait::Memory) => self.starved = self.starved.saturating_sub(1),
+            None => {}
+        }
+        match wait {
+            Some(SendWait::Room) => self.rooms.owe(port),
+            Some(SendWait::Memory) => self.starved += 1,
+            None => {}
+        }
+        if self.starved == 0 {
+            self.pause.stop();
+        }
+        if wait.is_none() {
+            unlist(&mut self.table, &mut self.owed, id);
+        } else if !listed {
+            // Room for every open session was reserved at its open, so
+            // neither of these allocates.
+            if let Some(session) = self.table.get_mut(&id) {
+                session.owed_at = Some(self.owed.len());
+            }
+            self.owed.push(id);
+        }
     }
 }
 
@@ -641,7 +753,7 @@ impl Session {
 
     /// Mark the session rung, returning its port when it was not already.
     fn ring(&mut self) -> Option<u64> {
-        if self.rung || self.ring_owed {
+        if self.rung || self.ring_owed.is_some() {
             return None;
         }
         self.rung = true;
@@ -737,6 +849,20 @@ fn peek_len(queue: &VecDeque<u8>) -> Option<usize> {
     Some(usize::from(u16::from_le_bytes([low, high])))
 }
 
+/// What a doorbell post's outcome leaves owed: nothing once it is answered
+/// for — posted, its port gone with its client, or refused for good and
+/// counted in `lost` — else what it waits for.
+fn owed_after(posted: Result<(), Errno>, lost: &mut Doubling) -> Option<SendWait> {
+    match Sent::of(posted) {
+        Sent::Waits(wait) => Some(wait),
+        Sent::Refused(_) => {
+            lost.note();
+            None
+        }
+        Sent::Taken | Sent::Gone => None,
+    }
+}
+
 /// How many owed doorbells ring each client port, and whether the owner
 /// watches the port for room.
 #[derive(Debug, Default)]
@@ -805,8 +931,11 @@ impl Rooms {
         }
     }
 
-    fn sync(&mut self, watch: &mut dyn FnMut(u64) -> bool, unwatch: &mut dyn FnMut(u64)) {
+    /// Watch and unwatch the ports changed since the last sync, answering
+    /// whether a watch was refused.
+    fn sync(&mut self, watch: &mut dyn FnMut(u64) -> bool, unwatch: &mut dyn FnMut(u64)) -> bool {
         let Self { ports, dirty } = self;
+        let mut refused = false;
         for port in dirty.drain(..) {
             let Ok(at) = ports.binary_search_by_key(&port, |room| room.port) else {
                 continue;
@@ -816,6 +945,7 @@ impl Rooms {
             if room.owed > 0 {
                 if !room.watched {
                     room.watched = watch(port);
+                    refused |= !room.watched;
                 }
             } else {
                 if room.watched {
@@ -824,6 +954,17 @@ impl Rooms {
                 ports.remove(at);
             }
         }
+        refused
+    }
+
+    /// Whether doorbells are owed at `port` with its room unwatched: after a
+    /// sync, only where its watch was refused.
+    fn unwatched(&self, port: u64) -> bool {
+        self.ports
+            .binary_search_by_key(&port, |room| room.port)
+            .ok()
+            .and_then(|at| self.ports.get(at))
+            .is_some_and(|room| room.owed > 0 && !room.watched)
     }
 }
 
@@ -837,19 +978,13 @@ fn mark(dirty: &mut Vec<u64>, room: &mut Room) {
 
 /// Take session `id` off the owed list in O(1), moving the last entry into
 /// its place and telling that entry's session where it went.
-fn unlist(
-    table: &mut HashMap<u32, Session, BuildFastHash>,
-    owed: &mut Vec<u32>,
-    rooms: &mut Rooms,
-    id: u32,
-) {
-    let Some((at, port)) = table
+fn unlist(table: &mut HashMap<u32, Session, BuildFastHash>, owed: &mut Vec<u32>, id: u32) {
+    let Some(at) = table
         .get_mut(&id)
-        .and_then(|session| Some((session.owed_at.take()?, session.port)))
+        .and_then(|session| session.owed_at.take())
     else {
         return;
     };
-    rooms.unowe(port);
     owed.swap_remove(at);
     if let Some(&moved) = owed.get(at) {
         if let Some(session) = table.get_mut(&moved) {

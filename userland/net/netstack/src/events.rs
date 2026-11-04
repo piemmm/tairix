@@ -166,6 +166,12 @@ pub const SERVICE_UNAVAILABLE: EventId = EventId(16_028);
 /// interfaces keep what they last read until the next change.
 pub const NOTICE_UNAVAILABLE: EventId = EventId(16_029);
 
+/// Deliveries to client ports were given up on: datagrams a port refused,
+/// which UDP may drop under congestion, and events a port refused for good.
+/// Recorded at `Warn` with the running total each time it doubles, so a flood
+/// of losses costs the log a record per doubling rather than one each.
+pub const DELIVERIES_LOST: EventId = EventId(16_030);
+
 /// The message [`SYN_COOKIES_ENGAGED`] carries. Named here because the
 /// connection-exhaustion QEMU vertical (`plans/NETWORK.md` N16b) gates its
 /// run on this text appearing in the serial transcript, so the wording is
@@ -182,10 +188,11 @@ mod tests {
         SOCKET_DENIED, SOCKET_LISTENING, SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
     };
     use super::{BOND_CONFIG_APPLIED, BOND_CONFIG_REFUSED, BOND_DOWN, BOND_FAILOVER, BOND_UP};
-    use super::{DHCP6_LEASE_ACQUIRED, DHCP6_LEASE_LOST, DHCP_LEASE_ACQUIRED, DHCP_LEASE_LOST};
     use super::{
-        MULTICAST_FILTER_REFUSED, NOTICE_UNAVAILABLE, SERVICE_UNAVAILABLE, SYN_COOKIES_ENGAGED,
+        DELIVERIES_LOST, MULTICAST_FILTER_REFUSED, NOTICE_UNAVAILABLE, SERVICE_UNAVAILABLE,
+        SYN_COOKIES_ENGAGED,
     };
+    use super::{DHCP6_LEASE_ACQUIRED, DHCP6_LEASE_LOST, DHCP_LEASE_ACQUIRED, DHCP_LEASE_LOST};
 
     #[test]
     fn ids_are_inside_reserved_range() {
@@ -219,6 +226,7 @@ mod tests {
             MULTICAST_FILTER_REFUSED,
             SERVICE_UNAVAILABLE,
             NOTICE_UNAVAILABLE,
+            DELIVERIES_LOST,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -256,6 +264,7 @@ mod tests {
             MULTICAST_FILTER_REFUSED.0,
             SERVICE_UNAVAILABLE.0,
             NOTICE_UNAVAILABLE.0,
+            DELIVERIES_LOST.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

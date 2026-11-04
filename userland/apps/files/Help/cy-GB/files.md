@@ -24,7 +24,12 @@ ddarllen, ac ni ddyfelir byth.
 Mae'r bwrdd gwaith yn cychwyn y rheolwr ffeiliau gyda'r sesiwn ac yn ei gadw
 ar y bar eiconau, ac nid yw byth yn gadael: mae dewislen ei slot yn rhestru
 eich lleoedd eich hun a phopeth sydd wedi'i osod, ac mae dewis un yn agor
-ffenestr yno; daw *Rhwydwaith* a *Gosodiadau…* yn olaf. Mae clic ar y slot yn
+ffenestr yno; daw *Rhwydwaith* a *Gosodiadau…* yn olaf. Mae cyfrol y gallwch
+ei thaflu allan — cof bach USB, cerdyn cof neu ddisg symudadwy arall, neu
+ddelwedd ddisg neu gyfran a osodwyd gennych — yn agor is-ddewislen sy'n dal
+*Taflu allan*, ac mae delwedd ddisg o'ch eiddo sydd â theitl yn dal *Teitl*
+hefyd: mae'n agor maes sy'n dal teitl y ddisg, yn barod i'w newid, ac mae
+pwyso `Return` yn ysgrifennu'r un newydd i'r ddisg. Mae clic ar y slot yn
 agor un yn y man y mae'r gosodiadau'n ei ddewis. Mae gofyn am ffolder sydd
 eisoes â ffenestr yn dod â'r ffenestr honno i'r blaen yn hytrach nag agor un
 arall. Nid oes rhes *Gadael* ar y ddewislen — mae'r rheolwr ffeiliau'n rhan
@@ -123,9 +128,15 @@ aros wedi'i gosod, a rhoddir cynnig arall ar ei dad-osod unwaith y gallai
 hwnnw fod wedi'i gollwng. Gall y gosodiadau gadw'r hyn rydych chi'n ei agor
 wedi'i osod yn lle hynny, nes i chi ei daflu allan neu i'ch sesiwn
 fewngofnodi ddod i ben. Mae *Taflu allan* yn
-tynnu cyfrol a osodwyd gennych, o'i heicon neu o'i rhes yn y bar lleoedd, y
-mae ei dewislen clic de ei hun yn dal *Agor* a *Taflu allan*; mae'ch
-ffenestri arni'n symud i `/Storage` yn gyntaf. Mae cyfrol a ddiflannodd —
+tynnu cyfrol a osodwyd gennych, neu ddisg symudadwy tra byddwch chi'n
+defnyddio'r cyfrifiadur ei hun, o'i heicon, o'i rhes yn y bar lleoedd, y mae
+ei dewislen clic de ei hun yn dal *Agor* a *Taflu allan*, neu o ddewislen
+slot y bar eiconau; mae'ch ffenestri arni'n symud i `/Storage` yn gyntaf. Ni
+chaiff disg symudadwy sydd â ffeil arni'n dal ar agor ei thaflu allan, ac
+mae'n dweud hynny. Pan na chewch chi daflu disg symudadwy allan — nid chi
+yw'r person wrth y cyfrifiadur — mae'r bwrdd gwaith yn gofyn am enw a
+chyfrinair gweinyddwr, ac yn ei thaflu allan ar air y gweinyddwr. Mae cyfrol
+a ddiflannodd —
 ei disg wedi'i thynnu allan, neu ei gweinydd wedi'i golli — cyn i bopeth a
 ysgrifennwyd gennych iddi gael ei gadw yn gadael y bar ond yn cadw ei heicon
 yn `/Storage`, a chollir yr hyn na chafodd ei gadw; mae *Taflu allan* ar

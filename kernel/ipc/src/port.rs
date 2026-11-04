@@ -27,10 +27,13 @@
 extern crate alloc;
 
 use alloc::collections::{TryReserveError, VecDeque};
+use alloc::sync::Arc;
 
 use tairix_abi::ipc::{IPC_MESSAGE_MAX_PAYLOAD_LEN, IPC_SENDER_DEPTH_MAX};
 use tairix_abi::{Errno, LimitKind, Origin, ProcId};
 use tairix_caps::CapabilitySet;
+use tairix_collections::HashSet;
+use tairix_hash::BuildFastHash;
 use tairix_kernel_mem::SensitiveBuffer;
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::Charge;
@@ -42,6 +45,7 @@ use crate::lanes::{
     lane_cost, KeepRoom, Lane, Lanes, Opened, RoomWaiters, RoomWake, SPARE_LANES, SPARE_LANE_ITEMS,
 };
 use crate::loom_compat::{AtomicU32, Ordering};
+use crate::registry::SenderIndex;
 
 /// Why a send was refused: the sender lacks the port's send capabilities.
 const SEND_DENIED_CAPABILITY: Field<'static> = Field {
@@ -111,15 +115,35 @@ enum Refused {
     NotAdmitted { first: bool },
     /// The sender's own lane is at the per-sender depth.
     Full,
-    /// Paying for a lane would carry the sender past its own limit.
+    /// Paying for a lane, or for its growth, would carry the sender past its
+    /// own limit.
     OverLimit,
     /// The room for the message could not be allocated.
     NoMemory,
 }
 
+/// Whether a send from one sender would find room at a port, and what it
+/// waits for when it would not.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Room {
+    /// A send of the port's largest message would be admitted — or the
+    /// sender holds nothing, so no release could make more room and its send
+    /// answers.
+    Free,
+    /// The sender's lane holds the per-sender depth: a receive there frees a
+    /// slot.
+    Full,
+    /// The message, with any lane the send opens or grows, would carry the
+    /// sender past its `ipc-queue-bytes` limit: a release of what it holds
+    /// anywhere frees it.
+    OverBudget,
+}
+
 /// One sending process instance's messages at a port, oldest first.
 struct PortLane {
     messages: VecDeque<Message>,
+    /// What its messages are charged, beyond the lane's storage.
+    charged: u64,
     /// What the sender pays for the lane's storage; `None` while it is a spare
     /// the owner holds.
     paid: Option<Charge>,
@@ -129,12 +153,18 @@ struct PortLane {
 }
 
 impl PortLane {
+    /// How many messages a lane is made with room for.
+    fn first_room(per_sender: usize) -> usize {
+        per_sender.min(SPARE_LANE_ITEMS)
+    }
+
     /// A lane with room for the first few messages, made outside any lock.
     fn fresh(per_sender: usize) -> Result<Self, TryReserveError> {
         let mut messages = VecDeque::new();
-        messages.try_reserve_exact(per_sender.min(SPARE_LANE_ITEMS))?;
+        messages.try_reserve_exact(Self::first_room(per_sender))?;
         Ok(Self {
             messages,
+            charged: 0,
             paid: None,
             ended: false,
         })
@@ -147,34 +177,58 @@ impl PortLane {
 
     /// What the lane holds: its storage and its messages' payloads.
     fn held(&self) -> u64 {
-        self.messages
-            .iter()
-            .map(|message| Port::message_charge(message.payload.len()))
-            .fold(self.storage(), u64::saturating_add)
+        self.storage().saturating_add(self.charged)
     }
 
-    /// Make room for one more message, growing to at most `per_sender` and
-    /// charging the sender for what that took.
-    fn reserve_one(&mut self, per_sender: usize) -> Result<(), Errno> {
-        if self.messages.len() < self.messages.capacity() {
+    /// The capacity the lane grows to, at most `per_sender`, before it takes
+    /// one more message, and what the growth charges the sender; `None` while
+    /// it has room.
+    fn growth(&self, per_sender: usize) -> Option<(usize, u64)> {
+        (self.messages.len() >= self.messages.capacity()).then(|| {
+            let target = crate::grown_capacity(
+                self.messages.capacity(),
+                self.messages.len() + 1,
+                per_sender,
+            );
+            (target, lane_bytes(target).saturating_sub(self.storage()))
+        })
+    }
+
+    /// Make room for one more message. The sender pays for the growth under
+    /// `limit` before it is taken, so its limit bounds the lane as it bounds
+    /// the messages.
+    fn reserve_one(&mut self, per_sender: usize, limit: u64) -> Result<(), Refused> {
+        let Some((target, grown)) = self.growth(per_sender) else {
             return Ok(());
-        }
-        let before = self.storage();
-        let target = self
+        };
+        let Some(paid) = self.paid.as_mut() else {
+            return Err(Refused::NoMemory);
+        };
+        paid.grow(grown, limit).map_err(|_| Refused::OverLimit)?;
+        if self
             .messages
-            .capacity()
-            .saturating_mul(2)
-            .clamp(1, per_sender);
-        self.messages
-            .try_reserve_exact(target.saturating_sub(self.messages.len()))
-            .map_err(|_| Errno::OutOfMemory)?;
-        // Held whatever the limit says, because the memory is real; the
-        // charge taken for each message is what refuses a sender at its limit.
-        let grown = self.storage().saturating_sub(before);
-        if let Some(paid) = self.paid.as_mut().filter(|_| grown > 0) {
-            let _ = paid.grow(grown, u64::MAX);
+            .try_reserve_exact(target - self.messages.len())
+            .is_err()
+        {
+            paid.shrink(grown);
+            return Err(Refused::NoMemory);
         }
         Ok(())
+    }
+
+    /// Queue `message` behind the lane's others.
+    fn push(&mut self, message: Message) {
+        let charge = Port::message_charge(message.payload.len());
+        self.charged = self.charged.saturating_add(charge);
+        self.messages.push_back(message);
+    }
+
+    /// Take the lane's oldest message.
+    fn pop(&mut self) -> Option<Message> {
+        let message = self.messages.pop_front()?;
+        let charge = Port::message_charge(message.payload.len());
+        self.charged = self.charged.saturating_sub(charge);
+        Some(message)
     }
 }
 
@@ -227,6 +281,17 @@ struct Mailbox {
     /// the first is, so a sender the port will never take cannot flood the
     /// audit trail through it; the rest are counted into its destruction.
     refusal_recorded: bool,
+    /// The senders noted in the registry's index as using the port, so only a
+    /// sender's first use takes the index's lock.
+    noted: Noted,
+}
+
+/// Sending instances, which the kernel mints and no sender chooses, so the
+/// fast unkeyed hash is safe.
+type Noted = HashSet<ProcId, BuildFastHash>;
+
+const fn noted() -> Noted {
+    HashSet::with_hasher(BuildFastHash::new())
 }
 
 /// One end of an IPC message channel.
@@ -261,6 +326,9 @@ pub struct Port {
     /// mailbox rather than in a registry keyed by endpoint so occupancy and
     /// the parties waiting on it cannot drift apart.
     room_waiters: tairix_sync::SpinLock<RoomWaiters<ProcId>>,
+    /// The registry's index of the ports each sender uses, once the port is
+    /// registered.
+    index: Option<Arc<SenderIndex>>,
     /// What the owner is charged for the port's bookkeeping, returned when the
     /// port is dropped.
     _queue_charge: Charge,
@@ -283,23 +351,36 @@ impl Port {
     }
 
     /// The room a port keeps for the messages of senders that have ended: one
-    /// full lane of the largest messages. A message outlives its sender, at its
-    /// receiver's expense, up to this much.
+    /// full lane of the largest messages, as they are charged. A message
+    /// outlives its sender, at its receiver's expense, up to this much.
     #[must_use]
     pub fn ended_room(max_payload: u32, per_sender: usize) -> u64 {
         lane_bytes(per_sender).saturating_add(
             u64::try_from(per_sender)
                 .unwrap_or(u64::MAX)
-                .saturating_mul(u64::from(max_payload)),
+                .saturating_mul(Self::largest_charge(max_payload)),
         )
     }
 
     /// What one queued message of `len` payload bytes costs its sender against
     /// its own `ipc-queue-bytes` limit until the owner takes it, beyond its
-    /// lane's storage: the payload.
+    /// lane's storage: the payload, and never less than the message's own
+    /// record, so the limit refuses an empty message as it does any other.
     #[must_use]
     pub fn message_charge(len: usize) -> u64 {
-        u64::try_from(len).unwrap_or(u64::MAX)
+        u64::try_from(len.max(size_of::<Message>())).unwrap_or(u64::MAX)
+    }
+
+    /// What a message of the largest payload `max_payload` allows costs its
+    /// sender.
+    fn largest_charge(max_payload: u32) -> u64 {
+        Self::message_charge(usize::try_from(max_payload).unwrap_or(usize::MAX))
+    }
+
+    /// What a sender with no lane here pays for the one its send opens, a
+    /// spare or a fresh one alike.
+    fn opening_charge(&self) -> u64 {
+        lane_bytes(PortLane::first_room(self.per_sender))
     }
 
     /// Create a new capability-checked port.
@@ -418,8 +499,10 @@ impl Port {
                 admitted: None,
                 refused: 0,
                 refusal_recorded: false,
+                noted: noted(),
             }),
             room_waiters: tairix_sync::SpinLock::new(RoomWaiters::new()),
+            index: None,
             _queue_charge: queue_charge,
         })
     }
@@ -445,29 +528,67 @@ impl Port {
         self.mailbox.lock().lanes.has_turn()
     }
 
-    /// `true` when `sender`'s lane is below the per-sender depth, so a send
-    /// from it would not be refused for want of room — the non-consuming
-    /// readiness peek a wait-set member observing this port's room uses; the
-    /// woken sender's own [`Self::send`] takes the slot.
+    /// Whether a send of the port's largest message from `sender` would be
+    /// admitted under `limit`, its `ipc-queue-bytes` limit: its lane here below
+    /// the per-sender depth, and all it holds anywhere, with that message and
+    /// any lane the send opens or grows, within the limit. A sender holding
+    /// nothing has room whatever it is short of: waiting could never end, so
+    /// its send answers. The non-consuming readiness peek a wait-set member
+    /// observing this port's room uses; the woken sender's own [`Self::send`]
+    /// takes the slot.
     #[must_use]
-    pub fn has_room_for(&self, sender: ProcId) -> bool {
-        self.mailbox
-            .lock()
-            .lanes
-            .get(sender)
-            .is_none_or(|lane| lane.messages.len() < self.per_sender)
+    pub fn room_for(&self, sender: &TaskCapabilities, limit: u64) -> Room {
+        let q = self.mailbox.lock();
+        let lane = match q.lanes.get(sender.proc_id()) {
+            Some(lane) if lane.messages.len() >= self.per_sender => return Room::Full,
+            Some(lane) => lane.growth(self.per_sender).map_or(0, |(_, cost)| cost),
+            None => self.opening_charge(),
+        };
+        drop(q);
+        let held = sender.charges().held(LimitKind::IpcQueueBytes);
+        let needed = held
+            .saturating_add(Self::largest_charge(self.max_payload))
+            .saturating_add(lane);
+        if needed <= limit || held == 0 {
+            Room::Free
+        } else {
+            Room::OverBudget
+        }
     }
 
     /// Record `task` as parked for room in `sender`'s lane, so the next
-    /// [`Self::recv`] that frees a slot there names it. Idempotent: a task
-    /// that re-enters its wait registers once.
+    /// [`Self::recv`] that frees a slot there names it, and note `sender`'s
+    /// use of the port so its end forgets the wait. Idempotent: a task that
+    /// re-enters its wait registers once.
     ///
     /// # Errors
     ///
     /// [`Errno::OutOfMemory`] when the record cannot be kept: the task must
     /// then not park, since nothing would wake it.
     pub fn watch_room(&self, task: u64, sender: ProcId) -> Result<(), Errno> {
+        self.note(&mut self.mailbox.lock(), sender)?;
         self.room_waiters.lock().watch(task, sender)
+    }
+
+    /// Note each sender that uses the port in the registry's `index`.
+    pub(crate) fn note_senders_in(&mut self, index: Arc<SenderIndex>) {
+        self.index = Some(index);
+    }
+
+    /// Note `sender`'s use of the port in the registry's index, once. A port
+    /// that is gone notes no one: its destruction already forgot its senders.
+    fn note(&self, q: &mut Mailbox, sender: ProcId) -> Result<(), Errno> {
+        let Some(index) = &self.index else {
+            return Ok(());
+        };
+        if self.is_closed() || q.noted.contains(&sender) {
+            return Ok(());
+        }
+        q.noted.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        index.note(sender, self.id)?;
+        // Reserved above, so this cannot fail.
+        let _ = q.noted.try_insert(sender);
+        Ok(())
     }
 
     /// Forget `task`'s room registration as `sender` — its wait ended, so a
@@ -538,12 +659,18 @@ impl Port {
         // sees `CLOSED`, and Acquire on the reverse to pair with the
         // load on the send fast path.
         self.state.store(state::CLOSED, Ordering::Release);
-        let (retired, drained, refused) = {
+        let (retired, drained, refused, users) = {
             let mut q = self.mailbox.lock();
             let drained = core::mem::take(&mut q.queued);
-            (q.lanes.take_all(), drained, q.refused)
+            let users = core::mem::replace(&mut q.noted, noted());
+            (q.lanes.take_all(), drained, q.refused, users)
         };
         drop(retired);
+        if let Some(index) = &self.index {
+            for &sender in &users {
+                drop(index.forget(sender, self.id));
+            }
+        }
         let mut id_buf = [0u8; 16];
         let mut drained_buf = [0u8; 12];
         let mut refused_buf = [0u8; 20];
@@ -580,8 +707,12 @@ impl Port {
     ///    otherwise [`Errno::PermissionDenied`] +
     ///    [`AuditEvent::MessageSendDenied`].
     /// 3. **Size check.** Payload bytes must be `<= max_payload`,
-    ///    bounded again by [`IPC_MESSAGE_MAX_PAYLOAD_LEN`]; otherwise
-    ///    [`Errno::MessageTooLarge`] + [`AuditEvent::MessageTooLarge`].
+    ///    bounded again by [`IPC_MESSAGE_MAX_PAYLOAD_LEN`], and the message,
+    ///    with the lane a sender holding nothing opens for it, within
+    ///    `sender_limit`; otherwise [`Errno::MessageTooLarge`] +
+    ///    [`AuditEvent::MessageTooLarge`]. Either way no release of what the
+    ///    sender holds could admit it, so it is not the retryable refusal the
+    ///    charge below gives.
     /// 4. **Charge.** The message's [`message_charge`](Self::message_charge)
     ///    is taken from the sender's own `ipc-queue-bytes` budget under
     ///    `sender_limit`; otherwise [`Errno::LimitExceeded`] +
@@ -597,6 +728,9 @@ impl Port {
     ///    receiver has not taken that sender's earlier messages yet, the
     ///    same retryable signal [`Self::recv`]'s empty-mailbox case would
     ///    report in reverse.
+    ///
+    /// The sender's lane grows with its messages, the growth charged under
+    /// `sender_limit` like each message and refused past it the same way.
     ///
     /// On success the payload is copied into a kernel-owned
     /// [`SensitiveBuffer`] — wiped when the message is released, however the
@@ -656,7 +790,10 @@ impl Port {
         //    saturates `usize` on a 32-bit target (wasm32) still
         //    rejects oversize payloads correctly.
         let effective_max = u64::from(self.max_payload).min(u64::from(IPC_MESSAGE_MAX_PAYLOAD_LEN));
-        if payload.len() as u64 > effective_max {
+        let unaffordable = Self::message_charge(payload.len())
+            .saturating_add(self.opening_charge())
+            > sender_limit;
+        if payload.len() as u64 > effective_max || unaffordable {
             record(
                 audit,
                 AuditEvent::MessageTooLarge,
@@ -782,8 +919,11 @@ impl Port {
                 let first = !core::mem::replace(&mut q.refusal_recorded, true);
                 break Err(Refused::NotAdmitted { first });
             }
-            match q.lanes.open(instance, &mut fresh) {
-                Ok(Opened::Ready) => {}
+            // A sender is noted as its lane opens, so one that held a lane
+            // already is noted.
+            let made = match q.lanes.open(instance, &mut fresh) {
+                Ok(Opened::Held) => false,
+                Ok(Opened::Made) => true,
                 Ok(Opened::NeedsFresh) => {
                     drop(q);
                     match self.fresh_lane(sender, sender_limit) {
@@ -793,7 +933,7 @@ impl Port {
                     continue;
                 }
                 Err(_) => break Err(Refused::NoMemory),
-            }
+            };
             let per_sender = self.per_sender;
             let admitted = match q.lanes.get_mut(instance) {
                 None => Err(Refused::NoMemory),
@@ -807,9 +947,14 @@ impl Port {
             }
             .and_then(|()| match q.lanes.get_mut(instance) {
                 Some(lane) if lane.messages.len() >= per_sender => Err(Refused::Full),
-                Some(lane) => lane.reserve_one(per_sender).map_err(|_| Refused::NoMemory),
+                Some(lane) => lane.reserve_one(per_sender, sender_limit),
                 None => Err(Refused::NoMemory),
             });
+            let admitted = if made {
+                admitted.and_then(|()| self.note(&mut q, instance).map_err(|_| Refused::NoMemory))
+            } else {
+                admitted
+            };
             if let Err(refused) = admitted {
                 let idle = q.lanes.retire_if_idle(instance);
                 drop(q);
@@ -822,7 +967,7 @@ impl Port {
             else {
                 break Err(Refused::NoMemory);
             };
-            lane.messages.push_back(message);
+            lane.push(message);
             mailbox.queued += 1;
             break Ok(());
         };
@@ -897,7 +1042,7 @@ impl Port {
             Ok(value) => value,
             Err(err) => return Some(Err(err)),
         };
-        let message = lane.messages.pop_front()?;
+        let message = lane.pop()?;
         let still_waiting = !lane.messages.is_empty();
         if lane.ended {
             // An ended sender's lane retires once drained; what it held is
@@ -982,8 +1127,10 @@ impl Port {
                 lanes,
                 queued,
                 ended,
+                noted,
                 ..
             } = &mut *q;
+            noted.remove(&sender);
             let held = lanes
                 .get(sender)
                 .filter(|lane| !lane.ended)
@@ -1255,6 +1402,147 @@ mod tests {
             port.send(&other, b"mine", limit, &sink),
             Ok(()),
             "one sender's budget is never another's"
+        );
+    }
+
+    /// A message the sender's limit could not hold were it holding nothing is
+    /// too large rather than over budget: no release of what it holds could
+    /// admit it, so a wait for room would never end. It is charged nothing.
+    #[test]
+    fn a_message_no_holding_could_afford_is_too_large() {
+        let (sink, port) = open_port();
+        let from = sender(7);
+        let affordable = lane_bytes(DEPTH.min(SPARE_LANE_ITEMS)) + Port::message_charge(4);
+        assert_eq!(
+            port.send(&from, b"four", affordable - 1, &sink),
+            Err(Errno::MessageTooLarge)
+        );
+        assert_eq!(from.charges().held(LimitKind::IpcQueueBytes), 0);
+        assert_eq!(port.len(), 0);
+        assert!(sink.ids().contains(&AuditEvent::MessageTooLarge.id().0));
+        assert_eq!(port.send(&from, b"four", affordable, &sink), Ok(()));
+    }
+
+    /// A sender at its limit is refused even an empty message, and its lane
+    /// grows only as far as it can pay: what it holds never passes its limit.
+    #[test]
+    fn a_senders_limit_bounds_empty_messages_and_its_lane_alike() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let port = Port::create(
+            EndpointId(0x16),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            16,
+            2 * SPARE_LANE_ITEMS,
+            RLIMIT_INFINITY,
+            &sink,
+        )
+        .expect("bound");
+        let empty = Port::message_charge(0);
+        assert!(empty > 0, "an empty message is not free");
+        let lane = lane_bytes(SPARE_LANE_ITEMS);
+        let made = u64::try_from(SPARE_LANE_ITEMS).expect("small");
+        let exact = sender(7);
+        let filled = lane + made * empty;
+        for _ in 0..SPARE_LANE_ITEMS {
+            assert_eq!(port.send(&exact, b"", filled, &sink), Ok(()));
+        }
+        assert_eq!(
+            port.send(&exact, b"", filled, &sink),
+            Err(Errno::LimitExceeded),
+            "at its limit, not even an empty message"
+        );
+        let roomy = sender(8);
+        let limit = filled + empty;
+        for _ in 0..SPARE_LANE_ITEMS {
+            assert_eq!(port.send(&roomy, b"", limit, &sink), Ok(()));
+        }
+        assert_eq!(
+            port.send(&roomy, b"", limit, &sink),
+            Err(Errno::LimitExceeded),
+            "growing the lane would carry it past its limit"
+        );
+        assert!(roomy.charges().held(LimitKind::IpcQueueBytes) <= limit);
+        assert_eq!(port.len(), 2 * SPARE_LANE_ITEMS);
+        assert!(sink
+            .ids()
+            .contains(&AuditEvent::IpcSenderLimitReached.id().0));
+    }
+
+    /// Room counts all the sender holds, anywhere, and what its next message
+    /// needs — the port's largest, and the lane the send opens or grows —
+    /// against its limit, and names what a send would wait for.
+    #[test]
+    fn room_counts_all_the_sender_holds_and_what_its_next_message_needs() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let port = Port::create(
+            EndpointId(0x17),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            32,
+            2 * SPARE_LANE_ITEMS,
+            RLIMIT_INFINITY,
+            &sink,
+        )
+        .expect("bound");
+        let from = sender(7);
+        let held = || from.charges().held(LimitKind::IpcQueueBytes);
+        let largest = Port::largest_charge(port.max_payload());
+        let opening = lane_bytes(SPARE_LANE_ITEMS);
+        assert_eq!(
+            port.room_for(&from, 0),
+            Room::Free,
+            "holding nothing, no release could make room, so the send answers"
+        );
+        let other = from
+            .charges()
+            .charge(LimitKind::IpcQueueBytes, 1, RLIMIT_INFINITY)
+            .expect("held elsewhere");
+        assert_eq!(port.room_for(&from, 1 + opening + largest), Room::Free);
+        assert_eq!(
+            port.room_for(&from, opening + largest),
+            Room::OverBudget,
+            "with no lane here, the lane it would open is paid for too"
+        );
+        drop(other);
+        send(&port, &from, b"x", &sink).expect("fits");
+        assert_eq!(port.room_for(&from, held() + largest), Room::Free);
+        assert_eq!(
+            port.room_for(&from, held() + largest - 1),
+            Room::OverBudget,
+            "one byte short of the largest"
+        );
+        let elsewhere = from
+            .charges()
+            .charge(LimitKind::IpcQueueBytes, 1 << 20, RLIMIT_INFINITY)
+            .expect("held elsewhere");
+        assert_eq!(
+            port.room_for(&from, held() - elsewhere.units() + largest),
+            Room::OverBudget,
+            "what it holds elsewhere is counted"
+        );
+        drop(elsewhere);
+        for _ in 1..SPARE_LANE_ITEMS {
+            send(&port, &from, b"x", &sink).expect("fits");
+        }
+        let grown = lane_bytes(2 * SPARE_LANE_ITEMS) - lane_bytes(SPARE_LANE_ITEMS);
+        assert_eq!(
+            port.room_for(&from, held() + largest),
+            Room::OverBudget,
+            "a full lane grows to take the next"
+        );
+        assert_eq!(port.room_for(&from, held() + largest + grown), Room::Free);
+        for _ in 0..SPARE_LANE_ITEMS {
+            send(&port, &from, b"x", &sink).expect("fits");
+        }
+        assert_eq!(
+            port.room_for(&from, u64::MAX),
+            Room::Full,
+            "at its depth, whatever its budget"
         );
     }
 
@@ -1531,20 +1819,33 @@ mod tests {
         let (sink, port) = open_port();
         let full = sender(7);
         let idle = sender(9);
-        assert!(port.has_room_for(instance(7)), "an empty lane has room");
+        assert_eq!(
+            port.room_for(&full, u64::MAX),
+            Room::Free,
+            "an empty lane has room"
+        );
         for _ in 0..DEPTH {
             send(&port, &full, b"x", &sink).expect("fits");
         }
-        assert!(!port.has_room_for(instance(7)), "a full lane has none");
-        assert!(
-            port.has_room_for(instance(9)),
+        assert_eq!(
+            port.room_for(&full, u64::MAX),
+            Room::Full,
+            "a full lane has none"
+        );
+        assert_eq!(
+            port.room_for(&idle, u64::MAX),
+            Room::Free,
             "another sender's room is untouched"
         );
         assert_eq!(send(&port, &full, b"x", &sink), Err(Errno::WouldBlock));
         send(&port, &idle, b"y", &sink).expect("its own room");
         let taken = port.recv().expect("drains one");
         assert_eq!(taken.origin.proc_id(), instance(7));
-        assert!(port.has_room_for(instance(7)), "one drain frees one slot");
+        assert_eq!(
+            port.room_for(&full, u64::MAX),
+            Room::Free,
+            "one drain frees one slot"
+        );
         send(&port, &full, b"x", &sink).expect("the freed slot");
     }
 

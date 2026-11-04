@@ -1,6 +1,6 @@
-//! Unit tests for the in-window settings sheet.
+//! Unit tests for the settings sheet.
 //!
-//! Every geometric probe reads the sheet's *own* layout (`panel_bounds`,
+//! Every geometric probe reads the sheet's *own* layout (`content_rect`,
 //! `bands`, `resolve`, `split_row`, `footer_split`) rather than restating it,
 //! so a test can never assert against a rectangle the sheet does not actually
 //! draw or hit-test.
@@ -20,7 +20,7 @@ use crate::scheme::Scheme;
 use tairix_colour::Rgb;
 
 use super::{
-    footer_split, panel_bounds, split_row, Focus, Layout, Settings, SheetOutcome, Style,
+    content_rect, footer_split, split_row, Focus, Layout, Settings, SheetOutcome, Style,
     EFFECTS_TAB,
 };
 
@@ -64,11 +64,7 @@ fn bands(
     sheet: &Settings,
     viewport: Rect,
 ) -> (Option<Rect>, Option<Rect>, Option<Rect>, Option<Rect>) {
-    let bounds = panel_bounds(viewport, SCALE);
-    let content = sheet
-        .panel
-        .content_rect(bounds, SCALE, &theme())
-        .expect("the panel has a content rectangle");
+    let content = content_rect(viewport, SCALE, &theme()).expect("the sheet has content");
     sheet.bands(content, SCALE, &theme())
 }
 
@@ -83,7 +79,7 @@ fn resolved(sheet: &Settings, viewport: Rect) -> (Layout, ScrollModel) {
     let theme = theme();
     let font = Style::new(SCALE, &theme).font;
     let (layout, model) = sheet.resolve(viewport, SCALE, &theme, font);
-    (layout.expect("the panel has a content rectangle"), model)
+    (layout.expect("the sheet has content"), model)
 }
 
 /// How far the body is scrolled.
@@ -306,17 +302,21 @@ fn renders_under_the_light_theme_too() {
     assert!(surface.pixels().iter().any(|pixel| pixel.a > 0));
 }
 
+/// The sheet is its window's whole client: an opaque ground under content
+/// inset by the theme's pad, however large the window.
 #[test]
-fn the_panel_is_inset_from_a_viewport_larger_than_it() {
+fn the_sheet_fills_its_window() {
+    let theme = theme();
+    let sheet = sheet();
     let wide = Rect::new(0, 0, 1280, 900);
-    let bounds = panel_bounds(wide, SCALE);
+    let mut surface = surface(wide);
+    sheet.render(&mut surface, wide, SCALE, &theme);
     assert!(
-        bounds.left() > wide.left(),
-        "the panel leaves a margin to click out of"
+        surface.pixels().iter().all(|pixel| pixel.a == 0xFF),
+        "no pixel of the window shows through"
     );
-    assert!(bounds.right() < wide.right());
-    assert!(bounds.top() > wide.top());
-    assert!(bounds.bottom() < wide.bottom());
+    let pad = SCALE.scale_length(theme.metrics().control_inset);
+    assert_eq!(content_rect(wide, SCALE, &theme), Some(wide.inset(pad)));
 }
 
 // --- Appearance: the scheme choice ----------------------------------------
@@ -855,24 +855,16 @@ fn escape_dismisses_even_when_the_viewport_cannot_draw_the_sheet() {
     );
 }
 
+/// The window is modeless: only *Done* and Escape close it, so no press in
+/// it — the pad at its very corner of a window far larger than the sheet
+/// needs included — does.
 #[test]
-fn a_press_outside_the_panel_dismisses() {
-    let mut sheet = sheet();
-    let bounds = panel_bounds(CLIENT, SCALE);
-    let outside = Point::new(bounds.left() - 1, bounds.top() - 1);
-    assert!(!bounds.contains(outside));
-    assert_eq!(
-        press_at(&mut sheet, CLIENT, outside),
-        SheetOutcome::Dismissed
-    );
-}
-
-#[test]
-fn a_press_inside_the_panel_does_not_dismiss() {
-    let mut sheet = sheet();
-    let bounds = panel_bounds(CLIENT, SCALE);
-    let outcome = press_at(&mut sheet, CLIENT, centre(bounds));
-    assert_ne!(outcome, SheetOutcome::Dismissed);
+fn no_press_in_the_window_closes_it() {
+    let wide = Rect::new(0, 0, 1280, 900);
+    for at in [Point::new(0, 0), centre(wide)] {
+        let mut sheet = sheet();
+        assert_ne!(press_at(&mut sheet, wide, at), SheetOutcome::Dismissed);
+    }
 }
 
 // --- The keyboard-only path -------------------------------------------------

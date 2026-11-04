@@ -1748,9 +1748,12 @@ fn exercise_clients(rng: &mut Prng, noise: &[u8], reached: &mut Reached) {
     let mut crowd = Crowd::new(rng);
     crowd.name_a_computer(rng, reached);
     for _ in 0..96 {
-        crowd.world.0.borrow_mut().ring = match rng.below(4) {
-            0 => Some(Errno::WouldBlock),
-            1 => Some(Errno::NotFound),
+        crowd.world.0.borrow_mut().ring = match rng.below(8) {
+            0 | 1 => Some(Errno::WouldBlock),
+            2 => Some(Errno::LimitExceeded),
+            3 => Some(Errno::OutOfMemory),
+            4 => Some(Errno::NotFound),
+            5 => Some(Errno::MessageTooLarge),
             _ => None,
         };
         let who = rng.below(crowd.clients.len());

@@ -20,6 +20,7 @@ use super::{Interfaces, Note, Seam, UrbBuffer, ENDPOINT_DEPTH};
 use crate::domain::{ControllerDomainEvent, ControllerHealth, CONTROLLER_GRACE_NS};
 use crate::serve::UrbReply;
 use tairix_abi::hwtree::{HwResourceKind, HW_NODE_ROOT};
+use tairix_abi::ipc::IPC_MEMORY_RETRY_NS;
 use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::usb_urb::{
     decode_completion, iso_notify_endpoint_for, IsoGrant, IsoLayout, IsoNotify, IsoStartParams,
@@ -69,6 +70,12 @@ enum Step {
         port: u64,
         notice: IsoNotify,
     },
+    NotifyRefused {
+        port: u64,
+        notice: IsoNotify,
+    },
+    WatchRoom(u64),
+    UnwatchRoom(u64),
     Reset,
 }
 
@@ -284,8 +291,10 @@ struct Refusals {
     emits: bool,
     /// What a delegation answers, when refused.
     grant: Option<Errno>,
-    /// Ports whose notifications the kernel refuses.
-    notices: Vec<u64>,
+    /// Ports whose notices the kernel refuses, and how.
+    notices: Vec<(u64, Errno)>,
+    /// Ports whose room cannot be watched.
+    rooms: Vec<u64>,
 }
 
 #[derive(Default)]
@@ -451,14 +460,31 @@ impl Seam for Mock {
     }
 
     fn notify(&mut self, port: u64, notice: &IsoNotify) -> Result<(), Errno> {
-        if self.refuse.notices.contains(&port) {
-            return Err(Errno::WouldBlock);
+        let notice = *notice;
+        let refused = self
+            .refuse
+            .notices
+            .iter()
+            .find(|(to, _)| *to == port)
+            .map(|&(_, errno)| errno);
+        let step = match refused {
+            Some(_) => Step::NotifyRefused { port, notice },
+            None => Step::Notified { port, notice },
+        };
+        self.journal.borrow_mut().push(step);
+        refused.map_or(Ok(()), Err)
+    }
+
+    fn watch_room(&mut self, port: u64) -> bool {
+        if self.refuse.rooms.contains(&port) {
+            return false;
         }
-        self.journal.borrow_mut().push(Step::Notified {
-            port,
-            notice: *notice,
-        });
-        Ok(())
+        self.journal.borrow_mut().push(Step::WatchRoom(port));
+        true
+    }
+
+    fn unwatch_room(&mut self, port: u64) {
+        self.journal.borrow_mut().push(Step::UnwatchRoom(port));
     }
 
     fn receive(
@@ -1463,6 +1489,69 @@ fn streaming() -> (Mock, Interfaces<Buffer>, ControllerHealth, u64, u64) {
     )
 }
 
+/// Slot `slot` of the stream finishing, as the engine reports it.
+fn finished(slot: u16) -> IsoSlotDone {
+    IsoSlotDone {
+        slot,
+        skipped: 0,
+        microframe: u64::from(slot) * 64,
+    }
+}
+
+/// The completion `finished(slot)` makes of the first stream on `DATA`, seen
+/// at `at`.
+fn slot_done(slot: u16, at: u64) -> IsoNotify {
+    IsoNotify::SlotDone {
+        endpoint: DATA,
+        stream: NonZeroU32::MIN,
+        slot,
+        skipped: 0,
+        microframe: u64::from(slot) * 64,
+        completed_at: at,
+    }
+}
+
+/// The halt of the first stream on `DATA`, for `reason`.
+fn halt(reason: Errno) -> IsoNotify {
+    IsoNotify::Halted {
+        endpoint: DATA,
+        stream: NonZeroU32::MIN,
+        reason,
+    }
+}
+
+/// `port` took `notice`.
+fn sent(port: u64, notice: IsoNotify) -> Step {
+    Step::Notified { port, notice }
+}
+
+/// `port` refused `notice`.
+fn refused(port: u64, notice: IsoNotify) -> Step {
+    Step::NotifyRefused { port, notice }
+}
+
+/// Whether a stream's end was recorded.
+fn stream_ended(mock: &Mock) -> bool {
+    mock.notes
+        .iter()
+        .any(|note| matches!(note, Note::StreamEnded { .. }))
+}
+
+/// Whether a loss of notices was recorded.
+fn loss_noted(mock: &Mock) -> bool {
+    mock.notes
+        .iter()
+        .any(|note| matches!(note, Note::NoticesLost { .. }))
+}
+
+/// A request starting a stream on `DATA`.
+fn start_on_data() -> Vec<u8> {
+    request(UsbRequest::IsoStart(IsoStartParams {
+        endpoint: DATA,
+        layout: layout(),
+    }))
+}
+
 #[test]
 fn a_malformed_frame_is_answered_fail_closed_and_reaches_nothing() {
     let (mut mock, mut interfaces, emitted) = published(vec![Some(keyboard(1))]);
@@ -1610,7 +1699,7 @@ fn a_stream_whose_region_cannot_be_delegated_is_stopped_again() {
 
 #[test]
 fn finished_slots_are_notified_in_order() {
-    let (mut mock, mut interfaces, _health, _endpoint, port) = streaming();
+    let (mut mock, mut interfaces, health, _endpoint, port) = streaming();
     let done = |slot| IsoSlotDone {
         slot,
         skipped: u32::from(slot),
@@ -1618,7 +1707,7 @@ fn finished_slots_are_notified_in_order() {
     };
     mock.script(0).takes = VecDeque::from([Ok(Some(done(0))), Ok(Some(done(1)))]);
     mock.now = 55;
-    interfaces.deliver_streams(&mut mock);
+    interfaces.deliver_streams(&health, &mut mock);
     let notices: Vec<_> = mock
         .steps()
         .into_iter()
@@ -1673,7 +1762,7 @@ fn a_stream_started_again_on_an_endpoint_is_numbered_afresh() {
         skipped: 0,
         microframe: 0,
     }))]);
-    interfaces.deliver_streams(&mut mock);
+    interfaces.deliver_streams(&health, &mut mock);
     assert_eq!(
         mock.steps(),
         [Step::Notified {
@@ -1690,16 +1779,13 @@ fn a_stream_started_again_on_an_endpoint_is_numbered_afresh() {
     );
 }
 
+/// A stream that halts is stopped and its class driver told why, and it
+/// answers nothing after.
 #[test]
-fn a_stream_that_cannot_be_told_or_that_halts_ends() {
-    let (mut mock, mut interfaces, _health, _endpoint, port) = streaming();
-    mock.refuse.notices.push(port);
-    mock.script(0).takes = VecDeque::from([Ok(Some(IsoSlotDone {
-        slot: 0,
-        skipped: 0,
-        microframe: 0,
-    }))]);
-    interfaces.deliver_streams(&mut mock);
+fn a_stream_that_halts_ends_and_its_class_driver_is_told_why() {
+    let (mut mock, mut interfaces, health, _endpoint, port) = streaming();
+    mock.script(0).takes = VecDeque::from([Err(DriverError::DeviceFault)]);
+    interfaces.deliver_streams(&health, &mut mock);
     assert_eq!(
         mock.script(0).operations.last(),
         Some(&UsbRequest::IsoStop { endpoint: DATA })
@@ -1707,31 +1793,303 @@ fn a_stream_that_cannot_be_told_or_that_halts_ends() {
     assert!(mock.notes.contains(&Note::StreamEnded {
         index: 0,
         endpoint: DATA,
-        reason: Errno::WouldBlock
+        reason: Errno::DeviceFault
     }));
-    let steps = mock.steps();
-    assert_eq!(steps.len(), 1, "only the region's release: {steps:?}");
-    assert!(matches!(steps[0], Step::Unmap(_)));
-
-    let (mut mock, mut interfaces, _health, _endpoint, port) = streaming();
-    mock.script(0).takes = VecDeque::from([Err(DriverError::DeviceFault)]);
-    interfaces.deliver_streams(&mut mock);
-    let steps = mock.steps();
-    assert_eq!(
-        steps[0],
-        Step::Notified {
-            port,
-            notice: IsoNotify::Halted {
-                endpoint: DATA,
-                stream: NonZeroU32::MIN,
-                reason: Errno::DeviceFault
-            }
-        }
-    );
+    assert_eq!(mock.steps()[0], sent(port, halt(Errno::DeviceFault)));
     // A stream that ended answers no more queues.
     mock.script(0).takes.clear();
-    interfaces.deliver_streams(&mut mock);
+    interfaces.deliver_streams(&health, &mut mock);
     assert!(mock.steps().is_empty());
+}
+
+/// A completion its port refused for room, or for this process's IPC budget,
+/// is held with every completion after it, the port's room watched, and the
+/// stream runs on; the room wake sends them in the order the slots finished,
+/// and the room is watched no longer. Regression: the refusal ended the
+/// stream, and its class driver was never told the slot was done.
+#[test]
+fn a_completion_refused_for_room_or_budget_is_held_and_sent_on_the_room_wake() {
+    for refusal in [Errno::WouldBlock, Errno::LimitExceeded] {
+        let (mut mock, mut interfaces, health, _endpoint, port) = streaming();
+        mock.refuse.notices.push((port, refusal));
+        mock.now = 10;
+        mock.script(0).takes = VecDeque::from([Ok(Some(finished(0)))]);
+        interfaces.deliver_streams(&health, &mut mock);
+        assert_eq!(
+            mock.steps(),
+            [refused(port, slot_done(0, 10)), Step::WatchRoom(port)],
+            "{refusal:?}"
+        );
+        mock.now = 20;
+        mock.script(0).takes = VecDeque::from([Ok(Some(finished(1)))]);
+        interfaces.deliver_streams(&health, &mut mock);
+        assert_eq!(
+            mock.steps(),
+            [refused(port, slot_done(0, 10))],
+            "the later one held behind: {refusal:?}"
+        );
+        assert!(!stream_ended(&mock), "{refusal:?}");
+        mock.refuse.notices.clear();
+        interfaces.deliver_streams(&health, &mut mock);
+        assert_eq!(
+            mock.steps(),
+            [
+                sent(port, slot_done(0, 10)),
+                sent(port, slot_done(1, 20)),
+                Step::UnwatchRoom(port)
+            ],
+            "{refusal:?}"
+        );
+    }
+}
+
+/// A completion the kernel had no memory for waits out a pause with no room
+/// watched, since a room member stays ready while the port has room and would
+/// wake the loop at once; it is offered again once the pause ends and not
+/// before. Regression: the refusal ended the stream.
+#[test]
+fn a_completion_refused_for_memory_waits_out_a_pause_with_no_room_watched() {
+    let (mut mock, mut interfaces, health, _endpoint, port) = streaming();
+    mock.refuse.notices.push((port, Errno::OutOfMemory));
+    mock.now = 10;
+    mock.script(0).takes = VecDeque::from([Ok(Some(finished(0)))]);
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(mock.steps(), [refused(port, slot_done(0, 10))]);
+    let due = 10 + IPC_MEMORY_RETRY_NS;
+    assert_eq!(interfaces.next_notice_retry(), Some(due));
+    mock.refuse.notices.clear();
+    mock.now = due - 1;
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(mock.steps(), [], "not before the pause ends");
+    mock.now = due;
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(mock.steps(), [sent(port, slot_done(0, 10))]);
+    assert_eq!(interfaces.next_notice_retry(), None);
+    assert!(!stream_ended(&mock));
+}
+
+/// A port that refuses a completion for good can never be told anything: the
+/// stream ends, what the port was owed is given up and reported, and it is
+/// offered nothing again.
+#[test]
+fn a_completion_refused_for_good_ends_its_stream_and_is_reported_once() {
+    let (mut mock, mut interfaces, health, _endpoint, port) = streaming();
+    mock.refuse.notices.push((port, Errno::MessageTooLarge));
+    mock.script(0).takes = VecDeque::from([Ok(Some(finished(0)))]);
+    interfaces.deliver_streams(&health, &mut mock);
+    let steps = mock.steps();
+    assert_eq!(steps.len(), 2, "neither held nor told of a halt: {steps:?}");
+    assert_eq!(steps[0], refused(port, slot_done(0, 0)));
+    assert!(matches!(steps[1], Step::Unmap(_)));
+    assert!(mock.notes.contains(&Note::NoticesLost {
+        port,
+        lost: 1,
+        reason: Errno::MessageTooLarge
+    }));
+    assert!(mock.notes.contains(&Note::StreamEnded {
+        index: 0,
+        endpoint: DATA,
+        reason: Errno::MessageTooLarge
+    }));
+    assert_eq!(
+        mock.script(0).operations.last(),
+        Some(&UsbRequest::IsoStop { endpoint: DATA })
+    );
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(mock.steps(), [], "offered nothing again");
+}
+
+/// A port gone with its class driver ends the stream, with nothing reported
+/// lost and no halt offered to it.
+#[test]
+fn a_stream_whose_port_is_gone_ends_with_nothing_reported_lost() {
+    let (mut mock, mut interfaces, health, _endpoint, port) = streaming();
+    mock.refuse.notices.push((port, Errno::NotFound));
+    mock.script(0).takes = VecDeque::from([Ok(Some(finished(0)))]);
+    interfaces.deliver_streams(&health, &mut mock);
+    let steps = mock.steps();
+    assert_eq!(steps.len(), 2, "no halt offered: {steps:?}");
+    assert_eq!(steps[0], refused(port, slot_done(0, 0)));
+    assert!(matches!(steps[1], Step::Unmap(_)));
+    assert!(!loss_noted(&mock));
+    assert!(mock.notes.contains(&Note::StreamEnded {
+        index: 0,
+        endpoint: DATA,
+        reason: Errno::NotFound
+    }));
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(mock.steps(), []);
+}
+
+/// A stream's halt is owed like a completion: one its port refused for the
+/// budget is held past the stream for the room wake, and one refused for
+/// memory past the node its device took, for a pause. Regression: the halt
+/// was dropped, leaving its class driver waiting on a stream a reset or its
+/// device's departure had ended.
+#[test]
+fn a_halt_its_port_refused_is_held_past_its_stream_and_node() {
+    let (mut mock, mut interfaces, mut health, _endpoint, port) = streaming();
+    mock.refuse.notices.push((port, Errno::LimitExceeded));
+    mock.faulted = true;
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
+    let steps = mock.steps();
+    assert!(steps.contains(&refused(port, halt(Errno::WouldBlock))));
+    assert!(steps.contains(&Step::WatchRoom(port)));
+    mock.refuse.notices.clear();
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(
+        mock.steps(),
+        [sent(port, halt(Errno::WouldBlock)), Step::UnwatchRoom(port)]
+    );
+
+    let (mut mock, mut interfaces, health, _endpoint, port) = streaming();
+    mock.refuse.notices.push((port, Errno::OutOfMemory));
+    mock.now = 5;
+    mock.table[0] = None;
+    interfaces.reconcile(&mut mock);
+    let steps = mock.steps();
+    assert!(steps.contains(&refused(port, halt(Errno::NotFound))));
+    let due = 5 + IPC_MEMORY_RETRY_NS;
+    assert_eq!(interfaces.next_notice_retry(), Some(due));
+    mock.refuse.notices.clear();
+    mock.now = due;
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(mock.steps(), [sent(port, halt(Errno::NotFound))]);
+    assert_eq!(interfaces.next_notice_retry(), None);
+}
+
+/// A stream that halts while its port is owed a completion tells its class
+/// driver of the halt only after the completion.
+#[test]
+fn a_halt_is_held_behind_the_completions_its_port_is_owed() {
+    let (mut mock, mut interfaces, health, _endpoint, port) = streaming();
+    mock.refuse.notices.push((port, Errno::WouldBlock));
+    mock.script(0).takes = VecDeque::from([Ok(Some(finished(0))), Err(DriverError::DeviceFault)]);
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(
+        mock.script(0).operations.last(),
+        Some(&UsbRequest::IsoStop { endpoint: DATA })
+    );
+    mock.steps();
+    mock.refuse.notices.clear();
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(
+        mock.steps(),
+        [
+            sent(port, slot_done(0, 0)),
+            sent(port, halt(Errno::DeviceFault)),
+            Step::UnwatchRoom(port)
+        ]
+    );
+}
+
+/// A stream holds no more completions than it has slots: the rest stay
+/// finished in the engine, where none can be queued again, so a class driver
+/// that stops reading makes the HCD hold no more than its own depth.
+#[test]
+fn a_stream_holds_no_more_completions_than_it_has_slots() {
+    let (mut mock, mut interfaces, health, _endpoint, port) = streaming();
+    mock.refuse.notices.push((port, Errno::WouldBlock));
+    let slots = layout().slots;
+    mock.script(0).takes = (0..=slots).map(|n| Ok(Some(finished(n % slots)))).collect();
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(mock.script(0).takes.len(), 1, "one left in the engine");
+    mock.refuse.notices.clear();
+    interfaces.deliver_streams(&health, &mut mock);
+    let told: Vec<u16> = mock
+        .steps()
+        .into_iter()
+        .filter_map(|step| match step {
+            Step::Notified {
+                notice: IsoNotify::SlotDone { slot, .. },
+                ..
+            } => Some(slot),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(told, [0, 1, 2, 3, 0]);
+}
+
+/// What a port is owed is offered while the controller recovers too, as its
+/// room member would otherwise wake the loop for ever, but nothing is taken
+/// from a controller the loop does not drive.
+#[test]
+fn owed_notices_go_out_while_the_controller_recovers_and_nothing_is_taken() {
+    let (mut mock, mut interfaces, mut health, _endpoint, port) = streaming();
+    mock.refuse.notices.push((port, Errno::WouldBlock));
+    mock.script(0).takes = VecDeque::from([Ok(Some(finished(0)))]);
+    interfaces.deliver_streams(&health, &mut mock);
+    mock.faulted = true;
+    mock.reset_fails = true;
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
+    assert!(health.is_recovering());
+    mock.steps();
+    mock.refuse.notices.clear();
+    mock.script(0).takes = VecDeque::from([Ok(Some(finished(1)))]);
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(
+        mock.steps(),
+        [sent(port, slot_done(0, 0)), Step::UnwatchRoom(port)]
+    );
+    assert_eq!(mock.script(0).takes.len(), 1, "none taken");
+}
+
+/// A stream its class driver stops takes what its port was owed with it, its
+/// room watched no longer: those notices name a stream the class driver no
+/// longer holds.
+#[test]
+fn a_stopped_stream_takes_what_its_port_was_owed_with_it() {
+    let (mut mock, mut interfaces, mut health, endpoint, port) = streaming();
+    mock.refuse.notices.push((port, Errno::WouldBlock));
+    mock.script(0).takes = VecDeque::from([Ok(Some(finished(0)))]);
+    interfaces.deliver_streams(&health, &mut mock);
+    mock.steps();
+    mock.post(
+        endpoint,
+        0x71,
+        request(UsbRequest::IsoStop { endpoint: DATA }),
+    );
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    assert!(mock.steps().contains(&Step::UnwatchRoom(port)));
+    mock.refuse.notices.clear();
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(mock.steps(), [], "nothing left to offer");
+}
+
+/// A stream started on an endpoint supersedes what an ended predecessor still
+/// owed the same port, whose room is then watched no longer.
+#[test]
+fn a_new_stream_supersedes_what_its_ended_predecessor_owed() {
+    let (mut mock, mut interfaces, mut health, endpoint, port) = streaming();
+    mock.refuse.notices.push((port, Errno::WouldBlock));
+    mock.faulted = true;
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
+    assert!(mock.steps().contains(&Step::WatchRoom(port)));
+    mock.post(endpoint, 0x72, start_on_data());
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    assert!(mock.steps().contains(&Step::UnwatchRoom(port)));
+    mock.refuse.notices.clear();
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(mock.steps(), [], "the old halt is not owed");
+}
+
+/// A port whose room cannot be watched is offered its notices again after a
+/// pause rather than left waiting on a wake never armed.
+#[test]
+fn a_port_whose_room_cannot_be_watched_is_offered_again_after_a_pause() {
+    let (mut mock, mut interfaces, health, _endpoint, port) = streaming();
+    mock.refuse.notices.push((port, Errno::WouldBlock));
+    mock.refuse.rooms.push(port);
+    mock.now = 3;
+    mock.script(0).takes = VecDeque::from([Ok(Some(finished(0)))]);
+    interfaces.deliver_streams(&health, &mut mock);
+    let due = 3 + IPC_MEMORY_RETRY_NS;
+    assert_eq!(interfaces.next_notice_retry(), Some(due));
+    mock.steps();
+    mock.refuse.notices.clear();
+    mock.now = due;
+    interfaces.deliver_streams(&health, &mut mock);
+    assert_eq!(mock.steps(), [sent(port, slot_done(0, 3))]);
 }
 
 #[test]

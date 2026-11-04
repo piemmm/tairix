@@ -397,6 +397,10 @@ fn notes() -> DragItems {
         DocumentName::new("notes.txt").expect("a valid name"),
         1,
         true,
+        [tairix_abi::window_ipc::DragPicture {
+            icon: tairix_abi::window_ipc::IconAsset::new("text").expect("a valid asset id"),
+            from: None,
+        }],
     )
     .expect("one file")
 }
@@ -1222,7 +1226,7 @@ fn while_the_prompt_is_up_every_key_is_its_and_the_attention_key_answers_on_it()
         requester: String::from("Date & Time"),
         bundle: None,
         purpose: String::from("wants to change the date and time."),
-        window: None,
+        asker: None,
     };
     assert!(prompt.ask(request, &mut asked, &desk.shell, &mut desk.comp));
     let mut keys = keyboard(&[secure_attention(), char_key('p')]);

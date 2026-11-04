@@ -23,6 +23,8 @@ fn volume_root(
         icon: IconKind::Disk,
         facts: VolumeFacts {
             filesystem: String::from(filesystem),
+            title: String::new(),
+            class: tairix_abi::sysinfo::VolumeClass::Local,
             free,
             availability,
             owner: None,

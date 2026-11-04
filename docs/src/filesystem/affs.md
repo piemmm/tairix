@@ -60,6 +60,18 @@ removed by it. A plain volume matches names
 ASCII-case-insensitively, an international one Latin-1-case-insensitively —
 the fold its directory hash is computed with.
 
+The volume's name is its title (`FilesystemLabel`), held to a new entry's
+rules: one to 30 bytes of ISO 8859-1, never `:`, `/` or a control character,
+and never empty, since AmigaDOS addresses a volume by its name. An empty
+title or one past 30 bytes is `LengthOutOfRange`, any other refusal
+`OutOfRange`, and neither writes anything. A retitle rewrites the root block,
+dated now, as any change does, and its commit restamps the volume's
+alteration date; the creation date AmigaDOS also tells volumes apart by is
+kept. A soft link naming the volume follows the new name, and a volume the
+driver does not write refuses a retitle (`ReadOnly`). The volume's identity
+is a digest of its type, its geometry and the root's creation date, so a
+retitle leaves it as it was.
+
 A hard link to a file is that file under a second name: one node, its link
 count the chain's length; removing the file's own name promotes its newest
 link, as AmigaDOS does. A soft link reads in POSIX spelling (AmigaDOS's

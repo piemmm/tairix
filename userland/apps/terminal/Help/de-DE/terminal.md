@@ -35,11 +35,29 @@ Die Sitzung endet, wenn die Shell sich beendet (zum Beispiel mit
 Schließen des Fensters beendet die Shell mit einem Dateiende auf ihrer
 Eingabe.
 
+Das Schließen des letzten Fensters beendet das Terminal nicht. Sein
+Symbol bleibt auf der Symbolleiste des Desktops, und ein Klick darauf
+öffnet ein neues Fenster; *Beenden* im Menü dieses Symbols schließt
+alle Fenster und beendet das Programm.
+
+Zeilen, die oben aus dem Bildschirm herausscrollen, werden aufbewahrt —
+die letzten 500, sofern unter *Einstellungen…* nichts anderes festgelegt
+ist —, und das Mausrad scrollt zu ihnen zurück; `Shift Page Up` und
+`Shift Page Down` bewegen die Ansicht jeweils um einen Bildschirm,
+`Shift Home` springt zur ältesten Zeile und `Shift End` zurück zum
+Bildschirm. Ausgabe, die eintrifft, während Sie zurückgescrollt haben,
+lässt die Ansicht, wo sie ist, und Tippen bringt sie zum Bildschirm
+zurück. Wird das Fenster in der Größe verändert, werden die Zeilen auf
+die neue Breite umbrochen, statt abgeschnitten zu werden, und der eigene
+Bildschirm eines Vollbildprogramms bewahrt keine auf. Wird der Speicher
+knapp, werden die ältesten Zeilen zuerst freigegeben.
+
 Das Drücken der sekundären (rechten) Maustaste an einer beliebigen Stelle
-auf dem Bildschirm öffnet das Menü des Terminals. Jede Zeile verfügt
-über ein Tastenkürzel, das unabhängig davon funktioniert, ob das Menü
-geöffnet ist oder nicht, und `Escape` — oder ein Klick außerhalb des
-Menüs — schließt es, ohne eine Auswahl zu treffen.
+auf dem Bildschirm öffnet das Menü des Terminals. Jede Zeile außer
+*Verlaufspuffer leeren* verfügt über ein Tastenkürzel, das unabhängig
+davon funktioniert, ob das Menü geöffnet ist oder nicht, und `Escape` —
+oder ein Klick außerhalb des Menüs — schließt es, ohne eine Auswahl zu
+treffen.
 
 | Zeile | Tastenkürzel | Funktion |
 | --- | --- | --- |
@@ -47,12 +65,18 @@ Menüs — schließt es, ohne eine Auswahl zu treffen.
 | Größerer Text | `Ctrl +` | Zeichnet den Bildschirm eine Stufe größer. |
 | Kleinerer Text | `Ctrl -` | Zeichnet den Bildschirm eine Stufe kleiner. |
 | Originalgröße | `Ctrl 0` | Kehrt zur Standardtextgröße zurück. |
-| Bildschirm leeren | `Ctrl Shift K` | Leert den Bildschirm, ohne an die Shell zu schreiben. |
+| Bildschirm leeren | `Ctrl Shift K` | Leert den Bildschirm, ohne an die Shell zu schreiben; das bisher Angezeigte bleibt durch Zurückscrollen erreichbar. |
+| Verlaufspuffer leeren | — | Vergisst die oberhalb des Bildschirms aufbewahrten Zeilen. |
 | Schließen | `Ctrl Shift W` | Schließt das Fenster und beendet die Shell. |
 
-Die Einstellungen öffnen sich im Fenster selbst und haben zwei
-Registerkarten. **Erscheinungsbild** wählt das Farbschema aus, legt die
-Textgröße fest und bearbeitet das eigene Schema des Benutzers. Die
+Die Einstellungen öffnen sich in einem eigenen Fenster, das geöffnet
+bleiben kann, während Sie im Terminal arbeiten; erneutes Wählen von
+*Einstellungen…* holt es nach vorn. Es hat zwei Registerkarten; drehen
+Sie das Mausrad über ihnen, um zu scrollen. *Fertig*, `Escape` oder die
+Schließen-Schaltfläche des Fensters schließt es. **Erscheinungsbild**
+wählt das Farbschema aus, legt die Textgröße und die Anzahl der im
+Verlaufspuffer aufbewahrten Zeilen (keine bis 10.000, anfangs 500) fest
+und bearbeitet das eigene Schema des Benutzers. Die
 mitgelieferten Schemata sind *System* (das dem dunklen oder hellen
 Erscheinungsbild des Desktops folgt), *Midnight*, *Phosphor*, *Amber*,
 *Ember*, *Contrast*, *Paper* und *Custom*. Die Wahl von *Custom*
@@ -64,7 +88,10 @@ Farbwähler für die jeweils ausgewählte Farbe. Der Farbwähler stellt sie
 ihre hexadezimale Schreibweise ein und zeigt daneben die Farbe, die das
 Feld bei der Auswahl hatte; ein Klick darauf stellt sie wieder her.
 
-**Effekte** legt fest, wie der Bildschirm gezeichnet wird.
+**Effekte** legt fest, wie der Bildschirm gezeichnet wird. Ein neues
+Terminal öffnet sich mit 80 % Deckkraft und der Hintergrundunschärfe auf
+halber Stärke, alle übrigen Effekte sind aus; so wirkt der Desktop hinter
+dem Text wie Milchglas, statt scharf durchzuscheinen.
 
 | Effekt | Funktion |
 | --- | --- |

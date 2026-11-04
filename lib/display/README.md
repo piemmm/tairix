@@ -86,10 +86,11 @@ and the client can never drift apart.
   window half-converted.
 - **Service loop** (`service`, feature `service`): the one bring-up and
   serve loop every display driver's `Run` binary hosts — the reserved
-  endpoint bind, one wait-set holding it and the kernel's display-lease
-  notice, the kernel-attested caller facts, the reserved exit codes and the
-  one-shot `FIRST_PRESENT` record — so a driver's `main` is its surface and
-  nothing else. The feature pulls in the userland runtime, so the host
+  endpoint bind, one wait-set holding it, the kernel's display-lease notice
+  and, while a latch is owed to a presenter whose port had no room, that
+  port's room, the kernel-attested caller facts, the reserved exit codes and
+  the one-shot `FIRST_PRESENT` record — so a driver's `main` is its surface
+  and nothing else. The feature pulls in the userland runtime, so the host
   build of the engine stays free of it.
 - **Client** (`DisplayClient` / `RemoteDisplay`): the session-side half
   over the injected `DisplayTransport` seam. `RemoteDisplay` implements

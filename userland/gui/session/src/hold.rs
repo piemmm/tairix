@@ -1,5 +1,5 @@
-//! Which windows are held modal, and by what: the one rule an alert and an
-//! owner-modal dialog share (`plans/APPWIN.md`).
+//! Which windows are held modal, and by what: the one rule an alert, an
+//! owner-modal dialog and the trusted picker share (`plans/APPWIN.md`).
 //!
 //! A held window takes no new input — only the release of a press it already
 //! saw — a press on it hands the keyboard to its holder, and it takes no drop.
@@ -14,17 +14,20 @@ use tairix_wm::WindowId;
 ///
 /// Holders of one window are its family's transients that keep their order,
 /// so the last taken is the one in front. Bounded by what may hold — each
-/// application's alerts and its dialogs, both bounded by the window server —
-/// so a scan is the right structure for so few.
+/// application's alerts and its dialogs, both bounded by the window server, and
+/// the one trusted picker — so a scan is the right structure for so few.
 #[derive(Default)]
 pub struct Holds {
     up: Vec<Hold>,
 }
 
+/// `by` holding `held` modal.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct Hold {
-    held: WindowId,
-    by: WindowId,
+pub struct Hold {
+    /// The window held.
+    pub held: WindowId,
+    /// What holds it.
+    pub by: WindowId,
 }
 
 impl Holds {

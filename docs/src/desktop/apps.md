@@ -178,9 +178,9 @@ it the keyboard, and the window engine honours it only while the caller holds
 an **activation**:
 
 - the engine hands one to an application when it delivers it a user-driven
-  application event — `AppBarDefault`, `AppBarMenu` or `OpenRequested` —
-  recording the window that held the keyboard then (`Activation::Granted`),
-  and the first activation request spends it;
+  application event — `AppBarDefault`, `AppBarMenu`, `AppBarEntered` or
+  `OpenRequested` — recording the window that held the keyboard then
+  (`Activation::Granted`), and the first activation request spends it;
 - an activation is void once the keyboard is anywhere else, however it moved,
   so a gesture long past cannot be cashed in over the user's work;
 - a hand-over lends one while nothing holds the seat and either the user is
@@ -193,8 +193,9 @@ an **activation**:
 
 Anything else is `PermissionDenied`, a window the caller does not own is
 `NotFound`, and the session refuses a raise while the seat is held — by the
-lock, the picker, the elevation prompt or a confirmation (`seat_held`) — or a
-drag is carried. While the seat is held no popup or pick opens and a window's
+lock, the picker while it has the keyboard, the elevation prompt or a
+confirmation (`seat_held`) — or a drag is carried, and a raise of a window an
+alert, an owner-modal dialog or its own pick holds. While the seat is held no popup or pick opens and a window's
 first frame shows it beneath the surface holding the keyboard, so nothing can
 take the keys typed at a prompt. Granted raises (`WINDOW_RAISED`), refused
 ones (`RAISE_REFUSED`) and withheld hand-overs (`HAND_OVER_WITHHELD`) are on
@@ -207,7 +208,25 @@ a folder opened on the desktop — it activates that window rather than opening
 a second. The comparison is made again when a window's first listing lands,
 so a window that fell back from a folder it could not list to one already
 shown raises that window instead, stating why there. A refused activation
-still shows the folder, in a new window.
+still shows the folder, in a new window in front, and the one it could not
+raise closes. Windows that come to one place however they got there — a
+navigation, or a climb out of a volume that left — leave one window there:
+the one holding the keyboard, else the one the user last came there in, else,
+of windows that only climbed there, the one there longest. A window holding a
+gesture, a question, an operation, a clipboard or a navigation under way is
+never closed for it; its set converges once it is idle.
+
+When a volume leaves — ejected, disconnected, or still listed but unavailable
+— every window within it goes to the place above it at once. A volume the
+kernel says was disconnected without being ejected (`VOLUME_REMOVALS`) is
+stated once, in one alert naming every volume that went together and what
+became of what was being written to them, however many windows showed it; a
+volume ejected first is stated by nobody. A window's re-read of its own folder
+that the folder's absence refuses climbs, as a folder the watch reports gone
+does; one its device refuses waits for a mount-table read asked for after it,
+so a volume that went is never also stated as a device that failed, one being
+ridden out is read again once it is back, and one still attached whose device
+failed is stated once for all its windows.
 
 A path that names a file rather than a folder — from the command line, or the
 desktop showing where a document lives
@@ -252,9 +271,9 @@ Uniformly, for every app:
   stated on `stderr` and simply not shown — never a crash, and never a
   fallback to a clipped in-window draw (`AGENTS.md` §2.24, §5.4).
 
-The graphical terminal is the first consumer: its settings sheet is a popup
-(`plans/GUI-TERMINAL.md` §9). Its window menu is not — that is the desktop's
-one menu chain ([Menus](menus.md)).
+The file manager's *Open With* chooser is a popup. A window menu is not —
+that is the desktop's one menu chain ([Menus](menus.md)) — and nor is the
+terminal's Settings, a modeless dialog (`plans/GUI-TERMINAL.md` §9).
 
 ### Tool windows
 
@@ -278,8 +297,9 @@ manager's mini title band, above its owner, off the taskbar.
   (`DocumentView::tool_window`), each a rectangle of the window's own drawing
   laid out beside the window, and the host opens, resizes, retitles, closes,
   routes and paints them to match, so the view draws and hit-tests a floating
-  palette with the code that drew it docked. Paint's panes are the first
-  consumer ([Paint](paint.md)).
+  palette with the code that drew it docked; a menu the view anchors on a tool
+  window's part of the drawing opens over that tool window. Paint's panes are
+  the first consumer ([Paint](paint.md)).
 
 An overlay's picture is **retained between frames**, exactly as the terminal's
 grid picture is, and its paint is scoped to what the round reported. The
@@ -900,9 +920,14 @@ unchanged).
 application's icon-bar slot** (`plans/FILES-INTERACTION.md` FI9). A primary
 press on a selected entry arms a drag of the whole selection, and travelling
 past `DRAG_SLOP` logical pixels hands it to the desktop
-(`WindowClient::begin_drag`, naming the first item, the count, and whether it
-is one openable file); a drag the desktop will not carry stays the press it
-was.
+(`WindowClient::begin_drag`, naming the entry pressed, the count, and whether
+it is one openable file); a drag the desktop will not carry stays the press it
+was. The entry pressed leads, then the rest of the selection in listing order
+(`gesture::drag_order`), and each of the first four is described by the
+picture its listing draws (`render::icon_for_entry`) and where that picture
+stood from the press (`render::entry_target`), with the ending the window
+hides of the lead, so the desktop shows one item as its tile and several as a
+stack gathering from where they stood.
 
 - **Every folder drop is the manager's to decide.** Each report of where the
   drag is (`DragOver`) resolves the folder there — a folder under the point
@@ -1028,7 +1053,11 @@ drift apart (`AGENTS.md` §2.2):
   `media_for_name(name)` maps that ending to its type — a file type the
   registry knows first, else the extension — ASCII-case-insensitively and
   without allocating, and `name_endings(media)` lists the endings a type is
-  known by, the ones a save holds a name to; `media_for_named(name, kind,
+  known by; `save_format(media)` is the format a save offers a type in — its
+  RISC OS file type and its extensions, but none for a type RISC OS is home to
+  that other systems also name by an extension (a sprite file is named by its
+  type alone) — and `named_extension(media)` the extension a new document of
+  it is named with, none for those; `media_for_named(name, kind,
   site)` classifies a node known by its name, its kind and the layout it
   stands in (`Site`) — `inode/directory` for a directory whatever its name,
   `application/x-tairix-service` for a `<Name>.app` in a store of programs the
@@ -2771,13 +2800,38 @@ binary, behind the seam, not in the screen model.
 
 ### The screen model
 
-`Grid` is a fixed `cols`×`rows` rectangle of `lib/vt` `Cell`s — a glyph plus
-its folded `Attributes` — with a cursor and a rendition pen. It exposes the
+`Grid` is a `cols`×`rows` rectangle of `lib/vt` `Cell`s — a glyph plus its
+folded `Attributes` — with a cursor and a rendition pen. It exposes the
 cursor-relative operations a terminal needs: writing a glyph with the pen
 (wrapping and scrolling at the edges), the C0 moves, absolute/relative cursor
 positioning, the ANSI erase operations, the scroll region and explicit
 scrolling, the alternate screen, cursor visibility, the saved cursor, the
 window title, and clear.
+
+Above the main screen it keeps a **scrollback**: the lines that scroll off its
+top and the rows `ED 2` erases, until `CSI 3 J` forgets them. Each window's
+keeps the last lines of output up to the user's limit — the profile's
+`scrollback.lines`, 500 unless the Settings window's *Scrollback* slider sets
+another, from none to 10,000 — a line wrapped across rows counting once, and
+the cells the lines cover held to a widest screen's worth for each line of the
+limit so an endless line cannot take more. Neither count moves with the width
+a line is laid out at, so narrowing a window never costs history. The limit is
+all working set to the reclaim model, read through `shrink_target` at the
+pressure band, so memory pressure takes none of it short of severe and all of
+it at severe or critical, and every line pushed while a band stands is held to
+it; the oldest give way first. The alternate screen keeps none. Each row records
+whether its line continues on the next, and an erase or a scroll that takes a
+row's start ends the line that continued into it, so a resize **reflows** the
+main screen with its scrollback: lines are rejoined and split again at the new
+width, a wide glyph wrapping whole, the cursor keeps its place in its line, and
+the screen ends at the last row in use — an erased screen counting whole —
+taking rows back from the scrollback as the window grows. A resize is asked for
+when the window is re-mapped and given when it is next painted, so a burst of
+sizes costs one reflow and only a new width lays the scrollback out again;
+everything a reflow needs is had first, so one that memory refuses changes
+nothing. A **view** scrolls back over the scrollback; output arriving meanwhile
+leaves it on the lines it shows, and the renderer paints through it, drawing
+the cursor only where the view shows its row (`plans/GUI-TERMINAL.md` §16).
 
 `Parser` is a thin **consumer** of the shared `lib/vt` ANSI/VT/xterm
 vocabulary (`plans/CURSES.md` C2): it lets `lib/vt`'s streaming parser turn

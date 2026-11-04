@@ -545,7 +545,15 @@ undone. A started stream's slots are scheduled onto the endpoint's ring at the
 frame each service interval is due in, and each finished slot is reported to
 the class driver with its first interval's bus microframe, the intervals the
 schedule jumped to reach it, and how every interval went: moved, missed or
-failed. A late packet is a gap, never a packet sent late.
+failed. A late packet is a gap, never a packet sent late. A notice the class
+driver's notify port refuses for room, or for the HCD's own IPC budget, is
+held with every notice after it until the port's room wake, and one the
+kernel had no memory for until a timed retry; a stream holds no more
+completions than it has slots, so a class driver that stops reading holds it
+at its own depth. A stream ends with its device, a controller reset or a halt,
+its class driver owed why as it is owed every completion; one whose port is
+gone ends with it, and one whose port refuses its notices for good ends with
+the loss logged as event 27155.
 
 The interrupt-IN endpoint is armed only once the class driver's first report
 request names the longest report it expects: to that, or to one service

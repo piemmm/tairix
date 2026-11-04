@@ -218,6 +218,13 @@ impl SessionInputRouter {
         }
     }
 
+    /// Whether the primary button is down: what keeps an icon carried across
+    /// the desktop for as long as the press that took it lasts.
+    #[must_use]
+    pub const fn holds_primary(&self) -> bool {
+        self.buttons & button_bit(PointerButton::Primary) != 0
+    }
+
     /// The window that owns the keyboard, or `None` when focus rests on the
     /// desktop. Delegates to the window manager's router, which owns focus.
     #[must_use]

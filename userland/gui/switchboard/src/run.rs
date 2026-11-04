@@ -111,10 +111,10 @@ mod program {
         Desktop, EventError, EventMailbox, Repaint, WindowEvents,
     };
 
-    /// The command mailbox's bounded capacity: the session sends a panel
-    /// open on a click and a seat report when the seat's health changes, so
-    /// a small queue is ample.
-    const COMMAND_CAPACITY: usize = 8;
+    /// Commands the session, the one sender the command mailbox admits, may
+    /// have queued there: it sends a panel open on a click and a seat report
+    /// when the seat's health changes, so a small depth is ample.
+    const COMMAND_DEPTH: usize = 8;
 
     /// Exit code when the process cannot learn its own identity, enable
     /// signal observation, or build and arm its wait-set: with no parking
@@ -832,6 +832,7 @@ mod program {
             WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::AppBarEntered { .. }
             // The layer-surface feeds and a tool window's moves address
             // surfaces this application never opens, so none can arrive here.
             | WindowEvent::TerrainChanged { .. }
@@ -1314,7 +1315,7 @@ mod program {
     fn bind_mailboxes(pid: u64) -> Result<(u64, u64), i32> {
         let commands = command_endpoint_for(pid);
         if tairix_abi::ipc::is_reserved_endpoint(commands)
-            || tairix_rt::port_bind(commands, SwitchboardCommand::WIRE_LEN, COMMAND_CAPACITY) != 0
+            || tairix_rt::port_bind(commands, SwitchboardCommand::WIRE_LEN, COMMAND_DEPTH) != 0
         {
             return Err(app::fail(
                 APP_NAME,

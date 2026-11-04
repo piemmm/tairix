@@ -26,7 +26,7 @@ divergent parser in this app (`AGENTS.md` §2.2).
 
 ## Screen model (`Grid`)
 
-`Grid` is a fixed `cols`×`rows` rectangle of `lib/vt` `Cell`s (a glyph plus its
+`Grid` is a `cols`×`rows` rectangle of `lib/vt` `Cell`s (a glyph plus its
 folded `Attributes`) with a cursor and a current rendition pen. It exposes the
 cursor-relative operations a terminal needs — write a glyph with the pen
 (wrapping and scrolling at the edges), the C0 moves, absolute/relative cursor
@@ -40,6 +40,20 @@ owed wrap at the right edge above all — are pinned by the shared
 `tairix_vt::conformance` script the framebuffer boot console runs too, so the
 two screens a program can be drawn on cannot disagree about where its output
 lands.
+
+Above the main screen it keeps a scrollback: the lines that scroll off its top
+and the rows `ED 2` erases, until `CSI 3 J` forgets them. It keeps the last
+lines of output up to the user's limit (`scrollback.lines`, 500 unless the
+user sets another, at most 10,000), a line wrapped across rows counting once
+and an endless one a widest screen's worth of cells for each line of the
+limit. Neither count moves with the width, so narrowing a window never costs
+history. The limit is all working set to the reclaim model, so memory pressure
+takes none of it short of severe and all of it at severe or critical, the
+oldest line giving way first. The alternate
+screen keeps none. Each row records whether its line continues on the next, so
+a resize reflows the main screen with its scrollback — once per burst of window
+sizes, the scrollback only for a new width — and a view can be scrolled back
+over it while output arrives (`plans/GUI-TERMINAL.md` §16).
 
 ## Control parser (`Parser`)
 
@@ -71,6 +85,11 @@ no lying about capabilities). The compiled-in capability database that maps a
 - `pump` reads the bytes the shell has produced and applies them to the
   screen, returning how many were applied.
 - `send` / `send_str` forward the user's keystrokes to the shell.
+- `scroll_wheel`, `view_key`, and `view_to_bottom` move the view back over the
+  scrollback, and `clear_scrollback` and `shed_for` manage what it holds.
+- `resize` asks for a new size and `settle` gives the last asked, answering
+  whether the shell is to be told it, so a burst of window sizes costs one
+  reflow.
 
 The terminal never echoes input to the screen itself: echo, line editing, and
 job control are the shell's responsibility, exactly as on a real tty. A
@@ -163,13 +182,13 @@ reordering cannot re-map a row. Every advertised shortcut is really honoured by
 `Command::accelerator`, checked by parsing each row's own caption rather than
 restating it. The plate, its placement, the grab and the dismissal are the
 session's (`plans/NEW-MENUS.md`); this app draws no menu pixel and a refused
-menu is reported and carried on from. `Settings` is a modal sheet on its own
-popup surface, composed from the shared Reactive Alloy controls, its colour
-wells the shared `SwatchGrid`; every edit clamps through
+menu is reported and carried on from. `Settings` is one modeless dialog for
+the whole app, a window of its own composed from the shared Reactive Alloy
+controls, its colour wells the shared `SwatchGrid`; every edit clamps through
 `Profile::clamp`, so the sheet can never produce an invalid profile. Its body
 scrolls in pixels through the shared `ScrollView` — a row its edge crosses is
-drawn cut, and only the part that shows takes the pointer — and the wheel the
-popup receives scrolls it.
+drawn cut, and only the part that shows takes the pointer — and the wheel over
+it scrolls it.
 
 ## Rendering (`render`)
 
@@ -219,10 +238,13 @@ shell-output pipe's read end (`WaitSourceKind::Stream`, the AW4 kernel
 addition: ready on buffered bytes or end-of-stream), and the shell child
 (`WaitSourceKind::Child`) — dispatching on the woken member's token, never a
 poll loop. The park carries a one-shot frame deadline only while an animated
-effect is in force. A key press is claimed by an open menu or settings sheet,
-else by a terminal accelerator, else encoded through the one shared
+effect is in force. A key press for a terminal window is claimed by a
+terminal accelerator, then on the main screen by a scrolling chord (Shift with
+Page Up, Page Down, Home or End), else encoded through the one shared
 `lib/keymap` rule; shell output is pumped into the grid and the repainted
-frame presented. A settings change re-derives the colours and the face,
+frame presented. A resize re-maps the frame region at once and the window's
+next paint fits the grid to it, telling the pty only a size the grid took. A
+settings change re-derives the colours and the face,
 re-applies the backdrop blur, reshapes the grid and the pty, and rewrites the
 profile document. The shell exiting closes its window. The user choosing
 *Close*, or a `CloseRequested` from the desktop, closes the window and ends
@@ -254,7 +276,13 @@ CSI cursor positioning (1-based and home default), relative moves defaulting
 to one, erase-in-line and erase-in-display; dropping unrecognised escapes and
 high bytes; SGR folding (bold/colour, reset, 256-index and truecolour); the
 scroll region confining scrolling and the bottom-margin line feed; the
-alternate screen saving and restoring the main screen; cursor visibility and
+alternate screen saving and restoring the main screen; the scrollback (what
+enters it, its bound and the pressure bands, the view staying on its lines,
+`clear` leaving nothing to scroll back to) and the reflow on a resize (round
+trips, wide glyphs, the owed wrap, an erased screen keeping its place, an erase
+ending the line continued into it, the bound held across widths and as it
+goes, a burst of sizes costing one reflow, the alternate screen clipped over a
+reflowed main screen); cursor visibility and
 the hidden cursor not painting; the OSC window title; the saved cursor
 round-tripping position and pen; the §2.2 emitter↔consumer "one vocabulary"
 identity; `pump` applying output, the empty read, and read-error propagation;

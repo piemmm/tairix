@@ -900,15 +900,23 @@ pub struct WatchedListing {
 
 #[cfg(feature = "rt")]
 impl WatchedListing {
-    /// Why the listing is not live, when that is worth saying: it listed, but
-    /// its watch was refused for a reason other than the directory being one
-    /// no volume records changes for, such as the namespace's own roots.
+    /// Why the listing is not live, when it listed: its watch was refused —
+    /// [`Errno::NotImplemented`] for a directory no volume records changes
+    /// for, such as a namespace root or a network share. Which refusal is
+    /// worth saying is the consumer's to decide.
     #[must_use]
     pub fn unwatched(&self) -> Option<Errno> {
-        match (&self.listed, &self.watch) {
-            (Ok(_), Err(err)) if *err != Errno::NotImplemented => Some(*err),
-            _ => None,
-        }
+        refused_watch(&self.listed, &self.watch)
+    }
+}
+
+/// The refusal of `watch` for a directory that `listed`: none for one whose
+/// listing failed, which says why itself.
+#[cfg(any(feature = "rt", test))]
+fn refused_watch<T, W>(listed: &Result<T, Errno>, watch: &Result<W, Errno>) -> Option<Errno> {
+    match (listed, watch) {
+        (Ok(_), Err(err)) => Some(*err),
+        _ => None,
     }
 }
 
@@ -918,7 +926,8 @@ impl WatchedDirectory {
     /// `reuse`, the watch the consumer already holds there, so a reload keeps
     /// its pacing, or through a watch armed now at [`WATCH_LATENCY_NS`], which
     /// comes back to offer with the listing. `unwatched` hears why a folder
-    /// that listed could not be watched.
+    /// that listed could not be watched, as [`WatchedListing::unwatched`]
+    /// answers it.
     pub fn read(
         target: &[String],
         reuse: Option<alloc::sync::Arc<Self>>,

@@ -33,11 +33,28 @@ La sessione termina quando la shell esce (per esempio con `exit`) o
 quando la finestra viene chiusa dal desktop; chiudere la finestra
 termina la shell con fine file sul suo ingresso.
 
+Chiudere l'ultima finestra non termina il terminale. La sua icona resta
+sulla barra delle icone del desktop, e un clic su di essa apre una nuova
+finestra; *Esci* nel menu di quell'icona chiude tutte le finestre e
+termina il programma.
+
+Le righe che escono dalla parte superiore dello schermo vengono
+conservate — le ultime 500, salvo diversa indicazione in
+*Impostazioni…* — e la rotellina del mouse scorre indietro su
+di esse; `Shift Page Up` e `Shift Page Down` scorrono di una schermata
+alla volta, `Shift Home` va alla riga più vecchia e `Shift End` torna
+allo schermo. L'output che arriva mentre state guardando le righe
+precedenti lascia la vista dov'è, e digitare la riporta allo schermo.
+Ridimensionare la finestra ridistribuisce le righe sulla nuova larghezza
+invece di troncarle, e lo schermo proprio di un programma a schermo
+intero non ne conserva nessuna. Quando la memoria scarseggia, le righe
+più vecchie vengono rilasciate per prime.
+
 Premendo il tasto secondario (destro) del mouse in qualsiasi punto dello
-schermo si apre il menu del terminale. Ogni riga ha una scorciatoia da
-tastiera che funziona indipendentemente dal fatto che il menu sia aperto
-o meno, e `Escape` — o un clic fuori dal menu — lo chiude senza
-effettuare una scelta.
+schermo si apre il menu del terminale. Ogni riga tranne
+*Cancella cronologia* ha una scorciatoia da tastiera che funziona
+indipendentemente dal fatto che il menu sia aperto o meno, e `Escape` —
+o un clic fuori dal menu — lo chiude senza effettuare una scelta.
 
 | Riga | Scorciatoia | Cosa fa |
 | --- | --- | --- |
@@ -45,11 +62,17 @@ effettuare una scelta.
 | Testo più grande | `Ctrl +` | Disegna lo schermo un passo più grande. |
 | Testo più piccolo | `Ctrl -` | Disegna lo schermo un passo più piccolo. |
 | Dimensione reale | `Ctrl 0` | Torna alla dimensione del testo predefinita. |
-| Cancella schermo | `Ctrl Shift K` | Pulisce lo schermo senza scrivere sulla shell. |
+| Cancella schermo | `Ctrl Shift K` | Pulisce lo schermo senza scrivere sulla shell; ciò che mostrava si può ancora ritrovare scorrendo indietro. |
+| Cancella cronologia | — | Dimentica le righe conservate sopra lo schermo. |
 | Chiudi | `Ctrl Shift W` | Chiude la finestra e termina la shell. |
 
-Le impostazioni si aprono nella finestra stessa e hanno due schede.
-**Aspetto** sceglie lo schema di colori, imposta la dimensione del testo
+Le impostazioni si aprono in una finestra propria, che può restare
+aperta mentre lavorate nel terminale; scegliere di nuovo *Impostazioni…*
+la porta in primo piano. Ha due schede; girate la rotellina sopra di esse
+per scorrere. *Fine*, `Escape` o il pulsante di chiusura della finestra
+la chiude.
+**Aspetto** sceglie lo schema di colori, imposta la dimensione del testo e
+quante righe conserva la cronologia (da nessuna a 10.000, 500 all'inizio),
 e modifica lo schema dell'utente. Gli schemi forniti sono *System* (che
 segue l'aspetto scuro o chiaro del desktop), *Midnight*, *Phosphor*,
 *Amber*, *Ember*, *Contrast*, *Paper* e *Custom*. Scegliendo *Custom*
@@ -61,7 +84,11 @@ per tonalità, saturazione e valore, per rosso, verde e blu, o con la sua
 scrittura esadecimale, e mostra accanto il colore che la casella aveva
 quando è stata selezionata, che un clic ripristina.
 
-**Effetti** imposta il modo in cui viene disegnato lo schermo.
+**Effetti** imposta il modo in cui viene disegnato lo schermo. Un nuovo
+terminale si apre con l'80 % di opacità, lo sfondo sfocato a metà
+intensità e tutti gli altri effetti disattivati, così che il desktop
+appare dietro il testo come vetro smerigliato invece di trasparire
+nitidamente.
 
 | Effetto | Cosa fa |
 | --- | --- |

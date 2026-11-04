@@ -32,10 +32,26 @@ A sessão termina quando a shell sai (por exemplo com `exit`) ou quando
 a janela é fechada a partir do ambiente de trabalho; fechar a janela
 termina a shell com fim de ficheiro na sua entrada.
 
+Fechar a última janela não termina o terminal. O seu ícone permanece na
+barra de ícones do ambiente de trabalho, e um clique nele abre uma nova
+janela; *Sair* no menu desse ícone fecha todas as janelas e termina o
+programa.
+
+As linhas que saem pelo topo do ecrã são guardadas — as últimas 500,
+salvo indicação em contrário nas *Definições…* — e a roda do rato
+desloca a vista para trás por elas; `Shift Page Up` e
+`Shift Page Down` movem um ecrã de cada vez, `Shift Home` vai para a
+linha mais antiga e `Shift End` volta ao ecrã. A saída que chega
+enquanto está deslocado para trás deixa a vista onde está, e escrever
+devolve-a ao ecrã. Redimensionar a janela volta a quebrar as linhas para
+a nova largura em vez de as cortar, e o ecrã próprio de um programa em
+ecrã inteiro não guarda nenhuma. Quando a memória escasseia, as linhas
+mais antigas são libertadas primeiro.
+
 Ao premir o botão secundário (direito) do rato em qualquer lugar do ecrã
-abre-se o menu do terminal. Cada linha tem um atalho de teclado que
-funciona quer o menu esteja aberto ou não, e `Escape` — ou um clique
-fora do menu — descarta-o sem escolher nada.
+abre-se o menu do terminal. Todas as linhas exceto *Limpar histórico* têm
+um atalho de teclado que funciona quer o menu esteja aberto ou não, e
+`Escape` — ou um clique fora do menu — descarta-o sem escolher nada.
 
 | Linha | Atalho | O que faz |
 | --- | --- | --- |
@@ -43,12 +59,17 @@ fora do menu — descarta-o sem escolher nada.
 | Texto maior | `Ctrl +` | Desenha o ecrã um passo maior. |
 | Texto menor | `Ctrl -` | Desenha o ecrã um passo menor. |
 | Tamanho real | `Ctrl 0` | Regressa ao tamanho de texto predefinido. |
-| Limpar ecrã | `Ctrl Shift K` | Esvazia o ecrã sem escrever na shell. |
+| Limpar ecrã | `Ctrl Shift K` | Esvazia o ecrã sem escrever na shell; o que mostrava continua acessível deslocando para trás. |
+| Limpar histórico | — | Esquece as linhas guardadas acima do ecrã. |
 | Fechar | `Ctrl Shift W` | Fecha a janela e termina a shell. |
 
-As definições abrem-se na própria janela e têm dois separadores.
+As definições abrem-se numa janela própria, que pode ficar aberta
+enquanto trabalha no terminal; escolher novamente *Definições…* traz essa
+janela para a frente. Tem dois separadores; gire a roda sobre eles para
+deslocar. *Concluído*, `Escape` ou o botão de fechar da janela fecha-a.
 **Aparência** escolhe o esquema de cores, define o tamanho do texto e
-edita o esquema próprio do utilizador. Os esquemas incluídos são
+quantas linhas o histórico guarda (de nenhuma a 10 000, 500 de início),
+e edita o esquema próprio do utilizador. Os esquemas incluídos são
 *System* (que segue a aparência escura ou clara do ambiente de
 trabalho), *Midnight*, *Phosphor*, *Amber*, *Ember*, *Contrast*,
 *Paper* e *Custom*. Escolher *Custom* utiliza as cores editadas por
@@ -59,7 +80,10 @@ seletor define-a por matiz, saturação e valor, por vermelho, verde e
 azul, ou pela sua escrita hexadecimal, e mostra ao lado a cor que a casa
 tinha quando foi selecionada, que um clique repõe.
 
-**Efeitos** define como o ecrã é desenhado.
+**Efeitos** define como o ecrã é desenhado. Um terminal novo abre-se
+com 80 % de opacidade, a desfocagem de fundo a meia intensidade e todos
+os outros efeitos desligados, de modo que o ambiente de trabalho parece
+vidro fosco por trás do texto em vez de transparecer com nitidez.
 
 | Efeito | O que faz |
 | --- | --- |

@@ -37,8 +37,6 @@ use tairix_abi::window_ipc::{
     WINDOW_ENDPOINT,
 };
 use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, CALL_DEADLINE_NONE};
-use tairix_display::stale_frames;
-use tairix_geometry::{Rect, Region, StaleFrames};
 use tairix_raster::Surface;
 use tairix_rt::work::{Desk, Worker};
 use tairix_theme::{Accessibility, ThemeRegistry};
@@ -48,8 +46,8 @@ use crate::client::{
     notice_alert, presented_damage, retained_damage, WindowClient, WindowTransport,
 };
 use crate::desktop::Desktop;
-pub use crate::frames::region_bytes;
-use crate::frames::{draw_frame, WindowFrames};
+use crate::frames::{draw_frame, FrameRing, WindowFrames};
+pub use crate::frames::{region_bytes, FRAME_COUNT};
 use crate::server::{DialogSpec, LayerSpec, PopupSpec, ToolSpec, TransientSpec};
 
 /// Exit code when the shared frame region could not be created or granted to
@@ -633,9 +631,6 @@ pub fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
     }
 }
 
-/// Frames in a window's shared region: the one the session may still be
-/// reading, and the one the app draws its next present into.
-pub const FRAME_COUNT: u32 = 2;
 /// One open window's channel-side state: the id the session knows it by, the
 /// shared frame region every present crosses, and the pixel layout both are
 /// shaped as.
@@ -656,13 +651,7 @@ pub struct WindowPane {
     window: u64,
     frames: WindowFrames,
     mode: DisplayMode,
-    /// What each frame lacks of the picture last presented.
-    stale: StaleFrames,
-    /// The frame the next present is drawn into, never the one the session
-    /// took last.
-    back: usize,
-    /// The change a present carries, held so a present allocates none.
-    changed: Region,
+    ring: FrameRing,
 }
 
 impl WindowPane {
@@ -672,9 +661,7 @@ impl WindowPane {
             window,
             frames,
             mode: *mode,
-            stale: stale_frames(FRAME_COUNT as usize, mode),
-            back: 0,
-            changed: Region::new(),
+            ring: FrameRing::new(mode),
         }
     }
 
@@ -989,7 +976,8 @@ impl WindowPane {
     /// present would leave standing — but not while the window is hidden
     /// ([`WindowClient::is_hidden`]): nothing is presented then, since nobody
     /// can see it and re-attaching would map again the memory the release
-    /// gave back.
+    /// gave back. Nor is anything presented while the re-attach waits for room
+    /// at the session; the window is asked to paint again once it has some.
     ///
     /// # Errors
     ///
@@ -1024,31 +1012,30 @@ impl WindowPane {
         if client.is_hidden(window) {
             return Ok(());
         }
+        // Settled first, so a release its answer reports is re-attached now.
         client.await_present(window);
         let fresh = self.frames.is_released() || client.content_released(window);
         if fresh {
             let grant = self.frames.reattach().ok_or(Errno::NotAttached)?;
-            client
-                .resize(window, grant, FRAME_COUNT, &mode)
-                .map_err(|_| Errno::NotAttached)?;
-            self.stale
-                .reset(Rect::new(0, 0, mode.width_px, mode.height_px));
-            self.back = 0;
+            if let Err(errno) = client.resize(window, grant, FRAME_COUNT, &mode) {
+                // The session never took the fresh region, so none is kept.
+                self.frames.release();
+                // A resize in flight, or this process's own calls filling its
+                // place at the session: the client asks for the paint again
+                // once one is answered.
+                return if errno == Errno::WouldBlock {
+                    Ok(())
+                } else {
+                    Err(Errno::NotAttached)
+                };
+            }
+            self.ring.reset(&mode);
         }
         let damage = presented_damage(&mode, fresh, *damage)?;
         let pixels = self.frames.pixels().ok_or(Errno::NotAttached)?;
-        draw_frame(
-            pixels,
-            self.back,
-            (&mut self.stale, &mut self.changed),
-            surface,
-            &mode,
-            &damage,
-        )?;
-        let index = u32::try_from(self.back).map_err(|_| Errno::OutOfRange)?;
-        client.present(window, index, damage)?;
-        self.back = (self.back + 1) % FRAME_COUNT as usize;
-        Ok(())
+        self.ring.present(client, window, damage, |index, owed| {
+            draw_frame(pixels, index, owed, surface, &mode, &damage)
+        })
     }
 
     /// Re-map the frame region onto `new_mode`.
@@ -1096,9 +1083,7 @@ impl WindowPane {
         }
         self.frames = spare;
         self.mode = *new_mode;
-        self.stale
-            .reset(Rect::new(0, 0, new_mode.width_px, new_mode.height_px));
-        self.back = 0;
+        self.ring.reset(new_mode);
         Fitted::Adopted
     }
 

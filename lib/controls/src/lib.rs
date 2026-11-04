@@ -360,8 +360,9 @@ pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, S
 pub use chart::{Chart, DuplexRates, RateTrace, MAX_CHART_SAMPLES, RATE_TRACE_FLOOR};
 pub use checker::Checker;
 pub use collection::{
-    Card, CardAction, CellAlign, HeaderAction, HeaderColumn, IconTile, ListRow, Panel, PanelAction,
-    PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow, TileLayout, TileParts,
+    Card, CardAction, CellAlign, HeaderAction, HeaderColumn, IconTile, LabelHalo, ListRow, Panel,
+    PanelAction, PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow, TileLayout,
+    TileParts,
 };
 pub use colour_model::{ChannelSpec, ColourModel, PickerView, MOST_CHANNELS};
 pub use colour_picker::{ColourPicker, PickerOutcome};

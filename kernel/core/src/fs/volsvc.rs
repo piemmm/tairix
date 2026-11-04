@@ -20,10 +20,13 @@
 
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
+use tairix_abi::driver::filesystem::VolumeTitle;
 use tairix_abi::fsserve::ServeOffer;
 use tairix_abi::imageattach::{ImageAttach, ImageAttachReply};
 use tairix_abi::netattach::{AttachReply, FsserveCtl, NetworkAttach, NetworkOffer, OfferId};
+use tairix_abi::sysinfo::VolumeRemovalRecord;
 use tairix_abi::volume::{VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeInfo};
 use tairix_abi::{AppIdentity, CapabilityId, CapabilityQuery, DriverError, Errno, ProcId};
 use tairix_kernel_ipc::CallEndpoint;
@@ -57,6 +60,9 @@ pub struct Principal<'a> {
     pub gid: u32,
     /// Its effective capabilities.
     pub caps: &'a dyn CapabilityQuery,
+    /// Whether it runs in the session that holds the seat, as an ordinary
+    /// account: the user at the machine, who may eject removable media.
+    pub at_seat: bool,
 }
 
 impl Principal<'_> {
@@ -331,6 +337,39 @@ pub trait VolumeService: Sync {
         attach: &ImageAttach<'_>,
         answer: AnswerSink<'_>,
     ) -> Result<(), Errno>;
+
+    /// The device-backed volumes whose device most recently went away while
+    /// they were attached, oldest first: what tells a volume removed without
+    /// being ejected from one detached first.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] where the copy cannot be held, or
+    /// [`Errno::NotImplemented`] before a service is installed.
+    fn removals(&self) -> Result<Vec<VolumeRemovalRecord>, Errno>;
+
+    /// Title the volume published as `volume_id` `title`, for `caller`: written
+    /// as its filesystem's label and made durable, the catalog name it is shown
+    /// under left as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no volume of that identity;
+    /// [`Errno::NotSupported`] for one no disk-image file holds, or whose
+    /// format keeps no title; [`Errno::PermissionDenied`] for a caller other
+    /// than the principal it was attached for; [`Errno::Busy`] for one another
+    /// operation holds; [`Errno::DeviceOffline`] for one no driver serves;
+    /// [`Errno::ReadOnly`] for one that takes no writes; the driver's refusal
+    /// of the title ([`Errno::LengthOutOfRange`] past what its format stores,
+    /// [`Errno::OutOfRange`] for a character it cannot store,
+    /// [`Errno::NoSpace`] where it has no room for one) or of the flush; or
+    /// [`Errno::NotImplemented`] before a service is installed.
+    fn retitle(
+        &self,
+        caller: &Principal<'_>,
+        volume_id: &[u8; 16],
+        title: &VolumeTitle,
+    ) -> Result<(), Errno>;
 }
 
 /// Where an image attach's answer is delivered to its caller.
@@ -448,6 +487,19 @@ impl VolumeService for NullVolumeService {
     ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
+
+    fn removals(&self) -> Result<Vec<VolumeRemovalRecord>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn retitle(
+        &self,
+        _caller: &Principal<'_>,
+        _volume_id: &[u8; 16],
+        _title: &VolumeTitle,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// The shared [`NullVolumeService`] the syscall handlers default to.
@@ -484,6 +536,7 @@ mod tests {
             uid: 1000,
             gid: 1000,
             caps: &tairix_caps::CapabilitySet::empty(),
+            at_seat: false,
         };
         assert_eq!(
             NULL_VOLUME_SERVICE.detach(
@@ -542,5 +595,10 @@ mod tests {
             Err(Errno::NotImplemented)
         );
         assert!(!answered, "nothing is answered");
+        assert_eq!(NULL_VOLUME_SERVICE.removals(), Err(Errno::NotImplemented));
+        assert_eq!(
+            NULL_VOLUME_SERVICE.retitle(&caller, &[7; 16], &VolumeTitle::EMPTY),
+            Err(Errno::NotImplemented)
+        );
     }
 }

@@ -87,7 +87,11 @@ como uma janela nova o tem. Arrastar uma faixa move o seu painel no seu lado
 ou para o outro, marcando pelo caminho onde vai pousar; largado longe de ambos
 os lados, ou arrastado para fora da janela, o painel flutua numa pequena
 janela sua, movida pela sua faixa, mantida sobre a imagem e fechada pela sua
-marca; arrastado de novo sobre um lado, volta a acoplar-se ali.
+marca; arrastado de novo sobre um lado, volta a acoplar-se ali. Também a
+paleta flutua: o botão na ponta direita da sua faixa, ou Ver ▸ Painéis ▸
+Destacar a paleta, leva-a para uma pequena janela sua, com as cores dispostas
+numa grelha; fechar essa janela, ou arrastá-la de volta para o fundo da
+janela, devolve-a à faixa.
 
 A ferramenta de seleção marca um retângulo, uma elipse, um laço à mão
 livre, um polígono clicado canto a canto ou, com a varinha mágica, os píxeis

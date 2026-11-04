@@ -144,9 +144,7 @@ impl Masked {
 pub struct Drained {
     /// Any frame was received or transmitted.
     pub moved: bool,
-    /// The device's link state at the end of the pass.
-    pub link: LinkState,
-    /// The link differs from what the previous pass saw.
+    /// The link at the end of the pass differs from the one it began from.
     pub link_changed: bool,
     /// The device's cumulative receive-pre-filter count as last reported.
     pub filtered: u64,
@@ -206,7 +204,6 @@ impl Drain {
         Self {
             outcome: Drained {
                 moved: false,
-                link: previous_link,
                 link_changed: false,
                 filtered: 0,
                 masked: Masked::No,
@@ -220,7 +217,6 @@ impl Drain {
     /// Fold one service report in and decide the next step.
     pub fn observe(&mut self, report: &ServiceReport) -> DrainAction {
         self.outcome.moved |= report.received > 0 || report.transmitted > 0;
-        self.outcome.link = report.link;
         self.outcome.link_changed = report.link != self.previous_link;
         self.outcome.filtered = report.filtered;
         match self.phase {
@@ -312,6 +308,8 @@ pub struct NetChannelServer<N: Net> {
     /// Link state the last service reported, so the interrupt path can tell
     /// a change from a steady state.
     reported_link: LinkState,
+    /// The pre-filter count the last service reported.
+    reported_filtered: u64,
     /// The receive pre-filter the harvest path applies. Until the stack
     /// publishes an address set this admits everything, so nothing is ever
     /// dropped for want of a policy.
@@ -327,6 +325,7 @@ impl<N: Net> NetChannelServer<N> {
             // Until a service reports otherwise, assume the operational
             // default: a device that cannot sense its link reports `Up`.
             reported_link: LinkState::default(),
+            reported_filtered: 0,
             filter: RxClassifier::new(RxFilterPolicy::admit_all()),
         }
     }
@@ -488,6 +487,7 @@ impl<N: Net> NetChannelServer<N> {
             .service(&mut rings)
             .map_err(tairix_abi::DriverError::as_errno)?;
         self.reported_link = report.link;
+        self.reported_filtered = report.filtered;
         Ok(report)
     }
 
@@ -500,6 +500,13 @@ impl<N: Net> NetChannelServer<N> {
     #[must_use]
     pub fn reported_link(&self) -> LinkState {
         self.reported_link
+    }
+
+    /// The cumulative pre-filter count the last [`service`](Self::service)
+    /// reported: what a notify held since is offered with.
+    #[must_use]
+    pub fn reported_filtered(&self) -> u64 {
+        self.reported_filtered
     }
 
     /// Answer [`NetChannelRequest::SetRxFilter`](tairix_abi::driver::net_channel::NetChannelRequest::SetRxFilter):

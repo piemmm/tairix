@@ -435,7 +435,7 @@ impl<M: BufferMapper, T: DisplayTransport> RemoteDisplay<M, T> {
             ..
         } = self;
         let back = frames.get_mut(index).ok_or(DriverError::OutOfRange)?;
-        stale.bring_up_to_date(index, changed, |refresh| {
+        stale.bring_up_to_date(index, changed, DriverError::OutOfRange, |refresh| {
             draw(back.memory.as_mut(), *stride, refresh)
         })?;
         Ok(back.id)

@@ -16,7 +16,7 @@ picture.
 What it does cost is *repainting* that layer, and only there. The desktop is
 the bottom of the stack, so marking all of it recomposites every window above
 it and throws away every frosted backdrop over it — on a 1080p screen, most of
-a megapixel of blur to move one highlight. So the model reports the icon cells
+a megapixel of blur to move one highlight. So the model reports the icons
 a gesture actually changed and the session repaints only those
 (`DesktopShell::present_desktop_area`); the whole layer is repainted only when
 the whole layer changed — bring-up, a new wallpaper, a theme switch, or adopted
@@ -24,12 +24,12 @@ settings that restyle or re-lay it (`PinboardChange::layer`). A listing is not o
 merged in place (`Desktop::apply_changes`), and a fresh listing — a rescan, a
 folder read again, a name the desktop made in a folder its listing does not
 follow (`Desktop::follows`) — is adopted whole (`Desktop::relist_into`,
-`Desktop::resume_into`); either way the cells whose
-icon or highlight moved are reported, since a fixed-pitch column puts each
-index in the same cell whatever the listing. Icon artwork arriving from the
+`Desktop::resume_into`); either way the icons whose
+place or highlight moved are reported, since each icon is a rectangle of its
+own and one that stays where it stood costs nothing. Icon artwork arriving from the
 decode desk is not one of those: a landed decode can only change the picture
 inside the tiles that draw through it, so `Desktop::mark_artwork` reports those
-cells and a batch that pictures nothing shown costs no frame at all. See
+icons and a batch that pictures nothing shown costs no frame at all. See
 [the session's desktop layer](./session.md#the-desktop-layer-wallpaper-or-backdrop-then-icons).
 
 ## The pieces
@@ -50,8 +50,9 @@ Nothing about the pinboard lives in the kernel or in a driver.
 
 One small document per user, in the desktop session's **published** app-data
 scope ([the app-data client](../lib/appdata.md), `plans/APPDATA.md` §3.11).
-It carries five keys: which wallpaper, how it is fitted, the backdrop colour
-behind it, which corner the icons arrange from, and how they are sorted.
+It carries six keys: which wallpaper, how it is fitted, the backdrop colour
+behind it, which corner the icons arrange from, how they are sorted, and
+whether an icon put down settles onto the grid.
 [The `lib/wallpaper` page](../lib/wallpaper.md) is the reference for the
 registry, the defaults, and the bounds.
 
@@ -214,15 +215,38 @@ The pinboard lists the user's `Desktop` folder through exactly the same
 machinery the file manager uses: the same directory seam, the same shared
 sort, the same content-type classifier, the same grid, and the same
 double-click activation ([desktop icons](./icons.md),
-`plans/NEW-TASKBAR.md` T7/T16). Two things are settings:
+`plans/NEW-TASKBAR.md` T7/T16).
 
-- **Arrangement** — icons fill a column downward and grow a new column
-  across, starting either from the leading edge (the Windows/KDE
+An icon stands where the user put it, as on Windows or macOS: carried across
+the desktop with the mouse, dropped or saved onto it — each file as far from
+the drop as it was held — or laid out by *Tidy Up*. It lands exactly there,
+over another icon if that is where it was put, and the one put down last is
+the topmost, the one a click meets, whatever order the folder is sorted in.
+Every other icon takes the next free cell of the grid, in the order the
+folder is sorted, and keeps it until the screen, the order or the arrangement
+changes. A place is the user's own: the session keeps it in its private
+app-data scope, one key per icon placed and nothing for one never placed, so
+only that user's desktop shows it and their next session shows it the same.
+A place is measured from the edge the icons were arranged from when it was
+put there, so icons kept against the trailing edge stay there on a wider or
+narrower screen. A file renamed keeps its place, one deleted gives it up, and
+a place the screen no longer holds whole — after a change of resolution or
+scale — is shown on the free cell nearest it, never piled onto another at the
+edge, and kept as it was. The arrow keys move to the nearest icon in their
+direction, meeting icons stacked on one another in the order they are drawn.
+
+Three things are settings:
+
+- **Arrangement** — the grid's cells fill a column downward and grow a new
+  column across, starting either from the leading edge (the Windows/KDE
   arrangement, and the default) or from the trailing edge. The two are
   exact mirror images of one another in the shared grid engine, not two
   layouts.
 - **Sort** — by name, kind, size, or date, drawn from the shared sort, so
-  the desktop and the file manager agree on what each ordering means.
+  the desktop and the file manager agree on what each ordering means. It
+  orders the icons no one placed.
+- **Align to grid** — off by default; on, an icon put down settles onto the
+  free cell nearest where it was let go.
 
 A desktop icon is often a **shortcut** — a symbolic link the program
 library's row menu asked the session to make (`plans/SYMLINKS.md` S5, see
@@ -231,15 +255,42 @@ activated as what it *names*: bundle-ness reads off the target's own leaf, a
 folder or file is opened through the link, and one whose target has gone is
 refused with its reason rather than launched blind.
 
+**A name reads on whatever ground it stands on.** A resting icon wears no
+plate, so its name sits straight on the backdrop. Over a picture, whose light
+under any one name the desktop cannot know, the name is near-white over a dark
+halo; over a flat backdrop it takes whichever of near-white or near-black
+contrasts more with that colour, and needs no halo. The shell hands the paint
+the ground it lays down (`Desktop::render`), so the ink changes when the
+picture arrives rather than when the setting does. Only a resting name takes
+that ink (`IconTile::with_label_ink`): a selected, hovered or pressed icon
+keeps the theme's ink on its plate. The halo is clipped to the icon's cell, so
+repainting a cell still covers everything it drew. Each name's halo is blurred
+once and kept until the name, the scale or the theme changes, so repainting
+the layer — every frame of a wallpaper crossfade — lays the halos down again
+rather than blurring each anew.
+
+**A folder no watch can follow.** The column follows its folder through a
+[directory watch](../filesystem/watch.md). A volume that records no changes — a
+network share, or the stand-in of a volume that has gone away — lists the
+folder without one. The desktop says so once, on `stderr` and on the system log
+(`PINBOARD_UNFOLLOWED`, 20036), until a watch joins again. It reads the folder
+again after a save it made there itself (`Desktop::show_made`) and whenever the
+mount table moves (`Desktop::relist_unfollowed`), which arms a watch once the
+volume behind it records changes again. A copy a dragging application makes
+there shows on the next of those reads: nothing tells the desktop when that
+copy ends (`plans/PINBOARD.md` P12).
+
 ## The backdrop menu
 
 A right-click on the backdrop opens the desktop's own menu at the pointer. It
 is a chain like every other menu on the system — the pinboard hands a row model
 to the one [menu service](./menus.md) and keeps no shell of its own — and it
 offers: `Open` (only when the click landed on an icon), `New Folder`, the four
-sort orders, the two arrangements, `Refresh`, `Open Desktop Folder`, and
-`Change Background…`, with the sort and the arrangement in force shown as their
-group's chosen member and not offered again.
+sort orders, the two arrangements, `Tidy Up ▸ By Name / By Date / By Size`,
+`Refresh`, `Open Desktop Folder`, and `Change Background…`, with the sort and
+the arrangement in force shown as their group's chosen member and not offered
+again. *Tidy Up* lays every icon out on the grid in the order chosen, from the
+arrangement's corner, and keeps them there in one write.
 
 Managing an entry — rename, copy, delete, properties — is deliberately
 absent. Those verbs belong to [the file manager](./apps.md), which owns them
@@ -259,7 +310,7 @@ is [the session's own page](./session.md#the-backdrop-menu).
 The desktop picture is a **section of Settings**, not an application beside
 it: the menu's `Change Background…` opens
 [the Settings application](./settings.md) at its Wallpaper pane, where the
-fit, backdrop, arrangement and sort are four form rows above the shipped
+fit, backdrop, arrangement, sort and *Align to grid* are five form rows above the shipped
 pictures, filed under their categories and each drawn at the screen's own
 16:9 shape with rounded corners. A Settings already running is handed the pane
 and navigates to it; a fresh one is given the same pane and opens on it.

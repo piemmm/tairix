@@ -14,17 +14,22 @@ use tairix_fsprobe::udf::{
     TAG_LEN, TAG_LVD, TAG_LVID, TAG_PD, TAG_PVD, TAG_SBD, TAG_TD, TAG_USD, VRS_START,
 };
 
-use crate::dir::{self, CHAR_DIRECTORY, CHAR_PARENT, FID_FIXED};
+use crate::dir::{CHAR_DIRECTORY, CHAR_PARENT, FID_FIXED};
 use crate::entry::{EFE_FIXED, FE_FIXED, STRATEGY_4, TYPE_DIRECTORY};
 use crate::fields::encode_timestamp;
 use crate::integrity::FIRST_UNIQUE_ID;
 use crate::space::HEADER;
+use crate::title::{
+    dstring, leading, Titles, FSD_LOGICAL_ID, IUVD_LOGICAL_ID, LOGICAL_ID_LEN, LVD_LOGICAL_ID,
+    LV_INFO, PVD_VOLUME_ID,
+};
 use crate::{zeroed_len, Udf, UNSPECIFIED_ID};
 
 /// How a new volume is laid out.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FormatOptions<'a> {
-    /// The volume's label, kept as both the volume and the logical volume
+    /// The volume's label, recorded as a retitle records a title: whole as
+    /// the logical volume identifier, its leading part as the volume
     /// identifier.
     pub label: &'a str,
     /// The UDF revision to record: from 0x0102 to 0x0201, the newest a
@@ -109,21 +114,6 @@ fn u32_of(value: u64) -> Result<u32, DriverError> {
     u32::try_from(value).map_err(|_| DriverError::NoSpace)
 }
 
-/// A `dstring` of `len` bytes holding `text`.
-fn dstring(text: &str, len: usize) -> Result<Vec<u8>, DriverError> {
-    let mut field = zeroed_len(len)?;
-    if text.is_empty() {
-        return Ok(field);
-    }
-    let identifier = dir::encode(text).ok_or(DriverError::LengthOutOfRange)?;
-    if identifier.len() >= len {
-        return Err(DriverError::LengthOutOfRange);
-    }
-    field[..identifier.len()].copy_from_slice(&identifier);
-    field[len - 1] = u8::try_from(identifier.len()).map_err(|_| DriverError::LengthOutOfRange)?;
-    Ok(field)
-}
-
 /// A character set specification naming OSTA Compressed Unicode.
 fn charspec(out: &mut [u8]) {
     out[0] = 0;
@@ -167,7 +157,9 @@ impl<B: Block> Udf<B> {
     /// * [`DriverError::Unsupported`] for a revision this formatter does
     ///   not lay out, or a block size too large for its layout.
     /// * [`DriverError::NoSpace`] for a device too small to hold a volume.
-    /// * [`DriverError::LengthOutOfRange`] for a label no identifier holds.
+    /// * [`DriverError::LengthOutOfRange`] for a label the logical volume
+    ///   identifier cannot hold, and [`DriverError::OutOfRange`] for one
+    ///   closing with a space.
     /// * Whatever the device reports for a write.
     pub fn format(device: B, options: &FormatOptions<'_>) -> Result<Self, DriverError> {
         if !(0x0102..=NEWEST).contains(&options.revision) {
@@ -246,16 +238,17 @@ fn descriptors(
     let mut set_identifier = alloc::string::String::from(set);
     set_identifier.push_str(options.label);
 
+    let identifiers = Titles::of(options.label)?;
     let mut pvd = zeroed_len(512)?;
-    pvd[24..56].copy_from_slice(&dstring(options.label, 32)?);
+    pvd[PVD_VOLUME_ID].copy_from_slice(&identifiers.volume);
     pvd[56..58].copy_from_slice(&1u16.to_le_bytes());
     pvd[58..60].copy_from_slice(&1u16.to_le_bytes());
     pvd[60..62].copy_from_slice(&2u16.to_le_bytes());
     pvd[62..64].copy_from_slice(&3u16.to_le_bytes());
     pvd[64..68].copy_from_slice(&1u32.to_le_bytes());
     pvd[68..72].copy_from_slice(&1u32.to_le_bytes());
-    let truncated: alloc::string::String = set_identifier.chars().take(63).collect();
-    pvd[72..200].copy_from_slice(&dstring(&truncated, 128)?);
+    let volume_set: [u8; LOGICAL_ID_LEN] = dstring(leading(&set_identifier, LOGICAL_ID_LEN))?;
+    pvd[72..200].copy_from_slice(&volume_set);
     charspec(&mut pvd[200..264]);
     charspec(&mut pvd[264..328]);
     pvd[376..388].copy_from_slice(&stamp);
@@ -264,13 +257,9 @@ fn descriptors(
 
     let mut iuvd = zeroed_len(512)?;
     iuvd[16..20].copy_from_slice(&1u32.to_le_bytes());
-    regid(
-        &mut iuvd[20..52],
-        b"*UDF LV Info",
-        &options.revision.to_le_bytes(),
-    );
+    regid(&mut iuvd[20..52], LV_INFO, &options.revision.to_le_bytes());
     charspec(&mut iuvd[52..116]);
-    iuvd[116..244].copy_from_slice(&dstring(options.label, 128)?);
+    iuvd[IUVD_LOGICAL_ID].copy_from_slice(&identifiers.logical);
     regid(&mut iuvd[352..384], IMPLEMENTATION, &[]);
     out.push(sealed(iuvd, TAG_IUVD, version, start + 1, 512)?);
 
@@ -295,7 +284,7 @@ fn descriptors(
     let mut lvd = zeroed_len(512)?;
     lvd[16..20].copy_from_slice(&3u32.to_le_bytes());
     charspec(&mut lvd[20..84]);
-    lvd[84..212].copy_from_slice(&dstring(options.label, 128)?);
+    lvd[LVD_LOGICAL_ID].copy_from_slice(&identifiers.logical);
     lvd[212..216].copy_from_slice(&u32_of(plan.bs)?.to_le_bytes());
     domain(&mut lvd[216..248], options.revision);
     // The file set descriptor and its terminator.
@@ -391,9 +380,10 @@ fn partition<B: Block>(
     fsd[32..36].copy_from_slice(&1u32.to_le_bytes());
     fsd[36..40].copy_from_slice(&1u32.to_le_bytes());
     charspec(&mut fsd[48..112]);
-    fsd[112..240].copy_from_slice(&dstring(options.label, 128)?);
+    let identifiers = Titles::of(options.label)?;
+    fsd[FSD_LOGICAL_ID].copy_from_slice(&identifiers.logical);
     charspec(&mut fsd[240..304]);
-    fsd[304..336].copy_from_slice(&dstring(options.label, 32)?);
+    fsd[304..336].copy_from_slice(&identifiers.volume);
     fsd[400..404].copy_from_slice(&u32_of(bs)?.to_le_bytes());
     fsd[404..408].copy_from_slice(&u32_of(plan.root)?.to_le_bytes());
     domain(&mut fsd[416..448], options.revision);

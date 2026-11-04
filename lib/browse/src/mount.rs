@@ -1,5 +1,5 @@
-//! Mounting a disk image for the user who opens it, and ejecting what they
-//! mounted.
+//! Mounting a disk image for the user who opens it, ejecting what they
+//! mounted, and titling it.
 //!
 //! One rule for every launcher — the file manager, the desktop — as for a
 //! document: the image is opened read-write where the user may write it,
@@ -12,27 +12,29 @@
 //! volume that went away before what was written to it was saved is ejected
 //! only once the user agrees to let that go ([`lost_eject_question`]).
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 #[cfg(feature = "rt")]
 use alloc::collections::TryReserveError;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::{format, vec};
 use core::ops::Bound;
 
+use tairix_abi::driver::filesystem::VolumeTitle;
 #[cfg(any(feature = "rt", test))]
 use tairix_abi::imageattach::ImageAttach;
 use tairix_abi::imageattach::{ImageAccess, ImageAttachReply};
 #[cfg(any(feature = "rt", test))]
 use tairix_abi::netattach::Presentation;
 use tairix_abi::sysinfo::{
-    MountAvailability, ViewBindingRecord, VOLUME_ID_LEN, VOLUME_ID_UNPUBLISHED,
+    MountAvailability, ViewBindingRecord, VolumeClass, VOLUME_ID_LEN, VOLUME_ID_UNPUBLISHED,
 };
 use tairix_abi::volume::DetachMode;
 #[cfg(any(feature = "rt", test))]
 use tairix_abi::volume::VolumeDetachRequest;
 #[cfg(feature = "rt")]
-use tairix_abi::volume::VOLUME_DETACH_LEN;
+use tairix_abi::volume::{VolumeRetitleRequest, VOLUME_DETACH_LEN, VOLUME_RETITLE_MAX_LEN};
 use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
 use tairix_abi::{Errno, STORAGE_CATALOG};
 
@@ -49,6 +51,12 @@ pub const CROWDED: &str = "too many disks are being mounted or ejected";
 
 /// Why a mount was refused: there was no memory for the worker it runs on.
 pub const UNSERVED: &str = "there was not enough memory to mount disks";
+
+/// Why a title was refused before it began: as many wait as may.
+const TITLES_CROWDED: &str = "too many disks are being titled, mounted or ejected";
+
+/// Why a title was refused: there was no memory for the worker it runs on.
+const TITLES_UNSERVED: &str = "there was not enough memory to title disks";
 
 /// Why a read-only mount was refused: the user has the image mounted
 /// writable already, and the one volume a file holds cannot be both.
@@ -167,7 +175,8 @@ pub fn lost_eject_question(name: &str) -> Option<AlertSpec> {
     .ok()
 }
 
-/// A disk image asked to be mounted, or a volume asked to be ejected.
+/// A disk image asked to be mounted, or a volume asked to be ejected or
+/// titled.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MountAct {
     /// Mount the image at `path`, read-only when `read_only`.
@@ -186,6 +195,17 @@ pub enum MountAct {
         /// Why it is ejected: a volume lost with writes unsaved is let go only
         /// once the user is asked.
         asked: EjectAsked,
+    },
+    /// Write `title` as the label of the disk image published as
+    /// `volume_id`, shown as `name`.
+    Retitle {
+        /// The identity a retitle names it by.
+        volume_id: [u8; VOLUME_ID_LEN],
+        /// What the user calls it.
+        name: String,
+        /// The title its filesystem is to record, held apart so the rarest
+        /// act does not widen every queued one.
+        title: Box<VolumeTitle>,
     },
 }
 
@@ -272,7 +292,7 @@ impl MountAct {
     pub fn name(&self) -> &str {
         match self {
             Self::Attach { path, .. } => path.rsplit('/').next().unwrap_or(path),
-            Self::Eject { name, .. } => name,
+            Self::Eject { name, .. } | Self::Retitle { name, .. } => name,
         }
     }
 
@@ -282,6 +302,7 @@ impl MountAct {
         let undone = match self {
             Self::Attach { .. } => "mounted",
             Self::Eject { .. } => "ejected",
+            Self::Retitle { .. } => "retitled",
         };
         MountRefusal {
             headline: tairix_util::utf8::refusal_headline(self.name(), undone),
@@ -289,25 +310,36 @@ impl MountAct {
         }
     }
 
-    /// This act, taken out of `self` without copying what it names: the
-    /// worker hands the act it was lent back in its answer.
+    /// Why this act was refused before it began, as many waiting as may.
+    #[must_use]
+    pub fn crowded(&self) -> &'static str {
+        match self {
+            Self::Retitle { .. } => TITLES_CROWDED,
+            Self::Attach { .. } | Self::Eject { .. } => CROWDED,
+        }
+    }
+
+    /// Why this act was refused for want of memory for the worker it runs on.
+    #[must_use]
+    pub fn unserved(&self) -> &'static str {
+        match self {
+            Self::Retitle { .. } => TITLES_UNSERVED,
+            Self::Attach { .. } | Self::Eject { .. } => UNSERVED,
+        }
+    }
+
+    /// This act, taken out of `self` without copying or allocating: the
+    /// worker hands the act it was lent back in its answer, leaving an empty
+    /// one in its place.
     #[cfg(feature = "rt")]
     fn take(&mut self) -> Self {
-        match self {
-            Self::Attach { path, read_only } => Self::Attach {
-                path: core::mem::take(path),
-                read_only: *read_only,
+        core::mem::replace(
+            self,
+            Self::Attach {
+                path: String::new(),
+                read_only: false,
             },
-            Self::Eject {
-                volume_id,
-                name,
-                asked,
-            } => Self::Eject {
-                volume_id: *volume_id,
-                name: core::mem::take(name),
-                asked: *asked,
-            },
-        }
+        )
     }
 }
 
@@ -335,6 +367,40 @@ impl MountDone {
         }
     }
 
+    /// The volume an administrator is to be asked to eject in place of this
+    /// eject's refusal — a removable device's, which the kernel refused the
+    /// user asking, one not at the machine, and an administrator may eject
+    /// while nothing holds it open — as `unmount` is to name it, by its
+    /// [`volume_root`], so a device put in its place under the same catalog
+    /// name is never the one ejected, and as the user knows it, by that
+    /// catalog name. `None` for any other answer, and for an eject the user
+    /// did not ask for or one letting unsaved writes go, which only the
+    /// user's own confirmation may.
+    #[must_use]
+    pub fn for_an_administrator<'a>(&self, places: &'a Places) -> Option<(String, &'a str)> {
+        let MountAct::Eject {
+            volume_id,
+            asked: EjectAsked::ByUser,
+            ..
+        } = &self.act
+        else {
+            return None;
+        };
+        if !matches!(self.answer, Err(Errno::PermissionDenied)) {
+            return None;
+        }
+        places
+            .rows()
+            .iter()
+            .chain(places.unoffered())
+            .find(|place| {
+                place.facts().is_some_and(|facts| {
+                    facts.volume_id == *volume_id && facts.class == VolumeClass::Removable
+                })
+            })
+            .map(|place| (volume_root(*volume_id), place.label()))
+    }
+
     /// Where the volume to show the user is, root-first — the one the image
     /// holds, whether it was attached now or already — or `None` for a volume
     /// ejected, which the mount table reports.
@@ -356,7 +422,7 @@ impl MountDone {
         }
         let asked = match self.act {
             MountAct::Attach { read_only, .. } => access(read_only),
-            MountAct::Eject { .. } => ImageAccess::WritableWherePossible,
+            MountAct::Eject { .. } | MountAct::Retitle { .. } => ImageAccess::WritableWherePossible,
         };
         let reason = match self.answer {
             // Never taken up for this session, so never shown as what was
@@ -374,7 +440,7 @@ impl MountDone {
                     String::from(volume.name()),
                 ]))
             }
-            Ok(Mounted::Ejected) => return Ok(None),
+            Ok(Mounted::Ejected | Mounted::Retitled) => return Ok(None),
             Ok(Mounted::Image(ImageAttachReply::Refused(why))) => why.reason(),
             // No launcher here asks for a directory or a name of its own.
             Ok(Mounted::Image(
@@ -383,10 +449,18 @@ impl MountDone {
             Err(err) => match self.act {
                 MountAct::Attach { .. } => attach_refusal(err),
                 MountAct::Eject { .. } => eject_refusal(err),
+                MountAct::Retitle { .. } => retitle_refusal(err),
             },
         };
         Err(self.act.refused(reason))
     }
+}
+
+/// What `unmount` names the volume published as `volume_id` by, and no other:
+/// its durable root, `id::<volume-id>/` (`docs/src/filesystem/drives.md`).
+#[must_use]
+pub fn volume_root(volume_id: [u8; VOLUME_ID_LEN]) -> String {
+    tairix_path::Path::of_volume(tairix_path::VolumeId::from_bytes(volume_id)).to_string()
 }
 
 /// What a [`MountAct`] carried out.
@@ -396,9 +470,11 @@ pub enum Mounted {
     Image(ImageAttachReply),
     /// The volume was ejected.
     Ejected,
+    /// The volume records its new title.
+    Retitled,
 }
 
-/// A mount or eject that was refused, as the user is told it.
+/// A mount, eject or retitle that was refused, as the user is told it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MountRefusal {
     /// What could not be done, naming the image or the volume.
@@ -532,8 +608,27 @@ pub fn carry_out(act: MountAct) -> MountDone {
         MountAct::Eject {
             volume_id, asked, ..
         } => eject(*volume_id, *asked).map(|()| Mounted::Ejected),
+        MountAct::Retitle {
+            volume_id, title, ..
+        } => retitle(*volume_id, **title).map(|()| Mounted::Retitled),
     };
     MountDone { act, answer }
+}
+
+/// Write `title` as the label of the volume published as `volume_id`, which
+/// the caller attached.
+///
+/// # Errors
+///
+/// The kernel's refusal, as [`retitle_refusal`] states it.
+#[cfg(feature = "rt")]
+fn retitle(volume_id: [u8; VOLUME_ID_LEN], title: VolumeTitle) -> Result<(), Errno> {
+    let mut frame = [0u8; VOLUME_RETITLE_MAX_LEN];
+    let len = VolumeRetitleRequest { volume_id, title }.encode(&mut frame)?;
+    match tairix_rt::volume_retitle(&frame[..len]) {
+        0 => Ok(()),
+        err => Err(Errno::from_syscall(err)),
+    }
 }
 
 /// Why mounting an image was refused, given the kernel's `err`.
@@ -557,11 +652,30 @@ const fn attach_refusal(err: Errno) -> &'static str {
     }
 }
 
+/// Why titling a volume was refused, given the kernel's `err`.
+const fn retitle_refusal(err: Errno) -> &'static str {
+    match err {
+        Errno::PermissionDenied => "only whoever mounted it titles it",
+        Errno::NotFound => "it is not mounted",
+        Errno::NotSupported => "its format records no title",
+        Errno::ReadOnly => "it is mounted read-only",
+        Errno::OutOfRange | Errno::LengthOutOfRange => {
+            "its format cannot record that title: it is too long, or holds a character the \
+             format does not"
+        }
+        Errno::Busy => "it is being mounted, ejected or titled already",
+        Errno::DeviceOffline => "its disk's driver is not serving it",
+        Errno::DeviceFault | Errno::MediumError => "its device failed",
+        Errno::OutOfMemory => "there was not enough memory to title it",
+        _ => "it could not be titled",
+    }
+}
+
 /// Why ejecting a volume was refused, given the kernel's `err`.
 const fn eject_refusal(err: Errno) -> &'static str {
     match err {
         Errno::Busy => "a file on it is open, or a disk image on it is mounted",
-        Errno::PermissionDenied => "only whoever mounted it ejects it",
+        Errno::PermissionDenied => "only whoever mounted it, or an administrator, ejects it",
         Errno::NotFound => "it is not mounted",
         Errno::DeviceFault => "what it holds could not be written back",
         Errno::OutOfMemory => "there was not enough memory to eject it",
@@ -573,8 +687,9 @@ const fn eject_refusal(err: Errno) -> &'static str {
 mod tests {
     use super::{
         attach_refusal, detach_request, eject_refusal, holds_within, lost_eject_question, private,
-        shown_at, within, EjectAsked, MountAct, MountDone, MountRefusal, Mounted, Projection,
-        CROWDED, LOST_EJECT_INDEX, MOUNTED_WRITABLE, UNSERVED,
+        shown_at, volume_root, within, EjectAsked, MountAct, MountDone, MountRefusal, Mounted,
+        Projection, CROWDED, LOST_EJECT_INDEX, MOUNTED_WRITABLE, TITLES_CROWDED, TITLES_UNSERVED,
+        UNSERVED,
     };
     use crate::browser::Browser;
     use crate::entry::Entry;
@@ -583,7 +698,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
-    use tairix_abi::driver::filesystem::MountFlags;
+    use tairix_abi::driver::filesystem::{MountFlags, VolumeTitle};
     use tairix_abi::imageattach::{ImageAccess, ImageAttachReply, ImageRefusal};
     use tairix_abi::netattach::{AttachReply, Presentation};
     use tairix_abi::sysinfo::{MountAvailability, ViewBindingRecord};
@@ -608,6 +723,14 @@ mod tests {
 
     fn done(act: MountAct, answer: Result<Mounted, Errno>) -> MountDone {
         MountDone { act, answer }
+    }
+
+    fn retitle(name: &str) -> MountAct {
+        MountAct::Retitle {
+            volume_id: [7; 16],
+            name: String::from(name),
+            title: alloc::boxed::Box::new(VolumeTitle::new("Games").expect("a title")),
+        }
     }
 
     fn volume(name: &str) -> AttachReply {
@@ -725,6 +848,44 @@ mod tests {
         );
     }
 
+    /// A retitle is told as one: done, it shows nothing to open; refused, it
+    /// names the disk and says why in a title's own words, never a mount's
+    /// or an eject's.
+    #[test]
+    fn a_retitle_is_told_in_its_own_words() {
+        assert_eq!(
+            done(retitle("floppy"), Ok(Mounted::Retitled)).shown(),
+            Ok(None)
+        );
+        for (err, reason) in [
+            (Errno::PermissionDenied, "only whoever mounted it titles it"),
+            (Errno::NotSupported, "its format records no title"),
+            (Errno::ReadOnly, "it is mounted read-only"),
+            (
+                Errno::Busy,
+                "it is being mounted, ejected or titled already",
+            ),
+            (Errno::Stale, "it could not be titled"),
+        ] {
+            assert_eq!(
+                done(retitle("floppy"), Err(err)).shown(),
+                Err(MountRefusal {
+                    headline: String::from("\u{201c}floppy\u{201d} could not be retitled"),
+                    reason,
+                }),
+                "{err:?}"
+            );
+        }
+        let titling = retitle("floppy");
+        assert_eq!(
+            (titling.crowded(), titling.unserved()),
+            (TITLES_CROWDED, TITLES_UNSERVED)
+        );
+        for act in [attach("/Users/ada/Home/a.adf"), eject("usb1")] {
+            assert_eq!((act.crowded(), act.unserved()), (CROWDED, UNSERVED));
+        }
+    }
+
     /// Every folder lists one folder, `sub`, so a browser may stand anywhere,
     /// and a listing of `pending` waits.
     struct Anywhere;
@@ -746,6 +907,8 @@ mod tests {
     fn image_facts(uid: u32, availability: MountAvailability) -> VolumeFacts {
         VolumeFacts {
             filesystem: String::from("affs"),
+            title: String::new(),
+            class: tairix_abi::sysinfo::VolumeClass::Image,
             free: None,
             availability,
             owner: Some(uid),
@@ -783,6 +946,75 @@ mod tests {
             "the catalog above"
         );
         assert!(!within(&[], &disk), "nothing is within no roots");
+    }
+
+    /// Only the user's own eject of a removable device's volume, refused for
+    /// want of the authority, is one to ask an administrator for: by its
+    /// durable root, which no device put in its place carries, and its
+    /// catalog name.
+    #[test]
+    fn only_a_refused_eject_of_a_removable_volume_is_an_administrators() {
+        let stick = |class, offered| Volume {
+            label: String::from("usb1"),
+            target: String::from("/Storage/usb1"),
+            medium: None,
+            facts: VolumeFacts {
+                class,
+                owner: None,
+                volume_id: [7; 16],
+                ..image_facts(1000, MountAvailability::Available)
+            },
+            offered,
+        };
+        let home = components(&["Users", "ada"]);
+        let removable = Places::new(
+            &home,
+            &[stick(tairix_abi::sysinfo::VolumeClass::Removable, true)],
+        );
+        let refused = done(eject("usb1"), Err(Errno::PermissionDenied));
+        let asked = Some((volume_root([7; 16]), "usb1"));
+        assert_eq!(refused.for_an_administrator(&removable), asked);
+        let unoffered = Places::new(
+            &home,
+            &[stick(tairix_abi::sysinfo::VolumeClass::Removable, false)],
+        );
+        assert_eq!(
+            refused.for_an_administrator(&unoffered),
+            asked,
+            "wherever the rail lists it"
+        );
+        let fixed = Places::new(
+            &home,
+            &[stick(tairix_abi::sysinfo::VolumeClass::Local, true)],
+        );
+        assert_eq!(refused.for_an_administrator(&fixed), None, "a fixed disk");
+        for answer in [Err(Errno::Busy), Ok(Mounted::Ejected)] {
+            assert_eq!(
+                done(eject("usb1"), answer).for_an_administrator(&removable),
+                None
+            );
+        }
+        for asked in [EjectAsked::Finished, EjectAsked::LettingGo] {
+            let unasked = MountAct::Eject {
+                volume_id: [7; 16],
+                name: String::from("usb1"),
+                asked,
+            };
+            assert_eq!(
+                done(unasked, Err(Errno::PermissionDenied)).for_an_administrator(&removable),
+                None,
+                "{asked:?}"
+            );
+        }
+    }
+
+    /// A volume's durable root, as an administrator's eject names it, reads
+    /// back through the path grammar as exactly its identity.
+    #[test]
+    fn a_volume_root_reads_back_as_its_identity() {
+        let root = tairix_path::parse(&volume_root([7; 16])).expect("a path");
+        assert_eq!(root.volume_id().map(|id| *id.as_bytes()), Some([7; 16]));
+        assert!(root.components().is_empty());
     }
 
     #[test]

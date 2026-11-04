@@ -24,8 +24,14 @@ deviné.
 Le bureau démarre le gestionnaire de fichiers avec la session et le garde
 dans la barre d'icônes, et celui-ci ne se termine jamais : le menu de son
 emplacement liste vos propres lieux et tout ce qui est monté, et choisir l'un
-d'eux y ouvre une fenêtre ; *Réseau* et *Paramètres…* viennent en dernier. Un
-clic sur l'emplacement en ouvre une à l'endroit que choisissent les
+d'eux y ouvre une fenêtre ; *Réseau* et *Paramètres…* viennent en dernier.
+Un volume que vous pouvez éjecter — une clé USB, une carte mémoire ou un
+autre disque amovible, ou une image disque ou un partage que vous avez monté
+— ouvre un sous-menu contenant *Éjecter*, et celui d'une image disque qui
+vous appartient et porte un titre contient aussi *Titre* : cette ligne ouvre
+un champ contenant le titre du disque, prêt à être modifié, et un appui sur
+`Return` écrit le nouveau sur le disque. Un clic sur l'emplacement en ouvre
+une à l'endroit que choisissent les
 paramètres. Demander un dossier qui a déjà une fenêtre amène cette fenêtre au
 premier plan au lieu d'en ouvrir une autre. Le menu n'a pas de ligne
 *Quitter* — le gestionnaire de fichiers fait partie du bureau, fermer ses
@@ -125,10 +131,16 @@ document qui en provient, ouvert dans une autre application —, elle reste
 montée, et le démontage est retenté dès que cette autre chose a pu la
 libérer. Les paramètres peuvent plutôt garder monté ce que vous ouvrez,
 jusqu'à ce que vous l'éjectiez ou que votre session de connexion se termine.
-*Éjecter* retire un volume que vous avez monté, depuis son icône ou depuis
-sa ligne dans la colonne des lieux, dont le menu contextuel propre contient
-*Ouvrir* et *Éjecter* ; vos fenêtres qui s'y trouvent passent d'abord à
-`/Storage`. Si un volume disparaît — son disque retiré, ou son serveur
+*Éjecter* retire un volume que vous avez monté, ou un disque amovible
+pendant que vous utilisez l'ordinateur lui-même, depuis son icône, depuis sa
+ligne dans la colonne des lieux, dont le menu contextuel propre contient
+*Ouvrir* et *Éjecter*, ou depuis le menu de l'emplacement de la barre
+d'icônes ; vos fenêtres qui s'y trouvent passent d'abord à `/Storage`. Un
+disque amovible sur lequel un fichier est encore ouvert n'est pas éjecté, et
+un message le signale. Lorsque vous n'avez pas le droit d'éjecter un disque
+amovible — ce n'est pas vous qui êtes devant l'ordinateur —, le bureau
+demande le nom et le mot de passe d'un administrateur, et l'éjecte avec son
+accord. Si un volume disparaît — son disque retiré, ou son serveur
 perdu — avant que tout ce que vous y avez écrit soit enregistré, il quitte
 la colonne des lieux mais garde son icône dans `/Storage`, et ce qui n'a pas
 été enregistré est perdu ; *Éjecter* depuis cette icône demande confirmation

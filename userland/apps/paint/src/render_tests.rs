@@ -697,3 +697,67 @@ fn a_chosen_surround_and_checkerboard_are_drawn() {
         "the dark square"
     );
 }
+
+#[test]
+fn the_strip_draws_its_pop_out() {
+    let canvas = Canvas::new(20, 20, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits");
+    let (view, layout, registry) = window(canvas);
+    let theme = registry.active();
+    let surface = paint(&view, &layout, theme);
+    let raised = Color::from(theme.palette().surface_raised).premultiply();
+    let pop_out = layout.pop_out();
+    let (Ok(left), Ok(top)) = (u32::try_from(pop_out.left()), u32::try_from(pop_out.top())) else {
+        panic!("the strip seats it");
+    };
+    let drawn = (left..left + pop_out.width)
+        .any(|x| (top..top + pop_out.height).any(|y| surface.get(x, y) != Some(raised)));
+    assert!(drawn, "the control is drawn over the strip's ground");
+}
+
+#[test]
+fn the_floating_palette_draws_each_well() {
+    let canvas = Canvas::new(20, 20, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits");
+    let (mut view, layout, registry) = window(canvas);
+    let theme = registry.active();
+    view.act(Action::FloatPalette, &layout, &mut Region::new());
+    let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, faces(theme));
+    view.settle(&layout, &mut Region::new());
+    let frame = layout.palette();
+    assert!(
+        frame.intersection(&layout.window()).is_empty(),
+        "beside the window"
+    );
+    let width = u32::try_from(frame.right()).expect("right of the window");
+    let mut surface = Surface::new(width, WINDOW.1).expect("a surface");
+    render_into(
+        &mut surface,
+        &view,
+        &layout,
+        theme,
+        Scale::ONE,
+        faces(theme),
+        &mut NoArtwork,
+    );
+    let swatches = view.controls().swatches;
+    // A marked well wears its mark where the probe looks.
+    let marked = [swatches.selected(), swatches.secondary()];
+    for well in 0..swatches.len() {
+        let colour = swatches.colour(well).expect("a colour");
+        if colour.a < u8::MAX || marked.contains(&Some(well)) {
+            continue;
+        }
+        let centre = swatches
+            .cell_rect(layout.swatches(), well)
+            .expect("a well")
+            .center();
+        let at = (
+            u32::try_from(centre.x - 3).expect("on"),
+            u32::try_from(centre.y - 3).expect("on"),
+        );
+        assert_eq!(
+            surface.get(at.0, at.1),
+            Some(colour.premultiply()),
+            "well {well}"
+        );
+    }
+}

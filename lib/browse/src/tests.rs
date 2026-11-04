@@ -121,6 +121,8 @@ fn volume(label: &str, target: &str, medium: Option<BlkMedium>) -> Volume {
         medium,
         facts: VolumeFacts {
             filesystem: String::new(),
+            title: String::new(),
+            class: tairix_abi::sysinfo::VolumeClass::Local,
             free: None,
             availability: tairix_abi::sysinfo::MountAvailability::Available,
             owner: None,
@@ -321,18 +323,45 @@ fn a_volume_attached_for_a_principal_is_theirs_to_eject() {
         uid: 1000,
         private: true,
     })
-    .with_class(VolumeClass::Image);
+    .with_class(VolumeClass::Image)
+    .with_title(tairix_abi::driver::filesystem::VolumeTitle::new("Lemmings").expect("a title"));
     let image = Volume::from_mount(&image).expect("a volume");
     assert_eq!(image.facts.owner, Some(1000));
+    assert_eq!(
+        (image.facts.title.as_str(), image.facts.class),
+        ("Lemmings", VolumeClass::Image)
+    );
+    assert_eq!(
+        (machine.facts.title.as_str(), machine.facts.class),
+        ("", VolumeClass::Local),
+        "a machine's volume carries no title"
+    );
     assert_eq!(image.facts.volume_id, [7; 16]);
     assert!(image.facts.ejectable_by(1000));
     assert!(!image.facts.ejectable_by(1001), "someone else's");
     let unnamed = VolumeFacts {
         volume_id: tairix_abi::sysinfo::VOLUME_ID_UNPUBLISHED,
-        ..image.facts
+        ..image.facts.clone()
     };
     assert_eq!(unnamed.ejector(), None, "a detach could not name it");
     assert!(!unnamed.ejectable_by(1000));
+
+    let stick = VolumeFacts {
+        class: VolumeClass::Removable,
+        owner: None,
+        ..image.facts
+    };
+    assert_eq!(
+        stick.ejector(),
+        Some(crate::Ejector::AtTheSeat),
+        "a removable device's is the user at the machine's to eject"
+    );
+    assert!(stick.ejectable_by(1000) && stick.ejectable_by(1001));
+    let unnamed_stick = VolumeFacts {
+        volume_id: tairix_abi::sysinfo::VOLUME_ID_UNPUBLISHED,
+        ..stick
+    };
+    assert_eq!(unnamed_stick.ejector(), None);
 }
 
 /// Another principal's private volume is withheld from this session, which
@@ -7333,6 +7362,8 @@ fn the_chosen_lost_volume_is_ejected_letting_its_loss_go() {
             medium: None,
             facts: VolumeFacts {
                 filesystem: String::from("affs"),
+                title: String::new(),
+                class: tairix_abi::sysinfo::VolumeClass::Image,
                 free: None,
                 availability: MountAvailability::UnavailableLost,
                 owner: Some(1000),
@@ -7393,6 +7424,8 @@ fn a_disk_image_mounts_read_only_and_only_its_attachers_volume_ejects() {
         medium: None,
         facts: VolumeFacts {
             filesystem: String::from("affs"),
+            title: String::new(),
+            class: tairix_abi::sysinfo::VolumeClass::Image,
             free: None,
             availability: MountAvailability::Available,
             owner,
@@ -7438,12 +7471,12 @@ fn a_disk_image_mounts_read_only_and_only_its_attachers_volume_ejects() {
     );
     assert_eq!(
         reasons(&browser, "floppy", 1001).1,
-        "only a volume you attached ejects"
+        crate::chrome::REASON_NOT_EJECTABLE
     );
     select(&mut browser, "stick");
     assert_eq!(
         reasons(&browser, "stick", 1000).1,
-        "only a volume you attached ejects",
+        crate::chrome::REASON_NOT_EJECTABLE,
         "a machine's volume is no one's to eject here"
     );
 }
@@ -13906,18 +13939,21 @@ fn a_presentation_listing_the_same_names_leaves_the_listing_alone() {
 }
 
 #[test]
-fn a_rail_menu_ejects_only_a_volume_its_viewer_attached() {
+fn a_rail_menu_ejects_only_a_volume_its_viewer_attached_or_one_that_can_be_pulled() {
     use crate::chrome::{context_choice_from_item, place_menu, ContextChoice, ContextCommand};
     use crate::places::{Places, Volume, VolumeFacts};
     use tairix_abi::sysinfo::MountAvailability;
+    use tairix_abi::sysinfo::VolumeClass;
     use tairix_abi::window_ipc::AppMenuRowView;
 
-    let volume = |label: &str, owner| Volume {
+    let volume = |label: &str, owner, class| Volume {
         label: label.to_string(),
         target: alloc::format!("/Storage/{label}"),
         medium: None,
         facts: VolumeFacts {
             filesystem: String::from("iso9660"),
+            title: String::new(),
+            class,
             free: None,
             availability: MountAvailability::Available,
             owner,
@@ -13928,7 +13964,11 @@ fn a_rail_menu_ejects_only_a_volume_its_viewer_attached() {
     };
     let places = Places::new(
         &["Users".to_string(), "ann".to_string()],
-        &[volume("disc", Some(1000)), volume("stick", None)],
+        &[
+            volume("disc", Some(1000), VolumeClass::Image),
+            volume("stick", None, VolumeClass::Local),
+            volume("card", None, VolumeClass::Removable),
+        ],
     );
     let rows = |label: &str, viewer| {
         let place = places
@@ -13959,7 +13999,7 @@ fn a_rail_menu_ejects_only_a_volume_its_viewer_attached() {
         (
             eject,
             false,
-            String::from("only a volume you attached ejects")
+            String::from(crate::chrome::REASON_NOT_EJECTABLE)
         )
     );
     assert_eq!(
@@ -13967,13 +14007,31 @@ fn a_rail_menu_ejects_only_a_volume_its_viewer_attached() {
         (
             eject,
             false,
-            String::from("only a volume you attached ejects")
+            String::from(crate::chrome::REASON_NOT_EJECTABLE)
         )
+    );
+    assert_eq!(
+        rows("card", Some(1001)),
+        [(open, true, String::new()), (eject, true, String::new())],
+        "a removable device's is anyone at the machine's to eject"
     );
     assert_eq!(
         rows("Home", Some(1000))[1],
         (eject, false, String::from("only a volume ejects"))
     );
+    // The icon bar's plate asks the very rule the rail's menu does.
+    for place in places.rows().iter().filter(|place| place.facts().is_some()) {
+        for viewer in [1000, 1001] {
+            assert_eq!(
+                rows(place.label(), Some(viewer))[1].1,
+                place
+                    .facts()
+                    .is_some_and(|facts| facts.ejectable_by(viewer)),
+                "{}",
+                place.label()
+            );
+        }
+    }
 }
 
 /// A file can be made in every folder but the root view and the catalog of

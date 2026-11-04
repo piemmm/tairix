@@ -54,7 +54,7 @@ fn typed(caption: &str) -> (Key, Modifiers) {
 }
 
 /// Every `Item` row of the built menu, in the order it declares them.
-fn rows() -> Vec<(AppMenuItemId, &'static str, &'static str)> {
+fn rows() -> Vec<(AppMenuItemId, &'static str, Option<&'static str>)> {
     // The menu owns its text, so the views borrow it; the fixed captions are
     // `'static` in the source, and each is copied out by matching on them.
     let built = model().expect("the fixed rows fit");
@@ -156,12 +156,14 @@ fn every_label_and_caption_is_non_empty_and_distinct() {
     let declared = rows();
     for (_, label, shortcut) in &declared {
         assert!(!label.is_empty());
-        assert!(!shortcut.is_empty());
+        assert!(shortcut.is_none_or(|caption| !caption.is_empty()));
     }
     for (i, (_, label, shortcut)) in declared.iter().enumerate() {
         for (_, other_label, other_shortcut) in declared.iter().skip(i + 1) {
             assert_ne!(label, other_label, "labels must be distinct");
-            assert_ne!(shortcut, other_shortcut, "captions must be distinct");
+            if shortcut.is_some() {
+                assert_ne!(shortcut, other_shortcut, "captions must be distinct");
+            }
         }
     }
 }
@@ -172,12 +174,30 @@ fn every_label_and_caption_is_non_empty_and_distinct() {
 fn every_row_advertises_a_shortcut_the_matcher_really_honours() {
     for (id, label, shortcut) in rows() {
         let command = Command::from_item(id).expect("a declared row");
+        let Some(shortcut) = shortcut else {
+            continue;
+        };
         let (key, modifiers) = typed(shortcut);
         assert_eq!(
             Command::accelerator(key, modifiers),
             Some(command),
             "{label} advertises {shortcut}, which must reach it"
         );
+    }
+}
+
+/// Forgetting the scrollback cannot be undone, so no key combination reaches
+/// it: only its row does.
+#[test]
+fn no_chord_clears_the_scrollback() {
+    for ch in ' '..='~' {
+        for modifiers in [ctrl(), ctrl_shift()] {
+            assert_ne!(
+                Command::accelerator(Key::Char(ch), modifiers),
+                Some(Command::ClearScrollback),
+                "{ch:?}"
+            );
+        }
     }
 }
 

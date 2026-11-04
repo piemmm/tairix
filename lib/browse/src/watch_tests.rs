@@ -1020,6 +1020,24 @@ fn a_climb_carries_on_from_a_refusal_that_lands_later() {
     assert_eq!(browser.folder(), Some(at(&["a"]).as_slice()));
 }
 
+/// A window within a volume that left is taken above the volume's root at
+/// once, rather than asking for each folder between that went with it.
+#[test]
+fn leaving_a_place_that_went_starts_above_it() {
+    let tree = Tree::holding(&[&[], &["a"], &["a", "b"], &["a", "b", "c"]]);
+    let mut browser = Browser::open_root(tree.clone()).expect("open");
+    browser.navigate_to(at(&["a", "b", "c"])).expect("navigate");
+    *tree.later.borrow_mut() = true;
+    assert_eq!(browser.leave(&at(&["a", "b"])), Ok(true));
+    assert_eq!(
+        browser.listing_target(),
+        Some(&crate::Location::Folder(at(&["a"]))),
+        "the place above the one that went is asked for first"
+    );
+    assert_eq!(browser.resume(), Ok(true));
+    assert_eq!(browser.folder(), Some(at(&["a"]).as_slice()));
+}
+
 /// With every folder above gone too there is nowhere to climb to.
 #[test]
 fn a_climb_with_nothing_left_above_says_so() {
@@ -1028,4 +1046,31 @@ fn a_climb_with_nothing_left_above_says_so() {
     browser.navigate_to(at(&["a"])).expect("navigate");
     tree.dirs.borrow_mut().clear();
     assert_eq!(browser.climb(), Ok(false));
+}
+
+/// A folder no volume records changes for is not live, and says why exactly
+/// as any other refused watch does: which refusal is worth saying is the
+/// consumer's to decide, not the engine's.
+#[test]
+fn a_folder_no_volume_records_changes_for_is_reported_unwatched() {
+    let listed: Result<Vec<Entry>, Errno> = Ok(Vec::new());
+    for refused in [Errno::NotImplemented, Errno::LimitExceeded] {
+        assert_eq!(
+            refused_watch(&listed, &Err::<(), _>(refused)),
+            Some(refused)
+        );
+    }
+    assert_eq!(
+        refused_watch(&listed, &Ok::<(), Errno>(())),
+        None,
+        "a watched listing is live"
+    );
+    assert_eq!(
+        refused_watch(
+            &Err::<Vec<Entry>, _>(Errno::NotFound),
+            &Err::<(), _>(Errno::NotFound)
+        ),
+        None,
+        "a listing that failed says why itself"
+    );
 }

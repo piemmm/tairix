@@ -324,16 +324,20 @@ next time it reads input or repaints. What it guarantees:
   `tairix_sys_pty_set_size` C stub + regenerated `include/` header, and
   proptest/fuzz stubs. Kernel host test proves a master-side resize updates the
   slave's `terminal_size` and fails closed on the bad cases.
-- **The grid reflows.** `Grid::resize` / `Terminal::resize` reshape the screen
-  to a new `cols`×`rows`, preserving the top-left overlap of the contents and
-  clamping the cursor, scroll region, saved cursor, and any alternate screen —
-  the tty `TIOCSWINSZ` behaviour. Host-tested.
+- **The grid reflows.** `Grid::resize` reshapes the screen to a new
+  `cols`×`rows`, reflowing the main screen with its scrollback and clipping
+  any alternate screen (`plans/GUI-TERMINAL.md` §16), clamping the saved cursor
+  and resetting the scroll region — the tty `TIOCSWINSZ` behaviour; a size it
+  cannot have changes nothing. `Terminal::resize` asks for a size and
+  `Terminal::settle` gives the last asked, answering whether the shell is to be
+  told it. Host-tested.
 - **The terminal app opts in.** `userland/apps/terminal` creates its window
-  through its own `win_sizing` and, on each `WindowEvent::Resized`, re-maps its frame
-  region at the new client size (fail-closed, keeping the current surface on a
-  refused re-map), derives the new grid from the shared monospace advance /
-  line height, `Terminal::resize`s the screen, `pty_set_size`s the pty, and
-  repaints. Files was already resizable; the terminal now joins it.
+  through its own `win_sizing` and, on each `WindowEvent::Resized`, re-maps its
+  frame region at the new client size (fail-closed, keeping the current surface
+  on a refused re-map) and asks the screen for the grid the shared monospace
+  advance / line height derive from it; the window's next paint gives it once
+  and `pty_set_size`s the pty with a size the screen took, never one it
+  refused. Files was already resizable; the terminal now joins it.
 
 ## PTY7 — a command the shell runs writes to the terminal
 

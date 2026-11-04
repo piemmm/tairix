@@ -1056,7 +1056,9 @@ impl<H: Host, S: Sink + Clone> Front<H, S> {
             | Request::GetAttr { .. }
             | Request::SetAttr { .. }
             | Request::ListAttr { .. }
-            | Request::RemoveAttr { .. } => return Err(DriverError::Unsupported),
+            | Request::RemoveAttr { .. }
+            | Request::Label
+            | Request::SetLabel { .. } => return Err(DriverError::Unsupported),
             Request::NodeInfo { node } => Work::Info(node, known(volume, node)?.path),
             Request::Lookup { dir, name } => Work::Lookup(child(volume, dir, name)?),
             Request::ReadAt { file, offset, span } => read(volume, file, offset, span)?,

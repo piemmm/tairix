@@ -1829,6 +1829,19 @@ impl<S: DirectorySource> Browser<S> {
         Ok(false)
     }
 
+    /// Leave `gone` — a place shown, or on the way to, that has left the
+    /// namespace, as a volume disconnected leaves it — for the nearest place
+    /// above it that still lists, as [`climb`](Self::climb) leaves a directory
+    /// gone from its path.
+    ///
+    /// # Errors
+    ///
+    /// As [`climb`](Self::climb).
+    pub fn leave(&mut self, gone: &[String]) -> Result<bool, BrowseError> {
+        self.climbing = Some(gone.to_vec());
+        self.climb()
+    }
+
     /// Push `location` onto `stack`, dropping the oldest entries to keep the
     /// stack within [`HISTORY_MAX`] so navigation history cannot grow without
     /// bound.

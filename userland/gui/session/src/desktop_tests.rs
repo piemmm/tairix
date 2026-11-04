@@ -6,18 +6,19 @@
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
 use tairix_abi::desktop::{Appearance, Contrast, Density, Motion};
-use tairix_abi::window_ipc::AppMenuItemId;
-use tairix_abi::{Errno, Time64};
+use tairix_abi::window_ipc::{AppMenuItemId, DocumentName, DragItems, DragPicture, IconAsset};
+use tairix_abi::{Errno, FileId, Time64};
 use tairix_browse::{
     AppAssociation, DirectorySource, Entry, EntryChange, EntryKind, GridView, LinkTarget, Listing,
 };
 use tairix_colour::Rgb;
-use tairix_controls::{ActivityState, MenuMark};
+use tairix_controls::{ActivityState, LabelHalo, MenuMark};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
@@ -26,14 +27,19 @@ use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{
     Backdrop, CursorSize, DesktopSettings, IconFlow, IconSort, WallpaperChoice,
 };
-use tairix_wm::{Key, NamedKey};
+use tairix_wm::{Compositor, InputEvent, InputResponse, Key, NamedKey};
 
 use crate::desktop::{
     BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, GestureRefusal,
-    LaunchDocument, PinboardChange, SettingsEdit, DESKTOP_MARGIN,
+    LandingOffer, LaunchDocument, PinboardChange, SettingsEdit, DESKTOP_MARGIN,
 };
-use crate::pinboard::{self, PinboardCommand};
-use tairix_controls::{ChainChild, ChainModel};
+use crate::launcher::Kept;
+use crate::pinboard::{
+    self, Arrangement, ArrangementEdit, ArrangementMemory, PinboardCommand, Place, PlaceKey,
+    Placed, TidyOrder, MAX_PLACED, PLACE_UNITS,
+};
+use crate::shell::{DesktopShell, ShellOutcome, Stopped};
+use tairix_controls::{ChainChild, ChainModel, ChainRow};
 
 /// What a [`FakeDir`] answers with, and how often it has been asked.
 ///
@@ -359,7 +365,7 @@ fn every_relist_the_session_asks_for_reads_the_folder() {
 }
 
 #[test]
-fn a_reported_change_merges_in_place_and_repaints_only_the_cells_it_moved() {
+fn a_reported_change_merges_in_place_and_repaints_only_the_icons_it_moved() {
     let mut desktop = desktop_of(vec![file("a.txt"), file("c.txt"), file("e.txt")]);
     let layout = layout_of(&desktop);
     desktop.press(
@@ -380,8 +386,13 @@ fn a_reported_change_merges_in_place_and_repaints_only_the_cells_it_moved() {
     let after = layout_of(&desktop);
     assert_eq!(
         damage.rects(),
-        [cell(&after, 2), cell(&after, 3)],
-        "the icons ahead of the new one did not move"
+        [cell(&after, 3)],
+        "the new icon takes the next free cell, and no icon moves to make room"
+    );
+    assert_eq!(
+        bounds(&desktop, &after, 3),
+        cell(&after, 2),
+        "e.txt stands where it stood"
     );
 }
 
@@ -407,9 +418,11 @@ fn a_reported_change_moves_the_drop_folder_with_its_icon_and_revises_the_icons()
     );
 }
 
+/// An icon a reported change leaves standing where it was keeps a
+/// double-click begun on it: the second press lands on the same icon.
 #[test]
-fn a_reported_change_moving_the_icons_ends_a_double_click_in_progress() {
-    let mut desktop = desktop_of(vec![file("b.txt"), file("c.txt")]);
+fn a_reported_change_keeps_a_double_click_on_an_icon_it_did_not_move() {
+    let mut desktop = desktop_of(vec![folder("b"), folder("c")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
     desktop.press(
@@ -422,7 +435,7 @@ fn a_reported_change_moving_the_icons_ends_a_double_click_in_progress() {
         &mut Region::new(),
     );
     desktop.apply_changes(
-        vec![EntryChange::Upsert(file("a.txt"))],
+        vec![EntryChange::Upsert(folder("a"))],
         layout_of,
         &mut Region::new(),
     );
@@ -436,8 +449,11 @@ fn a_reported_change_moving_the_icons_ends_a_double_click_in_progress() {
         &mut Region::new(),
     );
     assert_eq!(
-        acted.action, None,
-        "a.txt is under the pointer now, unpressed"
+        acted.action,
+        Some(DesktopAction::Activate(DesktopActivation::OpenFolder {
+            path: "/Users/ada/Desktop/b".to_string(),
+        })),
+        "b still stands under the pointer"
     );
 }
 
@@ -469,7 +485,7 @@ fn a_relist_moving_the_icons_ends_a_double_click_in_progress() {
     );
     assert_eq!(
         acted.action, None,
-        "c.txt is under the pointer now, unpressed"
+        "b.txt went, and nothing stands where it stood"
     );
 }
 
@@ -490,8 +506,8 @@ fn a_relist_repaints_only_the_cells_its_listing_changed() {
     let after = layout_of(&desktop);
     assert_eq!(
         damage.rects(),
-        [cell(&after, 2), cell(&after, 3)],
-        "the icons ahead of the new one did not move"
+        [cell(&after, 3)],
+        "the new icon takes the next free cell, and no icon moves to make room"
     );
     let unchanged = damage_of(|damage| assert!(!desktop.relist_into(layout_of, damage)));
     assert!(
@@ -556,6 +572,74 @@ fn the_desktop_follows_its_folder_only_where_its_source_does() {
     assert!(Desktop::new(Followed, home()).follows());
     assert!(!Desktop::new(Followed, vec!["Apps".to_string()]).follows());
     assert!(!desktop_of(vec![file("a.txt")]).follows());
+}
+
+/// A watched folder over a shared [`Folder`]: it reports its own changes.
+struct WatchedDir(Rc<RefCell<Folder>>);
+
+impl DirectorySource for WatchedDir {
+    fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
+        FakeDir(Rc::clone(&self.0)).list(components)
+    }
+
+    fn follows(&self, _components: &[String]) -> bool {
+        true
+    }
+}
+
+/// A name the session made in a folder no watch follows shows by reading that
+/// folder again, as the mount table moving reads it again; a name made
+/// elsewhere reads nothing.
+#[test]
+fn a_name_made_in_an_unfollowed_folder_is_shown_by_reading_it_again() {
+    let shown = holding(vec![file("a.txt")]);
+    let mut desktop = desktop_over(&shown);
+    let read = listings(&shown);
+    shown.borrow_mut().answer = Some(Ok(Listing::Ready(vec![file("a.txt"), file("saved.txt")])));
+    assert!(
+        !desktop.show_made(
+            "/Users/ada/Documents/saved.txt",
+            layout_of,
+            &mut Region::new()
+        ),
+        "a name made elsewhere moves nothing"
+    );
+    assert_eq!(listings(&shown), read, "and reads nothing");
+    let damage = damage_of(|damage| {
+        assert!(desktop.show_made("/Users/ada/Desktop/saved.txt", layout_of, damage));
+    });
+    assert_eq!(listings(&shown), read + 1);
+    assert!(desktop
+        .entries()
+        .iter()
+        .any(|entry| entry.name() == "saved.txt"));
+    assert!(!damage.is_empty(), "the cell the name took is repainted");
+
+    shown.borrow_mut().answer = Some(Ok(Listing::Ready(vec![file("a.txt")])));
+    assert!(desktop.relist_unfollowed(layout_of, &mut Region::new()));
+    assert_eq!(desktop.entries().len(), 1);
+}
+
+/// A followed folder reports what was made in it, so neither a name made
+/// there nor the mount table moving reads it again.
+#[test]
+fn a_followed_folder_is_not_read_again_for_a_change_it_reports() {
+    let shown = holding(vec![file("a.txt")]);
+    let mut desktop = Desktop::new(WatchedDir(Rc::clone(&shown)), home());
+    desktop.relist();
+    let read = listings(&shown);
+    shown.borrow_mut().answer = Some(Ok(Listing::Ready(vec![file("a.txt"), file("saved.txt")])));
+    assert!(!desktop.show_made(
+        "/Users/ada/Desktop/saved.txt",
+        layout_of,
+        &mut Region::new()
+    ));
+    assert!(!desktop.relist_unfollowed(layout_of, &mut Region::new()));
+    assert_eq!(
+        listings(&shown),
+        read,
+        "the watch reports the change instead"
+    );
 }
 
 #[test]
@@ -688,58 +772,28 @@ fn hover_follows_the_pointer_and_damages_only_the_cells_it_moves_between() {
     assert_eq!(desktop.hovered(), None);
 }
 
-/// The desktop never scrolls, so a column of icons its edge would cut could
-/// never be brought whole: it is left out, as a tile a line cannot hold is,
-/// rather than drawn cut, hovered or pressed where only a sliver of it shows.
+/// The desktop never scrolls, so an icon the field has no free cell for is
+/// left off it — neither drawn nor hit — rather than drawn cut or piled onto
+/// another.
 #[test]
-fn a_column_the_field_cannot_hold_whole_is_left_out() {
+fn an_icon_the_field_has_no_cell_for_is_left_off_it() {
     for icons in [IconFlow::Leading, IconFlow::Trailing] {
         let entries = (0..400)
             .map(|at| file(&alloc::format!("{at:03}.txt")))
             .collect();
         let mut desktop = desktop_with(entries, arranged_by(icons, IconSort::Name));
         let layout = layout_of(&desktop);
-        let cut = layout
-            .visible_range(0)
-            .find(|&index| {
-                let (Some(cell), Some(shown)) =
-                    (layout.cell_rect(index), layout.shown_rect(0, index))
-                else {
-                    return false;
-                };
-                shown.width < cell.width
-            })
-            .expect("four hundred icons overflow the field into a cut column");
-        let sliver = layout.shown_rect(0, cut).expect("part of it shows");
-
-        let mut surface = Surface::new(800, 600).expect("a surface");
-        desktop.render(
-            &mut surface,
-            &layout,
-            Scale::ONE,
-            &theme(),
-            &mut NoArtwork,
-            work_area(),
-        );
-        let (x, y) = (
-            u32::try_from(sliver.center().x).unwrap_or(0),
-            u32::try_from(sliver.center().y).unwrap_or(0),
-        );
-        assert_eq!(
-            surface.get(x, y),
-            Surface::new(1, 1).and_then(|blank| blank.get(0, 0)),
-            "{icons:?}: the cut column was drawn"
-        );
-
-        let damage = damage_of(|damage| {
-            desktop.pointer_moved(sliver.center(), &layout, Scale::ONE, &theme(), damage);
-        });
-        assert_eq!(
-            desktop.hovered(),
-            None,
-            "{icons:?}: the sliver took the hover"
-        );
-        assert!(damage.is_empty(), "{icons:?}: the sliver reported damage");
+        let cells = layout.visible_range(0).len();
+        assert!(cells < 400, "four hundred icons overflow the field");
+        desktop.set_focused(true, &layout, &mut Region::new());
+        for index in 0..400 {
+            let shown = desktop.bounds_for_test(&layout, index);
+            if index < cells {
+                assert_eq!(shown, Some(cell(&layout, index)), "{icons:?}: {index}");
+            } else {
+                assert_eq!(shown, None, "{icons:?}: {index} has no cell");
+            }
+        }
     }
 }
 
@@ -1695,6 +1749,7 @@ fn every_icon_the_column_shows_is_painted_even_with_no_artwork_at_all() {
         &theme,
         &mut NoArtwork,
         work_area(),
+        None,
     );
 
     // With no artwork store at all every tile still draws its built-in
@@ -1720,6 +1775,7 @@ fn an_empty_desktop_paints_nothing_and_leaves_the_wallpaper_showing() {
         &theme,
         &mut NoArtwork,
         work_area(),
+        None,
     );
     assert!(
         !painted(&surface, work_area()),
@@ -1741,6 +1797,7 @@ fn a_render_clipped_to_one_cell_leaves_every_other_icon_untouched() {
         &theme,
         &mut NoArtwork,
         cell(&layout, 1),
+        None,
     );
 
     // A tile draws strictly inside its own cell, which is what lets a moved
@@ -1752,6 +1809,139 @@ fn a_render_clipped_to_one_cell_leaves_every_other_icon_untouched() {
     assert!(
         !painted(&surface, cell(&layout, 0)),
         "a cell outside the repainted area is left exactly as it was"
+    );
+}
+
+/// `desktop` painted whole over `ground` in the light theme, whose own ink is
+/// the dark one a dark picture would swallow, with the layout it was laid out
+/// in.
+fn painted_over<S: DirectorySource>(
+    desktop: &Desktop<S>,
+    ground: Option<tairix_raster::Color>,
+) -> (Surface, GridView) {
+    let theme = Theme::light();
+    let layout = desktop.layout(work_area(), Scale::ONE, &theme);
+    let mut surface = Surface::new(800, 600).expect("a screen-sized layer");
+    desktop.render(
+        &mut surface,
+        &layout,
+        Scale::ONE,
+        &theme,
+        &mut NoArtwork,
+        work_area(),
+        ground,
+    );
+    (surface, layout)
+}
+
+/// Every pixel of `surface` inside `area`.
+fn pixels_in(surface: &Surface, area: Rect) -> Vec<tairix_raster::Pixel> {
+    let left = u32::try_from(area.left()).unwrap_or(0);
+    let top = u32::try_from(area.top()).unwrap_or(0);
+    (top..top.saturating_add(area.height))
+        .flat_map(|y| (left..left.saturating_add(area.width)).map(move |x| (x, y)))
+        .filter_map(|(x, y)| surface.get(x, y))
+        .collect()
+}
+
+/// The opaque pixels of the name the icon at `index` draws: its glyphs' ink,
+/// which neither a halo nor a translucent plate under it is.
+fn name_ink(
+    surface: &Surface,
+    layout: &GridView,
+    index: usize,
+    theme: &Theme,
+) -> Vec<tairix_raster::Pixel> {
+    let band = tairix_browse::render::Tiles::Large
+        .layout()
+        .label_rect(cell(layout, index), Scale::ONE, theme)
+        .expect("the icon draws a name");
+    pixels_in(surface, band)
+        .into_iter()
+        .filter(|pixel| pixel.a == u8::MAX)
+        .collect()
+}
+
+/// Whether there is `ink` and all of it reads light.
+fn reads_light(ink: &[tairix_raster::Pixel]) -> bool {
+    !ink.is_empty() && ink.iter().all(|pixel| pixel.luma() >= 0xe0)
+}
+
+/// Whether there is `ink` and all of it reads dark.
+fn reads_dark(ink: &[tairix_raster::Pixel]) -> bool {
+    !ink.is_empty() && ink.iter().all(|pixel| pixel.luma() <= 0x40)
+}
+
+/// A resting name stands straight on the backdrop, and the desktop cannot know
+/// the light of a picture under it, so the name is light over a dark halo
+/// whatever the theme's own ink.
+#[test]
+fn a_resting_name_over_a_picture_reads_light_over_a_dark_halo() {
+    let desktop = desktop_of(vec![file("notes.txt")]);
+    let theme = Theme::light();
+    let (pictured, layout) = painted_over(&desktop, None);
+    let (flat, _) = painted_over(&desktop, Some(tairix_raster::Color::rgb(0x10, 0x14, 0x18)));
+    assert!(
+        reads_light(&name_ink(&pictured, &layout, 0, &theme)),
+        "the name kept the theme's dark ink"
+    );
+    assert!(reads_light(&name_ink(&flat, &layout, 0, &theme)));
+    let inked = |surface: &Surface| {
+        pixels_in(surface, cell(&layout, 0))
+            .iter()
+            .filter(|pixel| pixel.a != 0)
+            .count()
+    };
+    assert!(
+        inked(&pictured) > inked(&flat),
+        "no halo parts the name from the picture"
+    );
+}
+
+/// A flat backdrop is known, so a name on it takes whichever ink stands
+/// further from it.
+#[test]
+fn a_name_on_a_flat_backdrop_takes_the_ink_its_luminance_favours() {
+    let desktop = desktop_of(vec![file("notes.txt")]);
+    let theme = Theme::light();
+    let (pale, layout) = painted_over(&desktop, Some(tairix_raster::Color::rgb(0xf0, 0xf0, 0xf0)));
+    assert!(reads_dark(&name_ink(&pale, &layout, 0, &theme)));
+    let (deep, _) = painted_over(&desktop, Some(tairix_raster::Color::rgb(0x10, 0x20, 0x40)));
+    assert!(reads_light(&name_ink(&deep, &layout, 0, &theme)));
+    let (grey, _) = painted_over(&desktop, Some(tairix_raster::Color::rgb(0x80, 0x80, 0x80)));
+    assert!(
+        reads_dark(&name_ink(&grey, &layout, 0, &theme)),
+        "a mid grey contrasts more with the dark ink"
+    );
+}
+
+/// A selected name sits on its plate rather than on the backdrop, so it keeps
+/// the theme's ink while a resting one beside it takes the backdrop's.
+#[test]
+fn a_selected_name_keeps_the_theme_ink_on_its_plate() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let theme = Theme::light();
+    let layout = desktop.layout(work_area(), Scale::ONE, &theme);
+    desktop.press(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme,
+        0,
+        &[],
+        &mut Region::new(),
+    );
+    assert_eq!(desktop.selected(), Some(0));
+    let (surface, layout) = painted_over(&desktop, None);
+    let theme_ink = tairix_raster::Color::from(theme.palette().on_surface).premultiply();
+    let selected = name_ink(&surface, &layout, 0, &theme);
+    assert!(
+        !selected.is_empty() && selected.iter().all(|pixel| *pixel == theme_ink),
+        "the selected name lost the theme's ink"
+    );
+    assert!(
+        reads_light(&name_ink(&surface, &layout, 1, &theme)),
+        "the resting name beside it kept the theme's ink"
     );
 }
 
@@ -2113,7 +2303,7 @@ fn the_menus_open_command_resolves_exactly_as_a_double_click_does() {
     );
 
     assert_eq!(
-        desktop.command(PinboardCommand::Open, &[]).action,
+        desktop.command(PinboardCommand::Open, &layout, &[]).action,
         clicked.action,
         "one definition of what opening an icon means"
     );
@@ -2128,8 +2318,9 @@ fn the_menus_open_command_resolves_exactly_as_a_double_click_does() {
 #[test]
 fn open_with_nothing_selected_asks_for_nothing() {
     let mut desktop = desktop_of(vec![folder("Work")]);
+    let layout = layout_of(&desktop);
     assert_eq!(
-        desktop.command(PinboardCommand::Open, &[]),
+        desktop.command(PinboardCommand::Open, &layout, &[]),
         DesktopOutcome::ignored()
     );
 }
@@ -2137,8 +2328,11 @@ fn open_with_nothing_selected_asks_for_nothing() {
 #[test]
 fn a_new_folder_is_named_through_the_shared_naming_over_the_listing() {
     let mut desktop = desktop_of(vec![folder("New Folder")]);
+    let layout = layout_of(&desktop);
     assert_eq!(
-        desktop.command(PinboardCommand::NewFolder, &[]).action,
+        desktop
+            .command(PinboardCommand::NewFolder, &layout, &[])
+            .action,
         Some(DesktopAction::CreateFolder {
             path: "/Users/ada/Desktop/New Folder 2".to_string(),
         })
@@ -2148,9 +2342,10 @@ fn a_new_folder_is_named_through_the_shared_naming_over_the_listing() {
 #[test]
 fn a_sort_or_arrangement_row_asks_the_embedder_to_adopt_the_edit() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
+    let layout = layout_of(&desktop);
     assert_eq!(
         desktop
-            .command(PinboardCommand::SortBy(IconSort::Size), &[])
+            .command(PinboardCommand::SortBy(IconSort::Size), &layout, &[])
             .action,
         Some(DesktopAction::EditSettings(SettingsEdit::Sort(
             IconSort::Size
@@ -2163,14 +2358,18 @@ fn a_sort_or_arrangement_row_asks_the_embedder_to_adopt_the_edit() {
     );
     assert_eq!(
         desktop
-            .command(PinboardCommand::ArrangeFrom(IconFlow::Trailing), &[])
+            .command(
+                PinboardCommand::ArrangeFrom(IconFlow::Trailing),
+                &layout,
+                &[]
+            )
             .action,
         Some(DesktopAction::EditSettings(SettingsEdit::Icons(
             IconFlow::Trailing
         )))
     );
     assert_eq!(
-        desktop.command(PinboardCommand::SortBy(IconSort::Name), &[]),
+        desktop.command(PinboardCommand::SortBy(IconSort::Name), &layout, &[]),
         DesktopOutcome::ignored(),
         "the order already in force is no edit at all"
     );
@@ -2180,28 +2379,29 @@ fn a_sort_or_arrangement_row_asks_the_embedder_to_adopt_the_edit() {
 fn refresh_relists_now_and_the_remaining_rows_name_their_own_action() {
     let folder = holding(vec![file("a.txt")]);
     let mut desktop = desktop_over(&folder);
+    let layout = layout_of(&desktop);
     folder.borrow_mut().answer = Some(Ok(Listing::Ready(vec![file("a.txt"), file("b.txt")])));
 
-    // A re-list reports no cell: the icons themselves moved, so the caller
-    // repaints the whole layer instead of any cell of the layout it replaced.
+    // A re-list reports no icon: the icons themselves moved, so the caller
+    // repaints the whole layer instead of any icon of the listing it replaced.
     assert_eq!(
-        desktop.command(PinboardCommand::Refresh, &[]),
+        desktop.command(PinboardCommand::Refresh, &layout, &[]),
         DesktopOutcome {
-            relisted: true,
+            rearranged: true,
             action: None,
         }
     );
     assert_eq!(listings(&folder), 2);
     assert_eq!(desktop.entries().len(), 2);
     assert_eq!(
-        desktop.command(PinboardCommand::Refresh, &[]),
+        desktop.command(PinboardCommand::Refresh, &layout, &[]),
         DesktopOutcome::ignored(),
         "a refresh that finds nothing changed costs nothing"
     );
 
     assert_eq!(
         desktop
-            .command(PinboardCommand::OpenDesktopFolder, &[])
+            .command(PinboardCommand::OpenDesktopFolder, &layout, &[])
             .action,
         Some(DesktopAction::Activate(DesktopActivation::OpenFolder {
             path: "/Users/ada/Desktop".to_string(),
@@ -2209,7 +2409,7 @@ fn refresh_relists_now_and_the_remaining_rows_name_their_own_action() {
     );
     assert_eq!(
         desktop
-            .command(PinboardCommand::ChangeBackground, &[])
+            .command(PinboardCommand::ChangeBackground, &layout, &[])
             .action,
         Some(DesktopAction::ChangeBackground)
     );
@@ -2238,6 +2438,10 @@ fn the_menu_offers_exactly_the_closed_row_set_with_the_settings_in_force_marked(
             "Sort by Date",
             "Arrange from the Left",
             "Arrange from the Right",
+            "Tidy Up",
+            "By Name",
+            "By Date",
+            "By Size",
             "Refresh",
             "Open Desktop Folder",
             "Change Background…",
@@ -2280,11 +2484,11 @@ fn the_menu_offers_exactly_the_closed_row_set_with_the_settings_in_force_marked(
 #[test]
 fn every_row_names_the_command_at_its_own_index() {
     let model = pinboard::model(true, &DesktopSettings::default());
-    let commands: Vec<PinboardCommand> = (1..=u16::try_from(model.rows().len()).expect("small"))
-        .map(|raw| {
-            PinboardCommand::from_item(AppMenuItemId::new(raw).expect("a non-zero row id"))
-                .expect("a declared row")
-        })
+    let commands: Vec<PinboardCommand> = model
+        .rows()
+        .iter()
+        .filter_map(ChainRow::id)
+        .map(|id| PinboardCommand::from_item(id).expect("a declared row"))
         .collect();
     assert_eq!(commands, PinboardCommand::ALL.to_vec());
     assert_eq!(
@@ -2311,7 +2515,7 @@ fn a_menu_opened_on_the_backdrop_offers_no_open_row_and_shifts_no_id() {
         "the first row divides nothing"
     );
     assert_eq!(
-        bare.rows().len(),
+        bare.rows().iter().filter_map(ChainRow::id).count(),
         PinboardCommand::ALL.len() - 1,
         "only `Open` is left out"
     );
@@ -2348,26 +2552,60 @@ fn the_menu_groups_its_rows_by_what_they_are() {
             "New Folder",
             "Sort by Name",
             "Arrange from the Left",
+            "Tidy Up",
             "Refresh"
         ]
     );
 }
 
 /// The chain answers with a row id and nothing else, so every row the model
-/// offers must carry one it can read back.
+/// offers carries one it can read back or opens the plate of rows that do.
 #[test]
 fn the_model_declares_no_row_the_chain_cannot_answer_with() {
     for on_icon in [false, true] {
         let model = pinboard::model(on_icon, &DesktopSettings::default());
         assert!(!model.rows().is_empty(), "a plate with nothing to choose");
-        for row in model.rows() {
-            assert_eq!(
-                *row.child(),
-                ChainChild::None,
-                "the backdrop menu declares no submenu and hangs no window"
-            );
+        for (at, row) in model.rows().iter().enumerate() {
+            let label = row.drawn().label();
+            match row.child() {
+                ChainChild::None => assert!(row.id().is_some(), "{label:?} answers nothing"),
+                ChainChild::Submenu => assert!(
+                    model
+                        .rows()
+                        .iter()
+                        .any(|child| child.parent() == Some(at) && child.id().is_some()),
+                    "{label:?} opens an empty plate"
+                ),
+                other => panic!("the backdrop menu hangs no window: {other:?}"),
+            }
         }
     }
+}
+
+/// Tidy Up's three orders sit on a plate of their own, each naming its own
+/// command.
+#[test]
+fn tidy_up_files_its_orders_on_a_plate_of_their_own() {
+    let model = pinboard::model(false, &DesktopSettings::default());
+    let plate = model
+        .rows()
+        .iter()
+        .position(|row| row.drawn().label() == "Tidy Up")
+        .expect("the Tidy Up row");
+    let filed: Vec<Option<PinboardCommand>> = model
+        .rows()
+        .iter()
+        .filter(|row| row.parent() == Some(plate))
+        .map(|row| row.id().and_then(PinboardCommand::from_item))
+        .collect();
+    assert_eq!(
+        filed,
+        [
+            Some(PinboardCommand::TidyUp(TidyOrder::Name)),
+            Some(PinboardCommand::TidyUp(TidyOrder::Date)),
+            Some(PinboardCommand::TidyUp(TidyOrder::Size)),
+        ]
+    );
 }
 
 #[test]
@@ -2457,4 +2695,1217 @@ fn every_appearance_axis_asks_for_the_re_theme() {
         assert!(change.appearance.theme);
         assert_eq!(change.layer, drawn);
     }
+}
+
+// --- Where an icon stands -------------------------------------------------
+
+/// Press at `at` at monotonic time `now_ns`, as the seat does.
+fn press_at(
+    desktop: &mut Desktop<FakeDir>,
+    layout: &GridView,
+    at: Point,
+    now_ns: u64,
+) -> DesktopOutcome {
+    desktop.press(
+        at,
+        layout,
+        Scale::ONE,
+        &theme(),
+        now_ns,
+        &[],
+        &mut Region::new(),
+    )
+}
+
+/// Where the icon at `index` stands under `layout`.
+fn bounds(desktop: &Desktop<FakeDir>, layout: &GridView, index: usize) -> Rect {
+    desktop
+        .bounds_for_test(layout, index)
+        .expect("a shown icon")
+}
+
+/// Carry the icon at `index` by its centre `by` pixels and let it go there,
+/// answering what putting it down asked for.
+fn carry(
+    desktop: &mut Desktop<FakeDir>,
+    layout: &GridView,
+    index: usize,
+    by: (i32, i32),
+) -> DesktopOutcome {
+    let from = bounds(desktop, layout, index).center();
+    press_at(desktop, layout, from, 0);
+    let to = Point::new(from.x + by.0, from.y + by.1);
+    desktop.follow_press(to, true, layout, Scale::ONE, &mut Region::new());
+    desktop.follow_press(to, false, layout, Scale::ONE, &mut Region::new())
+}
+
+/// The record `edits` make of an empty one.
+fn record_of(edits: &[ArrangementEdit]) -> Arrangement {
+    let mut record = Arrangement::default();
+    for edit in edits {
+        record.make(edit).expect("room");
+    }
+    record
+}
+
+/// A desktop over `entries` whose record, read, keeps each named icon at its
+/// place, each put down after the one before it.
+fn placed_on(entries: Vec<Entry>, places: &[(&str, Place)]) -> Desktop<FakeDir> {
+    let mut desktop = desktop_of(entries);
+    let set = places
+        .iter()
+        .zip(0..)
+        .map(|(&(name, at), order)| {
+            (
+                name.to_string(),
+                Some(Placed {
+                    id: FileId::NONE,
+                    at,
+                    order,
+                }),
+            )
+        })
+        .collect();
+    let record = record_of(&[ArrangementEdit::Set(set)]);
+    desktop.adopt_arrangement(&record, true, &layout_of(&desktop), &mut Region::new());
+    let _ = desktop.take_arrangement_edits();
+    desktop
+}
+
+/// The place of the cell `column` columns across and `row` rows down from the
+/// leading corner.
+const fn cell_place(column: u32, row: u32) -> Place {
+    Place {
+        across: column * PLACE_UNITS,
+        down: row * PLACE_UNITS,
+        from: IconFlow::Leading,
+    }
+}
+
+/// The index of the icon named `name`.
+fn named(desktop: &Desktop<FakeDir>, name: &str) -> usize {
+    desktop
+        .entries()
+        .iter()
+        .position(|entry| entry.name() == name)
+        .expect("listed")
+}
+
+/// An icon carried across the desktop stands exactly where it was put down,
+/// and the record keeps it there for the next session to show it the same.
+#[test]
+fn a_carried_icon_stands_exactly_where_it_is_put_down_and_is_kept_there() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    let was = bounds(&desktop, &layout, 0);
+    assert_eq!(
+        carry(&mut desktop, &layout, 0, (237, 101)),
+        DesktopOutcome::ignored()
+    );
+    let now = bounds(&desktop, &layout, 0);
+    assert_eq!(
+        (now.left() - was.left(), now.top() - was.top()),
+        (237, 101),
+        "exactly where it was put"
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, 1),
+        cell(&layout, 1),
+        "the icon beside it never moved"
+    );
+    let edits = desktop.take_arrangement_edits();
+    assert_eq!(edits.len(), 1, "one change, made once the press came up");
+
+    let mut next = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    next.adopt_arrangement(&record_of(&edits), true, &layout, &mut Region::new());
+    assert_eq!(
+        bounds(&next, &layout, 0),
+        now,
+        "and the next session shows it there"
+    );
+}
+
+/// The icon is carried in memory alone while the press lasts: what it covers
+/// and what it left are repainted, and nothing is kept until it is put down.
+#[test]
+fn a_carried_icon_repaints_what_it_leaves_and_covers_and_keeps_nothing_yet() {
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let layout = layout_of(&desktop);
+    let from = cell(&layout, 0).center();
+    press_at(&mut desktop, &layout, from, 0);
+    let moved = damage_of(|damage| {
+        desktop.follow_press(
+            Point::new(from.x + 300, from.y + 200),
+            true,
+            &layout,
+            Scale::ONE,
+            damage,
+        );
+    });
+    let carried = bounds(&desktop, &layout, 0);
+    assert!(moved.intersects(cell(&layout, 0)), "the ground it left");
+    assert!(moved.intersects(carried), "and the ground it covers");
+    assert!(
+        desktop.take_arrangement_edits().is_empty(),
+        "nothing is kept while the press lasts"
+    );
+}
+
+#[test]
+fn a_press_that_never_travels_is_a_click_and_moves_nothing() {
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let layout = layout_of(&desktop);
+    let at = cell(&layout, 0).center();
+    press_at(&mut desktop, &layout, at, 0);
+    let still = Point::new(at.x + 1, at.y + 1);
+    let held = damage_of(|damage| {
+        desktop.follow_press(still, true, &layout, Scale::ONE, damage);
+    });
+    assert!(held.is_empty(), "a hand holding still is not a drag");
+    assert_eq!(
+        desktop.follow_press(still, false, &layout, Scale::ONE, &mut Region::new()),
+        DesktopOutcome::ignored()
+    );
+    let later = Point::new(at.x + 300, at.y + 200);
+    assert!(
+        damage_of(|damage| {
+            desktop.follow_press(later, true, &layout, Scale::ONE, damage);
+        })
+        .is_empty(),
+        "and the press it was is over"
+    );
+    assert_eq!(bounds(&desktop, &layout, 0), cell(&layout, 0));
+    assert!(
+        desktop.take_arrangement_edits().is_empty(),
+        "nothing the user did not place is stored"
+    );
+}
+
+#[test]
+fn where_the_grid_is_asked_for_a_carried_icon_settles_on_the_nearest_free_cell() {
+    let settings = DesktopSettings {
+        align_to_grid: true,
+        ..DesktopSettings::default()
+    };
+    let mut desktop = desktop_with(vec![file("a.txt"), file("b.txt")], settings);
+    let layout = layout_of(&desktop);
+    let beside = cell(&layout, layout.cells_per_line());
+    let was = cell(&layout, 0);
+    carry(
+        &mut desktop,
+        &layout,
+        0,
+        (beside.left() - was.left() + 9, 7),
+    );
+    assert_eq!(bounds(&desktop, &layout, 0), beside);
+}
+
+#[test]
+fn settling_on_the_grid_passes_over_a_cell_another_icon_holds() {
+    let settings = DesktopSettings {
+        align_to_grid: true,
+        ..DesktopSettings::default()
+    };
+    let mut desktop = desktop_with(vec![file("a.txt"), file("b.txt")], settings);
+    let layout = layout_of(&desktop);
+    let (a, b) = (cell(&layout, 0), cell(&layout, 1));
+    carry(
+        &mut desktop,
+        &layout,
+        1,
+        (a.left() - b.left() + 3, a.top() - b.top() + 3),
+    );
+    let settled = bounds(&desktop, &layout, 1);
+    assert_ne!(settled, a, "a.txt holds its cell");
+    assert!(
+        (0..layout.visible_range(0).len()).any(|at| cell(&layout, at) == settled),
+        "and b.txt settles on a cell of the grid: {settled:?}"
+    );
+}
+
+/// Overlaps are allowed: an icon put down on another stands over it, and a
+/// press there meets the one put there last.
+#[test]
+fn an_icon_put_over_another_overlaps_it_and_is_met_first() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    let (a, b) = (cell(&layout, 0), cell(&layout, 1));
+    carry(
+        &mut desktop,
+        &layout,
+        0,
+        (b.left() - a.left(), b.top() - a.top()),
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, 0),
+        b,
+        "a.txt stands on b.txt's cell"
+    );
+    assert_eq!(bounds(&desktop, &layout, 1), b, "and b.txt stays under it");
+    press_at(&mut desktop, &layout, b.center(), 10_000_000_000);
+    assert_eq!(
+        desktop.selected(),
+        Some(0),
+        "the icon on top is the one met"
+    );
+}
+
+#[test]
+fn a_cell_a_removal_frees_is_the_next_a_new_icon_takes() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+    let layout = layout_of(&desktop);
+    desktop.apply_changes(
+        vec![EntryChange::Remove(String::from("b.txt"))],
+        layout_of,
+        &mut Region::new(),
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, 1),
+        cell(&layout, 2),
+        "c.txt stays where it stood"
+    );
+    desktop.apply_changes(
+        vec![EntryChange::Upsert(file("z.txt"))],
+        layout_of,
+        &mut Region::new(),
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, named(&desktop, "z.txt")),
+        cell(&layout, 1),
+        "z.txt takes the cell b.txt left"
+    );
+}
+
+/// A rename arrives as one name going and another coming for the same file:
+/// the icon keeps the place the user put it in, and the record follows it.
+#[test]
+fn a_renamed_file_keeps_its_place() {
+    let id = FileId {
+        volume: [3; 16],
+        node: 42,
+    };
+    let mut desktop = desktop_of(vec![file("a.txt").with_id(id), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    carry(&mut desktop, &layout, 0, (300, 200));
+    let put = bounds(&desktop, &layout, 0);
+    let _ = desktop.take_arrangement_edits();
+    desktop.apply_changes(
+        vec![
+            EntryChange::Remove(String::from("a.txt")),
+            EntryChange::Upsert(file("z.txt").with_id(id)),
+        ],
+        layout_of,
+        &mut Region::new(),
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, named(&desktop, "z.txt")),
+        put,
+        "z.txt stands where a.txt was put"
+    );
+    assert_eq!(
+        desktop.take_arrangement_edits(),
+        [ArrangementEdit::Renamed {
+            from: PlaceKey::of("a.txt"),
+            to: String::from("z.txt"),
+            id,
+        }]
+    );
+}
+
+#[test]
+fn a_deleted_file_gives_up_its_place() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    carry(&mut desktop, &layout, 0, (300, 200));
+    let _ = desktop.take_arrangement_edits();
+    desktop.apply_changes(
+        vec![EntryChange::Remove(String::from("a.txt"))],
+        layout_of,
+        &mut Region::new(),
+    );
+    assert_eq!(
+        desktop.take_arrangement_edits(),
+        [ArrangementEdit::Set(vec![(String::from("a.txt"), None)])]
+    );
+}
+
+/// A resolution change can leave a place off the screen: it is shown on the
+/// free cell nearest it, and the place kept is not moved to where it is shown.
+#[test]
+fn a_place_the_screen_no_longer_reaches_is_shown_nearest_it_and_kept_as_it_was() {
+    let far = Place {
+        across: 1_000 * PLACE_UNITS,
+        down: 1_000 * PLACE_UNITS,
+        from: IconFlow::Leading,
+    };
+    let mut desktop = placed_on(vec![file("a.txt")], &[("a.txt", far)]);
+    let layout = layout_of(&desktop);
+    let last = layout.visible_range(0).len() - 1;
+    assert_eq!(
+        bounds(&desktop, &layout, 0),
+        cell(&layout, last),
+        "it is shown on the cell nearest its place"
+    );
+    desktop.set_focused(true, &layout, &mut Region::new());
+    assert!(
+        desktop.take_arrangement_edits().is_empty(),
+        "and its place is kept as it was"
+    );
+}
+
+#[test]
+fn tidying_lays_every_icon_out_in_its_order_and_keeps_the_lot_at_once() {
+    let mut desktop = desktop_of(vec![
+        Entry::new("b.txt", EntryKind::File, 300, Time64::from_secs(30)),
+        Entry::new("a.txt", EntryKind::File, 900, Time64::from_secs(20)),
+        Entry::new("c.txt", EntryKind::File, 100, Time64::from_secs(10)),
+    ]);
+    let layout = layout_of(&desktop);
+    carry(&mut desktop, &layout, 0, (300, 200));
+    let _ = desktop.take_arrangement_edits();
+    assert_eq!(
+        desktop.command(PinboardCommand::TidyUp(TidyOrder::Size), &layout, &[]),
+        DesktopOutcome {
+            rearranged: true,
+            action: None,
+        }
+    );
+    let at = |name: &str| bounds(&desktop, &layout, named(&desktop, name));
+    assert_eq!(
+        [at("c.txt"), at("b.txt"), at("a.txt")],
+        [cell(&layout, 0), cell(&layout, 1), cell(&layout, 2)],
+        "smallest first, from the corner the icons run from"
+    );
+    assert_eq!(
+        desktop.take_arrangement_edits().len(),
+        1,
+        "one change keeps them all"
+    );
+}
+
+/// A new order flows again the icons no one placed, and leaves the one the
+/// user put somewhere where they put it.
+#[test]
+fn a_new_order_flows_again_only_the_icons_no_one_placed() {
+    let mut desktop = placed_on(
+        vec![
+            Entry::new("b.txt", EntryKind::File, 300, Time64::from_secs(30)),
+            Entry::new("a.txt", EntryKind::File, 900, Time64::from_secs(20)),
+            Entry::new("c.txt", EntryKind::File, 100, Time64::from_secs(10)),
+        ],
+        &[("a.txt", cell_place(1, 1))],
+    );
+    let layout = layout_of(&desktop);
+    let placed = bounds(&desktop, &layout, named(&desktop, "a.txt"));
+    desktop
+        .apply_settings(arranged_by(IconFlow::default(), IconSort::Size))
+        .expect("the order changed");
+    let layout = layout_of(&desktop);
+    assert_eq!(
+        bounds(&desktop, &layout, named(&desktop, "c.txt")),
+        cell(&layout, 0)
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, named(&desktop, "b.txt")),
+        cell(&layout, 1)
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, named(&desktop, "a.txt")),
+        placed,
+        "the placed icon stays put"
+    );
+}
+
+/// Wait for a save of `name`, which its volume may make as `finished`, let
+/// go at `drop` with a wait ending at monotonic time 100.
+fn expect_save(desktop: &mut Desktop<FakeDir>, name: &str, finished: Option<&str>, drop: Point) {
+    let layout = layout_of(desktop);
+    desktop.offer_landing(Some(LandingOffer::saved(name, finished)));
+    desktop.expect_offered(drop, &layout, Scale::ONE, &theme(), 100);
+}
+
+/// Wait for a drop of the one file `name`, its picture held where the press
+/// was, let go at `drop` with a wait ending at monotonic time 100.
+fn expect_drop(desktop: &mut Desktop<FakeDir>, name: &str, drop: Point) {
+    let layout = layout_of(desktop);
+    let picture = DragPicture {
+        icon: IconAsset::new("text").expect("a valid asset id"),
+        from: Some((0, 0)),
+    };
+    let items = DragItems::new(
+        DocumentName::new(name).expect("a valid name"),
+        1,
+        false,
+        [picture],
+    )
+    .expect("one file");
+    desktop.offer_landing(Some(LandingOffer::of(&items)));
+    desktop.expect_offered(drop, &layout, Scale::ONE, &theme(), 100);
+}
+
+/// A copy that finds its name taken tells the file it makes apart, and the
+/// file still stands where the drop was let go.
+#[test]
+fn a_dropped_file_its_copy_names_apart_still_lands_where_it_was_let_go() {
+    let mut desktop = desktop_of(vec![file("x.txt")]);
+    let layout = layout_of(&desktop);
+    let drop = Point::new(500, 400);
+    expect_drop(&mut desktop, "x.txt", drop);
+    desktop.apply_changes(
+        vec![EntryChange::Upsert(file("x (2).txt"))],
+        layout_of,
+        &mut Region::new(),
+    );
+    assert!(bounds(&desktop, &layout, named(&desktop, "x (2).txt")).contains(drop));
+}
+
+/// A file a one-file drop did not name is not taken for the one it did, which
+/// still stands where it was let go when it arrives after.
+#[test]
+fn a_file_a_one_file_drop_did_not_name_is_not_taken_for_it() {
+    let mut desktop = desktop_of(Vec::new());
+    let layout = layout_of(&desktop);
+    let drop = Point::new(500, 400);
+    expect_drop(&mut desktop, "report.txt", drop);
+    desktop.apply_changes(
+        vec![EntryChange::Upsert(file("other.txt"))],
+        layout_of,
+        &mut Region::new(),
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, named(&desktop, "other.txt")),
+        cell(&layout, 0),
+        "the file it did not name flows"
+    );
+    assert!(
+        desktop.take_arrangement_edits().is_empty(),
+        "and nothing is kept for it"
+    );
+    desktop.apply_changes(
+        vec![EntryChange::Upsert(file("report.txt"))],
+        layout_of,
+        &mut Region::new(),
+    );
+    assert!(
+        bounds(&desktop, &layout, named(&desktop, "report.txt")).contains(drop),
+        "the file it named stands where it was let go"
+    );
+}
+
+#[test]
+fn a_saved_file_lands_where_its_save_was_let_go() {
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let layout = layout_of(&desktop);
+    let drop = Point::new(500, 400);
+    expect_save(&mut desktop, "Letter.txt", None, drop);
+    desktop.apply_changes(
+        vec![EntryChange::Upsert(file("Letter.txt"))],
+        layout_of,
+        &mut Region::new(),
+    );
+    assert!(
+        bounds(&desktop, &layout, named(&desktop, "Letter.txt")).contains(drop),
+        "it stands under the pointer it was let go at"
+    );
+    assert!(
+        matches!(
+            desktop.take_arrangement_edits().as_slice(),
+            [ArrangementEdit::Set(set)] if set.len() == 1
+        ),
+        "and is kept there"
+    );
+}
+
+/// A volume that keeps no file type finishes a save's name with its type, and
+/// the file it makes lands as surely as one made under the name asked for.
+#[test]
+fn a_save_its_volume_names_otherwise_still_lands_where_it_was_let_go() {
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let layout = layout_of(&desktop);
+    let drop = Point::new(500, 400);
+    expect_save(&mut desktop, "Letter", Some("Letter,fff"), drop);
+    desktop.apply_changes(
+        vec![EntryChange::Upsert(file("Letter,fff"))],
+        layout_of,
+        &mut Region::new(),
+    );
+    assert!(bounds(&desktop, &layout, named(&desktop, "Letter,fff")).contains(drop));
+}
+
+#[test]
+fn a_file_appearing_after_the_wait_takes_the_next_free_cell() {
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let layout = layout_of(&desktop);
+    expect_save(&mut desktop, "Letter.txt", None, Point::new(500, 400));
+    desktop.expire_landing(100);
+    desktop.apply_changes(
+        vec![EntryChange::Upsert(file("Letter.txt"))],
+        layout_of,
+        &mut Region::new(),
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, named(&desktop, "Letter.txt")),
+        cell(&layout, 1)
+    );
+    assert!(
+        desktop.take_arrangement_edits().is_empty(),
+        "nothing the user did not place is stored"
+    );
+}
+
+#[test]
+fn each_file_a_drop_carried_lands_as_far_from_the_drop_as_it_was_held() {
+    let mut desktop = desktop_of(Vec::new());
+    let layout = layout_of(&desktop);
+    let picture = |from| DragPicture {
+        icon: IconAsset::new("text").expect("a valid asset id"),
+        from: Some(from),
+    };
+    let items = DragItems::new(
+        DocumentName::new("one.txt").expect("a valid name"),
+        2,
+        false,
+        [picture((0, 0)), picture((150, 40))],
+    )
+    .expect("two files");
+    desktop.offer_landing(Some(LandingOffer::of(&items)));
+    desktop.expect_offered(Point::new(300, 300), &layout, Scale::ONE, &theme(), 100);
+    desktop.apply_changes(
+        vec![
+            EntryChange::Upsert(file("one.txt")),
+            EntryChange::Upsert(file("two.txt")),
+        ],
+        layout_of,
+        &mut Region::new(),
+    );
+    let (one, two) = (
+        bounds(&desktop, &layout, named(&desktop, "one.txt")),
+        bounds(&desktop, &layout, named(&desktop, "two.txt")),
+    );
+    assert_eq!((two.left() - one.left(), two.top() - one.top()), (150, 40));
+}
+
+/// A drop that moved on from the bare desktop leaves nothing to land.
+#[test]
+fn a_drop_with_no_offer_standing_lands_nothing() {
+    let mut desktop = desktop_of(Vec::new());
+    let layout = layout_of(&desktop);
+    desktop.offer_landing(None);
+    desktop.expect_offered(Point::new(300, 300), &layout, Scale::ONE, &theme(), 100);
+    desktop.apply_changes(
+        vec![EntryChange::Upsert(file("one.txt"))],
+        layout_of,
+        &mut Region::new(),
+    );
+    assert_eq!(bounds(&desktop, &layout, 0), cell(&layout, 0));
+    assert!(desktop.take_arrangement_edits().is_empty());
+}
+
+#[test]
+fn a_record_read_after_the_listing_moves_only_the_icons_it_places() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    desktop.set_focused(false, &layout, &mut Region::new());
+    let set = vec![(
+        String::from("b.txt"),
+        Some(Placed {
+            id: FileId::NONE,
+            at: cell_place(2, 1),
+            order: 0,
+        }),
+    )];
+    let damage = damage_of(|damage| {
+        desktop.adopt_arrangement(
+            &record_of(&[ArrangementEdit::Set(set)]),
+            true,
+            &layout,
+            damage,
+        );
+    });
+    let taken = cell(&layout, 2 * layout.cells_per_line() + 1);
+    assert_eq!(bounds(&desktop, &layout, 1), taken);
+    assert_eq!(
+        bounds(&desktop, &layout, 0),
+        cell(&layout, 0),
+        "a.txt never moved"
+    );
+    assert!(
+        damage.intersects(cell(&layout, 1)) && damage.intersects(taken),
+        "the cell b.txt left and the place it took"
+    );
+    assert!(!damage.intersects(cell(&layout, 0)));
+}
+
+#[test]
+fn a_place_kept_for_a_file_renamed_while_away_follows_the_file() {
+    let id = FileId {
+        volume: [5; 16],
+        node: 7,
+    };
+    let mut desktop = desktop_of(vec![file("new.txt").with_id(id)]);
+    let layout = layout_of(&desktop);
+    let kept = vec![(
+        String::from("old.txt"),
+        Some(Placed {
+            id,
+            at: cell_place(3, 2),
+            order: 0,
+        }),
+    )];
+    desktop.adopt_arrangement(
+        &record_of(&[ArrangementEdit::Set(kept)]),
+        true,
+        &layout,
+        &mut Region::new(),
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, 0),
+        cell(&layout, 3 * layout.cells_per_line() + 2)
+    );
+    assert_eq!(
+        desktop.take_arrangement_edits(),
+        [ArrangementEdit::Renamed {
+            from: PlaceKey::of("old.txt"),
+            to: String::from("new.txt"),
+            id,
+        }]
+    );
+}
+
+#[test]
+fn a_place_kept_for_a_file_gone_while_away_is_forgotten_once_the_record_is_read() {
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let layout = layout_of(&desktop);
+    let kept = ArrangementEdit::Set(vec![(
+        String::from("gone.txt"),
+        Some(Placed {
+            id: FileId::NONE,
+            at: cell_place(1, 1),
+            order: 0,
+        }),
+    )]);
+    let record = record_of(core::slice::from_ref(&kept));
+    desktop.adopt_arrangement(&record, false, &layout, &mut Region::new());
+    assert!(
+        desktop.take_arrangement_edits().is_empty(),
+        "nothing is forgotten before the store has been read"
+    );
+    desktop.adopt_arrangement(&record, true, &layout, &mut Region::new());
+    assert_eq!(
+        desktop.take_arrangement_edits(),
+        [ArrangementEdit::Forget(vec![PlaceKey::of("gone.txt")])]
+    );
+}
+
+#[test]
+fn an_icon_put_down_past_what_the_record_keeps_says_so_and_goes_back() {
+    let names: Vec<String> = (0..=MAX_PLACED)
+        .map(|n| alloc::format!("{n:03}.txt"))
+        .collect();
+    let entries = names.iter().map(|name| file(name)).collect();
+    let places: Vec<(&str, Place)> = names
+        .iter()
+        .take(MAX_PLACED)
+        .map(|name| (name.as_str(), cell_place(1, 1)))
+        .collect();
+    let mut desktop = placed_on(entries, &places);
+    let layout = layout_of(&desktop);
+    let was = bounds(&desktop, &layout, MAX_PLACED);
+    let refused = carry(&mut desktop, &layout, MAX_PLACED, (120, 60));
+    assert!(
+        matches!(refused.action, Some(DesktopAction::Refuse(_))),
+        "the record says it has no room"
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, MAX_PLACED),
+        was,
+        "and the icon stands where it stood"
+    );
+}
+
+#[test]
+fn an_arrow_moves_to_the_nearest_icon_that_way_wherever_the_icons_stand() {
+    let mut desktop = placed_on(
+        vec![file("a.txt"), file("b.txt"), file("c.txt")],
+        &[
+            ("a.txt", cell_place(0, 0)),
+            ("b.txt", cell_place(3, 0)),
+            ("c.txt", cell_place(1, 2)),
+        ],
+    );
+    let layout = layout_of(&desktop);
+    desktop.set_focused(true, &layout, &mut Region::new());
+    desktop.key(right(), true, &layout, &[], &mut Region::new());
+    assert_eq!(
+        desktop.selected(),
+        Some(0),
+        "the first arrow starts somewhere"
+    );
+    desktop.key(right(), true, &layout, &[], &mut Region::new());
+    assert_eq!(
+        desktop.selected(),
+        Some(1),
+        "b.txt is the icon to the right"
+    );
+    desktop.key(down(), true, &layout, &[], &mut Region::new());
+    assert_eq!(desktop.selected(), Some(2), "c.txt is the one below");
+    desktop.key(left(), true, &layout, &[], &mut Region::new());
+    assert_eq!(desktop.selected(), Some(0), "a.txt is the one to the left");
+    assert!(
+        damage_of(|damage| {
+            desktop.key(up(), true, &layout, &[], damage);
+        })
+        .is_empty(),
+        "with no icon that way nothing moves"
+    );
+    assert_eq!(desktop.selected(), Some(0));
+}
+
+#[test]
+fn turning_the_grid_on_or_off_moves_no_icon() {
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let base = desktop.settings().clone();
+    assert_eq!(
+        desktop.apply_settings(DesktopSettings {
+            align_to_grid: true,
+            ..base
+        }),
+        Some(PinboardChange::default()),
+        "it decides where the next icon put down settles"
+    );
+}
+
+/// The seat says while the primary button is down, which is what keeps an
+/// icon carried for as long as the press that took it lasts.
+#[test]
+fn the_seat_says_while_the_primary_button_is_held() {
+    let (mut shell, mut comp) = crate::tests::headless_desktop();
+    let _ = shell.apply(crate::tests::moved(300, 200), &mut comp, 0);
+    assert!(!shell.router().holds_primary());
+    let _ = shell.apply(crate::tests::PRIMARY_PRESS, &mut comp, 0);
+    assert!(shell.router().holds_primary(), "the press is held");
+    let _ = shell.apply(crate::tests::moved(340, 220), &mut comp, 0);
+    assert!(shell.router().holds_primary(), "and carried");
+    let _ = shell.apply(crate::tests::PRIMARY_RELEASE, &mut comp, 0);
+    assert!(!shell.router().holds_primary(), "until it comes up");
+}
+
+/// Pump `events` through `shell` as one wake of the serve loop drains them,
+/// and route each batch to `desktop` as the session does: every outcome first
+/// follows a held press to where the pointer is now, then a press on the
+/// desktop takes what it lands on.
+fn routed(
+    desktop: &mut Desktop<FakeDir>,
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+    events: &[InputEvent],
+) {
+    let mut source = crate::tests::MemoryInput::new(events);
+    let mut outcomes = Vec::new();
+    loop {
+        let stopped = shell
+            .pump(&mut source, comp, 0, &mut outcomes)
+            .expect("an in-memory source does not fault");
+        let layout = shell.desktop_layout(comp, desktop);
+        let (pointer, held) = (shell.router().pointer(), shell.router().holds_primary());
+        for outcome in &outcomes {
+            desktop.follow_press(pointer, held, &layout, comp.scale(), &mut Region::new());
+            if outcome.value == ShellOutcome::WindowManager(InputResponse::DesktopPressed) {
+                desktop.press(
+                    pointer,
+                    &layout,
+                    comp.scale(),
+                    shell.session().active_theme(),
+                    outcome.at_ns,
+                    &[],
+                    &mut Region::new(),
+                );
+            }
+        }
+        if stopped == Stopped::Empty {
+            return;
+        }
+    }
+}
+
+/// The seat applies a whole batch before routing any of it, so the release
+/// can arrive with motion not yet followed: the icon still lands where it was
+/// let go, not where the batch before left it.
+#[test]
+fn an_icon_let_go_with_motion_still_to_follow_lands_where_it_was_let_go() {
+    let (mut shell, mut comp) = crate::tests::headless_desktop();
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let layout = shell.desktop_layout(&comp, &desktop);
+    let from = bounds(&desktop, &layout, 0).center();
+    let to = |dx: i32, dy: i32| crate::tests::moved(from.x + dx, from.y + dy);
+    let mut wake = |events: &[InputEvent]| routed(&mut desktop, &mut shell, &mut comp, events);
+    wake(&[to(0, 0), crate::tests::PRIMARY_PRESS]);
+    wake(&[to(60, 40)]);
+    wake(&[to(120, 80), to(200, 120), crate::tests::PRIMARY_RELEASE]);
+    let put = bounds(&desktop, &layout, 0).center();
+    assert_eq!(
+        (put.x - from.x, put.y - from.y),
+        (200, 120),
+        "where it was let go"
+    );
+}
+
+/// A press routed on its own, then carried and let go within one batch, is a
+/// carry rather than a click.
+#[test]
+fn a_press_carried_and_let_go_within_one_batch_moves_its_icon() {
+    let (mut shell, mut comp) = crate::tests::headless_desktop();
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let layout = shell.desktop_layout(&comp, &desktop);
+    let from = bounds(&desktop, &layout, 0).center();
+    let to = |dx: i32, dy: i32| crate::tests::moved(from.x + dx, from.y + dy);
+    let mut wake = |events: &[InputEvent]| routed(&mut desktop, &mut shell, &mut comp, events);
+    wake(&[to(0, 0), crate::tests::PRIMARY_PRESS]);
+    wake(&[to(100, 50), to(150, 90), crate::tests::PRIMARY_RELEASE]);
+    let put = bounds(&desktop, &layout, 0).center();
+    assert_eq!(
+        (put.x - from.x, put.y - from.y),
+        (150, 90),
+        "it went with the press"
+    );
+}
+
+/// A burst of motion over the bare desktop routes as one outcome: each sample
+/// would only ask what lies under the one pointer the seat holds.
+#[test]
+fn a_burst_of_motion_over_the_desktop_folds_into_one_outcome() {
+    let (mut shell, mut comp) = crate::tests::headless_desktop();
+    let mut source = crate::tests::MemoryInput::new(&[
+        crate::tests::moved(300, 200),
+        crate::tests::moved(310, 205),
+        crate::tests::moved(320, 210),
+    ]);
+    let mut outcomes = Vec::new();
+    shell
+        .pump(&mut source, &mut comp, 0, &mut outcomes)
+        .expect("an in-memory source does not fault");
+    let seen: Vec<&ShellOutcome> = outcomes.iter().map(|timed| &timed.value).collect();
+    assert_eq!(
+        seen,
+        [&ShellOutcome::WindowManager(
+            InputResponse::DesktopPointerMoved
+        )]
+    );
+    assert_eq!(
+        shell.router().pointer(),
+        Point::new(320, 210),
+        "at the newest"
+    );
+}
+
+/// A tidy of more icons than the field has cells leaves each it could not
+/// place to flow after the others, never on a cell it gave another.
+#[test]
+fn a_tidy_of_more_icons_than_cells_stands_none_on_another() {
+    let cells = layout_of(&desktop_of(Vec::new())).visible_range(0).len();
+    let total = cells + 4;
+    // The largest are listed first, so they flowed onto the cells the tidy
+    // gives the smallest.
+    let entries = (0..total)
+        .map(|n| {
+            let size = u64::try_from(total - n).expect("a small count");
+            Entry::new(
+                format!("{n:03}.txt"),
+                EntryKind::File,
+                size,
+                Time64::UNIX_EPOCH,
+            )
+        })
+        .collect();
+    let mut desktop = desktop_of(entries);
+    let layout = layout_of(&desktop);
+    desktop.command(PinboardCommand::TidyUp(TidyOrder::Size), &layout, &[]);
+    let shown: Vec<Rect> = (0..total)
+        .filter_map(|index| desktop.bounds_for_test(&layout, index))
+        .collect();
+    assert_eq!(shown.len(), cells, "every cell holds one icon and no more");
+    for (at, rect) in shown.iter().enumerate() {
+        assert!(
+            !shown[at + 1..].contains(rect),
+            "two icons stand on {rect:?}"
+        );
+    }
+}
+
+/// Icons kept past the edge of a narrower field, or of one at a larger scale,
+/// each stand on a free cell near where they were put, never piled onto one
+/// another at the edge.
+#[test]
+fn icons_kept_past_the_field_each_take_a_cell_of_their_own() {
+    let desktop = placed_on(
+        vec![file("a.txt"), file("b.txt"), file("c.txt")],
+        &[
+            ("a.txt", cell_place(5, 0)),
+            ("b.txt", cell_place(6, 0)),
+            ("c.txt", cell_place(7, 0)),
+        ],
+    );
+    let double = Scale::from_percent(200).expect("a scale");
+    for field in [
+        desktop.layout(Rect::new(0, 0, 400, 600), Scale::ONE, &theme()),
+        desktop.layout(work_area(), double, &theme()),
+    ] {
+        let shown: Vec<Rect> = (0..3)
+            .map(|index| bounds(&desktop, &field, index))
+            .collect();
+        for (at, rect) in shown.iter().enumerate() {
+            assert!(
+                !shown[at + 1..].contains(rect),
+                "two icons stand on {rect:?}"
+            );
+            assert_eq!(
+                rect.intersection(&field.tile_area()),
+                *rect,
+                "{rect:?} stands on the field"
+            );
+        }
+    }
+}
+
+/// Under the trailing arrangement a place is measured from the trailing edge,
+/// so the icons tidied against it stay against it on a wider field.
+#[test]
+fn a_trailing_arrangement_keeps_its_places_against_the_trailing_edge() {
+    let mut desktop = desktop_with(
+        vec![file("a.txt"), file("b.txt")],
+        arranged_by(IconFlow::Trailing, IconSort::Name),
+    );
+    let layout = layout_of(&desktop);
+    desktop.command(PinboardCommand::TidyUp(TidyOrder::Name), &layout, &[]);
+    let wide = desktop.layout(Rect::new(0, 0, 1200, 600), Scale::ONE, &theme());
+    assert_eq!(
+        [bounds(&desktop, &wide, 0), bounds(&desktop, &wide, 1)],
+        [cell(&wide, 0), cell(&wide, 1)],
+        "still against the trailing edge"
+    );
+}
+
+/// The icon put down last stands over the one it was put on, whatever the two
+/// are called and however they are sorted.
+#[test]
+fn the_icon_put_down_last_stands_over_the_one_it_was_put_on() {
+    let mut desktop = desktop_of(vec![
+        Entry::new("a.txt", EntryKind::File, 900, Time64::UNIX_EPOCH),
+        Entry::new("b.txt", EntryKind::File, 100, Time64::UNIX_EPOCH),
+    ]);
+    let layout = layout_of(&desktop);
+    carry(&mut desktop, &layout, 1, (300, 200));
+    let (a, b) = (bounds(&desktop, &layout, 0), bounds(&desktop, &layout, 1));
+    carry(
+        &mut desktop,
+        &layout,
+        0,
+        (b.left() - a.left(), b.top() - a.top()),
+    );
+    press_at(&mut desktop, &layout, b.center(), 10_000_000_000);
+    assert_eq!(
+        desktop.selected(),
+        Some(0),
+        "a.txt, put down last, is met first"
+    );
+    desktop
+        .apply_settings(arranged_by(IconFlow::default(), IconSort::Size))
+        .expect("the order changed");
+    press_at(&mut desktop, &layout, b.center(), 20_000_000_000);
+    assert_eq!(
+        desktop.selected(),
+        Some(named(&desktop, "a.txt")),
+        "and stays on top through a new order"
+    );
+}
+
+/// The desktop's own change goes into the record before the record is handed
+/// back, so a store answer collected meanwhile cannot put the icon back.
+#[test]
+fn an_icon_put_down_as_the_record_arrives_stays_where_it_was_put() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    let mut memory = ArrangementMemory::new();
+    assert!(memory.next_load(0));
+    let kept = Placed {
+        id: FileId::NONE,
+        at: cell_place(3, 2),
+        order: 0,
+    };
+    let set = vec![(String::from("b.txt"), Some(kept))];
+    memory.loaded(0, Some(record_of(&[ArrangementEdit::Set(set)])));
+    carry(&mut desktop, &layout, 0, (300, 200));
+    let put = bounds(&desktop, &layout, 0);
+    assert!(
+        !desktop.keep_record(&mut memory, layout_of, &mut Region::new()),
+        "the record has room for it"
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, 0),
+        put,
+        "a.txt stands where it was put"
+    );
+    assert_eq!(
+        bounds(&desktop, &layout, 1),
+        cell(&layout, 3 * layout.cells_per_line() + 2),
+        "and b.txt where the record keeps it"
+    );
+    assert!(
+        memory.live().place_of("a.txt").is_some(),
+        "which keeps a.txt too"
+    );
+}
+
+/// An arrow still has somewhere to start when the icon selected is not shown:
+/// the first icon that is, as with nothing selected.
+#[test]
+fn an_arrow_starts_from_the_first_icon_shown_when_the_selection_is_not() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    press_at(&mut desktop, &layout, centre_of(&layout, 1), 0);
+    assert_eq!(desktop.selected(), Some(1));
+    let (tile, margin) = (cell(&layout, 0), 2 * DESKTOP_MARGIN);
+    let one = desktop.layout(
+        Rect::new(0, 0, tile.width + margin, tile.height + margin),
+        Scale::ONE,
+        &theme(),
+    );
+    assert_eq!(one.visible_range(0).len(), 1, "a field of one cell");
+    assert_eq!(desktop.bounds_for_test(&one, 1), None, "b.txt is not shown");
+    desktop.key(down(), true, &one, &[], &mut Region::new());
+    assert_eq!(desktop.selected(), Some(0), "the first icon shown");
+}
+
+/// Icons stacked exactly on one another are each reached by the arrows, in
+/// the order they are drawn.
+#[test]
+fn the_arrows_reach_every_icon_of_a_stack_in_the_order_they_are_drawn() {
+    let mut desktop = placed_on(
+        vec![file("a.txt"), file("b.txt"), file("c.txt")],
+        &[
+            ("a.txt", cell_place(2, 1)),
+            ("b.txt", cell_place(2, 1)),
+            ("c.txt", cell_place(2, 1)),
+        ],
+    );
+    let layout = layout_of(&desktop);
+    let stack = bounds(&desktop, &layout, 2).center();
+    press_at(&mut desktop, &layout, stack, 0);
+    assert_eq!(
+        desktop.selected(),
+        Some(2),
+        "c.txt, put down last, is on top"
+    );
+    let mut met = Vec::new();
+    for key in [left(), left(), left(), right(), right(), right()] {
+        desktop.key(key, true, &layout, &[], &mut Region::new());
+        met.push(desktop.selected());
+    }
+    assert_eq!(met, [Some(1), Some(0), Some(0), Some(1), Some(2), Some(2)]);
+}
+
+/// An application states where each picture it shows stood, and nothing bounds
+/// what it states: a drop of pictures held at the very ends of the coordinate
+/// space still lands every file on the field, and keeping icons to the grid
+/// settles them there rather than overflowing finding the nearest cell.
+#[test]
+fn a_drop_of_pictures_held_at_the_ends_of_the_coordinates_lands_on_the_field() {
+    let settings = DesktopSettings {
+        align_to_grid: true,
+        ..DesktopSettings::default()
+    };
+    let mut desktop = desktop_with(Vec::new(), settings);
+    let layout = layout_of(&desktop);
+    let picture = |from| DragPicture {
+        icon: IconAsset::new("text").expect("a valid asset id"),
+        from: Some(from),
+    };
+    let items = DragItems::new(
+        DocumentName::new("0.txt").expect("a valid name"),
+        4,
+        false,
+        [
+            picture((i32::MIN, i32::MIN)),
+            picture((i32::MAX, i32::MAX)),
+            picture((i32::MIN, i32::MAX)),
+            picture((i32::MAX, i32::MIN)),
+        ],
+    )
+    .expect("four files");
+    desktop.offer_landing(Some(LandingOffer::of(&items)));
+    desktop.expect_offered(Point::new(300, 300), &layout, Scale::ONE, &theme(), 100);
+    desktop.apply_changes(
+        (0..4)
+            .map(|n| EntryChange::Upsert(file(&format!("{n}.txt"))))
+            .collect(),
+        layout_of,
+        &mut Region::new(),
+    );
+    let area = layout.tile_area();
+    for n in 0..4 {
+        let shown = bounds(&desktop, &layout, named(&desktop, &format!("{n}.txt")));
+        assert_eq!(
+            shown.intersection(&area),
+            shown,
+            "{n}.txt stands on the field"
+        );
+    }
+}
+
+/// A resting name's halo is blurred once and kept: a repaint lays the same one
+/// down again, and only a new name, scale or theme blurs one afresh.
+#[test]
+fn a_halo_is_blurred_again_only_for_a_new_name_scale_or_theme() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let halos = |desktop: &Desktop<FakeDir>, scale: Scale, theme: &Theme| {
+        let layout = desktop.layout(work_area(), scale, theme);
+        let mut surface = Surface::new(800, 600).expect("a screen-sized layer");
+        desktop.render(
+            &mut surface,
+            &layout,
+            scale,
+            theme,
+            &mut NoArtwork,
+            work_area(),
+            None,
+        );
+        ["a.txt", "b.txt", "c.txt"].map(|name| desktop.halo_for_test(name))
+    };
+    let blurred = |was: &[Option<Arc<LabelHalo>>; 3], now: &[Option<Arc<LabelHalo>>; 3]| {
+        was.iter()
+            .zip(now)
+            .filter(|&(was, now)| match (was, now) {
+                (Some(was), Some(now)) => !Arc::ptr_eq(was, now),
+                (held, now) => held.is_none() && now.is_some(),
+            })
+            .count()
+    };
+    let (dark, light) = (Theme::dark(), Theme::light());
+    let double = Scale::from_percent(200).expect("a scale");
+    let first = halos(&desktop, Scale::ONE, &dark);
+    assert!(
+        first[0].is_some() && first[1].is_some(),
+        "each resting name keeps one"
+    );
+    let again = halos(&desktop, Scale::ONE, &dark);
+    assert_eq!(blurred(&first, &again), 0, "a repaint blurs none");
+    let scaled = halos(&desktop, double, &dark);
+    assert_eq!(blurred(&again, &scaled), 2, "a new scale blurs each again");
+    let themed = halos(&desktop, double, &light);
+    assert_eq!(blurred(&scaled, &themed), 2, "and so does a new theme");
+    desktop.apply_changes(
+        vec![
+            EntryChange::Remove(String::from("b.txt")),
+            EntryChange::Upsert(file("c.txt")),
+        ],
+        layout_of,
+        &mut Region::new(),
+    );
+    let renamed = halos(&desktop, double, &light);
+    assert_eq!(
+        blurred(&themed, &renamed),
+        1,
+        "a new name blurs its own and no other"
+    );
+    assert!(renamed[1].is_none(), "and a name gone keeps none");
 }

@@ -956,8 +956,10 @@ Four subjects ask for one:
   dwell rather than a caption beside the label; a declared separator opens
   the group its next row begins rather than becoming a choosable row; a declared
   `Submenu` row's own rows become its child plate. Choosing a row answers
-  `AppMenuChosen { app, item }`, which the session relays back to the declaring
-  process — the bar never interprets an id. The plate is titled from the
+  `AppMenuChosen { owner, item, revision }`, which the session relays back to
+  the declaring process — the bar never interprets an id. The revision is the
+  one the slot's declaration carried when the plate was built, so a row chosen
+  after a re-declaration still names the declaration it was chosen from. The plate is titled from the
   bundle's **signed** manifest, so a menu cannot be titled as an application it
   is not.
 

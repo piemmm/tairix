@@ -50,7 +50,7 @@ use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::media::BlankDocument;
 use crate::open_with::{AppAssociation, OPEN_WITH_QUICK_MAX};
-use crate::places::Place;
+use crate::places::{Ejector, Place};
 use crate::presentation::HiddenEndings;
 use crate::render::ListColumns;
 use crate::sort::{SortDirection, SortKey, SortMode};
@@ -656,6 +656,10 @@ const NAME_QUOTES: (char, char) = ('\u{2018}', '\u{2019}');
 /// Why a verb that acts on the selection, or the plate holding them, cannot
 /// be used.
 const REASON_NO_SELECTION: &str = "nothing selected";
+
+/// Why Eject cannot act on a volume: it is fixed to the machine, or another
+/// user attached it.
+pub const REASON_NOT_EJECTABLE: &str = "only a removable volume, or one you attached, ejects";
 
 impl ViewMode {
     /// The label Display ▸ offers this display under.
@@ -1328,7 +1332,7 @@ enum Mountable {
     Image,
     /// A volume's root, ejectable by its
     /// [`ejector`](crate::places::VolumeFacts::ejector).
-    Volume(Option<u32>),
+    Volume(Option<Ejector>),
 }
 
 impl Mountable {
@@ -1347,8 +1351,8 @@ impl Mountable {
     /// Why Eject cannot act on this for `viewer`, or `""` when it can.
     fn eject_refusal(self, viewer: Option<u32>) -> &'static str {
         match self {
-            Self::Volume(Some(ejector)) if viewer == Some(ejector) => "",
-            Self::Volume(_) => "only a volume you attached ejects",
+            Self::Volume(Some(ejector)) if viewer.is_some_and(|uid| ejector.admits(uid)) => "",
+            Self::Volume(_) => REASON_NOT_EJECTABLE,
             Self::Neither | Self::Image => "only a volume ejects",
         }
     }

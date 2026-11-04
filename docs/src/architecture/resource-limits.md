@@ -213,11 +213,14 @@ resource**, before the resource is committed, and fails closed (`AGENTS.md`
   bound is refused with `LimitExceeded` and binds nothing. The charge also
   bounds how many endpoints a process holds; `port_unbind` and the owner's exit
   return it. What a sender queues is charged to the *sender*: its lane's storage
-  for as long as the lane holds anything, a message's payload until its port's
-  owner takes it, a call — the larger of its request and reply, so a reply
-  never fails for its caller's budget — until its caller collects the reply or
-  the call is withdrawn, times out, or is cancelled. A send or post past the
-  sender's soft bound is refused `LimitExceeded`. So every byte waiting in an
+  as it grows, for as long as the lane holds anything, a message's payload —
+  never less than its own record — until its port's owner takes it, a call —
+  the larger of its request and reply, so a reply never fails for its caller's
+  budget — until its caller collects the reply or the call is withdrawn, times
+  out, or is cancelled. A send or post past the sender's soft bound, its lane's
+  growth included, is refused `LimitExceeded`, as is a post from a caller
+  holding `IPC_SENDER_DEPTH_MAX` answers it has not collected. So every byte
+  waiting in an
   endpoint is paid for by the process that put it there, and no sender's
   traffic can spend another's budget or another's room
   ([per-sender lanes](./ipc.md#per-sender-lanes)). What an ended sender left at

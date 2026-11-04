@@ -134,7 +134,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  78 | `pointer_inject` | `u64 seat`, `user_ptr` (record), `len`, `u64 at_ns` | `u64` (bytes) | `CAP_INPUT_INJECT` | no |
 |  79 | `pointer_read` | `u64 seat`, `user_ptr` (buf), `len`     | `u64` (bytes) | `CAP_INPUT_READ` | no    |
 |  80 | `volume_attach` | `user_ptr` (request), `len`            | `errno`       | `CAP_FS_MOUNT`  | yes   |
-|  81 | `volume_detach` | `user_ptr` (request), `len`            | `errno`       | — (in-service: `CAP_FS_MOUNT`, or a network or disk-image volume's owner) | yes |
+|  81 | `volume_detach` | `user_ptr` (request), `len`            | `errno`       | — (in-service: `CAP_FS_MOUNT`, a network or disk-image volume's owner, or the user at the seat for a removable volume's plain detach) | yes |
 |  82 | `shm_grant`    | `Handle` (region), `IpcEndpoint`        | `u64` (handle) | `CAP_SHM`      | yes   |
 |  83 | `call_peer_seat` | `IpcEndpoint`, `Handle` (ticket), `u64 seat` | `u64` (generation) | —     | no    |
 |  84 | `fs_attr_get`  | `u32 fd`, `user_ptr` (key), `len`, `user_ptr` (out), `len` | `u64` (bytes) | — (in-handler: `CAP_FS_ACCESS` of the identity a byte read through a readable descriptor acts as, else the caller's) | no |
@@ -220,6 +220,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 165 | `archive_read` | `u64 volume`, `u32 region`, `u64 offset`, `user_ptr` (dest), `len` | `u64` (bytes) | `CAP_FS_SERVE` | no |
 | 166 | `archive_write` | `u64 volume`, `u32 region`, `u64 offset`, `user_ptr` (src), `len` | `errno` | `CAP_FS_SERVE` | no |
 | 167 | `call_await`   | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (reply), `len` | `u64` (bytes) | — | no |
+| 168 | `volume_retitle` | `user_ptr` (`VolumeRetitleRequest`), `len` | `errno` | — (in-service: the principal a disk image's volume was attached for) | yes |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -1128,11 +1129,14 @@ hold to post (`send_caps`) and the capability the server must hold to serve
 (`recv_caps`); binding a restricted-sender endpoint (non-empty `send_caps`)
 requires `CAP_IPC_BIND_PRIVILEGED`, and an id already bound fails closed with
 `AlreadyExists` (the kernel never re-points a live endpoint). Its last argument
-is the per-caller depth: how many calls one caller process may hold
-outstanding, each paid for by that caller, never a total callers share
+is the per-caller depth: how many calls one caller process may have waiting
+on the server, each paid for by that caller, never a total callers share
 ([per-sender lanes](./ipc.md#per-sender-lanes)). A blocking `ipc_call` whose
-caller already holds that many parks until one of them retires, rather than
-failing. An id in a link
+caller already has that many waiting parks until one of them is answered or
+retires, rather than failing; one whose caller holds `IPC_SENDER_DEPTH_MAX`
+answers it has not collected fails `LimitExceeded` at once, as does one whose
+wait ends with the answers it waited for taking it there, until the caller
+has collected enough to hold fewer. An id in a link
 supplier's block is bindable only by the holder of the node's duty naming it,
 whatever the role (`plans/SUPPLIERS.md` SL1), and the endpoint registry
 reports each such bind and unbind to the hardware tree, whose node then states
@@ -1170,9 +1174,11 @@ the **asynchronous** caller half — the client-side split of `ipc_call` that
 lets one task drive many endpoints at once and never park forever on a wedged
 callee (`plans/FIX-IO.md` IO1). `call_post` posts a request without blocking,
 arms a per-request one-shot deadline, and writes the correlating ticket out;
-`call_post` answers `WouldBlock` when the caller already holds the
-endpoint's per-caller depth, and `LimitExceeded` when the call would carry it
-past its own `ipc-queue-bytes` limit; `call_reap` is the non-blocking claim
+`call_post` answers `WouldBlock` when the caller already has the endpoint's
+per-caller depth of calls waiting on the server, and `LimitExceeded` when the
+call would carry it past its own `ipc-queue-bytes` limit or it holds
+`IPC_SENDER_DEPTH_MAX` answers it has not reaped; `call_reap` is the
+non-blocking claim
 (`WouldBlock` while pending, `TimedOut`
 once the deadline elapses — the ticket is then retired, `NotFound` for a
 cancelled/torn-down/foreign ticket, the reply bytes otherwise); `call_cancel`
@@ -1689,10 +1695,13 @@ to, and the add applies the *send*-authority check `ipc_send` itself
 applies — the caller here is the sender, not the binder, so the `Port`
 kind's owner check does not fit. An unknown port and one the caller may
 not send to refuse with the same oracle-free `NotFound`. The member is
-ready when a send would **not** be refused for want of room: the caller's
-own lane at the port is below the port's per-sender depth, the port is gone,
-or the caller no longer holds the send authority — the last two because a sender parked on either would wait
-forever, and an unconditionally-ready member tells an unauthorised caller
+ready when a send of the port's largest message would be admitted: the
+caller's lane there is below the port's per-sender depth, and all the caller
+holds against its `ipc-queue-bytes` limit, wherever it is held, leaves room for
+that message and any lane the send opens or grows; the port is gone; or the
+caller no longer holds the send authority — the last two because a sender parked on
+either would wait forever, and an unconditionally-ready member tells an
+unauthorised caller
 nothing about the mailbox. Readiness is a non-consuming, **level-triggered**
 peek; the woken sender's own `ipc_send` takes the slot. Level rather than
 an edge on the occupancy falling, because the member is armed *after* a
@@ -1700,10 +1709,18 @@ send was refused: an edge seeded at that moment would already have passed
 if the receiver drained in between. The wake is **targeted** — a port
 records each task parked for its room with the process it waits as, and a
 committed `ipc_recv` names exactly the tasks waiting as the sender whose
-message it took, so a busy port never disturbs an unrelated waiter — with a
-broadcast on port teardown, when the record dies with the port, and one when
-more wait as a sender than a wake names. Only
-sets that contain a `PortRoom` member join the room wake queue. This is
+message it took, however many there are, so a busy port never disturbs an
+unrelated waiter — and every task waiting at a port is woken when the port
+is torn down, once the registry's lock is released, or when its owner admits
+one sender, since either changes every lane at once. Only
+sets that contain a `PortRoom` member join the room wake queue. A member short
+of budget is woken through the budget queue instead: the first scan that finds
+it so registers the thread there under its process and scans again before
+parking; a receive of one of the process's messages at any port, the
+collection, withdrawal or timeout of one of its calls, or a change to its limit
+wakes that key, and a teardown discarding queued messages or calls wakes every
+budget waiter, each at the cost of a fence and one load while nobody waits.
+This is
 what lets the desktop hold an app-ward event a full mailbox refused (a
 window resize, a file-picker conclusion) and deliver it when the app
 drains, instead of dropping it or polling for capacity.
@@ -1826,8 +1843,9 @@ first-party Rust wrapper is `tairix_rt::terminal_size`; the C stub is
 holder of a pseudo-terminal (`pty_create`, no. 97) sets its character-cell
 geometry after create, so the shared `tairix_abi::TerminalSize` both ends
 observe (and `terminal_size` reports) tracks the window. The graphical terminal
-calls it on every window resize so the hosted shell's prompt sizing and any
-full-screen program re-lay-out. It is **ungated** and unaudited, the same
+calls it whenever its screen takes a new size, so the hosted shell's prompt
+sizing and any full-screen program re-lay-out for the size the screen really
+has. It is **ungated** and unaudited, the same
 unprivileged baseline as `pty_create`: it reaches only the caller's own pty. The
 handler validates `rows`/`cols` (non-zero, `u16`-bounded) into a `TerminalSize`
 (a zero or oversized dimension → `OutOfRange`, before any state is touched) and
@@ -2698,7 +2716,7 @@ re-validates arguments — the dispatcher does that first.
 | --------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `yield_now`     | nothing — the handler is inert. The dispatch hook recognises the `yield` number and returns `DispatchOutcome::Reschedule { action: Yield, .. }`; the caller is suspended back to the scheduler, which re-enqueues it from the `TaskAction::Yield` its kthread reports. Re-enqueuing here as well would double-handle it, re-entrantly, from inside the in-flight `step` | Always `Ok(0)`.                                                           |
 | `exit`          | `CapTable::remove(caller.task_id)` then `Scheduler::exit(caller.task_id)`                                     | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
-| `ipc_send`      | `PortRegistry::lookup(endpoint)` in `KernelState.ipc`; payload copied in through `copy_from_user`, then `Port::send(caller.caps, payload)` | Unbound endpoint → `NotFound` (no extra audit). `len > port.max_payload` → `MessageTooLarge`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Port::send`'s errno (`PermissionDenied`, `MessageTooLarge`, …). |
+| `ipc_send`      | `PortRegistry::lookup(endpoint)` in `KernelState.ipc`; payload copied in through `copy_from_user`, then `Port::send(caller.caps, payload)` | Unbound endpoint → `NotFound` (no extra audit). `len > port.max_payload`, or a message the sender's whole `ipc-queue-bytes` limit could not hold → `MessageTooLarge`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Port::send`'s errno (`PermissionDenied`, `MessageTooLarge`, …). |
 | `port_admit`    | `PortRegistry::lookup(port)`; the caller must be the port's owner; then `callreg::lookup(server)` and its `owner_instance` handed to `Port::admit`, which discards every queued message another instance sent and which `Port::send` checks under the mailbox lock; senders parked for the room that frees are woken | Unbound port or endpoint → `NotFound`. Another process's port → `PermissionDenied`. |
 | `port_unbind`   | `PortRegistry::lookup(endpoint)` under the registry write lock; the caller must be the port's owner; then `PortRegistry::unregister`, which withdraws its names and destroys it, dropping its queue charge; the senders it recorded as parked for room are woken to find it gone | Unbound port → `NotFound`. Another process's port → `PermissionDenied`. |
 | `waitset_close` | `waitset::close(caller.process(), set)`: removes the owned set, releases its file members after the registry lock drops, and drops the set's charges | Not a set of the caller → `NotFound`. |

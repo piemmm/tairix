@@ -1,5 +1,6 @@
 //! System tasks: the closed set of privileged actions the desktop performs
-//! for its own Settings application behind the system's authorisation prompt
+//! for its own components — Settings, and the file manager — behind the
+//! system's authorisation prompt
 //! ([`WindowRequest::Authorise`](super::WindowRequest::Authorise)).
 //!
 //! The task is all that crosses. It names no program, no account to run as,
@@ -29,17 +30,21 @@ pub enum SystemTask {
     ShowAccounts,
     /// Open Date & Time, which sets the clock and the time zone.
     SetClock,
+    /// Eject a volume: these words are its durable root, `id::<volume-id>/`,
+    /// which `unmount` is handed, and the catalog name the prompt names it
+    /// by.
+    Eject(ElevateWords),
 }
 
 impl SystemTask {
-    /// The words the task hands its program, or `None` for a task that
-    /// carries none.
+    /// The words the task carries, or `None` for a task that carries none.
     #[must_use]
     pub const fn words(&self) -> Option<&ElevateWords> {
         match self {
-            Self::Configure(words) | Self::ChangeAccount(words) | Self::SetPassword(words) => {
-                Some(words)
-            }
+            Self::Configure(words)
+            | Self::ChangeAccount(words)
+            | Self::SetPassword(words)
+            | Self::Eject(words) => Some(words),
             Self::ShowAddressing | Self::ShowAccounts | Self::SetClock => None,
         }
     }
@@ -62,6 +67,7 @@ impl SystemTask {
             Self::ShowAddressing => KIND_SHOW_ADDRESSING,
             Self::ShowAccounts => KIND_SHOW_ACCOUNTS,
             Self::SetClock => KIND_SET_CLOCK,
+            Self::Eject(_) => KIND_EJECT,
         }
     }
 }
@@ -78,6 +84,8 @@ const KIND_SHOW_ADDRESSING: u8 = 4;
 const KIND_SHOW_ACCOUNTS: u8 = 5;
 /// Wire kind of [`SystemTask::SetClock`].
 const KIND_SET_CLOCK: u8 = 6;
+/// Wire kind of [`SystemTask::Eject`].
+const KIND_EJECT: u8 = 7;
 
 /// Byte offset of a task's kind within its operand block.
 const KIND_AT: usize = 0;
@@ -136,6 +144,7 @@ pub(super) fn read(block: &[u8]) -> Result<SystemTask, Errno> {
         KIND_CONFIGURE => SystemTask::Configure(words),
         KIND_CHANGE_ACCOUNT => SystemTask::ChangeAccount(words),
         KIND_SET_PASSWORD => SystemTask::SetPassword(words),
+        KIND_EJECT => SystemTask::Eject(words),
         KIND_SHOW_ADDRESSING | KIND_SHOW_ACCOUNTS | KIND_SET_CLOCK if !words.is_empty() => {
             return Err(Errno::OutOfRange);
         }

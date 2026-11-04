@@ -1141,7 +1141,7 @@ mod program {
         ) -> bool {
             let now = tairix_rt::clock_get();
             match event {
-                WindowEvent::AppBarMenu { item } => {
+                WindowEvent::AppBarMenu { item, .. } => {
                     if tairix_window::is_quit(*item) {
                         return true;
                     }

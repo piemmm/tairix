@@ -3,7 +3,8 @@
 //! Attaches an AmigaDOS volume — an 880 KiB or 1760 KiB floppy, or a bare
 //! hard-disk partition of any block size the format allows — behind any
 //! [`Block`] device and exposes it through [`FilesystemRead`],
-//! [`FilesystemWrite`], [`FilesystemAttrs`] and [`FilesystemStats`].
+//! [`FilesystemWrite`], [`FilesystemAttrs`], [`FilesystemStats`] and
+//! [`FilesystemLabel`].
 //!
 //! # Supported volumes
 //!
@@ -51,7 +52,9 @@
 //! as the volume's mode folds them ([`NameMatching`]). A hard link to a file
 //! is the file under a second name; removing the file promotes its newest
 //! link to take its place, as AmigaDOS does. A soft link reads in POSIX
-//! spelling; a hard link to a directory reads as a soft link to it.
+//! spelling; a hard link to a directory reads as a soft link to it. The
+//! volume's own name is its title, held to a new entry's rules, and a soft
+//! link naming the volume follows it.
 //!
 //! # Metadata
 //!
@@ -82,9 +85,9 @@ use tairix_abi::blkio::BlkCommandCost;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
-    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
-    NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats,
-    WriteRefusal,
+    FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned,
+    VolumeHost, VolumeStats, VolumeTitle, WriteRefusal,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
@@ -92,7 +95,7 @@ use tairix_bytedev::ByteDevice;
 use tairix_collections::RadixTree;
 use tairix_fsmeta::preset::amiga;
 use tairix_fsprobe::affs::{
-    be32, DateStamp, Layout, Offsets, BITMAP_PAGES, BITMAP_VALID, BOOT_BLOCKS,
+    be32, DateStamp, Layout, Offsets, BITMAP_PAGES, BITMAP_VALID, BOOT_BLOCKS, NAME_MAX,
 };
 use tairix_writeback::CommitScheduler;
 
@@ -1103,6 +1106,31 @@ impl<B: Block> FilesystemStats for Affs<B> {
             files: 0,
             files_free: 0,
         })
+    }
+}
+
+/// The volume's name is its title, held to a new entry's rules: ISO 8859-1,
+/// one to 30 bytes, and never a control character or the `:` and `/`
+/// AmigaDOS addresses a volume and separates a path with — a volume with no
+/// name is one AmigaDOS cannot address.
+impl<B: Block> FilesystemLabel for Affs<B> {
+    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
+        let mut spelt = [0u8; 2 * NAME_MAX];
+        let len = self.volume.decode(&mut spelt);
+        let text = core::str::from_utf8(&spelt[..len]).map_err(|_| DriverError::OutOfRange)?;
+        VolumeTitle::new(text).map_err(DriverError::from_errno)
+    }
+
+    fn set_label(&mut self, title: &VolumeTitle) -> Result<(), DriverError> {
+        let name = Name::encode(title.as_str().as_bytes())?.given()?;
+        self.change(|fs| {
+            let mut root = fs.header(fs.root_block())?;
+            root.set_name(&name);
+            root.set_date(fs.now());
+            fs.write_header(&mut root)
+        })?;
+        self.volume = name;
+        Ok(())
     }
 }
 

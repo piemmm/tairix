@@ -682,14 +682,14 @@ mod program {
             }
             DesktopAsk::Savers => DesktopAnswer::Savers(fetch_savers(client)),
             DesktopAsk::Authorise { window_id, task } => {
-                DesktopAnswer::Authorise(client.authorise(*window_id, task))
+                DesktopAnswer::Authorise(client.authorise(Some(*window_id), task))
             }
             DesktopAsk::TakeOutput {
                 window_id,
                 exit_code,
             } => DesktopAnswer::Output {
                 exit_code: *exit_code,
-                output: client.take_authorised_output(*window_id),
+                output: client.take_authorised_output(Some(*window_id)),
             },
         }
     }
@@ -1722,6 +1722,7 @@ mod program {
             WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::AppBarEntered { .. }
             | WindowEvent::MenuClosed { .. }
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }
@@ -2786,15 +2787,15 @@ mod program {
             outcome
         }
 
-        /// Paint and present what the chooser owes; nothing while the
-        /// session holds none of its pixels.
+        /// Paint and present what the chooser owes; nothing while the window
+        /// is hidden.
         fn present(
             &mut self,
             client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
             scale: Scale,
             theme: &Theme,
         ) -> Result<(), Errno> {
-            if self.pane.content_released() {
+            if client.is_hidden(self.pane.id()) {
                 return Ok(());
             }
             let mode = *self.pane.mode();

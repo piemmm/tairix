@@ -1388,7 +1388,7 @@ impl Tiles {
         icon: IconKind,
         endings: HiddenEndings,
     ) -> IconTile {
-        self.labelled(entry_label(entry, endings).into_owned(), state, icon)
+        self.named(entry_label(entry, endings).into_owned(), state, icon)
     }
 
     /// The [`IconTile`] for network `item`: the picture its kind wears and its
@@ -1404,10 +1404,14 @@ impl Tiles {
                 ..state
             }
         };
-        self.labelled(String::from(item.label()), state, item.icon())
+        self.named(String::from(item.label()), state, item.icon())
     }
 
-    fn labelled(self, label: String, state: ControlState, icon: IconKind) -> IconTile {
+    /// The [`IconTile`] for an item shown as `label` with the picture `icon`,
+    /// laid out, cut and shadowed as a listed entry's is: what stands for an
+    /// entry where only its shown name and picture are known, a carried drag's.
+    #[must_use]
+    pub fn named(self, label: String, state: ControlState, icon: IconKind) -> IconTile {
         let cut = name_cut(&label);
         let tile = IconTile::new(label, icon)
             .with_layout(self.layout())

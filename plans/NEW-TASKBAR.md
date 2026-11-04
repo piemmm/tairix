@@ -804,11 +804,14 @@ What now stands:
   (op 13), carrying the event route, what a primary press on the slot does
   (`AppBarClick`: `Raise`, `RaiseOrOpen`, or `Open` — the closed set of
   answers, since only the application knows whether a second window means
-  anything to it), and a bounded `AppMenu`. It is idempotent-replace, so
-  an application re-declares to change a row's enablement or its mark. Two
+  anything to it), a bounded `AppMenu`, and the application's own `revision`
+  for the declaration. It is idempotent-replace, so an application
+  re-declares to change a row's enablement or its mark. Two
   application-scoped events answer it: `WindowEvent::AppBarDefault` and
-  `AppBarMenu { item }`, which is why `WindowEvent::window_id()` is now
-  `Option<u64>`. The pin ops (`PinBundle`/`DragOffer`/`DragWithdraw`) and
+  `AppBarMenu { item, revision }`, which is why `WindowEvent::window_id()` is
+  now `Option<u64>`; the revision is that of the declaration the open menu
+  was copied from, so a row chosen after a re-declaration is resolved against
+  the menu the user saw. The pin ops (`PinBundle`/`DragOffer`/`DragWithdraw`) and
   `BundleRef` are **deleted**. The declaration is the widest operation, so it
   sets `WindowRequest::MAX_WIRE_LEN` — the endpoint's receive ceiling — while
   each request is framed to its own length, so a declaration's width costs
@@ -879,9 +882,10 @@ What now stands:
   row's child the information panel. That row is the one whose *label* is the
   desktop's rather than the application's: it draws as `INFO_ROW_LABEL` ("Info",
   with the submenu arrow), so every application reaches its panel by the same
-  name. Choosing a row answers `AppMenuChosen { app, item }` and the session
-  relays the id straight back — the bar never interprets one. An application
-  that declared no menu asks for **nothing**.
+  name. Choosing a row answers `AppMenuChosen { owner, item, revision }` — the
+  revision the slot's declaration carried when the plate was built — and the
+  session relays both straight back; the bar never interprets either. An
+  application that declared no menu asks for **nothing**.
 - **The hover window picker** (`WindowPicker`) opens when a slot has
   something to *choose* between (`PICKER_MIN_WINDOWS`, two, windows) **or**
   something to *recover* (any window minimised) — one predicate, `has_picker`,
@@ -1761,11 +1765,13 @@ now stands:
   copy on the wire could disagree with it.
 - **One icon grid, two flows** (`lib/browse::layout`): `GridView` is
   parameterised by `GridFlow` — `RowsFromLeading` for the file manager's
-  row-major scrolling grid, `ColumnsFromTrailing` for the desktop's
-  trailing-edge column that grows a new column inward as it fills — so both
-  share one cell geometry, one hit-test, one set of counts (`cells_per_line`,
-  `lines_total`, `visible_range`) and one scrolled view (`view`,
-  `shown_rect`). The tile
+  row-major scrolling grid, `ColumnsFromLeading` and `ColumnsFromTrailing` for
+  the desktop's cells, which run down from one edge and grow a new column
+  inward — so both share one cell geometry, one hit-test, one set of counts
+  (`cells_per_line`, `lines_total`, `visible_range`) and one scrolled view
+  (`view`, `shown_rect`). On the desktop the grid is every whole cell of the
+  work area, and an icon stands where the user put it or on the next free
+  cell, a rectangle of its own (`plans/PINBOARD.md` §4). The tile
   is shared too: `Tiles::tile`, `entry_label`, and `Tiles::metrics` are public, so
   the desktop paints the *same* `lib/controls::IconTile` — the plateless
   picture-over-name item — as the file manager rather than a lookalike; there is
@@ -1783,11 +1789,11 @@ now stands:
   the shared engine, and paints through the shell's icon-artwork lookup —
   shipped folder artwork for a folder, content-class artwork for a file, and
   the built-in glyph when an asset is absent or refused, so a tile can never
-  blank. Hover, press to select, press on empty desktop to clear, the shared
-  `DoubleClickTracker` to activate, and — while the desktop holds the
-  keyboard — arrows to move (down/up one icon, left/right one whole column),
-  `Enter` to activate, `Escape` to clear. A folder that will not list shows
-  nothing rather than failing.
+  blank. Hover, press to select (and, held past the drag slop, to carry the
+  icon), press on empty desktop to clear, the shared `DoubleClickTracker` to
+  activate, and — while the desktop holds the keyboard — arrows to move to the
+  nearest icon that way, `Enter` to activate, `Escape` to clear. A folder that
+  will not list shows nothing rather than failing.
 - **Activation resolves by kind, and refuses loudly**: a directory opens the
   file manager *at that path* (its first argument, which the files app now
   honours); an application bundle launches its `Run` binary; a plain file
@@ -1799,10 +1805,10 @@ now stands:
 - **The column follows its folder through a directory watch**
   (`docs/src/filesystem/watch.md`): a report is drained off the loop and
   merged in place by `Desktop::apply_changes`, keeping the selection on its
-  icon and repainting only the cells it moved. The folder is read whole at
+  icon and repainting only the icons it moved. The folder is read whole at
   bring-up, on a rescan or a gone, after the session's own action, and on
   Refresh, which also re-reads the library catalog and the file associations.
-  A new sort order re-sorts the icons shown and reads nothing.
+  A new sort order re-sorts the icons no one placed and reads nothing.
 
 Tested in the wm suite (the layer draws over the background and under every
 window, a layer smaller than the screen leaves the background showing,

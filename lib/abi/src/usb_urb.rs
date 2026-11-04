@@ -677,9 +677,9 @@ impl IsoLayout {
     }
 
     /// Notifications a stream of this layout can have outstanding: one per
-    /// queued slot, and its halt. A notify port bound with this much room
-    /// never refuses one; the HCD ends a stream whose notification is
-    /// refused.
+    /// queued slot, and its halt. A notify port bound with this much room is
+    /// never full, and the HCD holds no more than this for a port that
+    /// refuses them.
     #[must_use]
     pub const fn notify_capacity(self) -> usize {
         self.slots as usize + 1

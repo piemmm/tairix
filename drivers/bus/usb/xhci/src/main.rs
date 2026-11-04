@@ -19,8 +19,8 @@
 //!
 //! # The asynchronous event loop (`plans/USB.md` §1.1)
 //!
-//! The HCD multiplexes two independent event streams on one kernel **wait-set**
-//! (`U3a3`) and never waits on either inside the other's handler:
+//! The HCD multiplexes its event sources on one kernel **wait-set** (`U3a3`)
+//! and never waits on one inside another's handler:
 //!
 //! * **A URB-submit IPC call** on the per-interface endpoint it serves: it
 //!   `call_recv`s the call and drives it. One that does not finish at once —
@@ -29,6 +29,9 @@
 //!   class driver's `ipc_call` parks in the kernel until it is answered.
 //! * **The controller's completion interrupt**, acknowledged with the single
 //!   `USBSTS` read that also carries the fault latch.
+//! * **Room at a class driver's notify port** that refused an isochronous
+//!   notice for room or this process's IPC budget, watched only while it is
+//!   owed one.
 //!
 //! Every wake then runs one service step of the engine
 //! ([`tairix_usb::device::UsbHost::service`]): it routes every event the
@@ -197,6 +200,9 @@ mod program {
     /// Base wait-set token for "a URB submit arrived on transport slot
     /// `token - TOKEN_URB_BASE`'s endpoint".
     const TOKEN_URB_BASE: u64 = 1;
+    /// Wait-set token for "a notify port owed a notice has room", past every
+    /// transport slot's.
+    const TOKEN_ROOM: u64 = u64::MAX;
 
     fn log_hex_event(
         id: EventId,
@@ -223,6 +229,10 @@ mod program {
     /// Diagnostic event id: an isochronous stream ended other than at its
     /// class driver's word.
     const HCD_STREAM_ENDED: EventId = EventId(27_151);
+
+    /// Diagnostic event id: isochronous notices a class driver's port refused
+    /// for good were given up.
+    const HCD_NOTICES_LOST: EventId = EventId(27_155);
 
     /// Diagnostic event id: an endpoint recovery that failed was deferred to a
     /// retry, or a hub's failed status transfer was recovered, or the deferred
@@ -384,10 +394,28 @@ mod program {
         }
 
         fn notify(&mut self, port: u64, notice: &IsoNotify) -> Result<(), Errno> {
-            match tairix_rt::ipc_send(port, &notice.encode()) {
-                0 => Ok(()),
-                ret => Err(Errno::from_syscall(ret)),
-            }
+            tairix_rt::ipc_send(port, &notice.encode())
+        }
+
+        fn watch_room(&mut self, port: u64) -> bool {
+            let added = tairix_rt::waitset_ctl(
+                self.set,
+                WaitSetOp::Add,
+                WaitSourceKind::PortRoom,
+                port,
+                TOKEN_ROOM,
+            );
+            super::waitset_ctl_result(added).is_ok()
+        }
+
+        fn unwatch_room(&mut self, port: u64) {
+            let _ = tairix_rt::waitset_ctl(
+                self.set,
+                WaitSetOp::Del,
+                WaitSourceKind::PortRoom,
+                port,
+                TOKEN_ROOM,
+            );
         }
 
         fn receive(
@@ -474,6 +502,7 @@ mod program {
                     errno as u64,
                 ),
                 Note::Domain { event, owner } => log_domain_event(event, owner),
+                Note::NoticesLost { port, lost, reason } => log_notices_lost(port, lost, reason),
                 Note::StreamEnded {
                     index,
                     endpoint,
@@ -568,6 +597,35 @@ mod program {
         };
         log_hex_event(id, level, message, "owner_hex", u64::from(owner));
         let _ = tairix_rt::hw_node_health(health);
+    }
+
+    /// Record the notices a class driver's port refused for good, given up as
+    /// its stream ended.
+    fn log_notices_lost(port: u64, lost: usize, reason: Errno) {
+        let mut port_buf = [0u8; 16];
+        let u = tairix_log::FieldValue::UnsignedInt;
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Warn,
+                id: HCD_NOTICES_LOST,
+                message: "usb-hcd: isochronous notices a port refused for good were given up",
+                fields: &[
+                    Field {
+                        key: "port_hex",
+                        value: tairix_log::FieldValue::Str(format_hex_u64(port, &mut port_buf)),
+                    },
+                    Field {
+                        key: "lost",
+                        value: u(lost as u64),
+                    },
+                    Field {
+                        key: "errno",
+                        value: u(reason as u64),
+                    },
+                ],
+            },
+        );
     }
 
     /// Spend the single deferred re-attach the bring-up walk owed a port it
@@ -1128,8 +1186,9 @@ mod program {
 
     /// The asynchronous event loop: serve the engine, act on what it did,
     /// and park — never spinning a quiet controller — until the controller
-    /// interrupts, a transport endpoint is ready, or the earliest deadline an
-    /// operation, a held URB or a retry owes is due.
+    /// interrupts, a transport endpoint is ready, a notify port owed a notice
+    /// has room, or the earliest deadline an operation, a held URB or a retry
+    /// owes is due.
     ///
     /// Returns the process exit code: once the controller fails closed, or
     /// once the wait-set is torn down under us.
@@ -1169,8 +1228,10 @@ mod program {
             let serving = !(health.is_recovering() || health.is_failed_closed());
             if serving {
                 interfaces.drive_busy(live);
-                interfaces.deliver_streams(live);
             }
+            // A port watched for room wakes the loop until it is given what it
+            // is owed, so this runs while the controller recovers too.
+            interfaces.deliver_streams(health, live);
             // A teardown can leave the controller halted with a latched Host
             // System Error on some controllers, and a faulted controller raises
             // no further interrupt (xHCI §4.24.1). Only a teardown pays for
@@ -1207,6 +1268,9 @@ mod program {
                 interfaces
                     .next_deadline()
                     .map(|at| at.saturating_sub(now_ns)),
+                interfaces
+                    .next_notice_retry()
+                    .map(|at| at.saturating_sub(now_ns)),
             ]
             .into_iter()
             .flatten()
@@ -1217,6 +1281,8 @@ mod program {
             if wait_ret >= 0 {
                 match token {
                     TOKEN_IRQ => service_controller_interrupt(live, interfaces, health),
+                    // The next pass offers the port what it is owed.
+                    TOKEN_ROOM => {}
                     // Registered as `TOKEN_URB_BASE + slot`.
                     token => {
                         let slot = token

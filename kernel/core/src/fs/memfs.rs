@@ -22,9 +22,9 @@ use core::ops::Bound;
 
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
-    FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned,
-    VolumeHost, VolumeStats,
+    FilesystemAttrsProvider, FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats,
+    FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity,
+    NodeTimes, Unpinned, VolumeHost, VolumeStats, VolumeTitle,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_abi::SeekRegion;
@@ -140,6 +140,8 @@ pub struct RwMockFs {
     /// What every name mutation and byte write answers instead of making it,
     /// so a test can observe what the VFS makes of a driver's own refusal.
     mutation_refusal: Option<DriverError>,
+    /// The volume's title.
+    title: VolumeTitle,
 }
 
 /// A file's holes as `start → end` byte ranges: disjoint, never adjacent.
@@ -263,6 +265,7 @@ impl RwMockFs {
             stuck_cursor: false,
             links: true,
             mutation_refusal: None,
+            title: VolumeTitle::EMPTY,
         }
     }
 
@@ -1214,6 +1217,17 @@ impl FilesystemSecurity for RwMockFs {
     fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
         let idx = self.live(node)?;
         Ok(!self.unrecorded.contains(&idx))
+    }
+}
+
+impl FilesystemLabel for RwMockFs {
+    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
+        Ok(self.title)
+    }
+
+    fn set_label(&mut self, title: &VolumeTitle) -> Result<(), DriverError> {
+        self.title = *title;
+        Ok(())
     }
 }
 

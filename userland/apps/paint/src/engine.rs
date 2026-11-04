@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 
-use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, SaveEndings};
+use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, SaveFormats};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
@@ -376,10 +376,10 @@ impl DocumentView for Engine {
         }
     }
 
-    fn save_endings(&self) -> Result<SaveEndings, String> {
+    fn save_formats(&self) -> Result<SaveFormats, String> {
         match self {
-            Self::Picture(view) => DocumentView::save_endings(&**view),
-            Self::Area(view) => view.save_endings(),
+            Self::Picture(view) => DocumentView::save_formats(&**view),
+            Self::Area(view) => view.save_formats(),
         }
     }
 

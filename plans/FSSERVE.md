@@ -46,8 +46,8 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
   partition it reads at boot.
 - **Node-handle protocol, mirroring the driver traits.** Requests are the
   operations of `FilesystemRead`, `FilesystemWrite`, `FilesystemSecurity`,
-  `FilesystemStats` and `FilesystemAttrs`: one definition of what a
-  filesystem does. A `NodeId` keeps the drivers' contract — a pinned one
+  `FilesystemStats`, `FilesystemAttrs` and `FilesystemLabel`: one definition
+  of what a filesystem does. A `NodeId` keeps the drivers' contract — a pinned one
   names its node until its last unpin, an unheld one lives as the trait says
   — because the VFS keeps ids across operations (file identities in `stat`
   and listings, advisory locks, listing cursors). `Stale` means what it means
@@ -107,7 +107,8 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
   born with), `Link`, `WriteAt`, `Truncate` and `Punch` (each naming its
   node), `Remove`, `Rename`, `Flush`, `Security`, `SetSecurity`,
   `RecordsOwnership`, `Stats`, `GetAttr`, `SetAttr`, `ListAttr`,
-  `RemoveAttr`, and `Release`. An allocating request carries its
+  `RemoveAttr`, `Release`, and the title's `Label` and `SetLabel`. An
+  allocating request carries its
   `AllocationClass`.
 - Replies carry a `DriverError` code or the result, plus two state bits: the
   server holds unpublished writes, and the volume is in its reserve.

@@ -97,6 +97,9 @@ pub enum Op {
     EraseInDisplay(EraseMode),
     /// Erase part of the current line (`EL`).
     EraseInLine(EraseMode),
+    /// Erase the saved lines — the scrollback — and none of the display
+    /// (`CSI 3 J`, xterm's extension of `ED`).
+    EraseSavedLines,
     /// Scroll the display up `n` lines (`SU`).
     ScrollUp(u16),
     /// Scroll the display down `n` lines (`SD`).

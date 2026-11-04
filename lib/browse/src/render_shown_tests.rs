@@ -109,6 +109,8 @@ fn places() -> Places {
             medium: Some(BlkMedium::of_transport(BlkTransport::Nvme)),
             facts: VolumeFacts {
                 filesystem: String::from("arxfs"),
+                title: String::new(),
+                class: tairix_abi::sysinfo::VolumeClass::Local,
                 free: None,
                 availability: MountAvailability::Available,
                 owner: None,

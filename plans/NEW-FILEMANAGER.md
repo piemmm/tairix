@@ -67,6 +67,7 @@ which the drift guard enforces.
 | FM24 | Disk images: activating one mounts it and opens its volume, *Mount Read-Only* and *Eject* in the context menu, *Eject* on the rail's own menu (`plans/DISK-IMAGES.md` DI5) | done |
 | FM25 | A slow or failing device holds up only its own work: every read, write and operation on its volume's lane, one worker to a lane, with a spare whenever every worker is busy | done |
 | FM26 | A disk image or archive the user opened is unmounted once no window shows it and nothing else uses it, as the settings choose (`plans/DISK-IMAGES.md` DI21) | done |
+| FM27 | The icon-bar slot's volume plates: *Eject* on every volume the user may eject — a removable device's at the seat, an image or share they attached — with an administrator asked through the desktop's prompt for a removable one the kernel refuses them, and *Title* on a titled image of theirs (`plans/DISK-IMAGES.md` DI23) | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
@@ -217,6 +218,31 @@ or a drag waits for the hold to end, and one landing while a window is still
 opening is taken by it. A name's shown form is display only: a rename edits it
 and restores the ending it hid, and the desktop and the trusted picker keep the
 exact names.
+
+**FM27 — the slot's volume plates.** A volume's row on the icon-bar slot's
+menu opens a plate holding *Eject* wherever the viewer may eject it
+(`VolumeFacts::ejector`: the owner of an image or share, the user at the seat
+for a removable device's), and *Title* on a titled image of the viewer's own,
+its field opening on the title with the caret at its end and opened by choosing
+the row (`AppMenuEntry::opened_by_choosing`). A row's id carries its verb and
+the place's index (`appbar::BarRow`), and each declaration is made under a
+fresh revision (`AppBar::revision`) that its menu's answers name back:
+`appbar::Declarations` keeps what the rows of the last few the session
+accepted stood for, so an answer acts on what its own menu showed — a volume by
+its identity, wherever the rail lists it now — and one naming a declaration no
+longer held, or a volume since gone, is refused saying why. The root plate's
+row cap counts its own rows alone, and a place whose row and plate the menu's
+text cannot hold is left out whole and counted, the closing rows always
+fitting. An eject goes the way the rail's does, by the one rule
+(`Ejector::admits`); one the kernel refuses a removable volume for want of the
+authority asks an administrator through the desktop's prompt, for the slot
+rather than a window (`SystemTask::Eject`), naming the volume by its durable
+root (`id::<volume-id>/`, `mount::volume_root`) so a device put in its place
+under the same catalog name is never the one ejected, and by that catalog name
+for the prompt to show. A commit retitles on the
+mount worker (`MountAct::Retitle`) once checked against the disk as it stands:
+still a titled image of the viewer's, the title changed, not empty, and no
+longer than a disk records.
 
 **FM-dialogs — the two popup surfaces.** Three defects, one of them shared
 with every other surface on the desktop.

@@ -123,6 +123,10 @@ pub const PASTE_START: u16 = 200;
 /// Extended-key parameter for bracketed-paste end (`CSI 201 ~`).
 pub const PASTE_END: u16 = 201;
 
+/// The `ED` parameter that erases the saved lines — the scrollback — and none
+/// of the display (`CSI 3 J`).
+pub const ERASE_SAVED_LINES: u16 = 3;
+
 /// Whether `byte` is a read-line-discipline **erase** (rub-out) control: the
 /// Backspace ([`BS`], `^H`) or Delete ([`DEL`], `^?`) a terminal sends to rub
 /// out the last character of the line being edited.

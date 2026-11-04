@@ -207,6 +207,34 @@ the format requires, and the driver declares that rule
 rename: `B.TXT` beside `b.txt` is a clash, and a rename to a case variant of an
 entry's own name re-spells the entry. No Unicode normalisation is applied.
 
+## Volume label
+
+`FilesystemLabel` reads the label as the volume probe does: the root
+directory's label entry, else the boot sector's `BS_VolLab`. A byte past
+ASCII is refused (`OutOfRange`), since FAT records no code page that would
+spell it. The probe reads the entry from the head of the root's first
+cluster, at most its first 4 KiB, where formatters write it, so a retitle
+keeps the entry within it: over the label entry there, or, where there is
+none, in its first deleted slot or at the end of its entries, refused as
+`NoSpace` when it holds no slot for one. Before the entry it writes
+`BS_VolLab` of the boot sector and of its backup, each where its extended boot
+signature declares the field. A label is what a short name spells —
+upper-case ASCII letters, digits, interior spaces and a short name's
+punctuation (`$%'-_@~!(){}^#&` and the backtick) — at most eleven of them. A
+lower-case letter is refused rather than folded, as are any other character
+and `NO NAME`, the placeholder formatters write for none (`OutOfRange`), and a
+twelfth character (`LengthOutOfRange`). The empty title deletes the label
+entry and writes the placeholder back. Every refusal comes before the first
+write; a retitle failing after it leaves the volume refusing writes
+(`ReadOnly`), damaged, until it is mounted again, as a volume served
+read-only refuses them from the start.
+
+The volume's identity is a digest of the boot sector's serial (`BS_VolID`),
+where its extended boot signature declares one, and of the geometry
+formatting fixes: the sector size, the sectors of a cluster, the reserved
+sectors, the FATs and the sectors of each, and the root's first cluster.
+Neither a write nor a retitle changes it.
+
 ## Served from user space
 
 On removable media the driver is served from user space ([Volumes served from user space](./served.md)): its `Run`

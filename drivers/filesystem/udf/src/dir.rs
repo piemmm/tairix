@@ -164,11 +164,16 @@ pub(crate) fn decode(identifier: &[u8]) -> Option<Name> {
     Some(name)
 }
 
+/// Whether OSTA Compressed Unicode's eight-bit form holds `ch`.
+pub(crate) fn is_narrow(ch: char) -> bool {
+    u32::from(ch) < 0x100
+}
+
 /// `name`, a UTF-8 name, as an OSTA Compressed Unicode identifier: eight
 /// bits a character when every character fits them, else UTF-16. `None` for
 /// a name longer than an identifier's 255 bytes.
 pub(crate) fn encode(name: &str) -> Option<Vec<u8>> {
-    let narrow = name.chars().all(|ch| u32::from(ch) < 0x100);
+    let narrow = name.chars().all(is_narrow);
     let mut out = Vec::new();
     if narrow {
         out.push(8);

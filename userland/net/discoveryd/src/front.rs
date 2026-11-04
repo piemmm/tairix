@@ -65,7 +65,7 @@ use tairix_sandbox::supervise::{SessionLauncher, SupervisedSession};
 use tairix_util::fallible;
 use tairix_util::secret::Wiped;
 
-use crate::events::{DECODER_STARTED, REQUEST_DENIED};
+use crate::events::{DECODER_STARTED, DOORBELLS_LOST, REQUEST_DENIED};
 use crate::grants::Grants;
 use crate::query::{plan, Needs, QUESTIONS_PER_REQUEST};
 use crate::questions::{Questions, Spend, Verdict};
@@ -229,8 +229,9 @@ pub trait Host {
     ///
     /// # Errors
     ///
-    /// [`Errno::WouldBlock`] when the port has no room, or the kernel's
-    /// refusal.
+    /// [`Errno::WouldBlock`] when the port has no room,
+    /// [`Errno::LimitExceeded`] when this service's queued-bytes budget is
+    /// spent, [`Errno::OutOfMemory`], or the kernel's other refusals.
     fn ring(&mut self, port: u64, doorbell: &[u8]) -> Result<(), Errno>;
 
     /// Be told when `peer` exits.
@@ -622,14 +623,22 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
             .flat_map(|link| link.fetches.iter())
             .filter_map(Fetch::deadline)
             .min();
-        [self.decoder.restart_deadline(), tick, overdue, fetch]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.decoder.restart_deadline(),
+            tick,
+            overdue,
+            fetch,
+            self.sessions.retry_at(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Do whatever `now` has reached: start and key a decoder that is due,
-    /// and give a live one the tick its deadline asks for.
+    /// give a live one the tick its deadline asks for, offer again the
+    /// doorbells the kernel had no memory for once their pause has run, and
+    /// record the doorbells given up on.
     ///
     /// # Errors
     ///
@@ -665,6 +674,11 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         if expired {
             self.sync(now);
         }
+        let Self { sessions, host, .. } = self;
+        sessions.retry_starved(now, &mut |port, session| {
+            host.ring(port, &encode_doorbell(session))
+        });
+        self.report_lost_doorbells();
         Ok(())
     }
 
@@ -800,10 +814,30 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         self.sessions.sync_rooms(watch, unwatch);
     }
 
-    /// Post every doorbell owed.
+    /// Post every doorbell owed for room: the room wake's work.
     pub fn retry_rings(&mut self) {
         let Self { sessions, host, .. } = self;
         sessions.retry_owed(&mut |port, session| host.ring(port, &encode_doorbell(session)));
+    }
+
+    /// Record how many doorbells client ports refused for good, once the
+    /// count has doubled since it was last recorded.
+    fn report_lost_doorbells(&mut self) {
+        let Some(total) = self.sessions.lost_to_report() else {
+            return;
+        };
+        tairix_log::log(
+            &self.sink,
+            &Event {
+                level: Level::Warn,
+                id: DOORBELLS_LOST,
+                message: "discoveryd: doorbells client ports refused for good were given up on",
+                fields: &[Field {
+                    key: "total",
+                    value: FieldValue::UnsignedInt(total),
+                }],
+            },
+        );
     }
 
     /// The decoder's write end has room. The held datagram goes first — it

@@ -41,12 +41,15 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
+use tairix_abi::fs::Filetype;
 use tairix_abi::fs::OpenFlags;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::sound_cue::SoundEvent;
-use tairix_abi::window_ipc::{AlertButtonRole, PickPurpose, SaveEndings, WINDOW_TITLE_MAX};
+use tairix_abi::window_ipc::{AlertButtonRole, PickPurpose, SaveFormats, WINDOW_TITLE_MAX};
 use tairix_abi::Errno;
+use tairix_browse::media::media_for_name;
 use tairix_browse::render::{
     entry_index_at, header_sort_at, listing_damage, listing_floor_height, manager_art, render_into,
     reveal_selection, scroll_pointer, scroll_wheel, shown_listing, toolbar_command_at,
@@ -54,14 +57,14 @@ use tairix_browse::render::{
 use tairix_browse::ManagerChrome;
 use tairix_browse::ToolbarBand;
 use tairix_browse::{
-    apply_command, vfs, BrowseError, Browser, DirectorySource, Ending, Entry, EntryKind, ViewMode,
+    apply_command, vfs, BrowseError, Browser, DirectorySource, Entry, EntryKind, ViewMode,
     WatchUpdate, WIN_HEIGHT, WIN_WIDTH,
 };
 use tairix_controls::{
     damage, paint_focus_ring, Button, ButtonContent, ChainModel, ControlRole, TextAction, TextField,
 };
 use tairix_font::BitmapFont;
-use tairix_geometry::Scale;
+use tairix_geometry::{to_i32, Scale};
 use tairix_icon::{IconArtwork, IconRequest, Landed};
 use tairix_theme::{TextRole, Theme};
 use tairix_util::utf8::shown;
@@ -71,10 +74,10 @@ use tairix_wm::{
 };
 
 use crate::choice::{question, Choice, ChoicePrompt};
-use crate::drag::{SaveDrop, SavedDocument};
+use crate::drag::{PictureGrab, SaveDrop, SavedDocument};
 use crate::menu::ChainOutcome;
 use crate::savepanel::{
-    places, where_menu, PanelFocus, PanelHit, PanelLayout, Place, Said, SavePanel,
+    format_media, places, where_menu, PanelFocus, PanelHit, PanelLayout, Place, Said, SavePanel,
 };
 use crate::shell::DesktopShell;
 
@@ -228,10 +231,13 @@ pub enum PickStep {
         /// the file is opened for.
         for_window: u64,
         /// The chosen file's absolute path — the session's to open, never
-        /// disclosed to the requesting app.
+        /// disclosed to the requesting app. A save's name may yet be
+        /// finished as `typing` says.
         path: String,
         /// How to open it.
         access: PickAccess,
+        /// How a save's file is typed where it is made.
+        typing: Typing,
     },
     /// The user dismissed the picker without choosing; it is closed.
     Cancelled {
@@ -282,7 +288,8 @@ pub enum PickEnd {
 pub trait PickerSlot {
     /// A validated `PickFile` for `requested` — the asking window's channel
     /// id and, where the session has it, its compositor window — was accepted
-    /// by the window engine; open the picker UI for `purpose`.
+    /// by the window engine; open the picker UI for `purpose`, answering the
+    /// window it shows, which holds the asking one until the pick concludes.
     ///
     /// # Errors
     ///
@@ -297,7 +304,7 @@ pub trait PickerSlot {
         purpose: &PickPurpose,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-    ) -> Result<(), Errno>;
+    ) -> Result<Option<WindowId>, Errno>;
 
     /// The window-channel window `window_id` is gone (closed by its owner
     /// or torn down after the owner exited): if its pick is showing, take
@@ -333,6 +340,52 @@ struct Waiting {
     access: PickAccess,
     /// The folder a save was dropped in, or `None` for the one shown.
     into: Option<Vec<String>>,
+    /// How a save's file is typed where it is made.
+    typing: Typing,
+}
+
+/// How a save's file is typed where it is made, which only the folder it is
+/// made in can decide.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Typing {
+    /// The RISC OS file type to record it as, on a volume recording one.
+    pub filetype: Option<Filetype>,
+    /// Its name carries no ending of its type, so on a volume recording no
+    /// file type it takes the type's own `,xxx`.
+    pub bare: bool,
+}
+
+impl Typing {
+    /// The name a file asked for as `name` is made under, in a folder whose
+    /// volume `records` file types or does not, or `None` where that name is
+    /// too long for a file to have.
+    #[must_use]
+    pub fn leaf(self, name: &str, records: bool) -> Option<String> {
+        let suffixed = match self.filetype {
+            Some(filetype) if self.bare && !records => {
+                format!("{name},{:03x}", filetype.get())
+            }
+            _ => String::from(name),
+        };
+        tairix_path::validate_file_name(&suffixed).ok()?;
+        Some(suffixed)
+    }
+
+    /// The same typing for the file a save found already named so: the name
+    /// is exact now, whatever folder it is in.
+    #[must_use]
+    pub const fn exact(self) -> Self {
+        Self {
+            filetype: self.filetype,
+            bare: false,
+        }
+    }
+}
+
+/// A name a save holds and how its file is typed.
+struct Held {
+    name: String,
+    typing: Typing,
 }
 
 /// A file the user is being asked whether to replace: the name the question
@@ -342,6 +395,7 @@ struct Replacing {
     name: String,
     path: String,
     into: Option<Vec<String>>,
+    typing: Typing,
     question: ChoicePrompt,
 }
 
@@ -350,7 +404,7 @@ struct Replacing {
 struct AwaitedFolder {
     window_id: u64,
     serial: u32,
-    name: String,
+    held: Held,
 }
 
 /// A save pick's own controls, and the question it may be asking.
@@ -364,39 +418,75 @@ struct SaveBand {
 }
 
 impl SaveBand {
-    fn new(suggested: &str, endings: SaveEndings) -> Self {
+    fn new(suggested: &str, formats: &SaveFormats) -> Self {
         Self {
-            panel: SavePanel::new(suggested, endings),
+            panel: SavePanel::new(suggested, formats),
             replacing: None,
             listing_height: 0,
         }
     }
 
-    /// `name` as the requester can write it: as typed where it ends as the
-    /// requester asks, given the first ending where it has none, and refused,
-    /// with the endings it may take, where it has another.
-    fn held(&self, name: String) -> Result<String, String> {
-        let endings = self.panel.endings();
-        if endings.accepts(&name) {
-            return Ok(name);
+    /// `name` as the requester can write it in the chosen format, and how
+    /// its file is typed: as typed where an ending names the format, given
+    /// the format's extension where it has none and the format is named by
+    /// one, left for the folder to type where the format is named by its file
+    /// type alone, and refused, saying how to name it, where an ending names
+    /// another type.
+    fn held(&self, name: String) -> Result<Held, String> {
+        let formats = self.panel.formats();
+        let Some(format) = self.panel.format().and_then(|index| formats.get(index)) else {
+            return Ok(Held {
+                name,
+                typing: Typing::default(),
+            });
+        };
+        let filetype = format.filetype();
+        let named = media_for_name(&name);
+        if format.types(&name) || named.is_some_and(|media| format_media(format) == Some(media)) {
+            return Ok(Held {
+                name,
+                typing: Typing {
+                    filetype,
+                    bare: false,
+                },
+            });
         }
-        let first = endings.iter().next();
-        match first {
-            Some(first) if Ending::of(&name).is_none() => {
-                let mut named = name;
-                named.push_str(first);
-                tairix_path::validate_file_name(&named).map_err(|err| err.to_string())?;
-                Ok(named)
+        if named.is_some() {
+            let mut refusal = String::from("Name it to end in");
+            let mut extensions = format.extensions().peekable();
+            if extensions.peek().is_none() {
+                refusal.push_str(" no ending");
             }
-            _ => {
-                let mut refusal = String::from("Name it to end in one of:");
-                for ending in endings.iter() {
-                    refusal.push(' ');
-                    refusal.push_str(ending);
-                }
-                Err(refusal)
+            for extension in extensions {
+                refusal.push(' ');
+                refusal.push_str(extension);
             }
+            if let Some(filetype) = filetype {
+                let _ = write!(refusal, " or ,{:03x}", filetype.get());
+            }
+            return Err(refusal);
         }
+        let Some(extension) = format.extensions().next() else {
+            let typing = Typing {
+                filetype,
+                bare: true,
+            };
+            // Checked as long as it may yet be made.
+            typing
+                .leaf(&name, false)
+                .ok_or_else(|| String::from("The name is too long"))?;
+            return Ok(Held { name, typing });
+        };
+        let mut named = name;
+        named.push_str(extension);
+        tairix_path::validate_file_name(&named).map_err(|err| err.to_string())?;
+        Ok(Held {
+            name: named,
+            typing: Typing {
+                filetype,
+                bare: false,
+            },
+        })
     }
 
     /// Ask, in an alert holding the picker `picker`, whether to replace the
@@ -404,7 +494,7 @@ impl SaveBand {
     /// save in the panel instead, so nothing is replaced unasked.
     fn ask_to_replace(
         &mut self,
-        (name, path, into): (String, String, Option<Vec<String>>),
+        ((name, path, into), typing): ((String, String, Option<Vec<String>>), Typing),
         picker: WindowId,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -418,6 +508,7 @@ impl SaveBand {
                     name,
                     path,
                     into,
+                    typing: typing.exact(),
                     question,
                 });
             }
@@ -484,9 +575,10 @@ struct ActivePick<S: DirectorySource> {
     reread_owed: bool,
     /// The menu the save panel has open, and what its rows stand for.
     menu: Option<PanelMenu>,
-    /// Where a press on the save panel's icon landed, while it is held: a
-    /// drag carried from it is the document saved where it is dropped.
-    icon_press: Option<Point>,
+    /// Where a press on the save panel's icon landed, while it is held, and
+    /// where on the picture it holds it: a drag carried from it is the
+    /// document saved where it is dropped.
+    icon_press: Option<(Point, PictureGrab)>,
     /// The save dropped on a window, until its application names the folder.
     awaiting: Option<AwaitedFolder>,
     /// The folder asked to be made, and the attempt naming it, until the
@@ -606,6 +698,13 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         self.active.as_ref().map(|active| active.wm)
     }
 
+    /// Whether the picker has the keyboard — `focused` is its window or its
+    /// replace question — and so holds the seat as the lock does.
+    #[must_use]
+    pub fn holds_keyboard(&self, focused: Option<WindowId>) -> bool {
+        focused.is_some() && (focused == self.wm_id() || focused == self.question_wm())
+    }
+
     /// The question whether to replace a file, while it is up: an alert
     /// holding the picker, which takes no input of its own until it is
     /// answered.
@@ -678,14 +777,18 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             name,
             path,
             into,
+            typing,
             question,
         } = self.active.as_mut()?.save.as_mut()?.replacing.take()?;
         // The keyboard goes back to the picker with it.
         question.close(shell, compositor);
         match choice {
-            Choice::Accepted => {
-                self.request_at((name, path, into), PickAccess::Replace, shell, compositor)
-            }
+            Choice::Accepted => self.request_at(
+                (name, path, into),
+                (PickAccess::Replace, typing),
+                shell,
+                compositor,
+            ),
             Choice::Declined => None,
         }
     }
@@ -953,7 +1056,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     /// the drag carries and the window the save is for.
     pub fn icon_drag(&mut self, local: Point, scale: Scale) -> Option<(SavedDocument, u64)> {
         let active = self.active.as_mut()?;
-        let from = active.icon_press?;
+        let (from, grab) = active.icon_press?;
         let Requester::Window(for_window) = active.requester else {
             return None;
         };
@@ -965,6 +1068,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let document = SavedDocument {
             name: panel.name.text().to_string(),
             icon: panel.icon(),
+            grab,
         };
         Some((document, for_window))
     }
@@ -988,10 +1092,10 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             self.refuse_save(String::from(UNANSWERED), shell, compositor);
             return None;
         }
-        let name = self.dropped_name(shell, compositor)?;
+        let held = self.dropped_name(shell, compositor)?;
         match dropped {
             SaveDrop::Nothing | SaveDrop::Unanswered => None,
-            SaveDrop::Folder(folder) => self.save_into(name, &folder, shell, compositor),
+            SaveDrop::Folder(folder) => self.save_into(held, &folder, shell, compositor),
             SaveDrop::Offer { window_id, serial } => {
                 let active = self.active.as_mut()?;
                 let band = active.save.as_mut()?;
@@ -999,7 +1103,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                 active.awaiting = Some(AwaitedFolder {
                     window_id,
                     serial,
-                    name,
+                    held,
                 });
                 redraw_band(active, shell, compositor);
                 None
@@ -1038,7 +1142,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         &mut self,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-    ) -> Option<String> {
+    ) -> Option<Held> {
         let active = self.active.as_mut()?;
         let band = active.save.as_mut()?;
         let typed = band.panel.name.text().to_string();
@@ -1046,7 +1150,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             .map_err(|err| err.to_string())
             .and_then(|()| band.held(typed));
         match held {
-            Ok(name) => Some(name),
+            Ok(held) => Some(held),
             Err(refusal) => {
                 band.edit(Said::Refusal(refusal), shell, compositor);
                 redraw_band(active, shell, compositor);
@@ -1055,11 +1159,11 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         }
     }
 
-    /// Save under `name` in the folder at the absolute path `folder`, a name
+    /// Save as `held` in the folder at the absolute path `folder`, a name
     /// already there asked about before it is replaced.
     fn save_into(
         &mut self,
-        name: String,
+        Held { name, typing }: Held,
         folder: &str,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -1081,7 +1185,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         };
         self.request_at(
             (name, path, Some(into)),
-            PickAccess::Create,
+            (PickAccess::Create, typing),
             shell,
             compositor,
         )
@@ -1399,7 +1503,8 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     }
 
     /// The embedder's answer to the open `serial` names: whether the file
-    /// could be opened.
+    /// could be opened, and the path a save made it at, its name finished as
+    /// its typing asked — `None` for the path asked for.
     ///
     /// An opened file ends the pick. A refused open ends an open pick too, but
     /// a save stays up to say why — or, for a name that was taken after the
@@ -1409,19 +1514,26 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     pub fn opened(
         &mut self,
         serial: u64,
-        result: Result<(), Errno>,
+        (result, made): (Result<(), Errno>, Option<String>),
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<PickEnd> {
         let active = self.active.as_mut()?;
         let waiting = active.waiting.take_if(|waiting| waiting.serial == serial)?;
         let Waiting {
-            name,
-            path,
+            mut name,
+            mut path,
             access,
             into,
+            typing,
             ..
         } = waiting;
+        if let Some(made) = made {
+            if let Some((_, leaf)) = made.rsplit_once('/') {
+                name = String::from(leaf);
+            }
+            path = made;
+        }
         if let (Some(band), Err(err)) = (active.folder.as_mut(), result) {
             band.message = Some(format!("Not opened: {err}"));
             redraw_band(active, shell, compositor);
@@ -1451,7 +1563,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                     .folder()
                     .and_then(|folder| shown_path(folder, &name));
                 if into.is_some() || shown.as_deref() == Some(path.as_str()) {
-                    band.ask_to_replace((name, path, into), active.wm, shell, compositor);
+                    band.ask_to_replace(((name, path, into), typing), active.wm, shell, compositor);
                 } else {
                     band.edit(Said::Refusal(already_exists(&name)), shell, compositor);
                 }
@@ -1760,7 +1872,15 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             // carry, so the icon starts no drag.
             PanelHit::Icon => {
                 if !band.panel.naming() {
-                    active.icon_press = Some(local);
+                    let icon = layout.icon;
+                    let grab = PictureGrab {
+                        offset: (
+                            local.x - icon.left() - to_i32(icon.width / 2),
+                            local.y - icon.top() - to_i32(icon.height / 2),
+                        ),
+                        side: icon.width,
+                    };
+                    active.icon_press = Some((local, grab));
                 }
                 None
             }
@@ -1970,17 +2090,25 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let held = tairix_path::validate_file_name(&typed)
             .map_err(|err| err.to_string())
             .and_then(|()| match folder {
-                Some(_) => Ok(typed),
+                Some(_) => Ok(Held {
+                    name: typed,
+                    typing: Typing::default(),
+                }),
                 None => band.held(typed),
             });
-        let name = match held {
-            Ok(name) => name,
+        let Held { name, typing } = match held {
+            Ok(held) => held,
             Err(refusal) => {
                 band.edit(Said::Refusal(refusal), shell, compositor);
                 redraw_band(active, shell, compositor);
                 return None;
             }
         };
+        if typing.bare && folder.is_none() {
+            // Its name is the folder's to finish, so whether it is taken is
+            // known once the file is asked for: an exclusive create asks.
+            return self.request(name, (PickAccess::Create, typing), shell, compositor);
+        }
         let taken = folder.or_else(|| {
             active
                 .browser
@@ -1991,13 +2119,13 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let Some(index) = taken else {
             // A name the listing does not show is created exclusively, so one
             // that appeared since is asked about rather than overwritten.
-            return self.request(name, PickAccess::Create, shell, compositor);
+            return self.request(name, (PickAccess::Create, typing), shell, compositor);
         };
         let kind = active.browser.entries()[index].kind();
         match kind {
             EntryKind::File => {
                 let path = shown_path(active.browser.folder()?, &name)?;
-                band.ask_to_replace((name, path, None), active.wm, shell, compositor);
+                band.ask_to_replace(((name, path, None), typing), active.wm, shell, compositor);
                 redraw_band(active, shell, compositor);
                 None
             }
@@ -2038,7 +2166,12 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let name = components
             .last()
             .map_or_else(|| String::from("/"), String::clone);
-        self.request_at((name, path, None), PickAccess::Folder, shell, compositor)
+        self.request_at(
+            (name, path, None),
+            (PickAccess::Folder, Typing::default()),
+            shell,
+            compositor,
+        )
     }
 
     /// Ask the embedder to open the file `name` names in the directory the
@@ -2046,14 +2179,14 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     fn request(
         &mut self,
         name: String,
-        access: PickAccess,
+        how: (PickAccess, Typing),
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<PickStep> {
         // A name the shared spelling refuses is not chosen rather than
         // guessed at.
         let path = shown_path(self.active.as_ref()?.browser.folder()?, &name)?;
-        self.request_at((name, path, None), access, shell, compositor)
+        self.request_at((name, path, None), how, shell, compositor)
     }
 
     /// Ask the embedder to open the file `name` at `path`, in the folder
@@ -2061,7 +2194,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     fn request_at(
         &mut self,
         (name, path, into): (String, String, Option<Vec<String>>),
-        access: PickAccess,
+        (access, typing): (PickAccess, Typing),
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<PickStep> {
@@ -2091,12 +2224,14 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             path: path.clone(),
             access,
             into,
+            typing,
         });
         Some(PickStep::Open {
             serial,
             for_window,
             path,
             access,
+            typing,
         })
     }
 
@@ -2152,7 +2287,12 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                 }
                 None
             }
-            NavOutcome::Chosen(name) => self.request(name, PickAccess::Read, shell, compositor),
+            NavOutcome::Chosen(name) => self.request(
+                name,
+                (PickAccess::Read, Typing::default()),
+                shell,
+                compositor,
+            ),
         }
     }
 
@@ -2243,8 +2383,8 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         };
         let mut save = match purpose {
             PickPurpose::Open | PickPurpose::Folder => None,
-            PickPurpose::Save { suggested, endings } => {
-                Some(SaveBand::new(suggested.as_str(), *endings))
+            PickPurpose::Save { suggested, formats } => {
+                Some(SaveBand::new(suggested.as_str(), formats))
             }
         };
         if let Some(band) = save.as_mut() {
@@ -2340,14 +2480,15 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
         purpose: &PickPurpose,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-    ) -> Result<(), Errno> {
+    ) -> Result<Option<WindowId>, Errno> {
         self.begin_over(
             Requester::Window(for_window),
             over,
             purpose,
             shell,
             compositor,
-        )
+        )?;
+        Ok(self.wm_id())
     }
 
     fn abort_for(&mut self, window_id: u64, shell: &mut DesktopShell, compositor: &mut Compositor) {
@@ -2386,7 +2527,7 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
             .ok_or(Errno::NotFound)?;
         match folder {
             Some(folder) => {
-                self.owed = self.save_into(awaited.name, &folder, shell, compositor);
+                self.owed = self.save_into(awaited.held, &folder, shell, compositor);
             }
             None => self.refuse_save(String::from(NOT_GIVEN), shell, compositor),
         }

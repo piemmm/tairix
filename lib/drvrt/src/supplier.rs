@@ -7,6 +7,7 @@
 //! supplier asks it the one way.
 
 use tairix_abi::hwtree::HwResource;
+use tairix_abi::waitset::WaitSetOp;
 use tairix_abi::{DriverError, Errno, ProcId};
 
 /// What a link supplier asks the kernel about the call it is serving.
@@ -97,6 +98,21 @@ pub trait Supplier {
     fn expired(&mut self) -> Result<(), DriverError> {
         Ok(())
     }
+
+    /// Keep a room member armed, through `member`, on exactly the message
+    /// ports the supplier holds a message for that had no room — `member`
+    /// adds or deletes the one for a port, answering whether it took — and
+    /// answer whether it holds one that waits on a pause instead: one the
+    /// kernel had no memory for, or whose port's room could not be watched.
+    /// The loop offers that again through [`Supplier::room`] once the pause
+    /// has run. Called before every wait.
+    fn rooms(&mut self, _member: &mut dyn FnMut(WaitSetOp, u64) -> bool) -> bool {
+        false
+    }
+
+    /// Room came in a port [`Supplier::rooms`] armed, or its pause ran: offer
+    /// again what is held.
+    fn room(&mut self) {}
 }
 
 /// The kernel, as the supplier serving one endpoint sees it.

@@ -523,7 +523,9 @@ volume-policy service.
 #### 2.4.2 D3b — runtime volume attach and multi-root publication. **Done.**
 
 - **The ABI**: `volume_attach` (78) / `volume_detach` (79), both
-  `CAP_FS_MOUNT`-gated and audited, taking the fixed-frame
+  `CAP_FS_MOUNT`-gated and audited — a removable device's volume is also
+  the user at the seat's to detach, plainly, decided under the detach's
+  claim (`drives.md`) — taking the fixed-frame
   `lib/abi/src/volume.rs` requests (`VolumeAttachRequest`: endpoint +
   window + probed partition extent + fstype + validated catalog name;
   `VolumeDetachRequest`: the 16-byte volume identity). The attach handler
@@ -563,7 +565,8 @@ volume-policy service.
   orders fs-flush → device-flush → unmount → unregister → unpublish and
   fails closed (volume stays attached) on a flush error; a vanished
   endpoint (device already gone) is not a refusal. Audit: 4172/4173
-  (`fs.hotplug.root_added` allow/deny), 4174/4175 (`root_removed`), 4180
+  (`fs.hotplug.root_added` allow/deny), 4174/4175 (`root_removed`), 4213 (a
+  removable device's volume ejected by the user at the seat), 4180
   (attached or recovered read-only, with the driver's reason: an unsupported
   feature, recorded errors, a crash a checker has not seen), 4181 (a catalog name
   already taken, which the volume manager answers with its next
@@ -572,7 +575,8 @@ volume-policy service.
 - **Reality-driven decisions.** (1) ext4/FAT32 lacked the
   `FilesystemStats` surface and any volume identity: both gained honest
   impls (ext4: live superblock counts + `s_uuid`; FAT32: an open-time
-  FAT scan maintained by the allocator, serial‖label‖tag identity —
+  FAT scan maintained by the allocator, an identity digested from the
+  serial and the geometry formatting fixes —
   content-derived, as drives.md §8 sanctions for formats without a
   UUID), and FAT32 gained the uniform restrictive `FilesystemSecurity`
   posture (stores refused — silently-lossy records are forbidden). The
@@ -787,12 +791,15 @@ first, then the force-unmount exit, then the verified re-insert replay.
   refused) and a clean unplug (root retracted, mount gone, nothing left
   to detach). Live path: Pi 4 metal acceptance (QEMU models no Pi USB —
   the D2/D3 precedent).
-- **Deliberate staging.** The user-facing session notification (§2.24)
-  is not emitted yet: no system notification service exists to carry it
-  (the taskbar's notification area is an in-process GUI model, not an
-  IPC surface), so the syslog/audit record is the D4a channel and the
-  notification emit lands with the session-notification surface when one
-  exists.
+- **What a user is told.** Each surprise removal is recorded, before the
+  mount table moves, in a bounded record of the newest
+  `VOLUME_REMOVALS_KEPT` (`RuntimeVolumeService::removals`, numbered from 1
+  since boot, with what became of the volume's unwritten writes) and listed
+  by `SysinfoQueryId::VOLUME_REMOVALS`; a detach is never one. The file
+  manager states each in one alert (`plans/FILES-INTERACTION.md` FI40). A
+  stand-in is registered already listed unavailable
+  (`register_stand_in`'s availability), so no listing shows a volume whose
+  every operation fails as one that serves.
 
 #### 2.5.2 D4b — force-unmount. **Done.**
 

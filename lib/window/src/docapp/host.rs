@@ -50,7 +50,7 @@ use super::closing::{
     next_quit_step, reveal_refusal, save_changes_alert, CloseAnswer, QuitStanding, QuitStep,
 };
 use super::members::{members_of, route, Route};
-use super::title::{opening, Title};
+use super::title::{opening, Title, Withheld};
 use super::{
     AppRequest, AppView, DocumentView, Outcome, Relayout, Request, ToolGone, ToolMove, ViewOutcome,
 };
@@ -405,15 +405,21 @@ pub struct DocWindow<A: DocumentApp> {
     chrome: Chrome,
     file: DocumentFile<Handle, SnapshotOf<A>>,
     reading: Reading,
+    /// Kept off the screen while the document it was opened for is read in,
+    /// so a read that lands soon shows that document's own window first.
+    withheld: Withheld,
+    /// The least size the session was last told it may take.
+    least: (u32, u32),
     /// Counts the documents it has shown, so an answer to the one before is
     /// told apart.
     epoch: u64,
     /// Its own work on the queue not yet taken in: the room it keeps on
     /// closing.
     own_held: usize,
-    /// The menu open over it, so an outcome is matched to the gesture that
-    /// asked for it.
-    menu: Option<u64>,
+    /// The menu open over it or one of its tool windows: the open, so an
+    /// outcome is matched to the gesture that asked for it, and the window it
+    /// opened over, which holds the text an entry row commits.
+    menu: Option<(u64, u64)>,
     /// The tool windows and the dialog it has open, as its view last asked.
     owned: Vec<OwnedPane>,
     /// Whether its view was last told it has the keyboard: it has while the
@@ -592,6 +598,8 @@ pub struct AppWindow<A: DocumentApp> {
     /// What it reported changed since the window was last painted.
     pub damage: Region,
     chrome: Chrome,
+    /// The least size the session was last told it may take.
+    least: (u32, u32),
 }
 
 impl<A: DocumentApp> AppWindow<A> {
@@ -609,7 +617,14 @@ impl<A: DocumentApp> AppWindow<A> {
 
     /// Lay the window out again for its size and bring the view into line
     /// with it, owing what the view reported, and the whole when `whole`.
-    fn lay_out(&mut self, theme: &Theme, scale: Scale, faces: FacesOf<A>, whole: bool) {
+    fn lay_out(
+        &mut self,
+        client: &mut Client,
+        (theme, scale, faces): (&Theme, Scale, FacesOf<A>),
+        whole: bool,
+    ) {
+        let least = self.view.min_size(theme, scale, faces);
+        restate_least::<A>(client, &self.chrome.pane, &mut self.least, least);
         let mode = *self.chrome.pane.mode();
         self.layout = self
             .view
@@ -899,8 +914,8 @@ impl<A: DocumentApp> DocWindow<A> {
 
     /// Lay the window out again for its size, bring the view into line with
     /// it, and owe it whole.
-    fn relayout(&mut self, theme: &Theme, scale: Scale, faces: FacesOf<A>) {
-        self.lay_out(theme, scale, faces);
+    fn relayout(&mut self, client: &mut Client, theme: &Theme, scale: Scale, faces: FacesOf<A>) {
+        self.lay_out(client, theme, scale, faces);
         self.owe(Repaint::Whole);
         for pane in &mut self.owned {
             pane.chrome.owe(Repaint::Whole);
@@ -909,7 +924,9 @@ impl<A: DocumentApp> DocWindow<A> {
 
     /// Lay the window out again for its size and bring the view into line
     /// with it, owing only what the view reported moved.
-    fn lay_out(&mut self, theme: &Theme, scale: Scale, faces: FacesOf<A>) {
+    fn lay_out(&mut self, client: &mut Client, theme: &Theme, scale: Scale, faces: FacesOf<A>) {
+        let least = self.view.min_size(theme, scale, faces);
+        restate_least::<A>(client, &self.chrome.pane, &mut self.least, least);
         let mode = *self.chrome.pane.mode();
         self.layout = self
             .view
@@ -1333,6 +1350,15 @@ impl<A: DocumentApp> Host<A> {
         window.view = view;
         window.file.opened(handle);
         window.reading = Reading::Done;
+        window.withheld.end();
+        // The least first, which the size asked for may be below.
+        let least = window.view.min_size(theme, scale, self.faces);
+        restate_least::<A>(
+            &mut self.client,
+            &window.chrome.pane,
+            &mut window.least,
+            least,
+        );
         if let Some(mode) = fit {
             let _ =
                 window
@@ -1340,7 +1366,7 @@ impl<A: DocumentApp> Host<A> {
                     .pane
                     .resize_with(&mut self.client, &mode, &mut window.chrome.surface);
         }
-        window.relayout(theme, scale, self.faces);
+        window.relayout(&mut self.client, theme, scale, self.faces);
     }
 
     /// The document `name` could not be read into window `index`, which an
@@ -1370,7 +1396,7 @@ impl<A: DocumentApp> Host<A> {
         }
         window.file.opened(None);
         window.reading = Reading::Done;
-        window.relayout(theme, scale, self.faces);
+        window.relayout(&mut self.client, theme, scale, self.faces);
     }
 
     /// Paint what the engine reported for window `index`, and carry out what
@@ -1384,8 +1410,8 @@ impl<A: DocumentApp> Host<A> {
         window.owe_pointer_checks();
         match outcome.relayout {
             Relayout::None => {}
-            Relayout::Reported => window.lay_out(theme, scale, self.faces),
-            Relayout::Whole => window.relayout(theme, scale, self.faces),
+            Relayout::Reported => window.lay_out(&mut self.client, theme, scale, self.faces),
+            Relayout::Whole => window.relayout(&mut self.client, theme, scale, self.faces),
         }
         let id = window.id();
         A::driven(self, index);
@@ -1447,6 +1473,12 @@ impl<A: DocumentApp> Host<A> {
             chrome: Chrome::new(pane, surface, title),
             file: DocumentFile::new(),
             reading,
+            withheld: if reading == Reading::Alone {
+                Withheld::since(tairix_rt::clock_get())
+            } else {
+                Withheld::default()
+            },
+            least,
             epoch: 0,
             own_held: 0,
             menu: None,
@@ -1577,6 +1609,7 @@ impl<A: DocumentApp> Host<A> {
             layout,
             damage: A::damage_sink(),
             chrome: Chrome::new(pane, surface, title),
+            least,
         };
         window.view.settle(&window.layout, &mut window.damage);
         if self.app_windows.try_reserve(1).is_err() {
@@ -1623,8 +1656,10 @@ impl<A: DocumentApp> Host<A> {
         window.chrome.pointing.owed = true;
         match outcome.relayout {
             Relayout::None => {}
-            Relayout::Reported => window.lay_out(theme, scale, self.faces, false),
-            Relayout::Whole => window.lay_out(theme, scale, self.faces, true),
+            Relayout::Reported => {
+                window.lay_out(&mut self.client, (theme, scale, self.faces), false);
+            }
+            Relayout::Whole => window.lay_out(&mut self.client, (theme, scale, self.faces), true),
         }
         match outcome.request {
             None => {}
@@ -1705,7 +1740,7 @@ impl<A: DocumentApp> Host<A> {
                 let window = &mut self.windows[index];
                 window.view = view;
                 window.reading = Reading::Over;
-                window.relayout(theme, scale, self.faces);
+                window.relayout(&mut self.client, theme, scale, self.faces);
                 index
             }
             None => match self.open_window(view, Reading::Alone) {
@@ -1968,12 +2003,12 @@ impl<A: DocumentApp> Host<A> {
 
     /// Ask the picker where to save window `index`, offering its name, or
     /// for a new document or one whose name cannot be written, a name in the
-    /// form it would be written — held to the endings it can be written
-    /// under, or saying why it can be written under none.
+    /// form it would be written — in the formats it can be written in, or
+    /// saying why it can be written in none.
     fn ask_where(&mut self, index: usize, then_close: bool) {
         let window = &self.windows[index];
-        let endings = match window.view.save_endings() {
-            Ok(endings) => endings,
+        let formats = match window.view.save_formats() {
+            Ok(formats) => formats,
             Err(why) => {
                 self.quitting = false;
                 let headline = refusal_headline(window.view.name(), "saved");
@@ -1983,9 +2018,9 @@ impl<A: DocumentApp> Host<A> {
         };
         let view = &window.view;
         let offered = if view.access() == Access::Untitled {
-            format!("{UNTITLED}.{}", view.offered_extension())
+            offered_name(UNTITLED, view.offered_extension())
         } else if view.refuse_save(view.name()).is_some() {
-            format!("{}.{}", stem(view.name()), view.offered_extension())
+            offered_name(stem(view.name()), view.offered_extension())
         } else {
             String::from(view.name())
         };
@@ -1995,7 +2030,7 @@ impl<A: DocumentApp> Host<A> {
         };
         self.ask_pick(
             index,
-            &PickPurpose::Save { suggested, endings },
+            &PickPurpose::Save { suggested, formats },
             PickFor::SaveAs { then_close },
         );
     }
@@ -2061,19 +2096,25 @@ impl<A: DocumentApp> Host<A> {
         }
     }
 
-    /// Ask the session to open window `index`'s `kind` menu at `anchor`.
+    /// Ask the session to open window `index`'s `kind` menu at `anchor` in its
+    /// view's drawing: over the tool window showing that part of it, if one
+    /// does, else over the window.
     fn open_menu(&mut self, index: usize, kind: MenuKindOf<A>, anchor: Rect) {
         let window = &mut self.windows[index];
+        let tools = window
+            .owned
+            .iter()
+            .filter(|pane| pane.tool().is_some())
+            .map(|pane| (pane.chrome.id(), pane.shown()));
+        let (tool, anchor) = super::menu_over(anchor, tools);
+        let over = tool.unwrap_or_else(|| window.id());
         let Ok(region) =
             WindowRegion::new(anchor.left(), anchor.top(), anchor.width, anchor.height)
         else {
             return;
         };
-        match self
-            .client
-            .open_menu(window.id(), region, &window.view.menu(kind))
-        {
-            Ok(open) => window.menu = Some(open),
+        match self.client.open_menu(over, region, &window.view.menu(kind)) {
+            Ok(open) => window.menu = Some((open, over)),
             Err(err) => window.state(format!("The desktop composes no menu ({err})")),
         }
     }
@@ -2082,9 +2123,9 @@ impl<A: DocumentApp> Host<A> {
     /// another gesture is one already settled, and is not acted on.
     fn menu_closed(&mut self, index: usize, open_id: u64, outcome: MenuOutcome) {
         let window = &mut self.windows[index];
-        if window.menu != Some(open_id) {
+        let Some((_, over)) = window.menu.filter(|&(open, _)| open == open_id) else {
             return;
-        }
+        };
         window.menu = None;
         if window.loading() {
             return;
@@ -2093,7 +2134,7 @@ impl<A: DocumentApp> Host<A> {
             MenuOutcome::Chosen(item) => {
                 window.view.chosen(item, &window.layout, &mut window.damage)
             }
-            MenuOutcome::Entered(item) => match self.client.take_menu_text(window.id(), open_id) {
+            MenuOutcome::Entered(item) => match self.client.take_menu_text(over, open_id) {
                 Ok(Some(text)) => {
                     window
                         .view
@@ -2186,11 +2227,11 @@ impl<A: DocumentApp> Host<A> {
                 self.new_window();
                 return;
             }
-            WindowEvent::AppBarMenu { item } if is_quit(*item) => {
+            WindowEvent::AppBarMenu { item, .. } if is_quit(*item) => {
                 self.quit();
                 return;
             }
-            WindowEvent::AppBarMenu { item } => {
+            WindowEvent::AppBarMenu { item, .. } => {
                 match item.get() {
                     NEW_WINDOW_ROW => self.new_window(),
                     row => {
@@ -2247,6 +2288,17 @@ impl<A: DocumentApp> Host<A> {
         self.apply(index, outcome);
     }
 
+    /// Window `index` was resized to `(width, height)` physical pixels: its
+    /// surface follows and it is laid out again.
+    fn resized(&mut self, index: usize, (width, height): (u32, u32)) {
+        let (theme, scale) = (self.themes.active(), self.desktop.scale());
+        let window = &mut self.windows[index];
+        window
+            .chrome
+            .resize(&mut self.client, width, height, A::NAME);
+        window.relayout(&mut self.client, theme, scale, self.faces);
+    }
+
     /// Route one window-scoped event to window `index`.
     fn act(&mut self, index: usize, event: &WindowEvent) {
         let window = &mut self.windows[index];
@@ -2260,12 +2312,7 @@ impl<A: DocumentApp> Host<A> {
                 width_px,
                 height_px,
                 ..
-            } => {
-                window
-                    .chrome
-                    .resize(&mut self.client, *width_px, *height_px, A::NAME);
-                window.relayout(self.themes.active(), self.desktop.scale(), self.faces);
-            }
+            } => self.resized(index, (*width_px, *height_px)),
             WindowEvent::RedrawRequested { .. } => window.owe(Repaint::Whole),
             WindowEvent::ContentReleased { .. } => window.chrome.pane.release_frames(),
             WindowEvent::Focus { focused, .. } => {
@@ -2343,6 +2390,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::AppBarEntered { .. }
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }
@@ -2372,7 +2420,7 @@ impl<A: DocumentApp> Host<A> {
                 window
                     .chrome
                     .resize(&mut self.client, *width_px, *height_px, A::NAME);
-                window.lay_out(theme, scale, self.faces, true);
+                window.lay_out(&mut self.client, (theme, scale, self.faces), true);
             }
             WindowEvent::RedrawRequested { .. } => window.chrome.owe(Repaint::Whole),
             WindowEvent::ContentReleased { .. } => window.chrome.pane.release_frames(),
@@ -2432,6 +2480,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::AppBarEntered { .. }
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }
@@ -2540,8 +2589,12 @@ impl<A: DocumentApp> Host<A> {
                 let now = tairix_rt::clock_get();
                 self.point((index, Some(owned)), at, *modifiers, pinch, now);
             }
-            // Never minimised but with its window, and asking for no picker,
-            // menu or preview.
+            // A tool window's menu is its window's.
+            WindowEvent::MenuClosed {
+                open_id, outcome, ..
+            } if fed == Fed::Window => self.menu_closed(index, *open_id, *outcome),
+            // Never minimised but with its window, and asking for no picker
+            // or preview, nor a dialog for a menu.
             WindowEvent::Resized { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::PickCancelled { .. }
@@ -2549,6 +2602,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::MenuClosed { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::AppBarEntered { .. }
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }
@@ -2633,6 +2687,11 @@ impl<A: DocumentApp> Host<A> {
                 .find(|pane| pane.kind == Owned::Tool(id))
             {
                 tool.fit(&mut self.client, rect, wanted.title, A::NAME);
+                continue;
+            }
+            // A placeholder's tool windows would only go again once its
+            // document lands.
+            if window.reading != Reading::Done {
                 continue;
             }
             let title = String::from(wanted.title);
@@ -2962,15 +3021,19 @@ impl<A: DocumentApp> Host<A> {
         }
     }
 
-    /// Present what every window owes. A present the session refuses is that
-    /// window's trouble alone: it is said once, and the window paints whole at
-    /// its next chance, while every other window carries on.
-    fn paint_all(&mut self) {
+    /// Present what every window owes at `now_ns`, but for one still kept off
+    /// the screen while its document is read in. A present the session
+    /// refuses is that window's trouble alone: it is said once, and the window
+    /// paints whole at its next chance, while every other window carries on.
+    fn paint_all(&mut self, now_ns: u64) {
         let theme = self.themes.active();
         let scale = self.desktop.scale();
         let faces = self.faces;
         let app = &mut self.app;
         for window in &mut self.windows {
+            if window.withheld.holds(now_ns) {
+                continue;
+            }
             window.paint(&mut self.client, |surface, view, layout, focused| {
                 app.render(surface, view, layout, (theme, scale, faces), focused);
             });
@@ -3000,10 +3063,10 @@ impl<A: DocumentApp> Host<A> {
                 let scale = self.desktop.scale();
                 self.faces = A::faces(theme, scale);
                 for window in &mut self.windows {
-                    window.relayout(theme, scale, self.faces);
+                    window.relayout(&mut self.client, theme, scale, self.faces);
                 }
                 for window in &mut self.app_windows {
-                    window.lay_out(theme, scale, self.faces, true);
+                    window.lay_out(&mut self.client, (theme, scale, self.faces), true);
                 }
             }
             Ok(false) => {}
@@ -3042,11 +3105,52 @@ pub fn commit(file: &Handle, len: u64) -> Result<(), Errno> {
     file.sync().map_err(Errno::from_syscall)
 }
 
+/// The name `stem` is offered under with `extension`: none for a format named
+/// by its file type alone.
+fn offered_name(stem: &str, extension: &str) -> String {
+    if extension.is_empty() {
+        String::from(stem)
+    } else {
+        format!("{stem}.{extension}")
+    }
+}
+
 /// `name` without the extension or RISC OS file type that ends it.
 fn stem(name: &str) -> &str {
     match name.rfind(['.', ',']) {
         Some(at) if at > 0 => &name[..at],
         _ => name,
+    }
+}
+
+/// Tell the session afresh that `pane` may be sized from `least` up, where
+/// that is not `told`, the least it was last told: held to a stale least, a
+/// window whose view shrank could not be made its size.
+fn restate_least<A: DocumentApp>(
+    client: &mut Client,
+    pane: &WindowPane,
+    told: &mut (u32, u32),
+    least: (u32, u32),
+) {
+    if least == *told {
+        return;
+    }
+    match client.set_sizing(pane.id(), resizable(least)) {
+        Ok(()) => *told = least,
+        Err(err) => report(
+            A::NAME,
+            format_args!("a window's least size was not restated: {err}"),
+        ),
+    }
+}
+
+/// A window any size from `least` up.
+const fn resizable(least: (u32, u32)) -> WindowSizing {
+    WindowSizing::Resizable {
+        min_width_px: least.0,
+        min_height_px: least.1,
+        max_width_px: 0,
+        max_height_px: 0,
     }
 }
 
@@ -3060,13 +3164,7 @@ fn open_pane(
     title: &str,
     least: (u32, u32),
 ) -> Result<WindowPane, String> {
-    let sizing = WindowSizing::Resizable {
-        min_width_px: least.0,
-        min_height_px: least.1,
-        max_width_px: 0,
-        max_height_px: 0,
-    };
-    match WindowPane::open(client, endpoint, mode, title, sizing) {
+    match WindowPane::open(client, endpoint, mode, title, resizable(least)) {
         // A reply from any other sender is something else answering for the
         // window endpoint.
         Ok((pane, replied)) if replied == server => Ok(pane),
@@ -3283,7 +3381,7 @@ impl<A: DocumentApp> Host<A> {
         self.settle_owned();
         self.settle_focus();
         self.settle_pointers();
-        self.paint_all();
+        self.paint_all(now);
         if self.quitting && self.windows.is_empty() {
             // The quit can no longer be turned down, so the application's own
             // windows, kept until now in case it was, go.
@@ -3297,7 +3395,12 @@ impl<A: DocumentApp> Host<A> {
         // A job carried out here for want of a worker has its answer already
         // on the desk, so the loop goes round again rather than parking.
         if !answered {
-            signals.deadline_ns.set(A::deadline(self, now));
+            let own = A::deadline(self, now);
+            let shown = self
+                .windows
+                .iter()
+                .filter_map(|window| window.withheld.until());
+            signals.deadline_ns.set(own.into_iter().chain(shown).min());
             let polled = events.wait(&mut self.client);
             self.take_event(polled)?;
         }

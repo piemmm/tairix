@@ -46,8 +46,9 @@ use tairix_abi::driver::display::{
 use tairix_abi::origin::{AppIdentity, ProcId};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::window_ipc::{
-    encode_authorised_output_reply, encode_screensaver_reply, AuthorisedOutcome, SystemTask,
-    WINDOW_AUTHORISED_OUTPUT_REPLY_MAX, WINDOW_SCREENSAVER_REPLY_MAX,
+    encode_authorised_output_reply, encode_screensaver_reply, AppMenuItemId, AuthorisedOutcome,
+    SystemTask, APP_MENU_MAX_TOTAL_ROWS, WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
+    WINDOW_SCREENSAVER_REPLY_MAX,
 };
 use tairix_abi::window_ipc::{
     encode_clipboard_reply, encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply,
@@ -1080,14 +1081,14 @@ pub trait WindowHost {
     }
 
     /// Put the system's authorisation prompt up for `task`, asked by
-    /// `caller`, the application the kernel attests is asking, for its own
-    /// window `window_id`.
+    /// `caller`, the application the kernel attests is asking, for `asker`:
+    /// its own window, or its icon-bar slot.
     ///
-    /// The engine has checked the window is the caller's and has no
-    /// authorisation pending; who may ask, what the task runs and what the
-    /// prompt says are the host's. Its outcome is answered through
-    /// [`WindowServer::conclude_authorisation`]. The default refuses, because
-    /// a host with no prompt cannot ask.
+    /// The engine has checked the window is the caller's, or the slot one it
+    /// declared, and that no authorisation is pending there; who may ask, what
+    /// the task runs and what the prompt says are the host's. Its outcome is
+    /// answered through [`WindowServer::conclude_authorisation`]. The default
+    /// refuses, because a host with no prompt cannot ask.
     ///
     /// # Errors
     ///
@@ -1098,12 +1099,30 @@ pub trait WindowHost {
     fn authorise_requested(
         &mut self,
         caller: Option<&AppIdentity>,
-        window_id: u64,
+        asker: AuthoriseFor,
         task: &SystemTask,
     ) -> Result<(), Errno> {
-        let _ = (caller, window_id, task);
+        let _ = (caller, asker, task);
         Err(Errno::NotSupported)
     }
+}
+
+/// Who an authorisation was asked for, and so where its answer goes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AuthoriseFor {
+    /// The asking application's own window.
+    Window(u64),
+    /// The icon-bar slot of the application that is this process, which has
+    /// no window to hold the question.
+    Slot(ProcId),
+}
+
+/// An icon-bar slot's authorisation: pending until it concludes, then what
+/// a captured task printed until the application takes it.
+#[derive(Default)]
+struct SlotAuthorisation {
+    pending: bool,
+    output: Option<Vec<u8>>,
 }
 
 /// Where [`WindowServer::latch`] shows each window's newest presented frame:
@@ -1125,9 +1144,10 @@ pub trait FrameHost {
         damage: &DamageList,
     ) -> Result<(), Errno>;
 
-    /// Window `window_id`'s frame could not be shown: the window keeps the
-    /// pixels it had until it presents again, and that present carries what
-    /// the refused frame changed as well.
+    /// Window `window_id`'s frame could not be shown, the first refused since
+    /// the window last showed one. The window keeps the pixels it had, and the
+    /// frame is tried again with the next frame the desktop composes, carrying
+    /// what a later present changes as well.
     fn frame_refused(&mut self, window_id: u64, errno: Errno);
 }
 
@@ -1140,6 +1160,13 @@ pub trait FrameHost {
 struct Pending {
     frame: Option<u32>,
     damage: Region,
+    /// The frame named was refused, so it waits for a frame the desktop
+    /// composes rather than asking for one: a lasting refusal would otherwise
+    /// compose a frame every period for nothing.
+    refused: bool,
+    /// A frame was refused since the window last showed one, and the host was
+    /// told.
+    reported: bool,
 }
 
 impl Pending {
@@ -1147,26 +1174,73 @@ impl Pending {
         Self {
             frame: None,
             damage: Region::with_budget(MAX_DAMAGE_RECTS),
+            refused: false,
+            reported: false,
         }
     }
 
     /// Frame `frame_index` is the newest, `damage` of it changed.
     fn record(&mut self, frame_index: u32, damage: &DamageList, surface: &DisplayMode) {
         self.frame = Some(frame_index);
+        self.refused = false;
         let bounds = Rect::new(0, 0, surface.width_px, surface.height_px);
         add_damage(&mut self.damage, damage.rects(), bounds);
     }
 
-    /// Nothing is pending: the frames it named are shown or gone.
+    /// Nothing is pending: the frames it named are gone.
     fn clear(&mut self) {
         self.frame = None;
+        self.refused = false;
         self.damage.clear();
     }
 
-    /// The frame named could not be shown. It is not retried each desktop
-    /// frame; what it changed is shown with the window's next present.
-    fn refused(&mut self) {
-        self.frame = None;
+    /// The frame named was shown.
+    fn shown(&mut self) {
+        self.clear();
+        self.reported = false;
+    }
+
+    /// The frame named could not be shown. Answers whether the host is to be
+    /// told, which it is once until the window next shows a frame.
+    fn refuse(&mut self) -> bool {
+        self.refused = true;
+        !core::mem::replace(&mut self.reported, true)
+    }
+}
+
+/// How many windows hold a frame [`WindowServer::latch`] has yet to show, kept
+/// as each changes so asking costs no walk of every window.
+#[derive(Clone, Copy)]
+struct Unshown {
+    /// Frames that ask the desktop for a frame of their own.
+    due: usize,
+    /// Refused frames, which wait for one the desktop composes.
+    refused: usize,
+}
+
+impl Unshown {
+    const NONE: Self = Self { due: 0, refused: 0 };
+
+    const fn is_empty(self) -> bool {
+        self.due == 0 && self.refused == 0
+    }
+
+    /// Count `pending` in.
+    fn count_in(&mut self, pending: &Pending) {
+        match (pending.frame, pending.refused) {
+            (None, _) => {}
+            (Some(_), false) => self.due = self.due.saturating_add(1),
+            (Some(_), true) => self.refused = self.refused.saturating_add(1),
+        }
+    }
+
+    /// Count `pending` out, before it changes or goes.
+    fn count_out(&mut self, pending: &Pending) {
+        match (pending.frame, pending.refused) {
+            (None, _) => {}
+            (Some(_), false) => self.due = self.due.saturating_sub(1),
+            (Some(_), true) => self.refused = self.refused.saturating_sub(1),
+        }
     }
 }
 
@@ -1659,6 +1733,13 @@ struct CommittedText {
     text: String,
 }
 
+/// One committed icon-bar quick-entry text, with the revision of the
+/// declaration whose menu committed it.
+struct CommittedRowText {
+    revision: u32,
+    text: String,
+}
+
 /// One alert the host has up, and where its answer goes.
 struct AlertRecord {
     owner: ProcId,
@@ -1697,6 +1778,14 @@ pub struct WindowServer<M: ShmMapper> {
     /// engine keeps only the route, so an application-scoped event can be
     /// delivered without asking the host where it goes.
     app_bars: BTreeMap<ProcId, u64>,
+    /// The text each application's icon-bar rows had committed and not yet
+    /// taken, one per row with the revision it was committed under: at most
+    /// [`APP_MENU_MAX_TOTAL_ROWS`] a client, the most rows its declaration
+    /// carries.
+    app_bar_texts: BTreeMap<ProcId, BTreeMap<AppMenuItemId, CommittedRowText>>,
+    /// Each application's icon-bar slot authorisation, while one pends or
+    /// its output waits to be taken.
+    slot_authorisations: BTreeMap<ProcId, SlotAuthorisation>,
     /// Targets queued for each application to open, oldest first.
     ///
     /// Keyed on the application rather than on one of its windows, because
@@ -1724,6 +1813,10 @@ pub struct WindowServer<M: ShmMapper> {
     /// Bytes of window frame one client may hold mapped here at once
     /// ([`client_frame_budget_bytes`]).
     client_frame_max: u64,
+    /// The windows holding a frame [`Self::latch`] has yet to show, counted
+    /// out and in around every change to one: a latch runs only while some
+    /// are counted, so a frame left out would wait for another present.
+    unshown: Unshown,
 }
 
 impl<M: ShmMapper> WindowServer<M> {
@@ -1741,9 +1834,12 @@ impl<M: ShmMapper> WindowServer<M> {
             alerts: BTreeMap::new(),
             next_alert: 1,
             app_bars: BTreeMap::new(),
+            app_bar_texts: BTreeMap::new(),
+            slot_authorisations: BTreeMap::new(),
             open_targets: BTreeMap::new(),
             activations: BTreeMap::new(),
             client_frame_max,
+            unshown: Unshown::NONE,
         }
     }
 
@@ -1891,6 +1987,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 window_id,
                 ref task,
             } => {
+                let window_id = window_id.map(core::num::NonZeroU64::get);
                 let accepted = identity
                     .caller_app(ticket)
                     .and_then(|app| self.authorise(host, caller, app.as_ref(), window_id, task));
@@ -1971,6 +2068,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 open_target_reply(reply, Ok(taken.as_ref().map(OpenEntry::as_wire)))
             }
             WindowRequest::TakeAuthorisedOutput { window_id } => {
+                let window_id = window_id.map(core::num::NonZeroU64::get);
                 self.take_authorised_output(caller, window_id, reply)
             }
             WindowRequest::QueryWallpapers { from } => wallpapers_reply(reply, host, from),
@@ -1984,6 +2082,10 @@ impl<M: ShmMapper> WindowServer<M> {
                         Err(err) => Err(err),
                     },
                 )
+            }
+            WindowRequest::TakeAppBarText { item, revision } => {
+                let taken = self.take_app_bar_text(caller, item, revision);
+                menu_text_reply(reply, Ok(taken.as_deref()))
             }
             WindowRequest::HandOverLaunch { .. } | WindowRequest::RevealDocument { .. } => {
                 self.dispatch_reach(host, sink, caller, decoded, reply)
@@ -2323,7 +2425,9 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::SaveInto { .. }
             | WindowRequest::RevealDocument { .. } => status(reply, Err(Errno::NotSupported)),
             // ...and a committed-text pull, likewise.
-            WindowRequest::TakeMenuText { .. } => menu_text_reply(reply, Err(Errno::NotSupported)),
+            WindowRequest::TakeMenuText { .. } | WindowRequest::TakeAppBarText { .. } => {
+                menu_text_reply(reply, Err(Errno::NotSupported))
+            }
             WindowRequest::TakePickedName { .. } => {
                 picked_name_reply(reply, Err(Errno::NotSupported))
             }
@@ -2786,6 +2890,7 @@ impl<M: ShmMapper> WindowServer<M> {
             record.frame_len = frame_len;
             record.region = Some(region);
             // What was pending named a frame of the region just dropped.
+            self.unshown.count_out(&record.pending);
             record.pending.clear();
         }
         Ok(())
@@ -2818,38 +2923,47 @@ impl<M: ShmMapper> WindowServer<M> {
         if record.region.is_none() {
             return Err(Errno::NotAttached);
         }
+        self.unshown.count_out(&record.pending);
         record.pending.record(frame_index, damage, &record.surface);
+        self.unshown.count_in(&record.pending);
         Ok(())
     }
 
     /// Show every window's newest presented frame through `host`, once a
     /// desktop frame: a client presenting faster than the desktop draws costs
-    /// one conversion a frame, never one a present.
+    /// one conversion a frame, never one a present. A refused frame is tried
+    /// again with each, until it shows or a later present replaces it.
     pub fn latch(&mut self, host: &mut dyn FrameHost) {
+        if self.unshown.is_empty() {
+            return;
+        }
+        let mut unshown = Unshown::NONE;
         for (&window_id, record) in &mut self.windows {
-            let Some(frame_index) = record.pending.frame else {
-                continue;
-            };
-            let shown = Self::frame_of(record, frame_index).and_then(|frame| {
-                let damage = damage_of(&record.pending.damage, &record.surface)?;
-                host.window_presented(window_id, &record.surface, frame, &damage)
-            });
-            match shown {
-                Ok(()) => record.pending.clear(),
-                Err(errno) => {
-                    record.pending.refused();
-                    host.frame_refused(window_id, errno);
+            if let Some(frame_index) = record.pending.frame {
+                let shown = Self::frame_of(record, frame_index).and_then(|frame| {
+                    let damage = damage_of(&record.pending.damage, &record.surface)?;
+                    host.window_presented(window_id, &record.surface, frame, &damage)
+                });
+                match shown {
+                    Ok(()) => record.pending.shown(),
+                    Err(errno) => {
+                        if record.pending.refuse() {
+                            host.frame_refused(window_id, errno);
+                        }
+                    }
                 }
             }
+            unshown.count_in(&record.pending);
         }
+        self.unshown = unshown;
     }
 
-    /// Whether any window has presented a frame [`Self::latch`] has not shown.
+    /// Whether a window presented a frame that asks the desktop for a frame:
+    /// one [`Self::latch`] has not tried. A refused frame waits for a frame
+    /// the desktop composes for something else.
     #[must_use]
-    pub fn has_pending_frames(&self) -> bool {
-        self.windows
-            .values()
-            .any(|record| record.pending.frame.is_some())
+    pub const fn has_pending_frames(&self) -> bool {
+        self.unshown.due > 0
     }
 
     /// Frame `frame_index` of `record`'s region.
@@ -2900,31 +3014,70 @@ impl<M: ShmMapper> WindowServer<M> {
     fn take_authorised_output(
         &mut self,
         caller: ProcId,
-        window_id: u64,
+        window_id: Option<u64>,
         reply: &mut [u8; WINDOW_REPLY_MAX],
     ) -> usize {
-        let taken = owned_window_mut(&mut self.windows, caller, window_id)
-            .and_then(|record| record.authorised_output.take().ok_or(Errno::NotFound));
+        let taken = match window_id {
+            Some(window_id) => owned_window_mut(&mut self.windows, caller, window_id)
+                .and_then(|record| record.authorised_output.take().ok_or(Errno::NotFound)),
+            None => self.take_slot_output(caller),
+        };
         authorised_output_reply(reply, taken.as_deref().map_err(|&err| err))
     }
 
-    /// Accept an authorisation of `task` for `caller`'s window `window_id`,
-    /// asked by the attested application `app`: at most one pends per window,
-    /// and the host must bring its prompt up before anything is recorded
-    /// (fail closed — a refused request leaves no pending state).
+    /// What `caller`'s icon-bar slot's last task printed, letting the slot's
+    /// record go once nothing pends there either.
+    fn take_slot_output(&mut self, caller: ProcId) -> Result<Vec<u8>, Errno> {
+        let slot = self
+            .slot_authorisations
+            .get_mut(&caller)
+            .ok_or(Errno::NotFound)?;
+        let output = slot.output.take().ok_or(Errno::NotFound)?;
+        if !slot.pending {
+            self.slot_authorisations.remove(&caller);
+        }
+        Ok(output)
+    }
+
+    /// Accept an authorisation of `task` for `caller`'s window `window_id`, or
+    /// its icon-bar slot when `None`, asked by the attested application `app`:
+    /// at most one pends per window and one per slot, and the host must bring
+    /// its prompt up before anything is recorded (fail closed — a refused
+    /// request leaves no pending state).
     fn authorise(
         &mut self,
         host: &mut dyn WindowHost,
         caller: ProcId,
         app: Option<&AppIdentity>,
-        window_id: u64,
+        window_id: Option<u64>,
         task: &SystemTask,
     ) -> Result<(), Errno> {
+        let Some(window_id) = window_id else {
+            if !self.app_bars.contains_key(&caller) {
+                return Err(Errno::NotFound);
+            }
+            if self
+                .slot_authorisations
+                .get(&caller)
+                .is_some_and(|slot| slot.pending)
+            {
+                return Err(Errno::AlreadyExists);
+            }
+            host.authorise_requested(app, AuthoriseFor::Slot(caller), task)?;
+            self.slot_authorisations.insert(
+                caller,
+                SlotAuthorisation {
+                    pending: true,
+                    output: None,
+                },
+            );
+            return Ok(());
+        };
         let record = owned_window_mut(&mut self.windows, caller, window_id)?;
         if record.authorising {
             return Err(Errno::AlreadyExists);
         }
-        host.authorise_requested(app, window_id, task)?;
+        host.authorise_requested(app, AuthoriseFor::Window(window_id), task)?;
         record.authorising = true;
         record.authorised_output = None;
         Ok(())
@@ -3188,6 +3341,64 @@ impl<M: ShmMapper> WindowServer<M> {
             text: String::from(text),
         });
         Ok(())
+    }
+
+    /// Hold `text`, committed into the quick-entry field of application
+    /// `client`'s icon-bar row `item` on the menu of its declaration
+    /// `revision`, for its [`WindowRequest::TakeAppBarText`], in place of any
+    /// it held for that row.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — `client` declared no icon-bar presence.
+    /// * [`Errno::LengthOutOfRange`] — longer than a quick-entry field holds.
+    /// * [`Errno::LimitExceeded`] — `client` already holds a text for every
+    ///   row its declaration can carry.
+    pub fn record_app_bar_text(
+        &mut self,
+        client: ProcId,
+        item: AppMenuItemId,
+        revision: u32,
+        text: &str,
+    ) -> Result<(), Errno> {
+        if text.len() > APP_MENU_ENTRY_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if !self.app_bars.contains_key(&client) {
+            return Err(Errno::NotFound);
+        }
+        let held = self.app_bar_texts.entry(client).or_default();
+        if held.len() >= APP_MENU_MAX_TOTAL_ROWS && !held.contains_key(&item) {
+            return Err(Errno::LimitExceeded);
+        }
+        held.insert(
+            item,
+            CommittedRowText {
+                revision,
+                text: String::from(text),
+            },
+        );
+        Ok(())
+    }
+
+    /// Take the text `caller`'s icon-bar row `item` holds, if it was committed
+    /// under `revision`: a commit under another stays held for the answer
+    /// that names it.
+    fn take_app_bar_text(
+        &mut self,
+        caller: ProcId,
+        item: AppMenuItemId,
+        revision: u32,
+    ) -> Option<String> {
+        let held = self.app_bar_texts.get_mut(&caller)?;
+        if held.get(&item)?.revision != revision {
+            return None;
+        }
+        let taken = held.remove(&item).map(|committed| committed.text);
+        if held.is_empty() {
+            self.app_bar_texts.remove(&caller);
+        }
+        taken
     }
 
     /// Take the text committed for `caller`'s window `window_id` under
@@ -3481,7 +3692,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 .map(|(&id, _)| id),
         );
         for &id in &closed {
-            self.windows.remove(&id);
+            if let Some(record) = self.windows.remove(&id) {
+                self.unshown.count_out(&record.pending);
+            }
             host.window_closed(id);
         }
         closed
@@ -3510,6 +3723,7 @@ impl<M: ShmMapper> WindowServer<M> {
         let bytes = record.mapped_bytes();
         // Dropping the region is the unmap: the mapper owns that side.
         record.region = None;
+        self.unshown.count_out(&record.pending);
         record.pending.clear();
         bytes
     }
@@ -3525,12 +3739,16 @@ impl<M: ShmMapper> WindowServer<M> {
             .map(|(&id, _)| id)
             .collect();
         for id in closed {
-            self.windows.remove(&id);
+            if let Some(record) = self.windows.remove(&id) {
+                self.unshown.count_out(&record.pending);
+            }
             host.window_closed(id);
         }
         if self.app_bars.remove(&client).is_some() {
             host.app_bar_withdrawn(client);
         }
+        self.app_bar_texts.remove(&client);
+        self.slot_authorisations.remove(&client);
         // A target queued for a client that has gone is reachable by
         // nothing; its delegation dies with the process it was minted to.
         self.open_targets.remove(&client);
@@ -3660,7 +3878,7 @@ impl<M: ShmMapper> WindowServer<M> {
         Ok(())
     }
 
-    /// Conclude window `window_id`'s pending authorisation with `outcome`,
+    /// Conclude the authorisation pending for `asker` with `outcome`,
     /// holding `output` — exactly what a captured task printed, and nothing
     /// for any other outcome — for the owner's `TakeAuthorisedOutput`.
     ///
@@ -3670,18 +3888,17 @@ impl<M: ShmMapper> WindowServer<M> {
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotFound`] — no such window.
-    /// * [`Errno::OutOfRange`] — no authorisation is pending on it, or an
+    /// * [`Errno::NotFound`] — no such window, or no such slot.
+    /// * [`Errno::OutOfRange`] — no authorisation is pending there, or an
     ///   output that is not the one `outcome` states.
     /// * Any [`Errno`] the sink surfaces; the authorisation is still owed.
     pub fn conclude_authorisation(
         &mut self,
         sink: &mut dyn EventSink,
-        window_id: u64,
+        asker: AuthoriseFor,
         outcome: AuthorisedOutcome,
         output: Vec<u8>,
     ) -> Result<(), Errno> {
-        let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
         let captured = match outcome {
             AuthorisedOutcome::Captured { len, .. } => {
                 if usize::try_from(len).ok() != Some(output.len()) {
@@ -3699,15 +3916,43 @@ impl<M: ShmMapper> WindowServer<M> {
                 false
             }
         };
-        if !record.authorising {
-            return Err(Errno::OutOfRange);
+        match asker {
+            AuthoriseFor::Window(window_id) => {
+                let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
+                if !record.authorising {
+                    return Err(Errno::OutOfRange);
+                }
+                sink.deliver(
+                    record.event_endpoint,
+                    &WindowEvent::Authorised {
+                        window_id: Some(window_id),
+                        outcome,
+                    },
+                )?;
+                record.authorising = false;
+                record.authorised_output = captured.then_some(output);
+            }
+            AuthoriseFor::Slot(app) => {
+                let endpoint = *self.app_bars.get(&app).ok_or(Errno::NotFound)?;
+                let slot = self
+                    .slot_authorisations
+                    .get_mut(&app)
+                    .filter(|slot| slot.pending)
+                    .ok_or(Errno::OutOfRange)?;
+                sink.deliver(
+                    endpoint,
+                    &WindowEvent::Authorised {
+                        window_id: None,
+                        outcome,
+                    },
+                )?;
+                slot.pending = false;
+                slot.output = captured.then_some(output);
+                if slot.output.is_none() {
+                    self.slot_authorisations.remove(&app);
+                }
+            }
         }
-        sink.deliver(
-            record.event_endpoint,
-            &WindowEvent::Authorised { window_id, outcome },
-        )?;
-        record.authorising = false;
-        record.authorised_output = captured.then_some(output);
         Ok(())
     }
 

@@ -192,6 +192,7 @@ extern "C" {
 #define TAIRIX_SYS_ARCHIVE_READ 165u
 #define TAIRIX_SYS_ARCHIVE_WRITE 166u
 #define TAIRIX_SYS_CALL_AWAIT 167u
+#define TAIRIX_SYS_VOLUME_RETITLE 168u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -567,6 +568,11 @@ typedef struct tairix_image_attach_reply {
 #define TAIRIX_VOLUME_DETACH_FORCE ((uint8_t)1u)
 #define TAIRIX_VOLUME_DETACH_LOST ((uint8_t)2u)
 #define TAIRIX_VOLUME_DETACH_IDLE ((uint8_t)3u)
+
+/* The frame volume_retitle() takes: the 16-byte identity an attach
+ * reply names, one length byte, then that many bytes of UTF-8 with no
+ * control character, at most TAIRIX_VOLUME_TITLE_MAX; none clears it. */
+#define TAIRIX_VOLUME_RETITLE_MAX_LEN 269u
 
 /* fs_readdir() reads a directory a batch at a time from the open description's
 * position: whole records of at most TAIRIX_READDIR_BATCH_MAX bytes per call,
@@ -945,6 +951,7 @@ uint64_t tairix_sys_image_attach(uint32_t a0, void * a1, uintptr_t a2, void * a3
 uint64_t tairix_sys_archive_read(uint64_t a0, uint32_t a1, uint64_t a2, void * a3, uintptr_t a4);
 int32_t tairix_sys_archive_write(uint64_t a0, uint32_t a1, uint64_t a2, void * a3, uintptr_t a4);
 uint64_t tairix_sys_call_await(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
+int32_t tairix_sys_volume_retitle(void * a0, uintptr_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

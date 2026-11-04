@@ -17,10 +17,13 @@
 //!   reports the device's progress on, or the answer to a call the device
 //!   posted to a supplier, a DMA controller's period wait — reads the device's
 //!   causes, moves a period for every endpoint whose boundary passed, and
-//!   wakes the mixer with one notify carrying the clock pair.
+//!   wakes the mixer with one notify carrying the clock pair;
+//! * a **room** wake — room in a port a held notification waits on — or the
+//!   pause for one the kernel had no memory for running out offers what the
+//!   mixer is owed again.
 //!
-//! Both are the host-tested [`Dispatcher`]; this file is the wait-set and the
-//! syscalls behind its [`ChannelIo`].
+//! All three are the host-tested [`Dispatcher`]; this file is the wait-set and
+//! the syscalls behind its [`ChannelIo`].
 //!
 //! # Why the interrupt path services rather than merely notifying
 //!
@@ -42,6 +45,7 @@ use tairix_abi::driver::audio_channel::{
     AUDIO_CHANNEL_MAX_REQUEST,
 };
 use tairix_abi::driver::DeviceWake;
+use tairix_abi::ipc::MemoryPause;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, ProcId};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
@@ -60,11 +64,18 @@ const AUDIOCHAN_READY: EventId = EventId(29_010);
 /// mixer granted is smaller than the geometry the two agreed.
 const AUDIOCHAN_SHORT_REGION: EventId = EventId(29_012);
 
+/// Diagnostic event id: notifications the mixer's ports refused for good were
+/// given up on, carrying the running total each time it doubles.
+const AUDIOCHAN_GIVEN_UP: EventId = EventId(29_013);
+
 /// Wait-set token for a device-channel call doorbell on the claimed endpoint.
 const CALL_TOKEN: u64 = 1;
 
 /// Wait-set token for "one of the device's event sources is ready".
 const EVENT_TOKEN: u64 = 2;
+
+/// Wait-set token for room in a port a held notification waits on.
+const ROOM_TOKEN: u64 = 3;
 
 /// Calls the mixer may hold at the device-channel endpoint at once. It issues
 /// one control request at a time (it blocks on the reply); the room beyond
@@ -147,6 +158,36 @@ impl<A: Audio> Channel<A> {
     pub fn on_event(&mut self) {
         self.dispatcher.on_event();
     }
+
+    /// Room came in a port a held notification waits on, or the pause for
+    /// what the kernel had no memory for ran: offer what is held.
+    pub fn on_room(&mut self) {
+        self.dispatcher.on_room();
+    }
+
+    /// Keep a room member armed, through `member`, on exactly the ports a
+    /// held notification waits on room in, and record what was given up on,
+    /// answering whether something held waits on a pause instead — kernel
+    /// memory, or a port whose room could not be watched — which nothing
+    /// reports. Called before every wait.
+    pub fn rooms(&mut self, member: &mut dyn FnMut(WaitSetOp, u64) -> bool) -> bool {
+        let watched = self.dispatcher.watch(member);
+        if let Some(total) = self.dispatcher.given_up() {
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Warn,
+                    id: AUDIOCHAN_GIVEN_UP,
+                    message: "audiochan: notifications the mixer refused for good were given up",
+                    fields: &[Field {
+                        key: "total",
+                        value: FieldValue::UnsignedInt(total),
+                    }],
+                },
+            );
+        }
+        !watched || self.dispatcher.starved()
+    }
 }
 
 /// Serve the `audiochan-v1` device channel over the opened device `audio`
@@ -196,13 +237,26 @@ pub fn serve<A: Audio>(audio: A, wakes: &[DeviceWake]) -> i32 {
     serve_loop(channel, set)
 }
 
-/// Park on the wait set and serve device-channel doorbells and device events
-/// for the life of the driver. Never returns on the success path; a wait-set
-/// fault exits fail-closed.
+/// Park on the wait set and serve device-channel doorbells, device events and
+/// room for what the mixer is owed for the life of the driver. Never returns
+/// on the success path; a wait-set fault exits fail-closed.
 fn serve_loop<A: Audio>(mut channel: Channel<A>, set: u64) -> i32 {
+    let timed_out = -i64::from(Errno::TimedOut.as_i32());
+    let mut member = |op: WaitSetOp, port: u64| {
+        tairix_rt::waitset_ctl(set, op, WaitSourceKind::PortRoom, port, ROOM_TOKEN) == 0
+    };
+    let mut pause = MemoryPause::new();
     loop {
+        if pause.ran_out(tairix_rt::clock_get) {
+            channel.on_room();
+        }
+        pause.keep(channel.rooms(&mut member), tairix_rt::clock_get);
+        let timeout = pause.bound(WAITSET_TIMEOUT_NONE, tairix_rt::clock_get);
         let mut token = 0u64;
-        let woke = tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token);
+        let woke = tairix_rt::waitset_wait(set, timeout, &mut token);
+        if woke == timed_out {
+            continue;
+        }
         if woke < 0 {
             return end(
                 DriverExit::NoService,
@@ -217,6 +271,7 @@ fn serve_loop<A: Audio>(mut channel: Channel<A>, set: u64) -> i32 {
         match token {
             EVENT_TOKEN => channel.on_event(),
             CALL_TOKEN => channel.on_call(),
+            ROOM_TOKEN => channel.on_room(),
             _ => {}
         }
     }
@@ -284,8 +339,8 @@ impl ChannelIo for RtChannelIo {
         let _ = tairix_rt::shm_unmap(region.base as u64, region.len);
     }
 
-    fn notify(&mut self, port: u64, frame: &[u8]) {
-        let _ = tairix_rt::ipc_send(port, frame);
+    fn notify(&mut self, port: u64, frame: &[u8]) -> Result<(), Errno> {
+        tairix_rt::ipc_send(port, frame)
     }
 
     fn short_region(&mut self, mapped: usize, expected: usize, ring_frames: u32) {

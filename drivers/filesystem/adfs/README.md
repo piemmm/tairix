@@ -50,6 +50,15 @@ and a write restamps a typed one. ADFS stores no general-purpose
 attributes: writing any other namespace is refused (`Unsupported`),
 never silently dropped.
 
+## Disc title
+
+`FilesystemLabel` reads and sets the disc name: up to ten characters of RISC
+OS's Latin-1, kept in the new map's disc record (zone 0 of both map copies
+and the boot block, each resealed) or across the old map's two sectors. A
+space, RISC OS's specials and a character its Latin-1 lacks are refused
+(`OutOfRange`), as is an eleventh character (`LengthOutOfRange`); the empty
+title clears the name.
+
 ## Allocation behaviour
 
 - **Old map** objects are single contiguous sector runs. Growth first

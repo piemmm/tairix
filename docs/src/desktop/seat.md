@@ -58,7 +58,14 @@ three desktop channels share one ring definition (`InputChannel`), differing
 only in capacity (64 key records; 256 pointer records — a pointing device
 emits far more events between per-frame drains; 64 touch frames, half a
 second of a touchpad scanning at 125 Hz) and all zero each record as it is
-drained, so a typed secret never lingers. Every seat-addressed
+drained, so a typed secret never lingers. The three reads are one path
+(`SeatRegistry::read` for an `InputKind`), as the three injects share one
+route-and-queue, and a record leaves its channel only by reaching its reader:
+one whose copy into the reader's buffer fails goes back to the front while the
+lease it was taken under is still live, so a keystroke is never lost to a
+buffer the kernel could not write. A channel that filled meanwhile keeps what
+it holds — the record is then the oldest, which overflow drops — and an ended
+lease's record is never handed to the next one. Every seat-addressed
 syscall names its seat and fails closed with `Errno::NotFound` for one
 that does not (or no longer) exist.
 

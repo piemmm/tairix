@@ -258,12 +258,10 @@ so one process may hold several at once. A program parking on a wait-set of its
 own adds `LiveStream::notify_port` and takes notifications with `take_notify`,
 which never parks.
 
-The service's notifications are best effort: one is dropped only when the
-mailbox is full, so a dropped one always leaves a full mailbox behind it, and
-the drain that empties it takes at least a mailbox's worth. `NotifyDrain`
-counts that, and the drain that may have lost something — a stream's `Idle`
-or `DeviceLost` included — ends with the state read back from the service and
-handed over as a `StateChanged`. Any shorter drain asks the service nothing.
+The service drops no notification for want of room in the mailbox: it holds
+the rest until the client drains, folded so the client learns where its stream
+now stands ([the notify port](../abi/audio.md)), so a drain takes what is
+waiting and asks the service nothing.
 
 ## `audio:` targets
 

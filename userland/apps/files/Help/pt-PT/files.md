@@ -24,8 +24,13 @@ ilegível é recusado, nunca adivinhado.
 O ambiente de trabalho inicia o gestor de ficheiros com a sessão e mantém-no
 na barra de ícones, e este nunca termina: o menu do seu lugar lista os seus
 próprios locais e tudo o que estiver montado, e escolher um abre lá uma
-janela; *Rede* e *Definições…* são as últimas linhas. Um clique no lugar abre
-uma na pasta que as definições escolherem. Pedir uma pasta que já tem uma
+janela; *Rede* e *Definições…* são as últimas linhas. Um volume que pode
+ejetar — uma pen USB, um cartão de memória ou outro disco amovível, ou uma
+imagem de disco ou partilha que montou — abre um submenu com *Ejetar*, e o
+de uma imagem de disco sua que tenha título contém também *Título*: esta
+linha abre um campo com o título do disco, pronto a alterar, e premir
+`Return` escreve o novo no disco. Um clique no lugar abre uma na pasta que
+as definições escolherem. Pedir uma pasta que já tem uma
 janela traz essa janela para a frente, em vez de abrir outra. O menu não tem
 a linha *Sair* — o gestor de ficheiros faz parte do ambiente de trabalho,
 fechar as suas janelas apenas o arruma e, se alguma vez parar, o ambiente de
@@ -119,9 +124,15 @@ se outra coisa ainda o estiver a usar — um documento dele aberto noutra
 aplicação, por exemplo —, fica montado, e volta-se a tentar desmontá-lo
 assim que isso o possa ter libertado. As definições podem, em vez disso,
 manter montado o que abrir até o ejetar ou a sua sessão
-terminar. *Ejetar* retira um volume que montou, a partir do seu ícone ou da
-sua linha na barra de locais, cujo menu de contexto próprio contém *Abrir*
-e *Ejetar*; as suas janelas nele passam primeiro para `/Storage`. Um volume
+terminar. *Ejetar* retira um volume que montou, ou um disco amovível
+enquanto está a usar o próprio computador, a partir do seu ícone, da sua
+linha na barra de locais, cujo menu de contexto próprio contém *Abrir* e
+*Ejetar*, ou do menu do lugar na barra de ícones; as suas janelas nele
+passam primeiro para `/Storage`. Um disco amovível com um ficheiro ainda
+aberto não é ejetado, e é-lhe dito porquê. Quando não tem permissão para
+ejetar um disco amovível — não é a pessoa que está ao computador —, o
+ambiente de trabalho pede o nome e a palavra-passe de um administrador, e
+ejeta-o com o seu consentimento. Um volume
 que desapareceu — removido o seu disco, ou perdido o seu servidor — antes
 de tudo o que nele escreveu ter sido guardado sai da barra, mas mantém o
 seu ícone em `/Storage`, e o que não foi guardado perde-se; *Ejetar* nesse

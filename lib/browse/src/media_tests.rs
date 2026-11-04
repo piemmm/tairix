@@ -272,6 +272,47 @@ fn a_name_ends_only_in_a_file_type_or_an_extension_after_a_stem() {
     assert_eq!(Ending::of("Logo,B60").filetype, Filetype::new(0xB60));
 }
 
+/// A type is saved typed by its file type and, unless RISC OS is its home,
+/// named by its extensions; a sprite file is named by its type alone.
+#[test]
+fn a_save_format_is_typed_by_the_registry() {
+    use super::save_format;
+    let png = save_format(MediaType::ImagePng);
+    assert_eq!(png.filetype(), Filetype::new(0xB60));
+    assert_eq!(png.extensions().collect::<Vec<_>>(), [".png"]);
+    let jpeg = save_format(MediaType::ImageJpeg);
+    assert_eq!(jpeg.extensions().collect::<Vec<_>>(), [".jpg", ".jpeg"]);
+    let sprite = save_format(MediaType::ImageSprite);
+    assert_eq!(sprite.filetype(), Filetype::new(0xFF9));
+    assert_eq!(sprite.extensions().count(), 0, "named by its type alone");
+    let markdown = save_format(MediaType::TextMarkdown);
+    assert_eq!(markdown.filetype(), None, "RISC OS gives it no type");
+    assert!(markdown.extensions().count() > 0);
+}
+
+/// Every type's save format keeps each extension the registry names it by, as
+/// many as a save pick holds: none is refused by the pick's own checks.
+#[test]
+fn a_save_format_keeps_every_extension_the_registry_names() {
+    use super::{save_format, FILETYPE_NAMED};
+    use tairix_abi::window_ipc::SAVE_EXTENSIONS_MAX;
+    for media in ALL {
+        let named: Vec<String> = if FILETYPE_NAMED.contains(media) {
+            Vec::new()
+        } else {
+            EXTENSION_TABLE
+                .iter()
+                .filter(|(held, _)| held == media)
+                .flat_map(|(_, extensions)| extensions.iter())
+                .take(SAVE_EXTENSIONS_MAX)
+                .map(|extension| alloc::format!(".{extension}"))
+                .collect()
+        };
+        let format = save_format(*media);
+        assert_eq!(format.extensions().collect::<Vec<_>>(), named, "{media:?}");
+    }
+}
+
 /// Every ending a type is known by names that type back, extensions first.
 #[test]
 fn a_types_name_endings_read_back_as_the_type() {
@@ -928,6 +969,8 @@ fn a_volume_root_is_pictured_as_its_drive() {
         icon: IconKind::DiskNvme,
         facts: crate::places::VolumeFacts {
             filesystem: String::from("arxfs"),
+            title: String::new(),
+            class: tairix_abi::sysinfo::VolumeClass::Local,
             free: Some(1 << 30),
             availability: tairix_abi::sysinfo::MountAvailability::Available,
             owner: None,

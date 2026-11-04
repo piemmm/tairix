@@ -3629,6 +3629,17 @@ impl<'r> StreamFixture<'r> {
         taken
     }
 
+    /// Run the link to quiescence, every stream event refused `refusal`.
+    fn pump_refused(&mut self, refusal: Errno) {
+        let _ = pump_client_into(
+            &mut self.ns,
+            &mut self.svc,
+            &mut self.fs,
+            self.now,
+            &mut |_, _| Err(refusal),
+        );
+    }
+
     /// Offer `payload` to `socket` without pumping, returning how much of it
     /// the send buffer took.
     fn offer(&mut self, socket: u32, payload: &[u8]) -> usize {
@@ -4028,6 +4039,69 @@ fn received_bytes_a_full_port_cannot_take_stay_in_the_connection_and_arrive_whol
     }
     assert_eq!(received, payload, "every echoed byte arrived, in order");
     assert!(fx.svc.owed_ports().is_empty());
+}
+
+/// Bytes a post refused for the stack's own IPC budget stay in the
+/// connection and the port is watched for room as a full one is — the kernel
+/// wakes the member as the budget frees — so they arrive whole once it does.
+/// Taking the refusal for a delivery consumed bytes the client never had.
+#[test]
+fn received_bytes_the_stacks_budget_refused_stay_owed_and_arrive_whole() {
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+    let sid = fx.established_stream();
+    assert_eq!(fx.offer(sid, b"echo me"), 7);
+    fx.pump_refused(Errno::LimitExceeded);
+    assert_eq!(fx.svc.owed_ports(), [DELIVER_PORT], "watched for room");
+    assert!(
+        !fx.svc.take_starved(),
+        "the budget is the room wake's to report"
+    );
+    assert_eq!(
+        fx.svc.socket_records(0, u16::MAX)[0].recv_q,
+        7,
+        "nothing left the connection"
+    );
+    let delivered = fx.pump_into_room(usize::MAX);
+    assert_eq!(stream_data(&delivered, sid), b"echo me");
+    assert!(fx.svc.owed_ports().is_empty());
+}
+
+/// A post the kernel had no memory for leaves the bytes owed too, but no
+/// port's room reports memory freeing: the stack says a retry is owed, arms
+/// no room wake that would fire at once, and the retry delivers them.
+#[test]
+fn received_bytes_refused_for_kernel_memory_stay_owed_for_the_retry() {
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+    let sid = fx.established_stream();
+    assert_eq!(fx.offer(sid, b"echo me"), 7);
+    fx.pump_refused(Errno::OutOfMemory);
+    assert!(fx.svc.take_starved(), "a retry is owed");
+    assert!(!fx.svc.take_starved(), "asked for once a pass");
+    assert_eq!(
+        fx.svc.socket_records(0, u16::MAX)[0].recv_q,
+        7,
+        "nothing left the connection"
+    );
+    let delivered = fx.pump_into_room(usize::MAX);
+    assert_eq!(stream_data(&delivered, sid), b"echo me");
+    assert!(!fx.svc.take_starved());
+}
+
+/// A post a port refuses for good gives its event up rather than holding it
+/// for ever, nothing waiting on a port that will never take it, and the loss
+/// is counted for the report.
+#[test]
+fn an_event_a_port_refuses_for_good_is_given_up_and_counted() {
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+    let sid = fx.established_stream();
+    assert_eq!(fx.offer(sid, b"echo me"), 7);
+    fx.pump_refused(Errno::MessageTooLarge);
+    assert!(fx.svc.owed_ports().is_empty());
+    assert!(fx.svc.lost_to_report().is_some(), "the loss is reported");
+    assert_eq!(fx.svc.lost_to_report(), None, "once, until it doubles");
 }
 
 /// A send the stack took only part of owes the client one `Room` once at
@@ -5319,16 +5393,10 @@ fn binding_a_datagram_socket_widens_the_broadcast_ports_the_driver_admits() {
     assert!(!fs.rx_filter.expect("policy").admits_broadcast_port(9999));
 }
 
-#[test]
-fn a_notify_refreshes_the_pre_filter_count_with_no_doorbell() {
-    // The defect this closes: a pure receive deliberately rings no
-    // doorbell, so a count carried only on the `Service` reply left
-    // `stats:net/<iface>/rx.filtered` frozen at whatever the last transmit
-    // happened to observe — which is the only figure an operator has for
-    // what the filter is shedding.
+/// A managed `wan` with a static address and no IPv6: it has nothing of its
+/// own to send, so a pump of it is genuinely receive-only.
+fn receive_only_wan() -> Netstack {
     let mut stack = managed_stack();
-    // A statically-addressed, IPv6-free interface has nothing of its own to
-    // send, so the pump below is genuinely receive-only.
     stack
         .apply_interface_config(
             &NetInterfaceConfigMsg {
@@ -5347,6 +5415,76 @@ fn a_notify_refreshes_the_pre_filter_count_with_no_doorbell() {
             t(0),
         )
         .expect("static address");
+    stack
+}
+
+/// A notify saying the link changed makes the pump doorbell and take the link
+/// from the reply, the one report ordered with the stack's own calls; with no
+/// change notified the link stays as recorded and no doorbell rings.
+///
+/// Regression: the link rode the notify, so one that waited in the port
+/// behind a newer `Service` reply set the older link over it.
+#[test]
+fn a_notified_link_change_is_learned_from_the_doorbells_reply() {
+    let mut stack = receive_only_wan();
+    let mut region = rings_region();
+    let mut up = HarvestedService::new(LinkNet::new(), &mut region);
+    settle(&mut stack, &name("wan"), &mut up);
+    let mut pulled = LinkNet::new();
+    pulled.set_link(LinkState::Down);
+    let mut region = rings_region();
+    let mut down = HarvestedService::new(pulled, &mut region);
+    let quiet = stack
+        .service_interface(name("wan"), &mut down, t(9), ServiceHint::default())
+        .expect("a pump with nothing notified");
+    assert_eq!((quiet.link_change, down.doorbells), (None, 0));
+    let changed = stack
+        .service_interface(
+            name("wan"),
+            &mut down,
+            t(10),
+            ServiceHint {
+                link_changed: true,
+                ..ServiceHint::default()
+            },
+        )
+        .expect("a pump told the link changed");
+    assert_eq!(down.doorbells, 1, "the change is learned from a reply");
+    assert_eq!(changed.link_change, Some(LinkState::Down));
+}
+
+/// The pre-filter count only grows over a channel's life, so a notify that
+/// waited in the port behind a newer report cannot take it back.
+#[test]
+fn a_notify_behind_a_newer_count_cannot_take_it_back() {
+    let mut stack = receive_only_wan();
+    let mut region = rings_region();
+    let mut fs = HarvestedService::new(QuietNet, &mut region);
+    settle(&mut stack, &name("wan"), &mut fs);
+    for (at, filtered) in [(9, 100), (10, 90)] {
+        stack
+            .service_interface(
+                name("wan"),
+                &mut fs,
+                t(at),
+                ServiceHint {
+                    filtered: Some(filtered),
+                    ..ServiceHint::default()
+                },
+            )
+            .expect("notify-driven pump");
+    }
+    assert_eq!(stack.counters_records(0, 8)[0].counters.rx_filtered, 100);
+}
+
+#[test]
+fn a_notify_refreshes_the_pre_filter_count_with_no_doorbell() {
+    // The defect this closes: a pure receive deliberately rings no
+    // doorbell, so a count carried only on the `Service` reply left
+    // `stats:net/<iface>/rx.filtered` frozen at whatever the last transmit
+    // happened to observe — which is the only figure an operator has for
+    // what the filter is shedding.
+    let mut stack = receive_only_wan();
     let mut region = rings_region();
     let mut fs = HarvestedService::new(QuietNet, &mut region);
     settle(&mut stack, &name("wan"), &mut fs);
@@ -6634,6 +6772,71 @@ fn a_port_with_no_room_is_owed_the_rest_and_told_it_in_order() {
         "resumed where it stopped"
     );
     assert!(blocked.is_empty());
+}
+
+/// A link event refused for the stack's own budget waits on the port's room
+/// as a full port's does, and one refused for kernel memory on the retry, no
+/// room wake reporting that; neither is taken as told, which left the
+/// socket's view of the link wrong for good.
+#[test]
+fn a_link_event_refused_for_budget_or_memory_is_owed_not_told() {
+    let mut svc = socket_service();
+    let mut stack = two_link_stack();
+    let who = net_caller_as(1000, 17);
+    let id = datagram_bound(&mut svc, &mut stack, &who, 7330);
+    join_group(&mut svc, &mut stack, &who, id, Ipv4Addr::new(239, 0, 0, 5));
+    stack.publish_links();
+    let budget = svc.tell_links(stack.links(), stack.link_epoch(), &mut |_, _| {
+        Err(Errno::LimitExceeded)
+    });
+    assert_eq!(budget, [0x5000], "the port is watched for room");
+    assert!(!svc.take_starved());
+    let memory = svc.tell_links(stack.links(), stack.link_epoch(), &mut |_, _| {
+        Err(Errno::OutOfMemory)
+    });
+    assert!(memory.is_empty(), "no room wake reports kernel memory");
+    assert!(svc.take_starved(), "a retry is owed");
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [(id, name("wan"), true), (id, name("lan"), true)],
+        "each link told once the posts go through"
+    );
+}
+
+/// A port gone with its client takes nothing more, and nothing is lost: an
+/// event to it is given up uncounted, as a datagram to it is.
+#[test]
+fn an_event_for_a_port_that_is_gone_is_given_up_uncounted() {
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+    let sid = fx.established_stream();
+    assert_eq!(fx.offer(sid, b"echo me"), 7);
+    fx.pump_refused(Errno::NotFound);
+    assert!(fx.svc.owed_ports().is_empty());
+    assert_eq!(fx.svc.lost_to_report(), None, "nobody was there to lose it");
+    fx.svc.datagram_posted(Ok(()));
+    fx.svc.datagram_posted(Err(Errno::NotFound));
+    assert_eq!(fx.svc.lost_to_report(), None);
+    fx.svc.datagram_posted(Err(Errno::WouldBlock));
+    assert_eq!(
+        fx.svc.lost_to_report(),
+        Some(1),
+        "a refusal by a port still there"
+    );
+}
+
+/// Deliveries given up on are reported by their running total each time it
+/// doubles, so a flood of losses costs a record per doubling.
+#[test]
+fn deliveries_given_up_on_are_reported_each_time_their_count_doubles() {
+    let mut svc = socket_service();
+    assert_eq!(svc.lost_to_report(), None, "nothing lost, nothing said");
+    let mut reported = Vec::new();
+    for _ in 0..9 {
+        svc.datagram_posted(Err(Errno::WouldBlock));
+        reported.extend(svc.lost_to_report());
+    }
+    assert_eq!(reported, [1, 2, 4, 8]);
 }
 
 #[test]

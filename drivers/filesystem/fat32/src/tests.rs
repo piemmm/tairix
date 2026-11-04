@@ -1831,10 +1831,7 @@ mod format {
     fn stats_track_allocation_and_identity_is_remount_stable() {
         let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
         let identity = fs.volume_identity();
-        assert_ne!(
-            identity, [0u8; 16],
-            "the tag byte keeps the identity non-nil"
-        );
+        assert_ne!(identity, [0u8; 16], "a formatted volume has an identity");
 
         let before = fs.stats().expect("stats");
         assert!(before.total_blocks > 0);
@@ -2484,6 +2481,282 @@ mod format {
             ),
             (Time64::UNIX_EPOCH, Time64::UNIX_EPOCH, Time64::UNIX_EPOCH)
         );
+    }
+
+    fn title(text: &str) -> VolumeTitle {
+        VolumeTitle::new(text).expect("a title")
+    }
+
+    fn label_text(fs: &mut Fat32<VecBlock>) -> std::string::String {
+        std::string::String::from(fs.label().expect("a label").as_str())
+    }
+
+    /// The volume the probe reads from `image`.
+    fn probed(image: &mut VecBlock) -> tairix_fsprobe::ProbedVolume {
+        let mut dev = tairix_bytedev::ByteDevice::new(image).expect("geometry");
+        match tairix_fsprobe::recognise(&mut dev) {
+            Ok(Some(Recognised::Volume(volume))) => volume,
+            other => panic!("no FAT32 volume: {other:?}"),
+        }
+    }
+
+    /// The root directory's first cluster in `image`, as entries.
+    fn root_entries(image: &VecBlock) -> Vec<RawEntry> {
+        let sector: &[u8; 512] = image.store[..512].try_into().expect("a sector");
+        let bpb = Fat32Bpb::parse(sector).expect("a parameter block");
+        let start = bpb.cluster_byte(bpb.root_cluster).expect("a root");
+        let at = usize::try_from(start).expect("fits");
+        let len = usize::try_from(bpb.cluster_bytes()).expect("fits");
+        image.store[at..at + len]
+            .as_chunks::<DIR_ENTRY_LEN>()
+            .0
+            .to_vec()
+    }
+
+    /// A label is kept in the root directory's label entry and in both boot
+    /// sectors, reads back from the mount, a remount and the probe, and is
+    /// never listed as a file.
+    #[test]
+    fn a_label_is_kept_in_the_root_entry_and_both_boot_sectors() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        fs.set_label(&title("BACKUP 2025")).expect("labelled");
+        assert_eq!(label_text(&mut fs), "BACKUP 2025");
+        let root = fs.root();
+        assert_eq!(listed(&mut fs, root, 0, &[]), Ok(Vec::new()));
+        let mut image = fs.into_block();
+        let sector = &image.store[..512];
+        let backup = usize::from(u16::from_le_bytes([sector[50], sector[51]])) * SECTOR_SIZE;
+        assert_eq!(&sector[71..82], b"BACKUP 2025");
+        assert_eq!(&image.store[backup + 71..backup + 82], b"BACKUP 2025");
+        let labels: Vec<RawEntry> = root_entries(&image)
+            .into_iter()
+            .filter(|raw| raw[0] != DELETED_ENTRY && raw[11] == ATTR_VOLUME_ID)
+            .collect();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(&labels[0][..11], b"BACKUP 2025");
+        assert_eq!(probed(&mut image).label(), b"BACKUP 2025");
+        let mut fs = Fat32::open(image).expect("remounts");
+        assert_eq!(label_text(&mut fs), "BACKUP 2025");
+    }
+
+    /// A label a volume lacks takes the root's first deleted slot, and a
+    /// relabel rewrites that one entry.
+    #[test]
+    fn a_label_takes_the_first_free_slot_and_a_relabel_its_own() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        let root = fs.root();
+        fs.create(root, b"gone.txt", NodeKind::RegularFile, &FILE_RECORD)
+            .expect("create");
+        fs.create(root, b"kept.txt", NodeKind::RegularFile, &FILE_RECORD)
+            .expect("create");
+        fs.remove(root, b"gone.txt").expect("remove");
+        fs.set_label(&title("ONE")).expect("labelled");
+        fs.set_label(&title("TWO")).expect("relabelled");
+        let mut image = fs.into_block();
+        let entries = root_entries(&image);
+        assert_eq!(&entries[0][..11], b"TWO        ");
+        assert_eq!(entries[0][11], ATTR_VOLUME_ID);
+        let live = entries.iter().filter(|raw| raw[0] != DELETED_ENTRY);
+        assert_eq!(live.filter(|raw| is_label(raw)).count(), 1);
+        assert_eq!(probed(&mut image).label(), b"TWO");
+    }
+
+    /// Every character a short name spells makes a label.
+    #[test]
+    fn the_characters_a_short_name_spells_make_a_label() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        for text in ["AZ09!#$%&'(", ")-@^_`{}~ X"] {
+            fs.set_label(&title(text)).expect("labelled");
+            assert_eq!(label_text(&mut fs), text);
+        }
+    }
+
+    /// A label FAT cannot record is refused and nothing written: lower case,
+    /// which a label does not hold, a character no short name spells, a
+    /// twelfth character, a space opening or closing it, and the placeholder
+    /// that reads back as no label.
+    #[test]
+    fn a_label_fat_cannot_record_is_refused_and_nothing_written() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        fs.set_label(&title("KEPT")).expect("labelled");
+        let before = fs.dev.device().store.clone();
+        for (text, refusal) in [
+            ("photos", DriverError::OutOfRange),
+            ("MY.DISK", DriverError::OutOfRange),
+            ("CAFÉ", DriverError::OutOfRange),
+            ("TWELVE CHARS", DriverError::LengthOutOfRange),
+            (" LEADING", DriverError::OutOfRange),
+            ("TRAILING ", DriverError::OutOfRange),
+            ("NO NAME", DriverError::OutOfRange),
+        ] {
+            assert_eq!(fs.set_label(&title(text)), Err(refusal), "{text}");
+        }
+        assert_eq!(fs.dev.device().store, before);
+        assert_eq!(label_text(&mut fs), "KEPT");
+    }
+
+    /// The empty title deletes the label entry and writes the placeholder
+    /// back to the boot sector, and the volume reads as unlabelled.
+    #[test]
+    fn the_empty_title_removes_the_label() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        fs.set_label(&title("DATA")).expect("labelled");
+        fs.set_label(&title("")).expect("cleared");
+        assert_eq!(label_text(&mut fs), "");
+        let mut image = fs.into_block();
+        assert_eq!(&image.store[71..82], b"NO NAME    ");
+        let entries = root_entries(&image);
+        let labelled = entries
+            .iter()
+            .any(|raw| raw[0] != DELETED_ENTRY && is_label(raw));
+        assert!(!labelled);
+        assert!(probed(&mut image).label().is_empty());
+    }
+
+    /// The root slots the volume probe reads a label from: sixteen, in a
+    /// 64 MiB volume's one-sector clusters.
+    const LABEL_WINDOW_SLOTS: u64 = (SECTOR_SIZE / DIR_ENTRY_LEN) as u64;
+
+    /// Fill the root of `fs` with files from its first slot up to `slots`.
+    fn fill_root(fs: &mut Fat32<VecBlock>, slots: u64) {
+        let mut pos = SlotPos::at(first_cluster(fs.root()));
+        let name = |slot: u64| short_name(std::format!("F{slot:07X}").as_bytes(), b"BIN");
+        while pos.slot < slots {
+            let entry = Fat32::<VecBlock>::build_short_entry(
+                &name(pos.slot),
+                0x20,
+                0,
+                0,
+                EntryStamps::NONE,
+            );
+            fs.put_slot(&mut pos, &entry).expect("fill");
+        }
+    }
+
+    /// Past occupied root slots a label takes the last free one the volume
+    /// probe reads, and is read back from that entry alone: neither boot
+    /// sector declares a label of its own.
+    #[test]
+    fn a_label_past_occupied_slots_lies_where_the_probe_reads_it() {
+        let mut image = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL)
+            .expect("format")
+            .into_block();
+        for sector in [0, usize::from(BACKUP_BOOT_SECTOR)] {
+            image.store[sector * SECTOR_SIZE + EXT_BOOT_SIG_AT] = 0;
+        }
+        let mut fs = Fat32::open(image).expect("mounts");
+        fill_root(&mut fs, LABEL_WINDOW_SLOTS - 1);
+        fs.set_label(&title("LAST")).expect("labelled");
+        assert_eq!(label_text(&mut fs), "LAST");
+        let mut image = fs.into_block();
+        let last = usize::try_from(LABEL_WINDOW_SLOTS - 1).expect("fits");
+        assert_eq!(&root_entries(&image)[last][..11], b"LAST       ");
+        assert_eq!(probed(&mut image).label(), b"LAST");
+    }
+
+    /// A root whose slots the volume probe reads are all taken refuses a new
+    /// label rather than placing one where the probe would not find it, and
+    /// writes nothing; the empty title, needing no slot, still goes through.
+    #[test]
+    fn a_full_label_window_refuses_a_new_label() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        fill_root(&mut fs, LABEL_WINDOW_SLOTS);
+        let before = fs.dev.device().store.clone();
+        assert_eq!(fs.set_label(&title("FULL")), Err(DriverError::NoSpace));
+        assert_eq!(fs.dev.device().store, before);
+        fs.set_label(&title("")).expect("no slot to find");
+    }
+
+    /// A device refusing writes, as a volume granted read-only does, refuses
+    /// the label and is left as it was.
+    #[test]
+    fn a_device_refusing_writes_refuses_a_label() {
+        struct Locked(VecBlock);
+
+        impl Block for Locked {
+            fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+                self.0.geometry()
+            }
+
+            fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+                self.0.read_blocks(lba, buf)
+            }
+
+            fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
+                Err(DriverError::ReadOnly)
+            }
+
+            fn flush(&mut self) -> Result<(), DriverError> {
+                Ok(())
+            }
+        }
+
+        let image = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL)
+            .expect("format")
+            .into_block();
+        let before = image.store.clone();
+        let mut fs = Fat32::open(Locked(image)).expect("mounts");
+        assert_eq!(fs.set_label(&title("LOCKED")), Err(DriverError::ReadOnly));
+        assert_eq!(fs.label().expect("a label").as_str(), "");
+        assert_eq!(fs.into_block().0.store, before);
+    }
+
+    /// A relabel changes no part of the volume's identity: a remount and the
+    /// volume probe find the one it had.
+    #[test]
+    fn a_relabel_keeps_the_identity() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        let identity = fs.volume_identity();
+        fs.set_label(&title("RENAMED")).expect("labelled");
+        let mut image = fs.into_block();
+        assert_eq!(probed(&mut image).identity, identity);
+        let fs = Fat32::open(image).expect("remounts");
+        assert_eq!(fs.volume_identity(), identity);
+    }
+
+    /// A device taking `writes` more writes, then failing every one.
+    struct Faulting {
+        inner: VecBlock,
+        writes: usize,
+    }
+
+    impl Block for Faulting {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            self.inner.geometry()
+        }
+
+        fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+            self.inner.read_blocks(lba, buf)
+        }
+
+        fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+            let Some(left) = self.writes.checked_sub(1) else {
+                return Err(DriverError::DeviceFault);
+            };
+            self.writes = left;
+            self.inner.write_blocks(lba, buf)
+        }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    /// A label whose writing fails part-way leaves the volume refusing every
+    /// later change, damaged, rather than building on a label half-written.
+    #[test]
+    fn a_label_failing_part_way_leaves_the_volume_damaged() {
+        let inner = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL)
+            .expect("format")
+            .into_block();
+        let mut fs = Fat32::open(Faulting { inner, writes: 1 }).expect("mounts");
+        assert_eq!(fs.set_label(&title("TORN")), Err(DriverError::DeviceFault));
+        let root = fs.root();
+        assert_eq!(
+            fs.create(root, b"LATER.TXT", NodeKind::RegularFile, &FILE_RECORD),
+            Err(DriverError::ReadOnly)
+        );
+        assert_eq!(fs.set_label(&title("AGAIN")), Err(DriverError::ReadOnly));
     }
 }
 

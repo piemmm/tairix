@@ -75,13 +75,15 @@ pub enum MotionInteraction {
     PointerRestore,
     /// One crossing of a busy progress trace's sweep.
     ProgressSweep,
+    /// What a drag carries gathering under the pointer from where it stood.
+    DragGather,
 }
 
 impl MotionInteraction {
     /// Every interaction, in the order a [`MotionTheme`]'s duration table
     /// holds them: the table is indexed by the variant, so this order is the
     /// meaning of [`MotionTheme::new`]'s argument.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::HoverEnter,
         Self::HoverExit,
         Self::PressCompress,
@@ -102,6 +104,7 @@ impl MotionInteraction {
         Self::PointerEnlarge,
         Self::PointerRestore,
         Self::ProgressSweep,
+        Self::DragGather,
     ];
 
     /// How many durations a [`MotionTheme`] carries.

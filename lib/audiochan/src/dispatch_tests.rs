@@ -17,6 +17,7 @@ use tairix_abi::driver::audio_channel::{
 };
 use tairix_abi::driver::audio_ring::{aligned_region, PcmGeometry, REGION_ALIGN_PADDING};
 use tairix_abi::reply::decode_status_reply;
+use tairix_abi::waitset::WaitSetOp;
 use tairix_abi::{DriverError, Errno, ProcId};
 
 use super::{ChannelIo, Dispatcher, MappedRegion};
@@ -57,6 +58,10 @@ struct MockIo {
     short: Vec<(usize, usize, u32)>,
     /// What the next mapping is refused with, standing for a grant gone.
     refuse_map: Option<Errno>,
+    /// What the next notifications are refused with, one send each.
+    refuse_notify: VecDeque<Errno>,
+    /// Notifications offered, taken or refused.
+    offered: usize,
 }
 
 impl MockIo {
@@ -70,6 +75,8 @@ impl MockIo {
             live: 0,
             short: Vec::new(),
             refuse_map: None,
+            refuse_notify: VecDeque::new(),
+            offered: 0,
         }
     }
 
@@ -129,9 +136,14 @@ impl ChannelIo for MockIo {
         self.live -= 1;
     }
 
-    fn notify(&mut self, port: u64, frame: &[u8]) {
+    fn notify(&mut self, port: u64, frame: &[u8]) -> Result<(), Errno> {
         let notify = AudioChannelNotify::decode(frame).expect("a whole notify frame");
+        self.offered += 1;
+        if let Some(refused) = self.refuse_notify.pop_front() {
+            return Err(refused);
+        }
         self.notified.push((port, notify));
+        Ok(())
     }
 
     fn short_region(&mut self, mapped: usize, expected: usize, ring_frames: u32) {
@@ -382,4 +394,185 @@ fn a_re_attach_refused_its_mapping_leaves_the_endpoint_detached() {
     assert!(!dispatcher.server.is_attached(0));
     assert_eq!(dispatcher.io.live, 0, "the old region was given back");
     assert!(!dispatcher.server.audio().events_enabled);
+}
+
+/// The serve loop's room members, as a test sees them.
+#[derive(Default)]
+struct Members {
+    armed: Vec<u64>,
+    /// Whether the kernel refuses every member.
+    refuse: bool,
+}
+
+impl Members {
+    /// Add or delete the room member of `port`, answering whether it took.
+    fn apply(&mut self, op: WaitSetOp, port: u64) -> bool {
+        match op {
+            WaitSetOp::Add if self.refuse => false,
+            WaitSetOp::Add => {
+                assert!(!self.armed.contains(&port), "a port's room is armed once");
+                self.armed.push(port);
+                true
+            }
+            WaitSetOp::Del => {
+                let at = self
+                    .armed
+                    .iter()
+                    .position(|armed| *armed == port)
+                    .expect("only an armed room is disarmed");
+                self.armed.remove(at);
+                true
+            }
+        }
+    }
+}
+
+/// Bring the room members in line with what `dispatcher` holds, answering
+/// whether every one it needs is armed.
+fn arm_rooms(dispatcher: &mut TestDispatcher, members: &mut Members) -> bool {
+    dispatcher.watch(&mut |op, port| members.apply(op, port))
+}
+
+/// Fault the device, so it tells the attached sink its endpoint faulted.
+fn fault_sink(dispatcher: &mut TestDispatcher) {
+    dispatcher.server.audio_mut().fault = Some(DriverError::DeviceFault);
+    dispatcher.on_event();
+}
+
+/// The sink's fault, as told at its attachment's port.
+fn faulted() -> (u64, AudioChannelNotify) {
+    (
+        NOTIFY_PORT,
+        AudioChannelNotify::Faulted {
+            endpoint: SINK,
+            reason: Errno::DeviceFault,
+        },
+    )
+}
+
+/// A fault the mixer's port refused for want of room, or this driver's
+/// budget, is held, its port's room watched, and told once room comes; then
+/// the room is let go. Regression: the refusal used to drop the fault, so the
+/// mixer never learned the endpoint would raise nothing more.
+#[test]
+fn a_notification_refused_for_room_or_budget_is_told_once_room_comes() {
+    for refused in [Errno::WouldBlock, Errno::LimitExceeded] {
+        let mut dispatcher = dispatcher();
+        ready(&mut dispatcher, SINK);
+        dispatcher.io.refuse_notify.push_back(refused);
+        fault_sink(&mut dispatcher);
+        assert!(dispatcher.io.notified.is_empty(), "{refused:?}: held");
+        let mut members = Members::default();
+        assert!(arm_rooms(&mut dispatcher, &mut members), "{refused:?}");
+        assert_eq!(
+            members.armed,
+            [NOTIFY_PORT],
+            "{refused:?}: its room is watched"
+        );
+        assert!(!dispatcher.starved(), "{refused:?}");
+        dispatcher.on_room();
+        assert_eq!(dispatcher.io.notified, [faulted()], "{refused:?}");
+        assert!(arm_rooms(&mut dispatcher, &mut members), "{refused:?}");
+        assert!(
+            members.armed.is_empty(),
+            "{refused:?}: nothing owed, nothing watched"
+        );
+    }
+}
+
+/// A port's held notifications go in the order they happened, a later one
+/// held behind the first rather than sent around it, and a held loss absorbs
+/// the next, its frames summed.
+#[test]
+fn held_notifications_keep_their_order_and_a_held_loss_absorbs_the_next() {
+    let mut dispatcher = dispatcher();
+    ready(&mut dispatcher, SINK);
+    dispatcher.server.audio_mut().add_xrun = 5;
+    dispatcher.io.refuse_notify.push_back(Errno::WouldBlock);
+    for _ in 0..2 {
+        dispatcher.server.audio_mut().pending.xrun = 1 << SINK;
+        dispatcher.on_event();
+    }
+    fault_sink(&mut dispatcher);
+    assert!(
+        dispatcher.io.notified.is_empty(),
+        "held behind the first refusal"
+    );
+    dispatcher.on_room();
+    let told: Vec<AudioChannelNotify> = dispatcher
+        .io
+        .notified
+        .iter()
+        .map(|(_, told)| *told)
+        .collect();
+    assert!(
+        matches!(
+            told.as_slice(),
+            [
+                AudioChannelNotify::Xrun {
+                    lost_frames: 10,
+                    ..
+                },
+                AudioChannelNotify::Faulted { .. },
+            ]
+        ),
+        "{told:?}"
+    );
+}
+
+/// A notification the kernel had no memory for waits on the pause the serve
+/// loop times, with no room member armed for it — one would report room at
+/// once, for a send the kernel would refuse again — and is told when the
+/// pause has run. Regression: the refusal used to drop it.
+#[test]
+fn a_notification_refused_for_memory_waits_on_the_pause_with_no_room_watched() {
+    let mut dispatcher = dispatcher();
+    ready(&mut dispatcher, SINK);
+    dispatcher.io.refuse_notify.push_back(Errno::OutOfMemory);
+    fault_sink(&mut dispatcher);
+    assert!(dispatcher.starved());
+    let mut members = Members::default();
+    assert!(arm_rooms(&mut dispatcher, &mut members));
+    assert!(members.armed.is_empty(), "nothing armed for kernel memory");
+    dispatcher.on_room();
+    assert_eq!(dispatcher.io.notified, [faulted()]);
+    assert!(!dispatcher.starved());
+}
+
+/// A notification refused for good is given up once — counted, reported and
+/// never offered again — and one to a port gone with its mixer is dropped and
+/// reported to nobody.
+#[test]
+fn a_refusal_for_good_is_reported_once_and_a_port_gone_is_not() {
+    for (refused, reported) in [(Errno::PermissionDenied, Some(1)), (Errno::NotFound, None)] {
+        let mut dispatcher = dispatcher();
+        ready(&mut dispatcher, SINK);
+        dispatcher.io.refuse_notify.push_back(refused);
+        fault_sink(&mut dispatcher);
+        assert_eq!(dispatcher.given_up(), reported, "{refused:?}");
+        assert!(!dispatcher.starved(), "{refused:?}: nothing held");
+        let mut members = Members::default();
+        assert!(arm_rooms(&mut dispatcher, &mut members), "{refused:?}");
+        assert!(members.armed.is_empty(), "{refused:?}");
+        dispatcher.on_room();
+        assert_eq!(dispatcher.io.offered, 1, "{refused:?}: never offered again");
+        assert!(dispatcher.io.notified.is_empty(), "{refused:?}");
+    }
+}
+
+/// A port whose room cannot be watched is answered, so the serve loop offers
+/// what it is owed again once a pause has run rather than waiting on a wake
+/// that never comes.
+#[test]
+fn a_port_whose_room_cannot_be_watched_is_left_to_the_pause() {
+    let mut dispatcher = dispatcher();
+    ready(&mut dispatcher, SINK);
+    dispatcher.io.refuse_notify.push_back(Errno::WouldBlock);
+    fault_sink(&mut dispatcher);
+    let mut members = Members {
+        armed: Vec::new(),
+        refuse: true,
+    };
+    assert!(!arm_rooms(&mut dispatcher, &mut members));
+    assert!(members.armed.is_empty());
 }

@@ -104,9 +104,9 @@ use core::mem::size_of;
 
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
-    FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned, VolumeHost,
-    VolumeStats,
+    FilesystemAttrsProvider, FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats,
+    FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity,
+    Unpinned, VolumeHost, VolumeStats, VolumeTitle,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -1529,6 +1529,21 @@ impl<F: FilesystemStats> FilesystemStats for CachedFs<F> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
         // Volume accounting is live driver state, never cached.
         self.inner.stats()
+    }
+}
+
+impl<F: FilesystemRead + FilesystemLabel> FilesystemLabel for CachedFs<F> {
+    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
+        self.inner.label()
+    }
+
+    fn set_label(&mut self, title: &VolumeTitle) -> Result<(), DriverError> {
+        let result = self.inner.set_label(title);
+        // A format may keep its title in the root's own record, as AmigaDOS
+        // keeps it in the root block.
+        let root = self.inner.root().raw();
+        self.invalidate_stat(root);
+        result
     }
 }
 

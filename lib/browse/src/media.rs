@@ -1598,8 +1598,58 @@ const _: () = {
         }
         row += 1;
     }
-    assert!(longest < tairix_abi::window_ipc::SAVE_ENDING_MAX);
+    assert!(longest < tairix_abi::window_ipc::SAVE_EXTENSION_MAX);
 };
+
+/// The types RISC OS is home to that other systems also name by an extension:
+/// a document of one is named by its file type alone — recorded where the
+/// volume records one, its `,xxx` where not — and by an extension only where
+/// the user writes one.
+const FILETYPE_NAMED: &[MediaType] = &[MediaType::ImageSprite, MediaType::ArcFs];
+
+/// The extension a new document of `media` is named with: the registry's
+/// first for it, but none for a type named by its file type alone.
+#[must_use]
+pub fn named_extension(media: MediaType) -> Option<&'static str> {
+    if FILETYPE_NAMED.contains(&media) {
+        return None;
+    }
+    EXTENSION_TABLE
+        .iter()
+        .find(|(held, _)| *held == media)
+        .and_then(|(_, extensions)| extensions.first().copied())
+}
+
+/// The format a document of `media` is saved in: the RISC OS file type a new
+/// file of it is given, and, for a type not named by its file type alone, its
+/// extensions, most usual first, as many as a save pick carries.
+#[must_use]
+pub fn save_format(media: MediaType) -> tairix_abi::window_ipc::SaveFormat {
+    let filetype = FILETYPE_TABLE
+        .iter()
+        .find(|(held, _)| *held == media)
+        .and_then(|(_, codes)| codes.first())
+        .and_then(|code| u16::from_str_radix(code, 16).ok())
+        .and_then(Filetype::new);
+    let mut format = tairix_abi::window_ipc::SaveFormat::new(filetype);
+    if !FILETYPE_NAMED.contains(&media) {
+        let extensions = EXTENSION_TABLE
+            .iter()
+            .filter(|(held, _)| *held == media)
+            .flat_map(|(_, extensions)| extensions.iter());
+        for extension in extensions.take(tairix_abi::window_ipc::SAVE_EXTENSIONS_MAX) {
+            let mut dotted = [0u8; tairix_abi::window_ipc::SAVE_EXTENSION_MAX];
+            dotted[0] = b'.';
+            dotted[1..=extension.len()].copy_from_slice(extension.as_bytes());
+            // Every extension the registry holds fits, which the table's own
+            // check proves at compile time.
+            if let Ok(dotted) = core::str::from_utf8(&dotted[..=extension.len()]) {
+                let _ = format.push_extension(dotted);
+            }
+        }
+    }
+    format
+}
 
 /// The endings a name of `media` is known by — each extension after a `.`,
 /// then the RISC OS filetype a new file of it is given after a `,` — as

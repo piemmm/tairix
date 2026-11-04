@@ -1,6 +1,6 @@
 //! Unit tests for the terminal profile document.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
@@ -14,7 +14,8 @@ use tairix_colour::Rgb;
 use tairix_appconf::{Keys, Live, Registry};
 
 use super::{
-    Invalidation, Profile, ProfileKey, DEFAULT_FONT_SIZE_PX, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX,
+    Invalidation, Profile, ProfileKey, DEFAULT_FONT_SIZE_PX, DEFAULT_SCROLLBACK_LINES,
+    MAX_FONT_SIZE_PX, MAX_SCROLLBACK_LINES, MIN_FONT_SIZE_PX,
 };
 
 /// `key`'s setting on `profile`, as the store spells it.
@@ -67,6 +68,7 @@ fn edited_profile() -> Profile {
     Profile {
         scheme: Scheme::Contrast,
         font_size_px: DEFAULT_FONT_SIZE_PX + 2,
+        scrollback_lines: 1200,
         effects: Effects {
             opacity: MIN_OPACITY,
             blur: 250,
@@ -377,6 +379,7 @@ fn clamp_bounds_font_size_and_every_effect() {
     let mut profile = Profile {
         scheme: Scheme::System,
         font_size_px: MIN_FONT_SIZE_PX - 1,
+        scrollback_lines: MAX_SCROLLBACK_LINES + 1,
         effects: Effects {
             opacity: MIN_OPACITY - 1,
             blur: FULL + 1,
@@ -390,6 +393,7 @@ fn clamp_bounds_font_size_and_every_effect() {
     };
     profile.clamp();
     assert_eq!(profile.font_size_px, MIN_FONT_SIZE_PX);
+    assert_eq!(profile.scrollback_lines, MAX_SCROLLBACK_LINES);
     assert_eq!(profile.effects.opacity, MIN_OPACITY);
     assert_eq!(profile.effects.blur, FULL);
     assert_eq!(profile.effects.scanlines, FULL);
@@ -401,6 +405,51 @@ fn clamp_bounds_font_size_and_every_effect() {
     profile.font_size_px = MAX_FONT_SIZE_PX + 1;
     profile.clamp();
     assert_eq!(profile.font_size_px, MAX_FONT_SIZE_PX);
+}
+
+/// The scrollback keeps 500 lines unless the user says otherwise, any count
+/// up to its bound is theirs to set — none among them — and one past it is
+/// refused rather than cut down, as every bounded key is.
+#[test]
+fn the_scrollback_limit_is_the_users_within_its_bound() {
+    assert_eq!(
+        Profile::default().scrollback_lines,
+        DEFAULT_SCROLLBACK_LINES
+    );
+    assert_eq!(DEFAULT_SCROLLBACK_LINES, 500);
+    for lines in [0, 1, 500, MAX_SCROLLBACK_LINES] {
+        let mut profile = Profile::default();
+        assert!(profile.read(ProfileKey::ScrollbackLines, &lines.to_string()));
+        assert_eq!(profile.scrollback_lines, lines);
+        assert_eq!(
+            spelled(&profile, ProfileKey::ScrollbackLines),
+            lines.to_string()
+        );
+    }
+    let mut profile = Profile::default();
+    for refused in ["10001", "-1", "many", ""] {
+        assert!(
+            !profile.read(ProfileKey::ScrollbackLines, refused),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(profile.scrollback_lines, DEFAULT_SCROLLBACK_LINES);
+    assert_eq!(ProfileKey::ScrollbackLines.name(), "scrollback.lines");
+}
+
+/// A changed limit is a scrollback change alone: nothing is repainted for it.
+#[test]
+fn a_changed_scrollback_limit_invalidates_only_the_scrollback() {
+    let was = Profile::default();
+    let now = Profile {
+        scrollback_lines: 2000,
+        ..was
+    };
+    let stale = Invalidation::between(&was, &now);
+    assert!(stale.scrollback());
+    assert!(!stale.repaints());
+    assert!(!stale.metrics() && !stale.blur());
+    assert!(!Invalidation::between(&was, &was).scrollback());
 }
 
 #[test]

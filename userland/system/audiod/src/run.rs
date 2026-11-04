@@ -4,7 +4,8 @@
 //! It is the process half of `tairix_audiod`: it claims the reserved
 //! `audio-v1` rendezvous, binds one notify port per device channel it
 //! adopts, and parks on a wait set over {control endpoint, every device's
-//! notify port, the seat's lease} for the life of the machine. Nothing spins:
+//! notify port, the seat's lease, room in a client mailbox a held wake waits
+//! on} for the life of the machine. Nothing spins:
 //! the device's own period interrupt reaches this loop as a driver notify,
 //! and there is no audio tick anywhere in the system. Whenever the number of
 //! capture streams moving frames changes, it publishes the count as the
@@ -18,7 +19,8 @@
 //!   the driver, a client ring is created by the client and adopted *from*
 //!   its grant.
 //! * `RtChannel` — one `ipc_call` per `audiochan-v1` control operation.
-//! * `RtNotifier` — one `ipc_send` per client wake.
+//! * `RtNotifier` — one `ipc_send` per client wake, its refusal answered so
+//!   the engine holds what waiting would deliver.
 //!
 //! On the host it is an inert stub, so `cargo build --workspace`, clippy and
 //! fmt still cover the file while the host test build never links the
@@ -40,6 +42,7 @@ mod program {
         AudioRequest, AUDIO_ENDPOINT, AUDIO_MAX_REPLY, AUDIO_MAX_REQUEST, AUDIO_NOTIFY_LEN,
     };
     use tairix_abi::driver::audio_channel::AUDIO_CHANNEL_NOTIFY_LEN;
+    use tairix_abi::ipc::MemoryPause;
     use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
     use tairix_abi::reply::encode_status_reply;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -56,12 +59,20 @@ mod program {
     /// memory bound, not a capacity.
     const ENDPOINT_DEPTH: usize = 8;
 
+    /// Notifications the one driver a device channel's notify port admits may
+    /// have queued for the mixer's next drain (a fail-closed memory bound).
+    const CHANNEL_NOTIFY_DEPTH: usize = 16;
+
     /// Wait-set token of the control endpoint.
     const CONTROL_TOKEN: u64 = 0;
 
     /// Wait-set token of the seat's lease notice; device tokens count up from
     /// one, so the top of the range is free.
     const LEASE_TOKEN: u64 = u64::MAX;
+
+    /// Wait-set token of room in every client mailbox a held wake waits on,
+    /// beside the lease's at the top of the range.
+    const ROOM_TOKEN: u64 = u64::MAX - 1;
 
     /// The engine over this process's live seams.
     type Service = AudioService<RtRegions, RtNotifier, ClockDelay>;
@@ -202,8 +213,8 @@ mod program {
     struct RtNotifier;
 
     impl tairix_audiod::Notifier for RtNotifier {
-        fn notify(&mut self, endpoint: u64, frame: &[u8]) {
-            let _ = tairix_rt::ipc_send(endpoint, frame);
+        fn notify(&mut self, endpoint: u64, frame: &[u8]) -> Result<(), Errno> {
+            tairix_rt::ipc_send(endpoint, frame)
         }
     }
 
@@ -301,8 +312,9 @@ mod program {
         }
     }
 
-    /// Park on the wait set and serve control requests, device notifies and
-    /// the seat's lease for the life of the service.
+    /// Park on the wait set and serve control requests, device notifies, the
+    /// seat's lease and room for held client wakes for the life of the
+    /// service.
     fn serve(set: u64, pid: u64) -> i32 {
         let mut service = AudioService::new(RtRegions::new(), RtNotifier, ClockDelay::new());
         let (mut devices_notice, from) = ChangeNotice::resume(NoticeTopic::AudioDevices);
@@ -311,12 +323,29 @@ mod program {
         let mut reply = [0u8; AUDIO_MAX_REPLY];
         let mut notify = [0u8; NOTIFY_BUF];
         let mut published = None;
+        let timed_out = -i64::from(Errno::TimedOut.as_i32());
+        let mut member = |op: WaitSetOp, mailbox: u64| {
+            tairix_rt::waitset_ctl(set, op, WaitSourceKind::PortRoom, mailbox, ROOM_TOKEN) == 0
+        };
+        let mut pause = MemoryPause::new();
         follow_seat(&mut service);
         loop {
+            if pause.ran_out(tairix_rt::clock_get) {
+                service.wakes().flush();
+            }
             publish_captures(&service, &mut published);
             publish_devices(&service, &mut devices_notice);
+            report_given_up(&mut service);
+            // A mailbox whose room cannot be watched waits on the pause too,
+            // since nothing else would report it.
+            let watched = service.wakes().watch(&mut member);
+            pause.keep(!watched || service.wakes().starved(), tairix_rt::clock_get);
+            let timeout = pause.bound(u64::MAX, tairix_rt::clock_get);
             let mut token = 0u64;
-            let woke = tairix_rt::waitset_wait(set, u64::MAX, &mut token);
+            let woke = tairix_rt::waitset_wait(set, timeout, &mut token);
+            if woke == timed_out {
+                continue;
+            }
             if woke < 0 {
                 return exit::NO_SERVICE;
             }
@@ -327,6 +356,7 @@ mod program {
             match token {
                 CONTROL_TOKEN => serve_control(&mut service, set, pid, &mut request, &mut reply),
                 LEASE_TOKEN => follow_seat(&mut service),
+                ROOM_TOKEN => service.wakes().flush(),
                 device => drain_device(&mut service, device, &mut notify),
             }
         }
@@ -412,6 +442,26 @@ mod program {
         );
     }
 
+    /// Record how many client wakes their mailboxes refused for good, once the
+    /// count has doubled since it was last recorded.
+    fn report_given_up(service: &mut Service) {
+        let Some(total) = service.wakes().given_up() else {
+            return;
+        };
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Warn,
+                id: events::WAKES_GIVEN_UP,
+                message: "audiod: client wakes their mailboxes refused for good were given up",
+                fields: &[tairix_log::Field {
+                    key: "total",
+                    value: tairix_log::FieldValue::UnsignedInt(total),
+                }],
+            },
+        );
+    }
+
     /// Serve one control-endpoint doorbell.
     ///
     /// The bind operation is handled here rather than in the engine because
@@ -471,7 +521,7 @@ mod program {
         // A slot a reaped device left keeps its port and its wake: both are
         // this service's own and are reused. Anything else is a refusal.
         let exists = -i64::from(Errno::AlreadyExists.as_i32().unsigned_abs());
-        let bound = tairix_rt::port_bind(port, AUDIO_CHANNEL_NOTIFY_LEN, 16);
+        let bound = tairix_rt::port_bind(port, AUDIO_CHANNEL_NOTIFY_LEN, CHANNEL_NOTIFY_DEPTH);
         if bound != 0 && bound != exists {
             return Err(Errno::from_syscall(bound));
         }

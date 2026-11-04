@@ -45,7 +45,8 @@ used by the compositing window manager (`userland/gui/wm`), the taskbar
 - `StaleFrames` — what each frame of a presentation ring lacks of the picture:
   a change is owed to every frame but the one it was drawn in, and
   `bring_up_to_date` hands a frame everything it lacks before it carries a
-  present, owing nothing on if the update is refused. The display client keeps
+  present, owing nothing on if the update is refused, and refuses a frame the
+  ring does not have. The display client keeps
   its frames current through it and a window client its two frames, so both
   copy the size of the changes rather than of the picture.
 - `desktop_modes` — the sizes a graphical desktop may take on an output: its

@@ -67,11 +67,24 @@ fn recognises_fat32_with_identity_label_and_evidence() {
     let probed = recognised(&head).expect("matches");
     assert_eq!(probed.fstype, VolumeFsType::Fat32);
     assert_eq!(probed.label(), b"MYDISK");
-    let mut expected = [0u8; 16];
-    expected[..4].copy_from_slice(b"SRLN");
-    expected[4..15].copy_from_slice(b"MYDISK     ");
-    expected[15] = 0xF3;
-    assert_eq!(probed.identity, expected);
+    let mut relabelled = head.clone();
+    relabelled[71..82].copy_from_slice(b"OTHER      ");
+    let mut reserialled = head.clone();
+    reserialled[67] ^= 1;
+    let mut regeometried = head.clone();
+    regeometried[36..40].copy_from_slice(&2048u32.to_le_bytes());
+    let identity = |image: &[u8]| recognised(image).expect("matches").identity;
+    assert_eq!(
+        identity(&relabelled),
+        probed.identity,
+        "a label is no part of it"
+    );
+    assert_ne!(identity(&reserialled), probed.identity, "the serial is");
+    assert_ne!(
+        identity(&regeometried),
+        probed.identity,
+        "and so is the geometry"
+    );
     assert_eq!(
         probed.evidence,
         Some(Evidence {
@@ -106,7 +119,7 @@ fn the_root_directory_label_outranks_the_boot_sector_copy() {
     );
     let probed = recognised(&image).expect("matches");
     assert_eq!(probed.label(), b"HOLIDAYS");
-    let boot_only = recognised(&images::fat32_boot(*b"SRLN", b"NO NAME    ")).expect("matches");
+    let boot_only = recognised(&images::fat32_boot(*b"SRLN", b"MYDISK     ")).expect("matches");
     assert_eq!(
         probed.identity, boot_only.identity,
         "a label is not an identity"
@@ -169,14 +182,19 @@ fn a_root_directory_beyond_the_extent_leaves_the_boot_label() {
 }
 
 #[test]
-fn fat32_without_extended_signature_has_tag_only_identity_and_no_label() {
+fn fat32_without_extended_signature_is_identified_by_its_geometry_and_has_no_label() {
     let mut head = images::fat32_boot([0; 4], b"           ");
     head[66] = 0;
     let probed = recognised(&head).expect("matches");
     assert_eq!(probed.label(), b"");
-    let mut expected = [0u8; 16];
-    expected[15] = 0xF3;
-    assert_eq!(probed.identity, expected);
+    let mut undeclared = head.clone();
+    undeclared[67..82].copy_from_slice(b"SRLNMYDISK     ");
+    assert_eq!(
+        recognised(&undeclared).expect("matches").identity,
+        probed.identity,
+        "bytes the signature does not declare are no part of it"
+    );
+    assert_ne!(probed.identity, [0u8; 16]);
 }
 
 #[test]
@@ -671,6 +689,44 @@ fn an_old_map_adfs_disc_is_recognised_last_with_its_name() {
     assert_eq!(fstype(&unmarked), None);
 }
 
+/// A disc name is spelt in RISC OS's Latin-1, so its label is that text in
+/// UTF-8: an accented letter and one of the characters RISC OS adds alike.
+#[test]
+fn an_adfs_disc_name_is_labelled_in_utf8() {
+    let probed = recognised(&images::adfs_old_map(b"Caf\xE9 \x80    ")).expect("matches");
+    assert_eq!(probed.label(), "Caf\u{e9} \u{20ac}".as_bytes());
+}
+
+/// An ADFS disc's identity is what formatting fixed, its name no part of it:
+/// discs named apart share it, and another size of disc does not.
+#[test]
+fn an_adfs_disc_is_identified_without_its_name() {
+    let acorn = recognised(&images::adfs_old_map(b"Acorn     ")).expect("matches");
+    let retitled = recognised(&images::adfs_old_map(b"Renamed   ")).expect("matches");
+    assert_eq!(acorn.identity, retitled.identity);
+    let record = images::adfs_f_record();
+    let named = adfs::Layout::NewMap {
+        record,
+        boot_block: true,
+    };
+    let renamed = adfs::Layout::NewMap {
+        record: adfs::DiscRecord {
+            disc_name: *b"Other     ",
+            ..record
+        },
+        boot_block: true,
+    };
+    let smaller = adfs::Layout::NewMap {
+        record: adfs::DiscRecord {
+            disc_size: record.disc_size / 2,
+            ..record
+        },
+        boot_block: true,
+    };
+    assert_eq!(renamed.identity(), named.identity());
+    assert_ne!(smaller.identity(), named.identity());
+}
+
 #[test]
 fn a_session_the_drive_places_beyond_any_byte_address_is_no_disc() {
     let layout = DiscLayout {
@@ -707,9 +763,24 @@ fn an_amiga_floppy_is_recognised_with_its_name_identity_and_root_as_evidence() {
     assert_eq!((layout.root, layout.blocks), (880, 1760));
     assert!(layout.bitmap_valid);
     let renamed = images::affs_volume(0, 512, affs::DD_FLOPPY_BLOCKS, b"Workbench1.2");
-    assert_ne!(
+    assert_eq!(
         recognised(&renamed).expect("matches").identity,
-        probed.identity
+        probed.identity,
+        "a name is no part of the identity"
+    );
+    let mut reformatted = image;
+    let root = &mut reformatted[880 * 512..881 * 512];
+    affs::DateStamp {
+        days: 9001,
+        mins: 600,
+        ticks: 25,
+    }
+    .write(root, affs::Offsets::new(512).created());
+    affs::seal(root, affs::CHECKSUM);
+    assert_ne!(
+        recognised(&reformatted).expect("matches").identity,
+        probed.identity,
+        "a volume formatted another day is another"
     );
 }
 

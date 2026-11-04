@@ -2524,6 +2524,48 @@ fn a_volume_coming_going_or_failing_is_published_as_a_mounts_notice() {
     assert!(generation() > failed, "a volume leaving is published");
 }
 
+/// A volume is listed under the title its registration was given, which a
+/// driver replaced in place keeps; a retitle is published as a `Mounts`
+/// notice, and an unregistered handle takes none.
+#[test]
+fn a_volume_is_listed_under_the_title_it_was_given() {
+    use tairix_abi::driver::filesystem::VolumeTitle;
+    use tairix_abi::NoticeTopic;
+    let generation =
+        || crate::notice::generation(NoticeTopic::Mounts, &crate::seat::NULL_SEAT_REGISTRY);
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    let handle = DriverHandle::from_raw(9).expect("handle");
+    cell.register(handle, driver(), "vol", "memfs", [0u8; 16], None)
+        .expect("registered");
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+    let listed = || {
+        svc.mount_snapshot()
+            .expect("snapshot")
+            .iter()
+            .find(|record| record.source_bytes() == b"vol")
+            .expect("the registered volume is listed")
+            .title()
+    };
+    assert!(listed().is_empty(), "untitled until it is given one");
+    let title = VolumeTitle::new("Workbench").expect("a title");
+    let before = generation();
+    cell.set_title(handle, title).expect("titled");
+    assert!(generation() > before, "a retitle is published");
+    assert_eq!(listed(), title);
+    let nodes = cell.nodes(handle).expect("its registration");
+    cell.register_with_nodes(handle, driver(), "vol", "memfs", [0u8; 16], None, nodes)
+        .expect("replaced in place");
+    assert_eq!(listed(), title, "a driver replaced in place keeps it");
+    let unregistered = DriverHandle::from_raw(10).expect("handle");
+    assert_eq!(
+        cell.set_title(unregistered, title),
+        Err(Errno::NotImplemented)
+    );
+}
+
 /// The mount snapshot overlays a live device's reported I/O health onto an
 /// otherwise-`Available` volume, but a genuine surprise-removal state always
 /// wins over the overlay so a vanished volume never masquerades as merely
@@ -5809,8 +5851,14 @@ fn a_stand_in_is_known_as_one_until_a_driver_serves_again() {
         fstype: "memfs",
         volume_id: [0x33; 16],
     };
-    cell.register_stand_in(handle, RwMockFs::new(), names, Arc::clone(&nodes))
-        .expect("stands in");
+    cell.register_stand_in(
+        handle,
+        RwMockFs::new(),
+        names,
+        Arc::clone(&nodes),
+        MountAvailability::UnavailableDirty,
+    )
+    .expect("stands in");
     let (same, stand_in) = cell.reach(handle).expect("registered");
     assert!(
         Arc::ptr_eq(&same, &nodes) && stand_in,
@@ -5829,6 +5877,95 @@ fn a_stand_in_is_known_as_one_until_a_driver_serves_again() {
     assert!(!cell.reach(handle).expect("registered").1);
     let elsewhere = DriverHandle::from_raw(0x5E2).expect("a handle");
     assert!(cell.reach(elsewhere).is_none());
+}
+
+/// A stand-in is listed unavailable by the registration that installs it, so
+/// no listing shows a volume whose every operation already fails as one that
+/// serves, and a driver serving it again lists it available.
+///
+/// Regression: the stand-in was filed as available and its state set by a
+/// second call, so a listing read between the two showed a disconnected volume
+/// as healthy while its stand-in refused every read.
+#[test]
+fn a_stand_in_is_listed_unavailable_from_its_registration() {
+    use tairix_abi::NoticeTopic;
+    let generation =
+        || crate::notice::generation(NoticeTopic::Mounts, &crate::seat::NULL_SEAT_REGISTRY);
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    let handle = crate::fs::test_volume::volume_handle();
+    cell.register(handle, driver(), "gone", "memfs", [0x34; 16], None)
+        .expect("registers");
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+    let listed = || {
+        svc.mount_snapshot()
+            .expect("snapshot")
+            .iter()
+            .find(|record| record.source_bytes() == b"gone")
+            .expect("the registered volume is listed")
+            .availability()
+    };
+    let (nodes, _) = cell.reach(handle).expect("registered");
+    let names = crate::fs::VolumeNames {
+        source: "gone",
+        fstype: "memfs",
+        volume_id: [0x34; 16],
+    };
+    let before = generation();
+    cell.register_stand_in(
+        handle,
+        driver(),
+        names,
+        Arc::clone(&nodes),
+        MountAvailability::UnavailableLost,
+    )
+    .expect("stands in");
+    assert_eq!(listed(), MountAvailability::UnavailableLost);
+    assert!(generation() > before, "the change is published");
+    cell.register_with_nodes(handle, driver(), "gone", "memfs", [0x34; 16], None, nodes)
+        .expect("served again");
+    assert_eq!(listed(), MountAvailability::Available);
+}
+
+/// The stand-in for a volume recovering over its re-inserted device answers
+/// under a fresh registration and is listed as its volume from the
+/// registration that installs it: of the volume's class, recovering.
+#[test]
+fn a_recovery_stand_in_is_listed_as_its_volume_from_its_registration() {
+    use tairix_abi::sysinfo::VolumeClass;
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    let handle = crate::fs::test_volume::volume_handle();
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+    let names = crate::fs::VolumeNames {
+        source: "back",
+        fstype: "memfs",
+        volume_id: [0x35; 16],
+    };
+    cell.register_recovery_stand_in(
+        handle,
+        driver(),
+        names,
+        VolumeClass::Removable,
+        MountAvailability::Recovering,
+    )
+    .expect("stands in");
+    let record = svc
+        .mount_snapshot()
+        .expect("snapshot")
+        .into_iter()
+        .find(|record| record.source_bytes() == b"back")
+        .expect("the stand-in is listed");
+    assert_eq!(record.class(), VolumeClass::Removable);
+    assert_eq!(record.availability(), MountAvailability::Recovering);
+    assert!(
+        cell.reach(handle).expect("registered").1,
+        "the stand-in answers it"
+    );
 }
 
 #[test]

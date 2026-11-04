@@ -27,7 +27,8 @@ use tairix_abi::blkio::{BlkStatus, FaultDomainState};
 use tairix_abi::driver::DriverEnding;
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{
-    ancestor_imposed_status_by, HwDeviceClass, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID,
+    ancestor_imposed_status_by, on_removable_port_by, HwDeviceClass, HwResource, HW_NODE_ROOT,
+    HW_NODE_ROOT_ID,
 };
 use tairix_abi::{Errno, HwNode, HwTreeHeader};
 use tairix_kernel_core::callreg::LinkServiceObserver;
@@ -268,6 +269,15 @@ impl HwTreeStore {
     pub fn ancestor_status(&self, node_id: u32) -> BlkStatus {
         let inner = self.inner.lock();
         ancestor_imposed_status_by(node_id, inner.nodes.len(), |id| inner.node(id).copied())
+    }
+
+    /// Whether live node `node_id`, or a node above it, sits on a port it can
+    /// be pulled from while the machine runs, walked under the store's one
+    /// guard.
+    #[must_use]
+    pub fn on_removable_port(&self, node_id: u32) -> bool {
+        let inner = self.inner.lock();
+        on_removable_port_by(node_id, inner.nodes.len(), |id| inner.node(id).copied())
     }
 
     /// Visit every live node in id order with the store held: the visitor
@@ -1412,6 +1422,37 @@ mod tests {
         assert!(!node.is_key_source());
         assert!(!node.is_hot_arrival());
         assert!(node.is_removable(), "what the emitter describes stands");
+    }
+
+    /// A node is on a removable port when it says so itself, or a node above
+    /// it does however deep beneath that it lies; a fixed node, or one the
+    /// store does not hold, is not.
+    #[test]
+    fn a_node_is_on_a_removable_port_by_its_own_or_one_above_it() {
+        let store = HwTreeStore::new();
+        let mut hub = HwNode::new(3, 1, HwDeviceClass::Bus);
+        hub.set_removable(true);
+        let mut stick = HwNode::new(6, 1, HwDeviceClass::Storage);
+        stick.set_removable(true);
+        let mut tree = seed_tree();
+        tree.extend([
+            hub,
+            HwNode::new(4, 3, HwDeviceClass::Bus),
+            HwNode::new(5, 4, HwDeviceClass::Storage),
+            stick,
+        ]);
+        // A chain beneath the stick deeper than any fixed ceiling on a walk.
+        let deep = (7..107).map(|id| HwNode::new(id, id - 1, HwDeviceClass::Bus));
+        tree.extend(deep);
+        store.seed(tree).expect("a fresh store seeds");
+        assert!(store.on_removable_port(6), "a device that says so itself");
+        assert!(
+            store.on_removable_port(5),
+            "a device beneath a removable port"
+        );
+        assert!(store.on_removable_port(106), "however deep beneath one");
+        assert!(!store.on_removable_port(2), "a fixed device");
+        assert!(!store.on_removable_port(200), "an unknown node");
     }
 
     /// A key source is a driven node's: marking one no driver holds fails

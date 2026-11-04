@@ -18,7 +18,9 @@
 //! output that moved is announced on [`NoticeTopic::DisplayOutput`] before
 //! another request is served (`plans/DISPLAY.md` D12). An idle service
 //! therefore costs no CPU, and no presenter can leave the machine dark behind
-//! it.
+//! it. While a latch is owed to a presenter whose port had no room, the set
+//! also watches that port's room, and the retry of one the kernel had no
+//! memory for bounds the park.
 
 use tairix_abi::display_ipc::{DisplayEvent, DISPLAY_ENDPOINT, DISPLAY_MAX_REQUEST};
 use tairix_abi::driver::display::{Display, OutputMode, RefreshRate};
@@ -30,6 +32,7 @@ use tairix_drvrt::exit::{end, error, step, DriverExit};
 use tairix_drvrt::{GrantSyscalls, RtDriverHost};
 use tairix_log::{EventId, Field, FieldValue, Level};
 use tairix_rt::changenotice::ChangeNotice;
+use tairix_rt::room::RoomMember;
 use tairix_rt::{ClockDelay, LogSink};
 
 use crate::events::{
@@ -53,6 +56,10 @@ const LEASE_TOKEN: u64 = 2;
 /// Wait-set token every one of the display's event sources carries: the
 /// display reads all of its causes on any one of them.
 const EVENT_TOKEN: u64 = 3;
+
+/// Wait-set token of the room member watching the port an owed latch waits
+/// on.
+const ROOM_TOKEN: u64 = 4;
 
 /// Map the one scan-out surface the kernel granted `host`.
 ///
@@ -122,8 +129,16 @@ pub fn serve(display: &mut dyn Display, wakes: &[DeviceWake]) -> i32 {
     let mut reply = [0u8; DISPLAY_REPLY_MAX];
     let mut token = 0u64;
     let mut first_present_logged = false;
+    let mut room = RoomMember::new(wait_set, ROOM_TOKEN);
     loop {
-        // A queued present bounds the wait: its latch, or its deadline.
+        report_undelivered(&mut server);
+        // A port whose room cannot be watched has its latch posted again on
+        // the retry instead.
+        if !room.keep_on(server.room_port()) {
+            server.room_unwatched();
+        }
+        // A queued present bounds the wait, its latch or its deadline, and so
+        // does the retry of a latch the kernel had no memory for.
         let timeout = server.deadline_ns().map_or(u64::MAX, |deadline| {
             deadline.saturating_sub(tairix_rt::clock_get())
         });
@@ -139,6 +154,10 @@ pub fn serve(display: &mut dyn Display, wakes: &[DeviceWake]) -> i32 {
                     &[step("display: the serve wait set faulted")],
                 );
             }
+        }
+        if token == ROOM_TOKEN {
+            server.redeliver(&mut delivery);
+            continue;
         }
         if token == LEASE_TOKEN {
             if let Some(lease) = read_lease() {
@@ -396,31 +415,43 @@ impl Delivery for RtDelivery {
     }
 
     fn post(&mut self, port: u64, event: &DisplayEvent) -> Result<(), Errno> {
-        match tairix_rt::ipc_send(port, &event.to_le_bytes()) {
-            0 => Ok(()),
-            ret => Err(Errno::from_syscall(ret)),
-        }
+        tairix_rt::ipc_send(port, &event.to_le_bytes())
     }
 }
 
-/// Record a latch that came due unlatched or could not be told.
+/// Record a queued present released at its deadline, unlatched. A latch
+/// given up on is recorded by its running total instead.
 fn note_latch(latch: Latch) {
     match latch {
-        Latch::Idle | Latch::Posted => {}
         Latch::Overdue => record(
             Level::Warn,
             LATCH_OVERDUE,
             "display: a queued present never latched; its presenter is released",
             &[],
         ),
-        Latch::Undelivered(err) => record(
-            Level::Warn,
-            LATCH_UNDELIVERED,
-            "display: a latch could not reach its presenter",
-            &[Field {
-                key: "error",
-                value: FieldValue::SignedInt(i64::from(err.as_i32())),
-            }],
-        ),
+        Latch::Idle | Latch::Posted | Latch::Owed | Latch::Gone | Latch::Undelivered(_) => {}
     }
+}
+
+/// Record how many latches presenters' ports refused for good, once the
+/// count has doubled since it was last recorded.
+fn report_undelivered(server: &mut DisplayServer<ClockDelay>) {
+    let Some((total, refusal)) = server.undelivered_to_report() else {
+        return;
+    };
+    record(
+        Level::Warn,
+        LATCH_UNDELIVERED,
+        "display: latches presenters' ports refused were given up on",
+        &[
+            Field {
+                key: "total",
+                value: FieldValue::UnsignedInt(total),
+            },
+            Field {
+                key: "error",
+                value: FieldValue::SignedInt(i64::from(refusal.as_i32())),
+            },
+        ],
+    );
 }

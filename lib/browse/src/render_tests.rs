@@ -34,6 +34,8 @@ impl DirectorySource for Fixed {
 fn facts(free: Option<u64>, availability: MountAvailability) -> VolumeFacts {
     VolumeFacts {
         filesystem: String::from("arxfs"),
+        title: String::new(),
+        class: tairix_abi::sysinfo::VolumeClass::Local,
         free,
         availability,
         owner: None,

@@ -694,12 +694,13 @@ const TRACKPAD_SETTINGS: &[&str] = &[
 /// The Keyboard pane's setting labels.
 const KEYBOARD_SETTINGS: &[&str] = &[Setting::RepeatDelay.label(), Setting::RepeatRate.label()];
 
-/// The Wallpaper pane's setting labels: its four rows, then the picture.
+/// The Wallpaper pane's setting labels: its five rows, then the picture.
 const WALLPAPER_SETTINGS: &[&str] = &[
     Setting::Fit.label(),
     Setting::Backdrop.label(),
     Setting::Icons.label(),
     Setting::Sort.label(),
+    Setting::AlignToGrid.label(),
     Chooser::Wallpaper.label(),
 ];
 

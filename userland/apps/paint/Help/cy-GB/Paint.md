@@ -84,6 +84,10 @@ ochr neu i'r llall, gan nodi ar y ffordd lle bydd yn glanio; o'i ollwng i
 ffwrdd o'r ddwy ochr, neu o'i lusgo allan o'r ffenestr, mae'r cwarel yn
 arnofio mewn ffenestr fach ei hun, a symudir gan ei fand ac a gedwir uwchben y
 llun, a'i marc yn ei chau; o'i lusgo'n ôl dros ochr, mae'n docio yno eto.
+Mae'r palet yn arnofio hefyd: mae'r botwm ar ben de ei stribed, neu Golwg ▸
+Cwarelau ▸ Arnofio'r palet, yn ei symud i ffenestr fach ei hun, a'i liwiau
+wedi'u gosod mewn grid; mae cau'r ffenestr honno, neu ei llusgo'n ôl i
+waelod y ffenestr, yn ei roi'n ôl yn y stribed.
 
 Mae'r offeryn dewis yn nodi petryal, elips, lasŵ llawrydd, polygon a
 gliciwyd gornel wrth gornel, neu â'r ffon hud y picseli a gysylltir ag un

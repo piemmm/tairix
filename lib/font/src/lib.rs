@@ -132,7 +132,7 @@ pub use outline_cache::{
     outline_cache_budget, outline_cache_candidate, CachedOutline, OutlineCache, OutlineKey,
 };
 #[cfg(feature = "render")]
-pub use shadow::TextShadow;
+pub use shadow::{KeptShadow, TextShadow};
 #[cfg(feature = "svg")]
 pub use svgfont::{seam_outlines, ServiceFonts};
 #[cfg(feature = "render")]

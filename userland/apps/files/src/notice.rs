@@ -27,6 +27,10 @@ pub enum NoticeSource {
     Network,
     /// Mounting a disk image, or ejecting a volume.
     Mount,
+    /// Volumes disconnected without being ejected.
+    Disconnected,
+    /// Volumes still attached whose devices failed a re-read.
+    Unreadable,
 }
 
 /// A window's refusal notices, by where each came from.

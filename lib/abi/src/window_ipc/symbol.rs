@@ -390,12 +390,14 @@ pub enum AppMenuSymbol {
     /// Order the network's endpoints by the workgroup or domain each belongs
     /// to.
     SortByWorkgroup,
+    /// Float it in a window of its own.
+    Float,
 }
 
 impl AppMenuSymbol {
     /// Every symbol, in wire order: the symbol with wire value `n` is
     /// `ALL[n - 1]`.
-    pub const ALL: [Self; 187] = [
+    pub const ALL: [Self; 188] = [
         Self::Open,
         Self::OpenWith,
         Self::OpenFolder,
@@ -583,6 +585,7 @@ impl AppMenuSymbol {
         Self::SortByHealth,
         Self::SortByAddress,
         Self::SortByWorkgroup,
+        Self::Float,
     ];
 
     /// The symbol's wire value, never zero.

@@ -15,6 +15,10 @@ Mounts OSTA UDF 1.02 to 2.60 volumes behind any
 - Formatted: revisions 1.02 to 2.01, one overwritable partition.
 - Hard links, symbolic links, holes, owners and modes; Macintosh Finder
   information as `mac.type`, `mac.creator` and `mac.finderflags`.
+- The title (`FilesystemLabel`): the logical volume identifier, 126
+  eight-bit characters or 63 UTF-16 units, kept in both descriptor sequences
+  and the file set descriptor; the primary volume descriptor keeps as much of
+  it as its 30 or 15 hold.
 
 `docs/src/filesystem/udf.md` describes each structure, the write policy and
 the bounds applied to an untrusted volume.

@@ -243,7 +243,7 @@ mod program {
             // icon-bar slot. A row the declaration never carried names no
             // command and is ignored (fail closed).
             WindowEvent::CloseRequested { .. } => Acted::Close,
-            WindowEvent::AppBarMenu { item } if tairix_window::is_quit(*item) => Acted::Quit,
+            WindowEvent::AppBarMenu { item, .. } if tairix_window::is_quit(*item) => Acted::Quit,
             // The slot was clicked with no window open: the way back to one.
             WindowEvent::AppBarDefault => Acted::Open,
             WindowEvent::Key {
@@ -281,6 +281,7 @@ mod program {
             // region it lets go of.
             WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::AppBarEntered { .. }
             | WindowEvent::MenuClosed { .. }
             // The layer-surface feeds and a tool window's moves address
             // surfaces this application never opens, so none can arrive here.

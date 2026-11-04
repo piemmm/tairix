@@ -208,7 +208,9 @@ of its own identity, the same at every attach.
 
 A volume ID is a stable, non-human identifier (UUID-shaped or content-derived),
 carried by `lib/abi` as a fixed-size `#[repr(C)]` type under the ABI discipline
-of `AGENTS.md` §9 (versioned, hashed, frozen on release). `id::<volume-id>/path`
+of `AGENTS.md` §9 (versioned, hashed, frozen on release). A content-derived ID
+is built only from facts neither a write nor a relabel changes, so a retitled
+volume keeps its ID. `id::<volume-id>/path`
 is the durable form for machine records, boot-critical references, recovery
 logs, and anywhere a mutable alias is not stable enough. Time-bearing volume
 metadata uses `Time64` (`AGENTS.md` §21), never a 32-bit second count.
@@ -507,6 +509,12 @@ served by its user-space driver ([Volumes served from user space](./served.md)),
 whose root is mounted at `/Storage/<name>` with the removable-media flags and
 published/withdrawn as an `id::` root through the same forest — a detach
 flushes first and fails closed rather than discarding uncommitted data. A
+removable device's volume — one whose hardware-tree node, or a node above it,
+sits on a port it can be pulled from — is also the user at the seat's to
+detach: the ordinary account whose login session holds the primary seat, with
+a plain detach only, decided on the volume the detach claims, and recorded
+(`VOLUME_EJECTED_AT_SEAT`, 4213). A volume still in use is refused it as to
+anyone. A
 catalog name another volume holds is answered `AlreadyExists` before the
 volume is judged, so the volume manager's next candidate name costs nothing; a
 volume already attached under another name is `Busy`, which no other name
@@ -596,9 +604,10 @@ recorded when its driver first serves it),
 `fs.network.{offered,attached,attach_refused,detached,detach_refused,retired}`
 (a network volume offered, attached by its principal, detached, or retired by
 its server),
-`fs.image.{awaiting,attached,attach_refused,detached,detach_refused,retired}`
+`fs.image.{awaiting,attached,attach_refused,detached,detach_refused,retired,retitled,retitle_refused}`
 (an image volume published for its driver, served and mounted, refused,
-detached, or retired with its file's volume or its driver), and
+detached, retired with its file's volume or its driver, or retitled by its
+owner or refused that), and
 `fs.conflict.alias_ambiguous`. No secret, key,
 capability-token value, or private path content beyond the audit subsystem's
 policy set is logged.

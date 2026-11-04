@@ -34,7 +34,7 @@ use tairix_crypto::Sha256Stream;
 use tairix_fsprobe::name::{candidates, NameBase};
 use tairix_inline::ArrayString;
 use tairix_kernel_core::fs::served::{ServedFs, ServedState, ServerActivity};
-use tairix_kernel_core::fs::{OfferingServer, Principal, ServeChannel, VolumeNames};
+use tairix_kernel_core::fs::{OfferingServer, Principal, ServeChannel};
 use tairix_kernel_core::sharedreg::KernelHold;
 use tairix_kernel_core::{
     Attachment, BindsWithin, FilesystemService, VfsError, VolumePublishError,
@@ -44,8 +44,7 @@ use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_sync::SpinLock;
 
 use super::{
-    mount_flags, record, record_retired, refusal_level, storage_path, take_down, UnavailableFs,
-    Wiring, Writes,
+    mount_flags, record, record_retired, refusal_level, storage_path, take_down, Wiring, Writes,
 };
 use crate::kernel_fs::KernelFs;
 use crate::system_mount::{publish_volume_identity, FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST};
@@ -829,17 +828,11 @@ impl Retiring {
     /// Put the fail-closed stand-in in the place of its lanes, under its
     /// registration, and report it lost. Parks on nothing.
     fn stand_in(&self) {
-        let handle = self.attached.handle;
-        if let Some(nodes) = LATE_FILESYSTEM.nodes(handle) {
-            let names = VolumeNames {
-                source: &self.source,
-                fstype: self.format.as_str(),
-                volume_id: self.volume_id,
-            };
-            let _ =
-                LATE_FILESYSTEM.register_stand_in(handle, Box::new(UnavailableFs), names, nodes);
-        }
-        let _ = LATE_FILESYSTEM.set_availability(handle, MountAvailability::UnavailableLost);
+        super::RuntimeVolumeService::stand_in(
+            self.attached.handle,
+            (self.source.as_str(), self.format, self.volume_id),
+            MountAvailability::UnavailableLost,
+        );
     }
 }
 

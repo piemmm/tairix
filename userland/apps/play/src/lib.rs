@@ -10,6 +10,8 @@
 //! # Module map
 //!
 //! * [`command`] — the command line and what it asks for.
+//! * [`owed`] — the commands the interface holds while the playback's
+//!   mailbox refuses them.
 //! * [`report`] — the `stdinfo` records and the lines on standard error.
 //! * [`view`] — the full-screen interface, drawn from the engine's status.
 //!
@@ -22,5 +24,6 @@
 extern crate alloc;
 
 pub mod command;
+pub mod owed;
 pub mod report;
 pub mod view;

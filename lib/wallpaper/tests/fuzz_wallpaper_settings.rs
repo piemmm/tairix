@@ -53,6 +53,7 @@ const KEYS: &[RegistryRow] = &[
     ("backdrop", &["theme", "112233", "ffffff", "000000"], &[]),
     ("icons", &["leading", "trailing"], &[]),
     ("sort", &["name", "kind", "size", "date"], &[]),
+    ("grid", &["true", "false", "on", "off"], &["snap"]),
     ("appearance", &["dark", "light"], &[]),
     ("contrast", &["normal", "high", "monochrome"], &[]),
     ("density", &["compact", "normal", "comfortable"], &[]),

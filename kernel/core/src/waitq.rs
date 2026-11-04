@@ -34,7 +34,7 @@
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::ops::Bound;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_inline::ArrayVec;
 use tairix_kernel_sched_api::{CpuId, TaskId};
@@ -287,6 +287,9 @@ impl WaitSet {
 /// one definition of the wait set, no threading concerns of its own.
 pub struct WaitQueue {
     waiters: SpinLock<WaitSet>,
+    /// The rows `waiters` holds, published under its lock so a waker can see
+    /// nobody waits without taking it ([`Self::is_empty`]).
+    rows: AtomicUsize,
     /// Lock-free "an explicit wake was requested for this queue" flag.
     ///
     /// A wake delivered from **interrupt context** (a device-IRQ
@@ -315,6 +318,7 @@ impl WaitQueue {
     pub const fn new() -> Self {
         Self {
             waiters: SpinLock::new(WaitSet::new()),
+            rows: AtomicUsize::new(0),
             wake_pending: AtomicBool::new(false),
             drained_at_ns: AtomicU64::new(0),
         }
@@ -398,6 +402,7 @@ impl WaitQueue {
             if deadline_ns != NO_DEADLINE {
                 set.deadlines.insert((deadline_ns, seq), id);
             }
+            self.publish_rows(&set);
         }
     }
 
@@ -410,7 +415,9 @@ impl WaitQueue {
     /// Remove `task`'s registration on `key` from the wait set. Idempotent:
     /// removing an absent waiter is a no-op. O(log n).
     pub fn deregister_keyed(&self, key: WakeKey, task: TaskId) {
-        let _ = self.waiters.lock().remove((key, task));
+        let mut set = self.waiters.lock();
+        let _ = set.remove((key, task));
+        self.publish_rows(&set);
     }
 
     /// Remove **every** registration `task` holds, on any key.
@@ -433,6 +440,7 @@ impl WaitQueue {
         {
             let _ = set.remove((key, task));
         }
+        self.publish_rows(&set);
     }
 
     /// Wake **every** waiter (an explicit event changed the condition they
@@ -500,7 +508,9 @@ impl WaitQueue {
             if arch.unpark(reg.task()) {
                 landed += 1;
             } else {
-                self.waiters.lock().remove_registration(reg);
+                let mut set = self.waiters.lock();
+                set.remove_registration(reg);
+                self.publish_rows(&set);
             }
         }
         landed
@@ -606,7 +616,9 @@ impl WaitQueue {
         if arch.unpark(reg.task()) {
             return true;
         }
-        self.waiters.lock().remove_registration(reg);
+        let mut set = self.waiters.lock();
+        set.remove_registration(reg);
+        self.publish_rows(&set);
         false
     }
 
@@ -734,10 +746,18 @@ impl WaitQueue {
         }
     }
 
-    /// `true` if no task is currently waiting. Diagnostic / test observer.
+    /// `true` if no task is registered, read without the queue's lock. A
+    /// waker that skips a wake on it fences (`SeqCst`) between publishing its
+    /// event and the read, and its waiter between registering and looking
+    /// again, so one of the two always sees the other ([`budget_released`]).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.waiters.lock().by_waiter.is_empty()
+        self.rows.load(Ordering::Relaxed) == 0
+    }
+
+    /// Publish how many rows `set` holds; called under its lock.
+    fn publish_rows(&self, set: &WaitSet) {
+        self.rows.store(set.by_waiter.len(), Ordering::Relaxed);
     }
 }
 
@@ -1384,6 +1404,65 @@ pub fn port_room_wake_task(task: TaskId) {
     }
 }
 
+/// The wait-queue holding the threads waiting for their own process's
+/// `ipc-queue-bytes` budget: a `PortRoom` wait-set member whose send the
+/// budget refuses, wherever the process's charges are held. Each waits under
+/// its process's [`budget_key`] and is woken by a release of one of those
+/// charges another party makes — a receive of one of the process's messages,
+/// the collection, withdrawal or timeout of one of its calls, a change to its
+/// limit — none of which the member's own port need see; a teardown, which
+/// releases many processes' charges at once, wakes every waiter. A release
+/// looks at [`WaitQueue::is_empty`] first, so it costs a fence and a load
+/// while nobody waits.
+pub static BUDGET_WAITQ: WaitQueue = WaitQueue::new();
+
+/// The key a thread of `process` waits for its budget under on
+/// [`BUDGET_WAITQ`].
+#[must_use]
+pub const fn budget_key(process: ProcessId) -> WakeKey {
+    WakeKey::new(process.0)
+}
+
+/// Register `task` as waiting for `process`'s budget, before the look that
+/// would park it: the fence orders the registration before that look as
+/// [`budget_released`]'s orders a release before its look at the queue, so
+/// either the look sees the release or the release sees the registration.
+pub fn budget_watch(process: ProcessId, task: TaskId) {
+    BUDGET_WAITQ.register_keyed(budget_key(process), task, NO_DEADLINE);
+    fence(Ordering::SeqCst);
+}
+
+/// Forget `task`'s wait for `process`'s budget: its wait ended.
+pub fn budget_unwatch(process: ProcessId, task: TaskId) {
+    BUDGET_WAITQ.deregister_keyed(budget_key(process), task);
+}
+
+/// Wake the threads waiting for `process`'s budget, which a charge it held
+/// just gave back: called once the charge is dropped, outside every IPC lock.
+pub fn budget_released(process: ProcessId) {
+    if let Some(arch) = budget_waker() {
+        let _ = BUDGET_WAITQ.wake_key(arch, budget_key(process));
+    }
+}
+
+/// Wake every thread waiting for budget: a teardown gave back charges of many
+/// processes at once.
+pub fn budget_released_everywhere() {
+    if let Some(arch) = budget_waker() {
+        BUDGET_WAITQ.wake_all(arch);
+    }
+}
+
+/// The hook to wake budget waiters through, or [`None`] while nobody waits or
+/// before the hook is installed.
+fn budget_waker() -> Option<&'static (dyn WaitQueueArch + 'static)> {
+    fence(Ordering::SeqCst);
+    if BUDGET_WAITQ.is_empty() {
+        return None;
+    }
+    wait_arch()
+}
+
 /// The wait-queue an image attach parks on until its volume's filesystem
 /// driver serves or refuses it (`plans/DISK-IMAGES.md`). Timed: the attach
 /// judges its driver's liveness at each deadline it registers.
@@ -1554,6 +1633,11 @@ static ALL_QUEUES: &[GlobalQueue] = &[
     },
     GlobalQueue {
         queue: &PORT_ROOM_WAITQ,
+        timed: false,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &BUDGET_WAITQ,
         timed: false,
         deferred: false,
     },
@@ -2451,5 +2535,128 @@ mod tests {
         assert!(q.take_wake_pending());
         q.wake_all(&arch);
         assert_eq!(*arch.unparked.borrow(), alloc::vec![5]);
+    }
+
+    /// A queue's rows are counted through every path that changes them, so a
+    /// waker reading the count without the lock sees nobody waits exactly
+    /// when nobody does: a count left high costs every release the lock, and
+    /// one left low loses a wake.
+    #[test]
+    fn a_queue_counts_its_rows_through_every_path_that_changes_them() {
+        let q = WaitQueue::new();
+        let arch = MockArch::new();
+        assert!(q.is_empty());
+        q.register(1, NO_DEADLINE);
+        q.register(1, 50);
+        q.register_keyed(WakeKey::new(4), 2, NO_DEADLINE);
+        q.deregister(1);
+        assert!(!q.is_empty(), "the keyed row is still there");
+        q.deregister_keyed(WakeKey::new(4), 2);
+        assert!(q.is_empty());
+        q.register(3, NO_DEADLINE);
+        q.deregister_task(3);
+        assert!(q.is_empty(), "a retired task's rows are counted out");
+        q.register(5, NO_DEADLINE);
+        arch.refuse(5);
+        q.wake_all(&arch);
+        assert!(
+            q.is_empty(),
+            "a row no wake can land on is counted out as it is reaped"
+        );
+        q.register(6, NO_DEADLINE);
+        arch.refuse(6);
+        assert!(!q.wake_task(&arch, 6));
+        assert!(q.is_empty(), "by an addressed wake too");
+    }
+
+    /// A release wakes the threads waiting for its own process's budget and
+    /// nobody else's, a teardown's wakes every budget waiter, and a wait that
+    /// ended is woken by neither.
+    #[test]
+    fn a_budget_release_wakes_only_its_own_processs_waiters() {
+        let (_, mine) = crate::test_boot::claim_scheduler();
+        let theirs = crate::test_boot::claim_peer_task();
+        budget_watch(ProcessId(mine), mine);
+        budget_watch(ProcessId(theirs), theirs);
+        let _ = crate::test_boot::take_unparked();
+        budget_released(ProcessId(mine));
+        assert_eq!(crate::test_boot::take_unparked(), [mine]);
+        budget_released_everywhere();
+        let woken = crate::test_boot::take_unparked();
+        assert!(woken.contains(&mine) && woken.contains(&theirs));
+        budget_unwatch(ProcessId(mine), mine);
+        budget_unwatch(ProcessId(theirs), theirs);
+        budget_released(ProcessId(mine));
+        budget_released_everywhere();
+        let late = crate::test_boot::take_unparked();
+        assert!(
+            !late.contains(&mine) && !late.contains(&theirs),
+            "an ended wait is not woken"
+        );
+    }
+
+    /// The handshake the budget wake rests on, raced: the waiter registers and
+    /// then looks at what its process holds, the releaser gives a charge back
+    /// and then looks for waiters, and no lock orders the two. In every round
+    /// the waiter sees the release or the release wakes the waiter.
+    #[test]
+    fn a_budget_wait_and_a_release_racing_never_both_miss() {
+        extern crate std;
+
+        // The interpreter preempts at random points in every round, so it
+        // needs far fewer rounds than hardware to reach the racing orders.
+        const ROUNDS: usize = if cfg!(miri) { 1_000 } else { 100_000 };
+        const STOP: usize = usize::MAX;
+        let (_, waiter) = crate::test_boot::claim_scheduler();
+        let process = ProcessId(waiter);
+        let charges = alloc::sync::Arc::new(tairix_kernel_sec::ResourceCharges::new());
+        let (round, looked) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let saw_release = AtomicBool::new(false);
+        let wait_for = |until: &dyn Fn() -> bool| {
+            while !until() {
+                std::thread::yield_now();
+            }
+        };
+        let mut missed = None;
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for this in 1..=ROUNDS {
+                    wait_for(&|| {
+                        let r = round.load(Ordering::Acquire);
+                        r == this || r == STOP
+                    });
+                    if round.load(Ordering::Acquire) == STOP {
+                        return;
+                    }
+                    budget_watch(process, waiter);
+                    let held = charges.held(tairix_abi::LimitKind::IpcQueueBytes);
+                    saw_release.store(held == 0, Ordering::Relaxed);
+                    looked.store(this, Ordering::Release);
+                }
+            });
+            for this in 1..=ROUNDS {
+                let charge = charges
+                    .charge(tairix_abi::LimitKind::IpcQueueBytes, 1, u64::MAX)
+                    .expect("an unlimited charge");
+                let _ = crate::test_boot::take_unparked();
+                round.store(this, Ordering::Release);
+                drop(charge);
+                budget_released(process);
+                wait_for(&|| looked.load(Ordering::Acquire) == this);
+                let met = saw_release.load(Ordering::Relaxed)
+                    || crate::test_boot::take_unparked().contains(&waiter);
+                budget_unwatch(process, waiter);
+                if !met {
+                    missed = Some(this);
+                    // Release the waiter, or the scope waits on it for ever.
+                    round.store(STOP, Ordering::Release);
+                    break;
+                }
+            }
+        });
+        assert_eq!(
+            missed, None,
+            "a wait for budget and the release it waited for missed each other"
+        );
     }
 }

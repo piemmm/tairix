@@ -545,15 +545,19 @@ pub struct Pacing {
     pub reported_at: Option<u64>,
 }
 
-/// How a [`WaitSourceKind::DirWatch`](tairix_abi::WaitSourceKind::DirWatch)
-/// member stands at a scan.
+/// How a wait-set member stands at a scan.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MemberState {
     /// Report it now.
     Ready,
-    /// A change is held until this monotonic instant, the watch's latency
-    /// after the previous report.
+    /// A [`DirWatch`](tairix_abi::WaitSourceKind::DirWatch) change is held
+    /// until this monotonic instant, the watch's latency after the previous
+    /// report.
     Due(u64),
+    /// A [`PortRoom`](tairix_abi::WaitSourceKind::PortRoom) member waits on
+    /// the caller's `ipc-queue-bytes` budget, which no event of its port's
+    /// frees.
+    OverBudget,
     /// Nothing since the last report.
     Idle,
 }

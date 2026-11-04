@@ -35,9 +35,9 @@
 
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
-    FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned, VolumeHost,
-    VolumeStats,
+    FilesystemAttrsProvider, FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats,
+    FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity,
+    Unpinned, VolumeHost, VolumeStats, VolumeTitle,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::netattach::Presentation;
@@ -430,6 +430,16 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for PresentedFs<
 impl<F: FilesystemStats> FilesystemStats for PresentedFs<F> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
         self.inner.stats()
+    }
+}
+
+impl<F: FilesystemLabel> FilesystemLabel for PresentedFs<F> {
+    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
+        self.inner.label()
+    }
+
+    fn set_label(&mut self, title: &VolumeTitle) -> Result<(), DriverError> {
+        self.inner.set_label(title)
     }
 }
 

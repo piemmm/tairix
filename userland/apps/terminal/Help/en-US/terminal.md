@@ -35,10 +35,20 @@ Closing the last window does not end the terminal. Its icon stays on the
 desktop's icon bar, and clicking it opens a fresh window; *Quit* on that
 icon's menu closes every window and ends the program.
 
+Lines that scroll off the top of the screen are kept — the last 500
+unless *Settings…* says otherwise — and the mouse wheel scrolls back over
+them; `Shift Page Up` and
+`Shift Page Down` move a screen at a time, `Shift Home` goes to the
+oldest line and `Shift End` back to the screen. Output arriving while
+you are scrolled back leaves the view where it is, and typing returns it
+to the screen. Resizing the window rewraps the lines to the new width
+rather than cutting them off, and a full-screen program's own screen
+keeps none. When memory runs short the oldest lines are let go first.
+
 Pressing the secondary (right) mouse button anywhere on the screen opens
-the terminal's menu. Every row has a keyboard shortcut that works
-whether or not the menu is open, and `Escape` — or a click away from the
-menu — dismisses it without choosing.
+the terminal's menu. Every row but *Clear scrollback* has a keyboard
+shortcut that works whether or not the menu is open, and `Escape` — or a
+click away from the menu — dismisses it without choosing.
 
 | Row | Shortcut | What it does |
 | --- | --- | --- |
@@ -46,13 +56,17 @@ menu — dismisses it without choosing.
 | Larger text | `Ctrl +` | Draw the screen one step larger. |
 | Smaller text | `Ctrl -` | Draw the screen one step smaller. |
 | Actual size | `Ctrl 0` | Return to the default text size. |
-| Clear screen | `Ctrl Shift K` | Blank the screen without writing to the shell. |
+| Clear screen | `Ctrl Shift K` | Blank the screen without writing to the shell; what it showed can still be scrolled back to. |
+| Clear scrollback | — | Forget the lines kept above the screen. |
 | Close | `Ctrl Shift W` | Close the window and end the shell. |
 
-The settings open over the window and have two tabs; turn the wheel over
-them to scroll. **Appearance**
-chooses the colour scheme, sets the text size, and edits the user's own
-scheme. The shipped schemes are *System* (which follows the desktop's
+The settings open in a window of their own, which can stay open while you
+work in the terminal; choosing *Settings…* again brings it forward. It has
+two tabs; turn the wheel over them to scroll. *Done*, `Escape` or the
+window's close button closes it. **Appearance**
+chooses the colour scheme, sets the text size and how many lines of
+scrollback are kept (none to 10,000, 500 at first), and edits the user's
+own scheme. The shipped schemes are *System* (which follows the desktop's
 dark or light appearance), *Midnight*, *Phosphor*, *Amber*, *Ember*,
 *Contrast*, *Paper*, and *Custom*. Choosing *Custom* uses the colours
 edited below the chooser: a grid of the twenty colours a screen is drawn

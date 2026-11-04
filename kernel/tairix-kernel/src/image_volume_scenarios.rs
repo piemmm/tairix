@@ -6,7 +6,7 @@
 //! writes, served again after their driver is lost, and undone when their
 //! answer cannot be delivered.
 
-use tairix_abi::driver::filesystem::MountFlags;
+use tairix_abi::driver::filesystem::{MountFlags, VolumeTitle};
 use tairix_abi::imageattach::{ImageAccess, ImageAttach, ImageAttachReply, ImageRefusal};
 use tairix_abi::netattach::{AttachReply, FsserveCtl, Presentation};
 use tairix_abi::sysinfo::{VolumeClass, MOUNT_SOURCE_MAX};
@@ -28,6 +28,8 @@ const IMAGE_ATTACH_REFUSED: u32 = 4322;
 const IMAGE_VOLUME_DETACHED: u32 = 4323;
 const IMAGE_DETACH_REFUSED: u32 = 4324;
 const IMAGE_VOLUME_RETIRED: u32 = 4325;
+const IMAGE_VOLUME_RETITLED: u32 = 4327;
+const IMAGE_RETITLE_REFUSED: u32 = 4328;
 
 /// Every image scenario, in turn.
 pub(super) fn run(window_ptr: *mut u8, facility: &'static TestFacility) {
@@ -76,6 +78,7 @@ pub(super) fn run(window_ptr: *mut u8, facility: &'static TestFacility) {
     an_archives_work_files_grow_only_by_what_is_written_scenario(window_ptr, facility);
     an_archives_lost_driver_leaves_no_work_files_scenario(window_ptr, facility);
     an_archive_reached_through_a_read_only_view_attaches_read_only_scenario(window_ptr, facility);
+    an_image_is_retitled_by_its_owner_alone_scenario(window_ptr, facility);
 }
 
 /// A served FAT32 volume shown as `/Storage/<name>`, the `n`th these
@@ -2664,5 +2667,108 @@ fn an_archive_reached_through_a_read_only_view_attaches_read_only_scenario(
     FS_SERVICE
         .view_unbind(0, &MountAuthority, "/Storage/shelf37")
         .expect("unbinds");
+    retire(host_id, DetachMode::Plain, round);
+}
+
+/// An image volume is retitled by its owner alone: its filesystem's label is
+/// written through its driver, listed at once and carried in its file to the
+/// next attach, while its catalog name and its identity stay, so its file
+/// attached again is the volume attached already; a held volume, a read-only
+/// one, a format keeping no title and a device's volume are refused.
+fn an_image_is_retitled_by_its_owner_alone_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (host_id, round) = host(window_ptr, facility, 40, b"imgs40");
+    let path = "/Storage/imgs40/Retitled.adf";
+    put(0, path, &amiga_floppy(b"Before", b"titled"));
+    let owner = plain(MEMBER_UID, STORAGE_GID);
+    let open = |flags| source(MEMBER_UID, path, flags, session(), 0x1A00_01A0);
+    let retitle = |caller: &Principal<'_>, id: &[u8; 16], title: &str| {
+        VOLUME_SERVICE.retitle(caller, id, &VolumeTitle::new(title).expect("a title"))
+    };
+    let volume = mounted(attached(
+        facility,
+        &owner,
+        open(read_write()),
+        &private(false),
+    ));
+    assert_eq!(volume.name(), "before");
+    assert_eq!(
+        mount_record(b"Retitled.adf").title().as_str(),
+        "Before",
+        "titled from its label"
+    );
+    let id = volume.volume_id;
+    assert_eq!(
+        retitle(&plain(OUTSIDER_UID, OUTSIDER_UID), &id, "Theirs"),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        retitle(&admin(), &id, "Theirs"),
+        Err(Errno::PermissionDenied),
+        "the mount authority retitles no one's image"
+    );
+    assert_eq!(
+        VOLUME_SERVICE.while_image_held(&id, || retitle(&owner, &id, "Held")),
+        Err(Errno::Busy)
+    );
+    retitle(&owner, &id, "After").expect("its owner retitles it");
+    assert_eq!(mount_record(b"Retitled.adf").title().as_str(), "After");
+    assert_eq!(
+        attached(facility, &owner, open(read_write()), &private(false)),
+        Ok(ImageAttachReply::AlreadyAttached(volume)),
+        "a retitle keeps its identity, so the file is the volume attached already"
+    );
+    assert!(
+        shown("before"),
+        "its catalog name stays while it is attached"
+    );
+    assert_eq!(
+        audited(IMAGE_RETITLE_REFUSED, "before"),
+        [
+            Some(String::from("not_owner")),
+            Some(String::from("not_owner")),
+            Some(String::from("volume_busy"))
+        ]
+    );
+    assert_eq!(
+        audited(IMAGE_VOLUME_RETITLED, "before"),
+        [Some(String::from("owner"))]
+    );
+    eject(&volume, DetachMode::Plain, &owner).expect("its owner ejects it");
+    let again = mounted(attached(
+        facility,
+        &owner,
+        open(OpenFlags::READ),
+        &private(false),
+    ));
+    assert_eq!(again.name(), "after", "the title is the file's");
+    assert_eq!(again.volume_id, id, "and the volume is the one it was");
+    assert_eq!(
+        retitle(&owner, &again.volume_id, "Again"),
+        Err(Errno::ReadOnly),
+        "a read-only descriptor's volume keeps its title"
+    );
+    eject(&again, DetachMode::Plain, &owner).expect("its owner ejects it");
+    let disc = "/Storage/imgs40/disc.iso";
+    put(0, disc, &ext_fixture::sparse(ISO_FIXTURE));
+    let iso = mounted(attached(
+        facility,
+        &owner,
+        source(MEMBER_UID, disc, OpenFlags::READ, session(), 0x1A00_01A1),
+        &private(true),
+    ));
+    assert_eq!(
+        retitle(&owner, &iso.volume_id, "Disc"),
+        Err(Errno::NotSupported),
+        "a disc keeps the title it was mastered with"
+    );
+    eject(&iso, DetachMode::Plain, &owner).expect("its owner ejects it");
+    assert_eq!(
+        retitle(&admin(), &host_id, "Host"),
+        Err(Errno::NotSupported),
+        "a device's volume is no one's to retitle"
+    );
     retire(host_id, DetachMode::Plain, round);
 }

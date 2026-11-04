@@ -224,11 +224,11 @@ answers, never a parser.
 ## The picker's Save mode
 
 `PickFile` carries a purpose: Open, or Save with a suggested leaf name and the
-name endings the requester can write. Save shows the session's Save panel
+formats the requester can write. Save shows the session's Save panel
 (`plans/SAVE-DIALOG.md`) — the name, *Where*, *Format*, the folders on request,
-and the document's picture to drag to a folder — refuses an ending the
-requester cannot write and
-gives a name with none the first, confirms a replacement, and concludes by
+and the document's picture to drag to a folder — refuses an ending of a type
+the requester does not write, gives a name with none the format's extension,
+confirms a replacement, and concludes by
 opening the chosen path write-only under the
 session's authority: created exclusively and never through a link when new,
 and never truncated — the requester writes from the start and cuts the file to
@@ -293,7 +293,12 @@ then and is written in turn once those ahead of it land, so a Save as is
 adopted before the next save picks a file. Plain saves asked in a row become
 one of the latest document; every Save as keeps its own, its file already
 made. Closing writes them all at once, each where it would have gone. A
-document opened into a window replaces only one with nothing under way. The
+document opened into a window replaces only one with nothing under way. A
+window opened for a document is not presented until the document lands, or
+until a second has passed (`OPENING_SHOWN_AFTER_NS`), when it shows that it is
+opening: the session shows a served window at its first present, so a quick
+read shows the document's own window, sized to it, and nothing before it; the
+window's least size is restated whenever its view's moves. The
 loop takes in every answer and queued event, then paints each window once; a
 keystroke repaints the rows it changed — every row below it where it moved
 bytes or rows — and the status band, never the window,

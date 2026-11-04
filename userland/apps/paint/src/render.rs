@@ -18,7 +18,7 @@ use tairix_controls::{
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{saturate_i32, to_i32, Point, Rect, Scale};
-use tairix_icon::IconArtwork;
+use tairix_icon::{IconArtwork, IconRequest};
 use tairix_image::{IndexDepth, Rgba8, SpriteName};
 use tairix_raster::{Color, CoverageRows, Pixel, Surface};
 use tairix_theme::Theme;
@@ -114,20 +114,9 @@ pub fn render_into(
             .render(surface, layout.horizontal_bar(), scale, theme);
     }
     fill_area(surface, layout.corner(), Color::from(palette.scroll_track));
-    if !withheld(surface, layout.palette()) {
+    if layout.pane(PaneKind::Palette).is_none() && !withheld(surface, layout.palette()) {
         fill_area(surface, layout.palette(), chrome);
-        let shown = layout.wells_view();
-        let bounds = view.swatch_bounds(layout);
-        if let (Ok(x), Ok(y)) = (u32::try_from(shown.left()), u32::try_from(shown.top())) {
-            surface.with_clip(x, y, shown.width, shown.height, |surface| {
-                controls.swatches.render(surface, bounds, scale, theme);
-            });
-        }
-        if !layout.palette_bar().is_empty() {
-            controls
-                .palette_bar
-                .render(surface, layout.palette_bar(), scale, theme);
-        }
+        palette_wells(surface, view, layout, (theme, scale), artwork);
     }
     if !withheld(surface, layout.status()) {
         status(surface, view, layout, theme, faces.status);
@@ -222,6 +211,39 @@ fn pane_body(
             (faces, scale, theme),
             view.histogram(),
         ),
+        PaneKind::Palette => palette_wells(surface, view, layout, (theme, scale), artwork),
+    }
+}
+
+/// The palette's wells and, in its strip, the bar they scroll by and the
+/// control that floats them.
+fn palette_wells(
+    surface: &mut Surface,
+    view: &View,
+    layout: &Layout,
+    (theme, scale): (&Theme, Scale),
+    artwork: &mut dyn IconArtwork,
+) {
+    let controls = view.controls();
+    let shown = layout.wells_view();
+    let bounds = view.swatch_bounds(layout);
+    if let (Ok(x), Ok(y)) = (u32::try_from(shown.left()), u32::try_from(shown.top())) {
+        surface.with_clip(x, y, shown.width, shown.height, |surface| {
+            controls.swatches.render(surface, bounds, scale, theme);
+        });
+    }
+    if !layout.palette_bar().is_empty() {
+        controls
+            .palette_bar
+            .render(surface, layout.palette_bar(), scale, theme);
+    }
+    let pop_out = layout.pop_out();
+    if !pop_out.is_empty() {
+        let side = controls.pop_out.icon_side(pop_out, scale, theme);
+        let picture = artwork.artwork(IconRequest::kind(controls.pop_out.icon()), side);
+        controls
+            .pop_out
+            .render(surface, pop_out, scale, theme, picture);
     }
 }
 

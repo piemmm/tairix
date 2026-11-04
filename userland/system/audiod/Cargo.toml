@@ -36,6 +36,9 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # device clock model, routing policy and the volume model. This service is
 # its driver; it owns no sample arithmetic of its own.
 tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
+# The bounded store each client mailbox's held wakes are kept in, so holding
+# one never allocates on the period path.
+tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
 # The structured audit records every capture grant and refusal, device bind
 # and loss, and default-device change is written through.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }

@@ -18,6 +18,7 @@ use tairix_abi::driver::filesystem::listing::listed;
 use tairix_abi::DriverKind;
 use tairix_fsprobe::adfs::{BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE, DISC_RECORD_SIZE};
 
+mod label;
 mod recovery;
 
 // What a test's creations ask for, which ADFS has nowhere to keep.

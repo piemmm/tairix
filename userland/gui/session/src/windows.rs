@@ -38,8 +38,8 @@ use tairix_log::{EventId, Field, FieldValue};
 use tairix_theme::CursorKind;
 use tairix_wallpaper::DesktopSettings;
 use tairix_window::{
-    Activation, AlertOpen, ClientRegion, CursorSetName, DialogSpec, HandOverDesk, PreviewSize,
-    ToolSpec, WallpaperName, WindowHost,
+    Activation, AlertOpen, AuthoriseFor, ClientRegion, CursorSetName, DialogSpec, HandOverDesk,
+    PreviewSize, ToolSpec, WallpaperName, WindowHost,
 };
 
 use crate::launch::{
@@ -57,7 +57,7 @@ use crate::apps::{AppBarBridge, BundleIndex};
 use crate::clipboard::ClipboardService;
 use crate::confirm::ConfirmPrompt;
 use crate::elevate::{AuthoriseDesk, AuthorisePrompt};
-use crate::hold::{is_press, reaches_held_window, Holds};
+use crate::hold::{is_press, reaches_held_window, Hold, Holds};
 use crate::layer::{
     apply_participation, clamped_origin, fits_layer_bound, stack_at_depth, terrain_into,
     LayerDecision, LayerState, LayerSurface,
@@ -159,8 +159,9 @@ pub const SAVE_INTO_TAKEN: EventId = EventId(20_034);
 /// The exact message [`SAVE_INTO_TAKEN`] is emitted with.
 pub const SAVE_INTO_TAKEN_MESSAGE: &str = "dropped save's folder taken";
 
-/// Event id of a window's presented frame the session could not show: the
-/// window keeps the pixels it had until it presents again.
+/// Event id of a window's presented frame the session could not show,
+/// recorded once until the window next shows one: it keeps the pixels it had,
+/// and the frame is tried again with the desktop's next frame.
 pub const FRAME_REFUSED: EventId = EventId(20_035);
 
 /// The exact message [`FRAME_REFUSED`] is emitted with.
@@ -428,6 +429,11 @@ pub struct SessionWindows {
     /// loop has yet to withdraw: a teardown bridge cannot reach the preview
     /// desk, and every close reaches this table.
     closed: Vec<u64>,
+    /// Applications whose icon-bar slot went since the last take, whose
+    /// question the serve loop has yet to take down: a teardown bridge cannot
+    /// reach the prompt, and every exit of an application holding a slot
+    /// reaches this table.
+    withdrawn: Vec<ProcId>,
     /// The seat's desktop layer surface and its two feeds.
     pub layers: LayerState,
     /// The served window the seat last carried a key or a button press to:
@@ -436,9 +442,12 @@ pub struct SessionWindows {
     worked_in: Option<u64>,
     /// The alerts applications have up.
     pub alerts: Alerts,
-    /// Which windows are held modal, and by what: an alert or an owner-modal
-    /// dialog.
+    /// Which windows are held modal, and by what: an alert, an owner-modal
+    /// dialog, or the trusted picker.
     pub holds: Holds,
+    /// The hold the trusted picker took on the window that asked for its
+    /// pick, while it is up.
+    pick_hold: Option<Hold>,
 }
 
 /// The reports that move apps told the keyboard rests on `told` to where it
@@ -459,6 +468,27 @@ impl SessionWindows {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The trusted picker's window `by` holds compositor window `held`, whose
+    /// pick it shows, until the pick concludes.
+    pub fn hold_for_pick(&mut self, held: WindowId, by: WindowId) {
+        if let Some(earlier) = self.pick_hold.replace(Hold { held, by }) {
+            let _ = self.holds.release(earlier.by);
+        }
+        self.holds.take(held, by);
+    }
+
+    /// The pick concluded: release the hold its picker took, answering what
+    /// takes the keyboard — the front of the window it held, where the
+    /// picker handed the keyboard back to that window and something else
+    /// still holds it — given that `focused` has it now.
+    ///
+    /// The keyboard stays wherever the user took it while the pick was up.
+    pub fn release_pick_hold(&mut self, focused: Option<WindowId>) -> Option<WindowId> {
+        let hold = self.pick_hold.take()?;
+        let front = self.holds.release(hold.by)?;
+        (focused == Some(hold.held) && front != hold.held).then_some(front)
     }
 
     /// The window-channel id of the served window shown as `wm`, if any
@@ -623,6 +653,12 @@ impl SessionWindows {
     /// each close is answered once.
     pub fn take_closed(&mut self) -> Vec<u64> {
         core::mem::take(&mut self.closed)
+    }
+
+    /// The applications whose icon-bar slot went since the last take,
+    /// clearing the list so each is answered once.
+    pub fn take_withdrawn(&mut self) -> Vec<ProcId> {
+        core::mem::take(&mut self.withdrawn)
     }
 
     /// Report what the frame just handed to the display shows of the served
@@ -1333,8 +1369,9 @@ pub struct ShellWindowHost<'a> {
     /// The seat's one menu chain, which a validated `OpenMenu` brings up.
     pub menu: &'a mut MenuChain,
     /// Whether a surface a menu may not displace holds the seat — the screen
-    /// lock, the trusted picker, or a system-modal prompt. An accepted open is
-    /// answered `SeatBusy` rather than drawing over one.
+    /// lock, a system-modal prompt, or the trusted picker while the keyboard is
+    /// in it. An accepted open is answered `SeatBusy` rather than drawing over
+    /// one.
     ///
     /// Resolved by the session, which owns all of them; the host is handed the
     /// answer rather than reaching for each in turn.
@@ -1561,25 +1598,27 @@ impl ShellWindowHost<'_> {
         );
     }
 
-    /// Why the seat cannot carry a chain right now, if it cannot.
-    fn seat_refusal(&self) -> Option<MenuRefusal> {
+    /// Why the seat cannot carry a chain for window `window_id` right now, if
+    /// it cannot: a held window opens none, as it takes no input.
+    fn seat_refusal(&self, window_id: u64) -> Option<MenuRefusal> {
         // A carried drag owns the press still held; a menu opened under it
         // would take the release that drops the drag.
         seat_menu_refusal(
             self.compositor.screen_rect(),
-            self.seat_held || self.shell.drag_active(),
+            self.seat_held || self.shell.drag_active() || self.windows.is_held(window_id),
         )
     }
 }
 
 /// Why the seat cannot carry a menu chain on a `screen`, with `seat_held`
-/// saying whether a surface a menu may not displace has the seat.
+/// saying whether a surface the chain may not displace has the seat:
+/// [`seat_held`] for an application's chain, [`seat_modal`] for the desktop's.
 ///
-/// One rule for every chain, whoever asked for it: an application's `OpenMenu`
-/// and the desktop's own backdrop menu both resolve through this, so a menu
-/// cannot appear over a lock screen or the trusted picker by arriving from the
-/// other direction. Drawing over one would take the seat's grab away from a
-/// password field or a file choice the user is being asked to make.
+/// One rule for every chain, whoever asked for it, so a menu cannot appear over
+/// a lock screen or a prompt by arriving from the other direction, nor an
+/// application's over the trusted picker while it holds the keyboard. Drawing
+/// over one would take the seat's grab away from a password field or a file
+/// choice the user is making.
 #[must_use]
 pub fn seat_menu_refusal(screen: Rect, seat_held: bool) -> Option<MenuRefusal> {
     if screen.is_empty() {
@@ -1591,23 +1630,51 @@ pub fn seat_menu_refusal(screen: Rect, seat_held: bool) -> Option<MenuRefusal> {
     None
 }
 
-/// Whether a surface the seat may not be taken from holds it: the screen
-/// lock, the trusted picker, or a system-modal prompt.
+/// Whether a surface holding the whole seat is up — the screen lock or a
+/// system-modal prompt — which nothing opens over.
 ///
-/// One definition, because every request to come forward, take the keyboard,
-/// open a menu, start a drag or open a popup consults it, whichever direction
-/// it arrives from.
+/// The session's own surfaces the user opens — the bar's and the backdrop's
+/// menus, the program library — open over anything less. The trusted picker
+/// holds only the window that asked for its pick, so one opens over it, takes
+/// the keyboard while it is up and leaves it with the picker as it closes.
+#[must_use]
+pub fn seat_modal(
+    lock: &ScreenLock,
+    (confirm, elevate, resolution): (&ConfirmPrompt, &AuthorisePrompt, &ResolutionPrompt),
+) -> bool {
+    lock.is_locked() || confirm.wm_id().is_some() || elevate.is_up() || resolution.is_open()
+}
+
+/// Whether an application may not take the seat: a [`seat_modal`] surface is
+/// up, or the trusted picker has the keyboard — the window with it being
+/// `focused` — which only the user takes from it.
+///
+/// One definition, because every request of an application's to come
+/// forward, take the keyboard, open a menu, start a drag or open a popup
+/// consults it. The picker holds only its requester otherwise, as an
+/// owner-modal dialog does, so every other application stays usable.
 #[must_use]
 pub fn seat_held<S: DirectorySource, F: FnMut() -> S>(
     lock: &ScreenLock,
-    picker: &SessionPicker<S, F>,
-    (confirm, elevate, resolution): (&ConfirmPrompt, &AuthorisePrompt, &ResolutionPrompt),
+    (picker, focused): (&SessionPicker<S, F>, Option<WindowId>),
+    prompts: (&ConfirmPrompt, &AuthorisePrompt, &ResolutionPrompt),
 ) -> bool {
-    lock.is_locked()
-        || picker.wm_id().is_some()
-        || confirm.wm_id().is_some()
-        || elevate.is_up()
-        || resolution.is_open()
+    seat_modal(lock, prompts) || picker.holds_keyboard(focused)
+}
+
+/// Whether a surface the session draws for a trusted decision is on screen:
+/// the screen lock, the trusted picker, or a system-modal prompt.
+///
+/// Wider than [`seat_held`]: a picker the user has left still shows a file
+/// choice, so nothing that may draw over windows or watch the pointer — the
+/// desktop layer surface — may stand over it.
+#[must_use]
+pub fn trusted_up<S: DirectorySource, F: FnMut() -> S>(
+    lock: &ScreenLock,
+    picker: &SessionPicker<S, F>,
+    prompts: (&ConfirmPrompt, &AuthorisePrompt, &ResolutionPrompt),
+) -> bool {
+    seat_modal(lock, prompts) || picker.wm_id().is_some()
 }
 
 /// Where a window's own menu opens against the press `anchor` its application
@@ -1837,8 +1904,8 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         surface: &DisplayMode,
     ) -> Result<(), Errno> {
         // A popup takes the keyboard as it opens, so none opens while a lock,
-        // the picker or a prompt holds the seat.
-        if self.seat_held {
+        // the picker or a prompt holds the seat, nor for a held window.
+        if self.seat_held || self.windows.is_held(parent_window_id) {
             return Err(Errno::SeatBusy);
         }
         // An app is never told where its own window sits, so the offset it
@@ -1890,8 +1957,9 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 
     fn tool_opened(&mut self, window_id: u64, spec: &ToolSpec) -> Result<(), Errno> {
         // Opening one restacks its family to the front, which must never put
-        // an application's window over a lock, the picker or a prompt.
-        if self.seat_held {
+        // an application's window over a lock, the picker or a prompt, nor
+        // give a held window a way past its holder.
+        if self.seat_held || self.windows.is_held(spec.transient.parent_window_id) {
             return Err(Errno::SeatBusy);
         }
         let transient = &spec.transient;
@@ -2262,6 +2330,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
                 Standing::TopLevel | Standing::Popup(_) | Standing::Tool(_) => None,
             };
             holds.forget(record.wm);
+            self.windows.pick_hold = self.windows.pick_hold.filter(|hold| hold.held != record.wm);
             // A transient and a layer surface were never tasks, so they leave
             // through the taskbar-less path; the engine tears a parent's
             // transients down with it, so each arrives here in its own turn.
@@ -2303,7 +2372,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // application unable to tell "the desktop cannot" from "I asked
         // wrongly".
         let owner = ChainOwner::Window { window_id, open_id };
-        if let Some(reason) = self.seat_refusal() {
+        if let Some(reason) = self.seat_refusal(window_id) {
             self.menu.refuse(owner, reason);
             return Ok(());
         }
@@ -2360,7 +2429,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 
     fn pick_requested(&mut self, window_id: u64, purpose: &PickPurpose) -> Result<(), Errno> {
         // The picker takes the keyboard as it opens, so none opens over the
-        // lock, a prompt, or another pick.
+        // lock or a prompt; the slot itself refuses a second pick.
         if self.seat_held {
             return Err(Errno::SeatBusy);
         }
@@ -2368,8 +2437,15 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // single-pending rule; the slot brings the UI up under the
         // session's authority, refusing fail-closed when it cannot.
         let over = self.windows.wm_id(window_id);
-        self.picker
-            .begin((window_id, over), purpose, self.shell, self.compositor)
+        let shown = self
+            .picker
+            .begin((window_id, over), purpose, self.shell, self.compositor)?;
+        // The picker holds its requester as an owner-modal dialog does, and
+        // nothing else.
+        if let (Some(over), Some(by)) = (over, shown) {
+            self.windows.hold_for_pick(over, by);
+        }
+        Ok(())
     }
 
     fn focused_window(&self) -> Option<u64> {
@@ -2378,8 +2454,8 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 
     fn raise_requested(&mut self, window_id: u64) -> Result<(), Errno> {
         // Nothing comes forward over the lock, the picker, a prompt, or a
-        // drag the user is still carrying.
-        if self.seat_held || self.shell.drag_active() {
+        // drag the user is still carrying; a held window is its holder's.
+        if self.seat_held || self.shell.drag_active() || self.windows.is_held(window_id) {
             let owner = self.windows.owner_of(window_id);
             self.note_raise_refused(owner, window_id, "seat held");
             return Err(Errno::SeatBusy);
@@ -2419,8 +2495,8 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 
     fn drag_requested(&mut self, window_id: u64, items: &DragItems) -> Result<(), Errno> {
         // A drag may not take the pointer from the lock, the picker, or a
-        // prompt, any more than a menu may.
-        if self.seat_held {
+        // prompt, any more than a menu may, nor start in a held window.
+        if self.seat_held || self.windows.is_held(window_id) {
             return Err(Errno::SeatBusy);
         }
         let wm = self.windows.wm_id(window_id).ok_or(Errno::NotFound)?;
@@ -2632,6 +2708,9 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 
     fn app_bar_withdrawn(&mut self, owner: ProcId) {
         self.apps.app_bar_withdrawn(owner);
+        // A question the slot asked has no one left to tell, and the serve loop
+        // holds the prompt.
+        self.windows.withdrawn.push(owner);
     }
 
     fn backdrop_blur_set(&mut self, window_id: u64, radius_px: u16) {
@@ -2674,21 +2753,25 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
     fn authorise_requested(
         &mut self,
         caller: Option<&AttestedApp>,
-        window_id: u64,
+        asker: AuthoriseFor,
         task: &SystemTask,
     ) -> Result<(), Errno> {
-        if !self.shell.settings_only(caller, "authorise") {
+        let component = crate::systask::Component::of(task);
+        if !self
+            .shell
+            .component_only(caller, component.bundle_id(), "authorise")
+        {
             return Err(Errno::PermissionDenied);
         }
         let Some(desk) = self.authorise.as_mut() else {
             return Err(Errno::NotSupported);
         };
         // The prompt takes the seat as it opens, so none opens over the lock,
-        // the picker, or another prompt.
+        // a picker with the keyboard, or another prompt.
         if self.seat_held || desk.prompt.is_up() {
             return Err(Errno::SeatBusy);
         }
-        let request = crate::systask::request_for(task, window_id)?;
+        let request = crate::systask::request_for(task, asker)?;
         // The seat was free, so the only prompt that cannot come up is one the
         // compositor had no room for.
         if desk
@@ -2875,6 +2958,8 @@ mod tests {
     struct RecordingSlot {
         begun: alloc::vec::Vec<u64>,
         aborted: alloc::vec::Vec<u64>,
+        /// The window a begun pick shows, if the slot shows one.
+        shows: Option<WindowId>,
         /// The dropped save the slot awaits a folder for, and every folder
         /// it was told.
         awaits: Option<(u64, u32)>,
@@ -2888,9 +2973,9 @@ mod tests {
             _purpose: &PickPurpose,
             _shell: &mut DesktopShell,
             _compositor: &mut Compositor,
-        ) -> Result<(), Errno> {
+        ) -> Result<Option<WindowId>, Errno> {
             self.begun.push(for_window);
-            Ok(())
+            Ok(self.shows)
         }
 
         fn abort_for(
@@ -3170,7 +3255,7 @@ mod tests {
             clipboard: &mut bench.clipboard,
             authorise: prompt.map(|(prompt, elevator)| AuthoriseDesk { prompt, elevator }),
         };
-        host.authorise_requested(caller, 12, task)
+        host.authorise_requested(caller, AuthoriseFor::Window(12), task)
     }
 
     /// The screensaver catalogue is read by the desktop's own Settings alone,
@@ -3337,7 +3422,7 @@ mod tests {
         );
         let pending = prompt.pending().expect("the prompt is up");
         assert_eq!(pending.requester, crate::config::SETTINGS_LABEL);
-        assert_eq!(pending.window, Some(12));
+        assert_eq!(pending.asker, Some(AuthoriseFor::Window(12)));
         assert_eq!(elevator.asked, core::slice::from_ref(&pending.program));
         assert_eq!(
             ask_task(
@@ -3348,6 +3433,135 @@ mod tests {
             ),
             Err(Errno::SeatBusy),
             "one question at a time"
+        );
+    }
+
+    /// Only the file manager may ask to eject: Settings, another application,
+    /// one claiming the file manager's identifier under another key and a
+    /// caller running no verified bundle are refused before anything is asked,
+    /// and the file manager's asking puts the prompt up, naming it.
+    #[test]
+    fn an_eject_is_asked_for_the_file_manager_alone() {
+        let mut bench = HandOverBench::new();
+        let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
+        let stranger = tairix_abi::PublisherId::from_raw([2; 32]);
+        let own = AttestedApp::new("os.tairix.desktop", publisher).expect("identity");
+        bench.shell.set_own_app(Some(own));
+        let files = AttestedApp::new(crate::systask::FILES_BUNDLE, publisher).expect("identity");
+        let settings =
+            AttestedApp::new(tairix_taskbar::system::SETTINGS_BUNDLE, publisher).expect("identity");
+        let paint = AttestedApp::new("os.tairix.paint", publisher).expect("identity");
+        let impostor = AttestedApp::new(crate::systask::FILES_BUNDLE, stranger).expect("identity");
+        let mut prompt = AuthorisePrompt::new();
+        let mut elevator = CountingElevator::default();
+        let eject = SystemTask::Eject(
+            tairix_abi::elevate::ElevateWords::new(&[
+                "id::07070707-0707-0707-0707-070707070707/",
+                "usb1",
+            ])
+            .expect("within bounds"),
+        );
+
+        for caller in [Some(&settings), Some(&paint), Some(&impostor), None] {
+            assert_eq!(
+                ask_task(
+                    &mut bench,
+                    Some((&mut prompt, &mut elevator)),
+                    caller,
+                    &eject
+                ),
+                Err(Errno::PermissionDenied),
+                "{caller:?}"
+            );
+        }
+        assert!(
+            !prompt.is_up() && elevator.asked.is_empty(),
+            "nothing was asked"
+        );
+        assert_eq!(
+            ask_task(
+                &mut bench,
+                Some((&mut prompt, &mut elevator)),
+                Some(&files),
+                &eject
+            ),
+            Ok(())
+        );
+        let pending = prompt.pending().expect("the prompt is up");
+        assert_eq!(pending.requester, crate::config::FILES_LABEL);
+        assert_eq!(elevator.asked, core::slice::from_ref(&pending.program));
+    }
+
+    /// An application that exits takes the question its icon-bar slot asked
+    /// down unanswered: the bridge any exit is torn down through cannot reach
+    /// the prompt, so it records the slot for the serve loop.
+    ///
+    /// Regression: only a window's question was taken down, so a slot's prompt
+    /// outlived its application, still holding the seat.
+    #[test]
+    fn an_application_that_exits_takes_its_slots_question_down() {
+        use tairix_abi::window_ipc::{AppBarClick, WindowRequest};
+
+        let mut bench = HandOverBench::new();
+        let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
+        let own = AttestedApp::new("os.tairix.desktop", publisher).expect("identity");
+        bench.shell.set_own_app(Some(own));
+        let files = AttestedApp::new(crate::systask::FILES_BUNDLE, publisher).expect("identity");
+        let mut server = tairix_window::WindowServer::new(Mapper, window_owner(0x5D), u64::MAX);
+        let mut prompt = AuthorisePrompt::new();
+        let mut elevator = CountingElevator::default();
+        let eject = SystemTask::Eject(
+            tairix_abi::elevate::ElevateWords::new(&[
+                "id::07070707-0707-0707-0707-070707070707/",
+                "usb1",
+            ])
+            .expect("within bounds"),
+        );
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut bench.shell,
+                compositor: &mut bench.compositor,
+                windows: &mut bench.windows,
+                picker: &mut bench.picker,
+                apps: &mut bench.bar,
+                menu: &mut bench.menu,
+                seat_held: false,
+                screensaver: None,
+                relay: &mut bench.relay,
+                wallpapers: &mut bench.gallery,
+                cursor_sets: &[],
+                clipboard: &mut bench.clipboard,
+                authorise: Some(AuthoriseDesk {
+                    prompt: &mut prompt,
+                    elevator: &mut elevator,
+                }),
+            };
+            for request in [
+                WindowRequest::SetAppBar(crate::tests::app_bar(AppBarClick::Open)),
+                WindowRequest::Authorise {
+                    window_id: None,
+                    task: eject,
+                },
+            ] {
+                let reply = served(&mut server, &mut host, &mut Caller(Some(files)), &request);
+                assert_eq!(tairix_abi::reply::decode_status_reply(&reply), Ok(()));
+            }
+        }
+        let slot = AuthoriseFor::Slot(window_owner(1));
+        assert_eq!(
+            prompt.pending().and_then(|request| request.asker),
+            Some(slot)
+        );
+
+        server.client_exited(&mut bench.host(), window_owner(1));
+        for owner in bench.windows.take_withdrawn() {
+            prompt.abort_for(AuthoriseFor::Slot(owner), &mut bench.compositor);
+        }
+        assert!(!prompt.is_up(), "the question went with its application");
+        assert!(prompt.take_concluded().is_empty(), "with nobody to tell");
+        assert!(
+            bench.windows.take_withdrawn().is_empty(),
+            "each exit is answered once"
         );
     }
 
@@ -3914,6 +4128,129 @@ mod tests {
         assert!(window.is_visible(), "the first present maps the window");
         assert!(window.has_content());
         assert_eq!(shell.router().focused(), Some(wm), "and gives it focus");
+    }
+
+    /// A frame region an engine under test maps: zeroes, of the length asked.
+    struct Zeroed(Vec<u8>);
+
+    impl tairix_display::FrameRegion for Zeroed {
+        fn bytes(&self) -> &[u8] {
+            &self.0
+        }
+    }
+
+    /// A mapper handing an engine under test [`Zeroed`] regions.
+    struct Mapper;
+
+    impl tairix_display::ShmMapper for Mapper {
+        type Region = Zeroed;
+        fn map(&mut self, _: ProcId, _: u64, min_len: usize) -> Result<Zeroed, Errno> {
+            Ok(Zeroed(vec![0; min_len]))
+        }
+    }
+
+    /// Every caller of an engine under test: process 1, running the
+    /// application it holds, if any.
+    struct Caller(Option<AttestedApp>);
+
+    impl tairix_window::CallerIdentity for Caller {
+        fn caller(&mut self, _: u64) -> Result<ProcId, Errno> {
+            Ok(window_owner(1))
+        }
+        fn caller_mailbox(&mut self, _: u64) -> Result<u64, Errno> {
+            Ok(tairix_abi::window_ipc::event_endpoint_for(1))
+        }
+        fn caller_app(&mut self, _: u64) -> Result<Option<AttestedApp>, Errno> {
+            Ok(self.0)
+        }
+    }
+
+    /// A sink taking every event an engine under test delivers.
+    struct Sink;
+
+    impl tairix_window::EventSink for Sink {
+        fn deliver(&mut self, _: u64, _: &WindowEvent) -> Result<(), Errno> {
+            Ok(())
+        }
+    }
+
+    /// `request`, sent by `caller`, served by `server` over `host`: its reply.
+    fn served(
+        server: &mut tairix_window::WindowServer<Mapper>,
+        host: &mut ShellWindowHost<'_>,
+        caller: &mut Caller,
+        request: &tairix_abi::window_ipc::WindowRequest,
+    ) -> Vec<u8> {
+        let mut wire = [0u8; tairix_abi::window_ipc::WindowRequest::MAX_WIRE_LEN];
+        let len = request.encode(&mut wire).expect("encodes");
+        let mut reply = [0u8; tairix_window::WINDOW_REPLY_MAX];
+        let n = server.serve(host, &mut Sink, caller, 1, &wire[..len], &mut reply);
+        reply[..n].to_vec()
+    }
+
+    /// A served window is mapped by the latch that shows its first frame, not
+    /// by the request that presented it: the engine records a present, and the
+    /// desktop's next frame shows it.
+    #[test]
+    fn a_window_is_mapped_when_the_latch_shows_its_first_frame() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(4, 4, DisplayFormat::Rgba8888);
+        let mut server = tairix_window::WindowServer::new(Mapper, window_owner(0x5D), u64::MAX);
+        let id = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+                screensaver: None,
+                relay: &mut RefusingRelay,
+                wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
+            };
+            let create = tairix_abi::window_ipc::WindowRequest::Create {
+                shm_handle: 7,
+                event_endpoint: tairix_abi::window_ipc::event_endpoint_for(1),
+                frame_count: 2,
+                width_px: m.width_px,
+                height_px: m.height_px,
+                stride_bytes: m.stride_bytes,
+                format: m.format,
+                title: tairix_abi::window_ipc::WindowTitle::new("w").expect("a title"),
+                sizing: WindowSizing::default(),
+            };
+            let opened = served(&mut server, &mut host, &mut Caller(None), &create);
+            let (id, _) = tairix_abi::window_ipc::decode_create_reply(&opened).expect("opened");
+            let present = tairix_abi::window_ipc::WindowRequest::Present {
+                window_id: id,
+                frame_index: 1,
+                damage: whole(&m),
+            };
+            let recorded = served(&mut server, &mut host, &mut Caller(None), &present);
+            tairix_abi::reply::decode_status_reply(&recorded).expect("recorded");
+            id
+        };
+        let wm = windows.wm_id(id).expect("recorded");
+        assert!(
+            !compositor.window(wm).expect("live").is_visible(),
+            "a recorded frame is not yet shown"
+        );
+        server.latch(&mut FrameShow {
+            shell: &mut shell,
+            compositor: &mut compositor,
+            windows: &mut windows,
+            seat_held: false,
+        });
+        assert!(
+            compositor.window(wm).expect("live").is_visible(),
+            "the latch that shows it maps the window"
+        );
     }
 
     /// A present maps a window that has never been on screen, and only that
@@ -5386,6 +5723,137 @@ mod tests {
             Some(owner),
             "the keyboard goes back to the window it held"
         );
+    }
+
+    /// A pick holds only the window that asked for it, as an owner-modal
+    /// dialog does: another application's window takes input, raises and
+    /// drags while the pick is up, the asking window takes none of them, and
+    /// the hold ends with the pick, the keyboard back on the asking window.
+    ///
+    /// Regression: an open picker held the whole seat, so no other
+    /// application could open a menu or be operated until it closed.
+    #[test]
+    fn a_pick_holds_only_the_window_that_asked() {
+        let (mut shell, mut comp) = desktop();
+        let mut windows = SessionWindows::new();
+        let shown = comp_window(&mut comp);
+        let mut picker = RecordingSlot {
+            shows: Some(shown),
+            ..RecordingSlot::default()
+        };
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut comp,
+            windows: &mut windows,
+            picker: &mut picker,
+            apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
+            screensaver: None,
+            relay: &mut RefusingRelay,
+            wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
+        };
+        let m = mode(8, 8, DisplayFormat::Rgba8888);
+        for (owner, id, title) in [(1, 1, "paint"), (2, 2, "files")] {
+            host.window_opened(window_owner(owner), id, &m, title, WindowSizing::default())
+                .expect("opens");
+            host.window_presented(id, &m, &vec![0u8; 8 * 8 * 4], &whole(&m))
+                .expect("and maps");
+        }
+        host.pick_requested(1, &PickPurpose::Open)
+            .expect("accepted");
+        let asking = host.windows.wm_id(1).expect("served");
+        assert_eq!(host.windows.holder_of(asking), Some(shown));
+        assert!(host.windows.is_held(1) && !host.windows.is_held(2));
+        assert!(!host.windows.admits(&pointer(1, PRESS), || 0));
+        assert!(host.windows.admits(&pointer(2, PRESS), || 0));
+        let items = DragItems::new(
+            DocumentName::new("a.txt").expect("a valid name"),
+            1,
+            true,
+            [tairix_abi::window_ipc::DragPicture {
+                icon: tairix_abi::window_ipc::IconAsset::new("text").expect("a valid id"),
+                from: None,
+            }],
+        )
+        .expect("one file");
+        assert_eq!(host.raise_requested(1), Err(Errno::SeatBusy));
+        assert_eq!(host.drag_requested(1, &items), Err(Errno::SeatBusy));
+        assert_eq!(
+            host.raise_requested(2),
+            Ok(()),
+            "the other application comes forward"
+        );
+        let elsewhere = host.windows.wm_id(2);
+        assert_eq!(
+            host.windows.release_pick_hold(elsewhere),
+            None,
+            "the keyboard stays where the user took it"
+        );
+        assert!(!host.windows.is_held(1));
+        assert!(host.windows.admits(&pointer(1, PRESS), || 0));
+        assert_eq!(
+            host.windows.release_pick_hold(Some(asking)),
+            None,
+            "released once"
+        );
+
+        // Handed back to a window an alert also holds, the keyboard goes on
+        // to the alert.
+        host.pick_requested(1, &PickPurpose::Open)
+            .expect("accepted again");
+        let alert = comp_window(host.compositor);
+        host.windows.holds.take(asking, alert);
+        assert_eq!(host.windows.release_pick_hold(Some(asking)), Some(alert));
+        assert_eq!(host.windows.holder_of(asking), Some(alert));
+    }
+
+    /// A pick whose window closed under it leaves no hold behind.
+    #[test]
+    fn a_pick_hold_ends_with_the_window_it_held() {
+        let (mut shell, mut comp) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot {
+            shows: Some(comp_window(&mut comp)),
+            ..RecordingSlot::default()
+        };
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut comp,
+            windows: &mut windows,
+            picker: &mut picker,
+            apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
+            screensaver: None,
+            relay: &mut RefusingRelay,
+            wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
+        };
+        let m = mode(8, 8, DisplayFormat::Rgba8888);
+        host.window_opened(window_owner(1), 1, &m, "paint", WindowSizing::default())
+            .expect("opens");
+        host.window_presented(1, &m, &vec![0u8; 8 * 8 * 4], &whole(&m))
+            .expect("and maps");
+        host.pick_requested(1, &PickPurpose::Open)
+            .expect("accepted");
+        let asking = host.windows.wm_id(1).expect("served");
+        host.window_closed(1);
+        assert!(host.windows.pick_hold.is_none());
+        assert_eq!(host.windows.release_pick_hold(Some(asking)), None);
+    }
+
+    /// A compositor window standing for something that holds a window.
+    fn comp_window(compositor: &mut Compositor) -> WindowId {
+        compositor.add_window(
+            Point::new(0, 0),
+            Surface::new(4, 4).expect("a small window"),
+        )
     }
 
     /// A palette or a popup of a held window acts on that window's content,

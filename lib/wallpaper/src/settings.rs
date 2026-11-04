@@ -4,7 +4,8 @@
 //! One document is one [`DesktopSettings`], in two groups. The *backdrop*
 //! keys are the user's chosen wallpaper (or none), how it is fitted to the
 //! screen, the colour shown where it does not reach, the desktop icon flow,
-//! and the sort order the `Desktop` folder is listed in. The *appearance*
+//! the sort order the `Desktop` folder is listed in, and whether an icon put
+//! down there settles onto the grid. The *appearance*
 //! keys are how every surface of the desktop is drawn: light or dark,
 //! contrast, density, motion, the interface scale, and the cursor set and
 //! pointer size the compositor draws with. The *notification* keys are
@@ -465,6 +466,8 @@ pub enum SettingsKey {
     Icons,
     /// `sort` — how the `Desktop` folder's icons are ordered.
     Sort,
+    /// `grid` — whether an icon put down on the desktop settles onto its grid.
+    Grid,
     /// `appearance` — whether the desktop is drawn light or dark.
     Appearance,
     /// `contrast` — how much separation is drawn around a control.
@@ -554,12 +557,13 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 42] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
         Self::Icons,
         Self::Sort,
+        Self::Grid,
         Self::Appearance,
         Self::Contrast,
         Self::Density,
@@ -601,12 +605,13 @@ impl SettingsKey {
     /// The keys describing the backdrop and the icons standing on it: what
     /// the backdrop menu and the Settings application's Wallpaper pane
     /// edit.
-    pub const PINBOARD: [Self; 5] = [
+    pub const PINBOARD: [Self; 6] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
         Self::Icons,
         Self::Sort,
+        Self::Grid,
     ];
 
     /// The keys describing how every surface of the desktop is drawn: what
@@ -691,6 +696,7 @@ impl SettingsKey {
             Self::Backdrop => "backdrop",
             Self::Icons => "icons",
             Self::Sort => "sort",
+            Self::Grid => "grid",
             Self::Appearance => "appearance",
             Self::Contrast => "contrast",
             Self::Density => "density",
@@ -760,14 +766,16 @@ impl fmt::Display for SettingsKey {
 pub type DocumentRefusal = tairix_appconf::Refusal<SettingsKey>;
 
 /// The per-user pinboard settings: the desktop backdrop's wallpaper, fit,
-/// colour, and the `Desktop` folder's icon flow and sort order.
+/// colour, and the `Desktop` folder's icon flow, sort order and grid.
 ///
 /// [`DesktopSettings::default`] is the settings an **absent** document
 /// implies, exactly the table `plans/PINBOARD.md` §2 specifies: the shipped
 /// default wallpaper, `Fill`, the theme's own backdrop colour, a leading
-/// icon flow, and a name sort — so a fresh account or an unusable document
-/// runs on a calm, fully-specified desktop rather than a guessed one.
+/// icon flow, a name sort, and icons left exactly where they are put — so a
+/// fresh account or an unusable document runs on a calm, fully-specified
+/// desktop rather than a guessed one.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // Each is an independent user preference, not a state.
 pub struct DesktopSettings {
     /// The wallpaper image, or [`WallpaperChoice::None`].
     pub wallpaper: WallpaperChoice,
@@ -779,6 +787,9 @@ pub struct DesktopSettings {
     pub icons: IconFlow,
     /// How the `Desktop` folder's icons are ordered.
     pub sort: IconSort,
+    /// Whether an icon put down on the desktop settles into the nearest free
+    /// cell of its grid, rather than standing exactly where it was put.
+    pub align_to_grid: bool,
     /// Whether the desktop is drawn light or dark.
     pub appearance: Appearance,
     /// How much separation is drawn around a control.
@@ -852,6 +863,7 @@ impl Default for DesktopSettings {
             backdrop: Backdrop::Theme,
             icons: IconFlow::default(),
             sort: IconSort::default(),
+            align_to_grid: false,
             appearance: Appearance::default(),
             contrast: Contrast::Normal,
             density: Density::Normal,
@@ -958,6 +970,7 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
         SettingsKey::Backdrop => put(&mut settings.backdrop, Backdrop::from_value(value)),
         SettingsKey::Icons => put(&mut settings.icons, IconFlow::from_value(value)),
         SettingsKey::Sort => put(&mut settings.sort, IconSort::from_value(value)),
+        SettingsKey::Grid => put_bool(&mut settings.align_to_grid, value),
         SettingsKey::Appearance => put(&mut settings.appearance, Appearance::from_value(value)),
         SettingsKey::Contrast => put(&mut settings.contrast, Contrast::from_value(value)),
         SettingsKey::Density => put(&mut settings.density, Density::from_value(value)),
@@ -1087,6 +1100,7 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::Backdrop => settings.backdrop.render_value(),
         SettingsKey::Icons => settings.icons.as_str().to_string(),
         SettingsKey::Sort => settings.sort.as_str().to_string(),
+        SettingsKey::Grid => tairix_appconf::bool_text(settings.align_to_grid).to_string(),
         SettingsKey::Appearance => settings.appearance.as_str().to_string(),
         SettingsKey::Contrast => settings.contrast.as_str().to_string(),
         SettingsKey::Density => settings.density.as_str().to_string(),

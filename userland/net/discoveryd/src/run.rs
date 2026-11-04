@@ -14,8 +14,8 @@
 //! its session wants them, the discovery endpoint, the exits of its clients,
 //! room in each client port a doorbell is owed to — watched only while one
 //! is, and changed only for a port whose count crossed zero — and a timeout
-//! for the one instant the front must next act by. The loop parks; it never
-//! polls.
+//! for the one instant the front must next act by, a doorbell's memory retry
+//! among them. The loop parks; it never polls.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -132,10 +132,7 @@ mod program {
         }
 
         fn ring(&mut self, port: u64, doorbell: &[u8]) -> Result<(), Errno> {
-            match tairix_rt::ipc_send(port, doorbell) {
-                0 => Ok(()),
-                ret => Err(Errno::from_syscall(ret)),
-            }
+            tairix_rt::ipc_send(port, doorbell)
         }
 
         fn watch(&mut self, peer: ProcId) -> Result<(), Errno> {

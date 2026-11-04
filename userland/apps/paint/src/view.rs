@@ -12,14 +12,16 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::fs::Filetype;
-use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, DialogModality, SaveEndings};
+use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, DialogModality, SaveFormats};
 use tairix_browse::vfs::write_document_title;
 use tairix_colour::Rgba;
 use tairix_controls::{
-    ColourModel, ColourPicker, Keystroke, PickerView, ScrollAction, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollRange, SwatchGrid, SwatchMark, TitleBar, Toolbar,
+    ColourModel, ColourPicker, ControlRole, IconButton, Keystroke, PickerView, ScrollAction,
+    ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, SwatchGrid, SwatchMark, TitleBar,
+    Toolbar,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_icon::IconKind;
 use tairix_image::{desktop_palette, IndexDepth, Rgba8};
 use tairix_input::{InputEvent, Modifiers, PointerButton};
 use tairix_raster::Color;
@@ -43,7 +45,7 @@ use crate::layout::{Faces, Floor, Layout, Needs};
 use crate::mask::{Combine, Mask, Recipe};
 use crate::pane::{Arrangement, PaneKind, Side};
 use crate::preferences::{CanvasStyle, Grid, OpenAt, Preferences};
-use crate::save::{format_for, natural, save_endings, survey, Loss, SaveFormat, SaveRefusal};
+use crate::save::{format_for, natural, save_formats, survey, Loss, SaveFormat, SaveRefusal};
 use crate::selection::{cut_out, Floating};
 use crate::shape::{Bounds, Point as Fx, Shape, Span, FX};
 use crate::stroke::{Blend, Coat, Stroke};
@@ -78,7 +80,8 @@ fn colour_wells() -> Vec<Ink> {
 /// A menu the window asks the desktop to open.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MenuKind {
-    /// The window's menu, opened by a secondary press anywhere in it.
+    /// The window's menu, opened by a secondary press anywhere in it or in
+    /// one of its tool windows.
     Window,
     /// The magnifications, from the status band.
     Zoom,
@@ -522,6 +525,9 @@ pub enum Action {
     Pane(PaneKind),
     /// Put every pane back where a new window has it.
     ResetPanes,
+    /// Float the palette in a tool window of its own, or dock it in its
+    /// strip again.
+    FloatPalette,
     /// Put the inks back to black and white.
     ResetColours,
     /// Take the next press on the picture as a colour for the ink the
@@ -564,6 +570,7 @@ impl Action {
                 | Self::Tool(Tool::Select)
                 | Self::Pane(_)
                 | Self::ResetPanes
+                | Self::FloatPalette
                 | Self::ResetColours
                 | Self::PickColour
         )
@@ -591,6 +598,7 @@ impl Action {
                 | Self::SwapColours
                 | Self::Pane(_)
                 | Self::ResetPanes
+                | Self::FloatPalette
                 | Self::ResetColours
                 | Self::PickColour
         ) || self == Self::Tool(tool)
@@ -599,7 +607,7 @@ impl Action {
 
 /// The actions with no argument, by id: an action's position here is its
 /// menu id, less one.
-const PLAIN_ACTIONS: [Action; 61] = [
+const PLAIN_ACTIONS: [Action; 62] = [
     Action::NewPicture,
     Action::Open,
     Action::Save,
@@ -661,6 +669,7 @@ const PLAIN_ACTIONS: [Action; 61] = [
     Action::PickColour,
     Action::EditEntry,
     Action::SpriteFile,
+    Action::FloatPalette,
 ];
 
 /// Where the argument-carrying families' ids start, and the one entry
@@ -987,6 +996,11 @@ pub struct View {
     horizontal: ScrollBar,
     /// The palette strip's own bar, which scrolls its row of wells.
     palette_bar: ScrollBar,
+    /// The control at the strip's right end that floats the palette.
+    pop_out: IconButton,
+    /// The well a middle press landed on, which its release over the same
+    /// well makes the secondary ink.
+    middle_well: Option<usize>,
     gesture: Option<Gesture>,
     /// The button that began the drag under way: only its release ends it.
     dragging: Option<PointerButton>,
@@ -1071,10 +1085,14 @@ impl SavedDocument for View {
         self.document.saved(generation);
     }
 
+    /// The file the Save As made is typed as the format its sheet chose,
+    /// which the session recorded before the file was written.
     fn rename(&mut self, name: String) {
         self.name = name;
-        self.recorded = None;
-        self.save_as = None;
+        self.recorded = self
+            .save_as
+            .take()
+            .and_then(|format| tairix_browse::media::save_format(format.media()).filetype());
     }
 
     fn set_access(&mut self, access: Access) {
@@ -1238,19 +1256,20 @@ impl DocumentView for View {
             .extension()
     }
 
-    fn save_endings(&self) -> Result<SaveEndings, String> {
+    fn save_formats(&self) -> Result<SaveFormats, String> {
         let entries = self.document.entries();
         let origin = self.document.origin();
         let format = self.save_as.unwrap_or_else(|| natural(entries, origin));
-        save_endings(entries, origin, format).map_err(|refusal| alloc::format!("{refusal}"))
+        save_formats(entries, origin, format).map_err(|refusal| alloc::format!("{refusal}"))
     }
 
-    /// Each floating pane, in the rectangle of the drawing laid out for it.
+    /// Each floating pane, in the rectangle of the drawing laid out for it,
+    /// titled as its band is.
     fn tool_window(&self, layout: &Layout, index: usize) -> Option<ToolWindow<'_>> {
         let slot = layout.floating().get(index)?;
         Some(ToolWindow {
             id: tool_id(slot.kind),
-            title: slot.kind.title(),
+            title: self.headers[slot.kind.index()].title(),
             rect: slot.frame,
         })
     }
@@ -1375,6 +1394,8 @@ impl View {
             vertical: ScrollBar::new(ScrollOrientation::Vertical, flat()),
             horizontal: ScrollBar::new(ScrollOrientation::Horizontal, flat()),
             palette_bar: ScrollBar::new(ScrollOrientation::Horizontal, flat()),
+            pop_out: IconButton::new(IconKind::PopOut, ControlRole::Neutral),
+            middle_well: None,
             gesture: None,
             dragging: None,
             selection: None,
@@ -1768,6 +1789,7 @@ impl View {
             vertical: &self.vertical,
             horizontal: &self.horizontal,
             palette_bar: &self.palette_bar,
+            pop_out: &self.pop_out,
         }
     }
 
@@ -1801,6 +1823,7 @@ impl View {
         let controls = Layout::controls_width(width, view_strip, theme, scale);
         let needs = Needs {
             wells: self.wells.len(),
+            clear: self.wells.last() == Some(&Ink::Clear),
             picker: self.picker.measured_height(dock, scale, theme),
             colour_controls: self
                 .colour_controls
@@ -1842,8 +1865,8 @@ impl View {
         })
     }
 
-    /// The tip for what the pointer is over — a tool, a view command or a
-    /// setting — with its rectangle.
+    /// The tip for what the pointer is over — a tool, a view command, the
+    /// palette's pop-out or a setting — with its rectangle.
     #[must_use]
     pub fn tool_tip(
         &self,
@@ -1861,6 +1884,10 @@ impl View {
             let rect = self.commands.tool_rect(index, commands, scale, theme)?;
             return Some((rect, VIEW_COMMANDS.get(index)?.2));
         }
+        let pop_out = layout.pop_out();
+        if pop_out.contains(self.pointer) {
+            return Some((pop_out, "Float the palette in a window of its own"));
+        }
         self.bar.tip(layout.bar(), self.pointer)
     }
 
@@ -1873,7 +1900,7 @@ impl View {
         self.document.picture().map_or(0, Picture::active)
     }
 
-    /// Bring the scroll, the bars and the palette's rows into line with the
+    /// Bring the scroll, the bars and the palette's columns into line with the
     /// layout.
     pub fn settle(&mut self, layout: &Layout, damage: &mut Region) {
         if core::mem::take(&mut self.open_fitted) {
@@ -1961,7 +1988,8 @@ impl View {
                 Color::rgba(r, g, b, a)
             })
             .collect();
-        // The rows the wells fill follow the layout, which settles them.
+        // The columns the wells are set in follow the layout, which settles
+        // them.
         self.swatches
             .adopt_colours(self.swatches.columns(), colours);
         self.mark_wells();
@@ -2181,6 +2209,7 @@ impl View {
                 .repeat_deadline(now_ns, layout.view_strip(), scale, theme),
             self.vertical.repeat_deadline(now_ns),
             self.horizontal.repeat_deadline(now_ns),
+            self.palette_bar.repeat_deadline(now_ns),
         ]
         .into_iter()
         .flatten()
@@ -2215,6 +2244,12 @@ impl View {
                 .repeat(now_ns, layout.horizontal_bar(), scale, theme, damage)
         {
             self.scroll_to(Some(offset), None, layout, damage);
+        }
+        if let Some(ScrollAction::ScrollTo { offset }) =
+            self.palette_bar
+                .repeat(now_ns, layout.palette_bar(), scale, theme, damage)
+        {
+            self.scroll_palette(offset, layout, damage);
         }
     }
 
@@ -2280,12 +2315,19 @@ pub(crate) struct PaneDrag {
     pub(crate) grab: Point,
 }
 
-/// Where a dragged pane lands: before the pane at `before` down `side`, or
-/// at the dock's foot where `before` is its length.
+/// Where a dragged pane lands.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Landing {
-    pub(crate) side: Side,
-    pub(crate) before: usize,
+pub(crate) enum Landing {
+    /// Before the pane at `before` down `side`, or at the dock's foot where
+    /// `before` is its length.
+    Dock {
+        /// The side whose dock it lands in.
+        side: Side,
+        /// Where down that dock.
+        before: usize,
+    },
+    /// The palette's strip, beneath the canvas.
+    Strip,
 }
 
 /// The window's controls, for the painter.
@@ -2297,6 +2339,7 @@ pub(crate) struct Controls<'a> {
     pub(crate) vertical: &'a ScrollBar,
     pub(crate) horizontal: &'a ScrollBar,
     pub(crate) palette_bar: &'a ScrollBar,
+    pub(crate) pop_out: &'a IconButton,
 }
 
 /// The pixel `bounds` grown by `by` on every side.

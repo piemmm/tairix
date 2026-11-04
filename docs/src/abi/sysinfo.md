@@ -38,6 +38,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `UPTIME`                | none                   | no      |
 | `MOUNT_LIST`            | none (scoped)          | no      |
 | `VIEW_LIST`             | none (scoped)          | no      |
+| `VOLUME_REMOVALS`       | none                   | no      |
 | `PLATFORM_COMPATIBLE`   | none                   | no      |
 | `RESOURCE_LIMITS`       | none (self-scoped)     | no      |
 | `PROCESS_IDENTITY`      | none (self-scoped)     | no      |
@@ -96,9 +97,9 @@ the detected hardware tree (`AGENTS.md` §18.4). `MOUNT_LIST` and
 `/Storage` catalog shows its name to any. What a principal attached presented
 to itself alone — a private disk image or network share, which
 `MountRecord::private` marks — is listed to another principal without the
-source it was attached from or the usage of what it holds
+source it was attached from, its title, or the usage of what it holds
 (`MountRecord::withheld`, which `MountRecord::is_withheld` marks, so the
-empty source and zero usage read as unknown rather than absent); one
+empty source and title and zero usage read as unknown rather than absent); one
 presented to others too is listed whole. A binding is listed as the volume it
 shows is: one of a volume kept from the caller is left out, unless it is that
 volume's catalog entry, listed without the subtree it shows
@@ -115,7 +116,18 @@ identity, and for a `view_bind` binding its binder, so a consumer resolving
 a path takes the covering binding and
 joins it to its volume (`tairix_procinfo::Namespace`). A binding showing no
 volume, the `/Storage` catalog, carries the all-zero identity and so joins
-to nothing. `RESOURCE_LIMITS` is self-scoped — it
+to nothing. `VOLUME_REMOVALS` lists the device-backed volumes whose device
+went away while they were attached, rather than being detached first — the
+newest `VOLUME_REMOVALS_KEPT` (32), oldest first, one `VolumeRemovalRecord`
+each: the removal's number among those since boot, from 1, the volume's
+identity, and whether the writes it had not yet given its device were none,
+are held for a verified re-insert, or were lost. An eject or unmount is never
+one, so a reader learns from the kernel, not by guessing from a volume gone
+from the mount table, which volumes left without being ejected, and from a
+gap in the numbers how many it missed. The kernel records a removal before
+the mount table moves, so a reader that reads the mount list and then this
+one finds every volume it saw leave. It is ungated as `MOUNT_LIST` is: a
+device-backed volume was listed there to every task. `RESOURCE_LIMITS` is self-scoped — it
 returns the *caller's own* effective resource limits and live usage
 (`AGENTS.md` §24.3) — so, like `SELF_PROCESS_LIST`, it needs no capability;
 observing another principal's limits would be a separate, gated query.
@@ -781,7 +793,12 @@ the request/render libraries stay testable against in-memory fixtures.
   all-zero when the mount publishes none — the identity a `volume_detach`
   request names), the principal that attached a network or disk-image
   volume (`owner`, which may detach it without `CAP_FS_MOUNT`), its
-  [`VolumeClass`] (`0` local, `1` network, `2` one a disk-image file holds),
+  [`VolumeClass`] (`0` local, `1` network, `2` one a disk-image file holds,
+  `3` one on a removable device, which the user at the seat may eject),
+  its `title` (the label its filesystem records, at most `VOLUME_TITLE_MAX`
+  bytes of text: set as a disk image's volume attaches and as its owner
+  retitles it, empty for every other volume, and closing the record on the
+  wire as a length byte, the buffer and a zero pad),
   the storage `medium` of the block device backing it, and
   the volume's space accounting as a `VolumeStats` usage block (block size,
   whether the volume is down to its reserve, and 64-bit

@@ -48,8 +48,11 @@ leert und trennt `--force` weiterhin sauber; nichts wird verworfen,
 wenn ein sauberes Festschreiben möglich ist.
 
 Ein Datenträgerabbild oder eine Netzwerkfreigabe, die Sie selbst
-eingehängt haben, dürfen Sie aushängen; das Aushängen jedes anderen
-Datenträgers erfordert die Einhängeberechtigung (`CAP_FS_MOUNT`).
+eingehängt haben, dürfen Sie aushängen, und einen Wechseldatenträger
+— einen USB-Stick, eine Speicherkarte — ebenso, während Sie direkt
+am Computer arbeiten, allerdings nur durch einfaches Aushängen, nie
+mit `--force`; das Aushängen jedes anderen Datenträgers erfordert
+die Einhängeberechtigung (`CAP_FS_MOUNT`).
 Der Kernel prüft sie und protokolliert jede Entscheidung. Die
 permanenten Startdatenträger und die Sichtbindungen des Systems
 lassen sich nicht aushängen.

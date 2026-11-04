@@ -1440,10 +1440,27 @@ impl CapTable {
     /// this. Ascending order makes the fan-out deterministic rather than
     /// dependent on admission order.
     pub fn threads_of(&self, process: ProcessId) -> impl Iterator<Item = TaskId> + '_ {
+        self.threads_of_after(process, None)
+    }
+
+    /// The live threads of `process` after `after`, in ascending [`TaskId`]
+    /// order, or all of them for `None`: where a walk taken in batches
+    /// resumes, at a cost that does not grow with the threads it has passed.
+    pub fn threads_of_after(
+        &self,
+        process: ProcessId,
+        after: Option<TaskId>,
+    ) -> impl Iterator<Item = TaskId> + '_ {
+        let from = after.map_or(core::ops::Bound::Unbounded, core::ops::Bound::Excluded);
         self.members
             .get(&process)
             .into_iter()
-            .flat_map(|group| group.threads.iter().copied())
+            .flat_map(move |group| {
+                group
+                    .threads
+                    .range((from, core::ops::Bound::Unbounded))
+                    .copied()
+            })
     }
 
     /// The scheduling level `process`'s threads run at, or [`None`] for a
@@ -3000,6 +3017,20 @@ mod tests {
             table.threads_of(ProcessId(5)).collect::<Vec<_>>(),
             alloc::vec![TaskId(5), TaskId(11), TaskId(12)]
         );
+        assert_eq!(
+            table
+                .threads_of_after(ProcessId(5), Some(TaskId(5)))
+                .collect::<Vec<_>>(),
+            alloc::vec![TaskId(11), TaskId(12)],
+            "a walk resumes past the thread it last took"
+        );
+        assert_eq!(
+            table
+                .threads_of_after(ProcessId(5), Some(TaskId(12)))
+                .count(),
+            0
+        );
+        assert_eq!(table.threads_of_after(ProcessId(6), None).count(), 0);
     }
 
     /// The security property the shared record buys: a revoke by any thread is

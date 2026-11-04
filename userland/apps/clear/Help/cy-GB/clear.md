@@ -15,14 +15,13 @@ terfynell na all glirio (mae `TERM` anhysbys yn dirywio i'r sylfaen
 «dumb») yn gwneud i'r gorchymyn fethu yn hytrach nag argraffu beitiau y
 byddai'r derfynell yn eu dangos fel sbwriel.
 
-Nid yw consolau TAIRiX yn cadw ôl-sgrolio, felly nid oes ôl-sgrolio i'w
-glirio: derbynnir `-x` (opsiwn GNU sy'n cadw'r ôl-sgrolio) er
-cydnawsedd sgriptiau ac nid yw'n newid dim.
+Lle gall y derfynell, caiff y llinellau y mae'n eu cadw uwchben y
+sgrin — yr ôl-sgrolio — eu dileu hefyd, fel na ellir sgrolio'n ôl
+at ddim a oedd ar y sgrin.
 
 ## OPTIONS
 
-- `-x` — fe'i derbynnir er cydnawsedd GNU; nid yw consol TAIRiX yn cadw
-  ôl-sgrolio, felly mae'r allbwn yn union yr un fath hebddo a gydag ef.
+- `-x` — cadw'r ôl-sgrolio: dileu'r sgrin yn unig.
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn ei hun.
 
 ## EXAMPLES

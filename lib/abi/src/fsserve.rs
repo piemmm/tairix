@@ -16,8 +16,8 @@
 
 use crate::driver::filesystem::{
     AclModel, AllocationClass, DirEntry, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind,
-    NodeSecurity, NodeTimes, SecurityAcl, SecuritySubject, Unpinned, VolumeStats, WriteRefusal,
-    MAX_ACL_ENTRIES,
+    NodeSecurity, NodeTimes, SecurityAcl, SecuritySubject, Unpinned, VolumeStats, VolumeTitle,
+    WriteRefusal, MAX_ACL_ENTRIES,
 };
 use crate::fs::{
     is_component, SeekRegion, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, FS_NAME_MAX,
@@ -245,6 +245,10 @@ pub enum Op {
     RemoveAttr = 27,
     /// [`Request::Release`].
     Release = 28,
+    /// [`Request::Label`].
+    Label = 29,
+    /// [`Request::SetLabel`].
+    SetLabel = 30,
 }
 
 impl Op {
@@ -278,6 +282,8 @@ impl Op {
             26 => Self::ListAttr,
             27 => Self::RemoveAttr,
             28 => Self::Release,
+            29 => Self::Label,
+            30 => Self::SetLabel,
             _ => return Err(Errno::OutOfRange),
         })
     }
@@ -537,6 +543,13 @@ pub enum Request<'a> {
         /// The span the abandoned call used.
         span: Span,
     },
+    /// `FilesystemLabel::label`.
+    Label,
+    /// `FilesystemLabel::set_label`.
+    SetLabel {
+        /// The title stored.
+        title: VolumeTitle,
+    },
 }
 
 impl Request<'_> {
@@ -572,6 +585,8 @@ impl Request<'_> {
             Self::ListAttr { .. } => Op::ListAttr,
             Self::RemoveAttr { .. } => Op::RemoveAttr,
             Self::Release { .. } => Op::Release,
+            Self::Label => Op::Label,
+            Self::SetLabel { .. } => Op::SetLabel,
         }
     }
 
@@ -692,8 +707,9 @@ pub fn encode_request(
             put_node(&mut w, dst_dir)?;
             put_name(&mut w, dst_name)?;
         }
-        Request::ReleasePins | Request::Flush | Request::Stats => {}
+        Request::ReleasePins | Request::Flush | Request::Stats | Request::Label => {}
         Request::Release { span } => put_span(&mut w, span)?,
+        Request::SetLabel { title } => put_title(&mut w, &title)?,
         Request::SetSecurity { node, security } => {
             put_node(&mut w, node)?;
             put_security(&mut w, &security)?;
@@ -874,6 +890,10 @@ pub fn decode_request(bytes: &[u8]) -> Result<(AllocationClass, Request<'_>), Er
         Op::Release => Request::Release {
             span: span(&mut r)?,
         },
+        Op::Label => Request::Label,
+        Op::SetLabel => Request::SetLabel {
+            title: title(&mut r)?,
+        },
     };
     if !r.exhausted() {
         return Err(Errno::LengthOutOfRange);
@@ -942,6 +962,8 @@ pub enum Answer<'a> {
     Stats(VolumeStats),
     /// An attribute value, or a listed key, if there is one.
     Attr(Option<&'a [u8]>),
+    /// The volume's title.
+    Label(VolumeTitle),
 }
 
 /// How a listing batch ended.
@@ -1076,6 +1098,7 @@ pub fn encode_reply(
         (Op::ListAttr, Answer::Attr(key)) => {
             put_attr(&mut w, key.map(check_key).transpose()?)?;
         }
+        (Op::Label, Answer::Label(title)) => put_title(&mut w, &title)?,
         (
             Op::ReleasePins
             | Op::Link
@@ -1087,7 +1110,8 @@ pub fn encode_reply(
             | Op::SetSecurity
             | Op::SetAttr
             | Op::RemoveAttr
-            | Op::Release,
+            | Op::Release
+            | Op::SetLabel,
             Answer::Done,
         ) => {}
         _ => return Err(Errno::OutOfRange),
@@ -1242,6 +1266,7 @@ pub fn decode_reply<'a>(bytes: &'a [u8], request: &Request<'_>) -> Result<Reply<
         Request::Stats => Answer::Stats(stats(&mut r)?),
         Request::GetAttr { cap, .. } => Answer::Attr(attr(&mut r, cap, false)?),
         Request::ListAttr { cap, .. } => Answer::Attr(attr(&mut r, cap, true)?),
+        Request::Label => Answer::Label(title(&mut r)?),
         Request::ReleasePins
         | Request::Link { .. }
         | Request::Truncate { .. }
@@ -1252,7 +1277,8 @@ pub fn decode_reply<'a>(bytes: &'a [u8], request: &Request<'_>) -> Result<Reply<
         | Request::SetSecurity { .. }
         | Request::SetAttr { .. }
         | Request::RemoveAttr { .. }
-        | Request::Release { .. } => Answer::Done,
+        | Request::Release { .. }
+        | Request::SetLabel { .. } => Answer::Done,
     };
     if !r.exhausted() {
         return Err(Errno::LengthOutOfRange);
@@ -1799,6 +1825,15 @@ fn attr<'a>(r: &mut Reader<'a>, cap: u32, key: bool) -> Result<Option<&'a [u8]>,
         return Err(Errno::OutOfRange);
     }
     Ok(Some(bytes))
+}
+
+fn put_title(w: &mut Writer<'_>, title: &VolumeTitle) -> Result<(), Errno> {
+    w.str(title.as_str())
+}
+
+/// A volume title: text within its bound, with no control character.
+fn title(r: &mut Reader<'_>) -> Result<VolumeTitle, Errno> {
+    VolumeTitle::new(r.str()?).map_err(|_| Errno::OutOfRange)
 }
 
 #[cfg(test)]

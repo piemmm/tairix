@@ -83,6 +83,7 @@ mod program {
         elevate_endpoint, ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY,
     };
     use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
+    use tairix_abi::ipc::MemoryPause;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::notify_ipc::{NotifyRequest, NOTIFY_ENDPOINT, NOTIFY_MAX_REQUEST};
     use tairix_abi::pinboard_ipc::{
@@ -126,6 +127,7 @@ mod program {
     use tairix_controls::{damage, RowIcon};
     use tairix_desktop_session::about::SystemFacts;
     use tairix_desktop_session::alert::{alert_title, Speaker};
+    use tairix_desktop_session::desktop::{LandingOffer, LANDING_WAIT_NS};
     use tairix_desktop_session::effects::{
         load_choices, store_choices, Effects, EffectsWork, LoadedChoices, ReadAsk, MAX_HELD_CALLS,
     };
@@ -135,7 +137,9 @@ mod program {
     };
     use tairix_desktop_session::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
     use tairix_desktop_session::output::{Follow, Refusal};
-    use tairix_desktop_session::pinboard::{self, PinboardCommand};
+    use tairix_desktop_session::pinboard::{
+        self, load_arrangement, ArrangementMemory, LoadedArrangement, PinboardCommand,
+    };
     use tairix_desktop_session::saver::{
         keep as keep_picture, kept_at, load_savers, Picture, PictureFiles, SaverCatalog,
         SaverErrands, SaverMemory, Unkept,
@@ -154,7 +158,7 @@ mod program {
         open_tray, park_within, parse, publish_asked, reap_launched, relay_power,
         resize_drag_event, resolve_launch, resolve_window_identities, seat_held, serve_park_ns,
         serve_pinboard, serve_switchboard_request, settled_size_event, size_state_name,
-        tool_move_abandoned_event, tool_move_event, window_control_alternate_event,
+        tool_move_abandoned_event, tool_move_event, trusted_up, window_control_alternate_event,
         window_control_event, Acquisition, AidPolicy, Answer, AppBarBridge, AppBarService,
         AppearanceWork, ArtworkFileReader, AskedSettings, AuthoriseAnswer, AuthoriseConcluded,
         AuthoriseDesk, AuthoriseDone, AuthorisePrompt, AuthoriseRefusal, AuthoriseRequest,
@@ -174,8 +178,8 @@ mod program {
         ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter,
         SeatWake, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord,
         SlideWant, SlotAnswer, SoundCall, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
-        Timed, Trial, TrialEnd, TrialOutcome, UnlockAnswer, UnlockAsk, WallpaperDesk, WallpaperJob,
-        WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH, APP_BAR_SETTLED,
+        Timed, Trial, TrialEnd, TrialOutcome, Typing, UnlockAnswer, UnlockAsk, WallpaperDesk,
+        WallpaperJob, WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH, APP_BAR_SETTLED,
         APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED,
         CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED,
         DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
@@ -232,8 +236,8 @@ mod program {
         WALLPAPER_STORE,
     };
     use tairix_window::{
-        app, Activation, CallerIdentity, ClientRegion, DragConclusion, DragReport, EventSink,
-        PickedFile, WallpaperName, WindowServer, WINDOW_REPLY_MAX,
+        app, Activation, AuthoriseFor, CallerIdentity, ClientRegion, DragConclusion, DragReport,
+        EventSink, PickedFile, WallpaperName, WindowServer, WINDOW_REPLY_MAX,
     };
     use tairix_wm::{
         chrome_cache, frost_cache, Compositor, InputResponse, Point, Presentation, Rect, Region,
@@ -460,6 +464,29 @@ mod program {
     /// The wait-set token of every saver taken down while it still ran: ready
     /// once one has exited, to be reaped.
     const SAVER_EXIT_TOKEN: u64 = 31;
+
+    /// The wait-set token of the `Mounts` notice: a volume came, went or came
+    /// back, so a desktop folder no watch could follow may be followed now.
+    const MOUNTS_TOKEN: u64 = 32;
+
+    /// Whether the member `token` names reports once, the wait consuming its
+    /// report as it delivers it — a directory watch or a system notice —
+    /// rather than reporting until it is drained.
+    const fn reports_once(token: u64) -> bool {
+        matches!(
+            token,
+            PINBOARD_WATCH_TOKEN
+                | PICKER_WATCH_TOKEN
+                | MACHINE_ZONE_WATCH_TOKEN
+                | SAVER_STORE_TOKEN
+                | PRESSURE_TOKEN
+                | AUDIO_DEVICES_TOKEN
+                | AUDIO_CAPTURE_TOKEN
+                | DISPLAY_OUTPUT_TOKEN
+                | CUE_AUTHORITY_TOKEN
+                | MOUNTS_TOKEN
+        )
+    }
 
     /// How often the user's screensaver store's watch may report: a bundle
     /// copied in costs one read of the stores, and is most often whole by
@@ -827,8 +854,10 @@ mod program {
     /// would cost the app a resize it cannot re-derive or a picker
     /// conclusion it is owed exactly once. The sink arms a room member on
     /// the destination's port, and the loop's [`Self::flush`] sends what is
-    /// owed the moment the app drains — it never polls for capacity and
-    /// never blocks on the app.
+    /// owed the moment the app drains or the session's own spent budget frees,
+    /// the kernel waking the member for either — it never polls for capacity
+    /// and never blocks on the app. What the kernel had no memory for, which
+    /// nothing wakes for, goes with a flush the loop times one pause later.
     ///
     /// Every send outcome doubles as responsiveness evidence: the wrapped
     /// [`HangTracker`] folds each `WouldBlock` back-pressure refusal and
@@ -843,6 +872,9 @@ mod program {
         /// The wait-set the room members are armed on.
         set: u64,
         held: HoldBack,
+        /// The pause after which what the kernel had no memory for is offered
+        /// again.
+        pause: MemoryPause,
     }
 
     impl RtEventSink {
@@ -854,6 +886,7 @@ mod program {
                 changed: false,
                 set,
                 held: HoldBack::new(),
+                pause: MemoryPause::new(),
             }
         }
 
@@ -886,6 +919,31 @@ mod program {
             );
         }
 
+        /// Watch `endpoint` for room, answering whether it is watched. What an
+        /// unwatchable destination is owed could never go out, and may be
+        /// events it cannot do without, so its debt is dropped — a destination
+        /// is watched exactly while owed — and its app is to be taken as gone.
+        fn watch_room(&mut self, endpoint: u64) -> bool {
+            if self.arm(endpoint).is_ok() {
+                return true;
+            }
+            let _ = self.held.forget(endpoint);
+            self.disarm(endpoint);
+            io::write_stderr_line("desktop: cannot watch an app's mailbox for room");
+            false
+        }
+
+        /// How long the loop may park before the owed flush is due, if one is.
+        fn retry_in(&self, now_ns: u64) -> Option<u64> {
+            self.pause.ends().map(|at| at.saturating_sub(now_ns))
+        }
+
+        /// Whether the owed flush is due, reading the clock only while one is
+        /// owed; the flush it is due for times the next pause.
+        fn retry_due(&mut self) -> bool {
+            self.pause.ran_out(tairix_rt::clock_get)
+        }
+
         /// One non-blocking app-ward send, folding its outcome into the
         /// responsiveness evidence.
         ///
@@ -899,28 +957,35 @@ mod program {
             endpoint: u64,
             event: &WindowEvent,
         ) -> Result<(), Errno> {
-            let ret = tairix_rt::ipc_send(endpoint, &event.to_le_bytes());
-            if ret == 0 {
+            let Err(error) = tairix_rt::ipc_send(endpoint, &event.to_le_bytes()) else {
                 *changed |= vigil.note_delivered(endpoint);
                 return Ok(());
-            }
-            let error = Errno::from_syscall(ret);
+            };
             *changed |= vigil.note_refused(endpoint, error, tairix_rt::clock_get());
             Err(error)
         }
 
         /// Send what each destination is owed, as far as its mailbox now
-        /// allows, and report the owners the sends proved gone so the loop
-        /// can tear their windows down.
+        /// allows, and report the owners the sends proved gone, or whose room
+        /// cannot be watched, so the loop can tear their windows down.
         fn flush(&mut self) -> Vec<u64> {
             let vigil = &mut self.vigil;
             let changed = &mut self.changed;
-            let report = self
+            let mut report = self
                 .held
                 .flush(|endpoint, event| Self::post(vigil, changed, endpoint, event));
             for endpoint in report.settled.iter().chain(&report.gone) {
                 self.disarm(*endpoint);
             }
+            for endpoint in core::mem::take(&mut report.watch) {
+                if !self.watch_room(endpoint) {
+                    report.gone.push(endpoint);
+                }
+            }
+            if report.dropped > 0 {
+                io::write_stderr_line("desktop: events an app could never take were dropped");
+            }
+            self.pause.keep(self.held.starved(), tairix_rt::clock_get);
             report.gone
         }
 
@@ -960,26 +1025,30 @@ mod program {
             let changed = &mut self.changed;
             // Back-pressure means the app is behind, not gone: the event is
             // held rather than dropped, and the destination watched for room.
-            let outcome = self.held.deliver(endpoint, event, |event| {
-                Self::post(vigil, changed, endpoint, event)
+            let outcome = self.held.deliver(endpoint, event, |to, event| {
+                Self::post(vigil, changed, to, event)
             })?;
-            let Delivery::Owed { watch } = outcome else {
-                return Ok(());
+            let (watch, behind) = match outcome {
+                Delivery::Sent => return Ok(()),
+                // Nothing wakes for kernel memory, and the app is not at fault.
+                Delivery::Starved => {
+                    self.pause.keep(true, tairix_rt::clock_get);
+                    return Ok(());
+                }
+                Delivery::Owed { watch } => (watch, true),
+                Delivery::OverBudget { watch } => (watch, false),
             };
-            // The event could not be delivered, so the responsiveness
-            // evidence stands whether the refusal came from this send or
-            // from the debt this one joined: only a delivery the owner
-            // accepts clears it.
-            self.changed |=
-                self.vigil
-                    .note_refused(endpoint, Errno::WouldBlock, tairix_rt::clock_get());
-            if watch && self.arm(endpoint).is_err() {
-                // What an unwatchable destination is owed could never go out,
-                // and may be events it cannot do without: drop the debt, so it
-                // is watched exactly while owed, and answer the app as gone.
-                let _ = self.held.forget(endpoint);
-                self.disarm(endpoint);
-                io::write_stderr_line("desktop: cannot watch an app's mailbox for room");
+            // An event the app is behind on could not be delivered, so the
+            // responsiveness evidence stands whether the refusal came from
+            // this send or from the debt this one joined: only a delivery the
+            // owner accepts clears it. The session's own budget is not the
+            // app's to answer for.
+            if behind {
+                self.changed |=
+                    self.vigil
+                        .note_refused(endpoint, Errno::WouldBlock, tairix_rt::clock_get());
+            }
+            if watch && !self.watch_room(endpoint) {
                 return Err(Errno::NotFound);
             }
             Ok(())
@@ -1261,7 +1330,8 @@ mod program {
     /// frame due, so the frame presented next carries it: the desktop's
     /// screen fade, the windows' shadows rising and resting as the focus
     /// moves, the program library rising, arriving and leaving, the pointer
-    /// aids, the locked screen's own surface, a credential
+    /// aids, what a drag carries gathering under the pointer, the locked
+    /// screen's own surface, a credential
     /// prompt's password marker, the bar's clock, and the backdrop dissolving
     /// into another. Between frames only the pointer aids take in
     /// where the pointer is. All of them are idle once nothing is in flight,
@@ -1283,6 +1353,7 @@ mod program {
         compositor.step_elevations(now_ns);
         shell.advance_library(compositor, now_ns);
         shell.advance_pointer_aids(now_ns, compositor);
+        shell.advance_drag(now_ns, compositor);
         lock.advance(now_ns, shell, compositor);
         elevate.resolve_picture(shell, compositor.scale());
         if elevate.advance(now_ns, shell, compositor) {
@@ -1747,14 +1818,15 @@ mod program {
 
     impl SwitchboardMailbox for RtSwitchboardMailbox {
         fn send(&mut self, pid: u64, command: SwitchboardCommand) -> bool {
-            let ret = tairix_rt::ipc_send(command_endpoint_for(pid), &command.to_le_bytes());
-            if ret == 0 {
+            let Err(refused) =
+                tairix_rt::ipc_send(command_endpoint_for(pid), &command.to_le_bytes())
+            else {
                 return true;
-            }
+            };
             if drop_is_noteworthy(command) {
                 app::report(
                     APP_NAME,
-                    format_args!("switchboard command dropped: {}", Errno::from_syscall(ret)),
+                    format_args!("switchboard command dropped: {refused}"),
                 );
             }
             false
@@ -2916,9 +2988,10 @@ mod program {
         let _sound_guard = tairix_rt::work::WorkerGuard::new(&sound_worker);
         let mut sound = SoundSession::new();
         // The private scope's round trips leave the loop: the sound choices,
-        // the files they name and the cue authority, and the launcher's
-        // record. One worker carries all of them, because the app-data service
-        // stages edits per process and two writers would commit each other's.
+        // the files they name and the cue authority, the launcher's record and
+        // where the desktop's icons were put. One worker carries all of them,
+        // because the app-data service stages edits per process and two
+        // writers would commit each other's.
         let private_worker = match Worker::queued(
             serve_private,
             (),
@@ -2944,7 +3017,7 @@ mod program {
         }
         let _private_guard = tairix_rt::work::WorkerGuard::new(&private_worker);
         let mut effects = Effects::new();
-        let mut memory = LauncherMemory::new();
+        let mut memory = PrivateRecords::new();
         // Each password offered at the screen lock waits on the broker's key
         // derivation away from the loop that composites every window.
         let unlock_worker = alloc::sync::Arc::new(Worker::new(
@@ -3600,6 +3673,20 @@ mod program {
                 return app::fail(APP_NAME, EXIT_WAIT_FAILED, "sound notice wait refused");
             }
         }
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::SystemNotice,
+            u64::from(NoticeTopic::Mounts.as_u32()),
+            MOUNTS_TOKEN,
+        ) != 0
+        {
+            return app::fail(
+                APP_NAME,
+                EXIT_WAIT_FAILED,
+                "mount-table notice wait refused",
+            );
+        }
         shell.set_sound(&mut compositor, sound.captures(live_captures()));
         effects.authority_is(cue_authority());
         pump_private(
@@ -3815,6 +3902,9 @@ mod program {
         tick_clock(&mut shell, &mut compositor, tairix_rt::clock_get());
 
         let mut token = 0u64;
+        // A member whose report the wait consumed on a turn an idle deadline
+        // took, served on the next turn without waiting.
+        let mut owed_wake = None;
         // Held for the life of the loop rather than taken per request: it is
         // sized to the widest operation the channel has, so a per-request
         // array would cost every present — the hottest and one of the
@@ -3854,7 +3944,7 @@ mod program {
                 {
                     fade_to_black(&mut fade, &mut compositor, &mut display);
                     shell.teardown(&mut compositor);
-                    see_out_launcher(&mut memory, &private_worker);
+                    see_out_private(&mut memory, &private_worker);
                     return leaving.exit_code();
                 }
             }
@@ -3862,7 +3952,12 @@ mod program {
             // of the authorisation prompt goes with it before the next park.
             for window_id in windows.take_closed() {
                 wallpapers.forget_window(window_id);
-                elevate.abort_for(window_id, &mut compositor);
+                elevate.abort_for(AuthoriseFor::Window(window_id), &mut compositor);
+            }
+            // So does what an application that has gone asked from its icon-bar
+            // slot.
+            for owner in windows.take_withdrawn() {
+                elevate.abort_for(AuthoriseFor::Slot(owner), &mut compositor);
             }
             // However a prompt an application asked for ended, the window that
             // asked is told before the next park.
@@ -4096,12 +4191,14 @@ mod program {
                 park = idle.park_deadline_ns(now_ns, park);
                 park = effects.park_deadline_ns(now_ns, park);
                 park = memory.park_deadline_ns(now_ns, park);
+                park = park_within(park, sink.retry_in(now_ns));
                 // Exactly what `animate` steps, which it steps only on a
                 // frame the pacer has due.
                 let mut step = WAITSET_TIMEOUT_NONE;
                 step = shell.backdrop_park_deadline_ns(now_ns, step, refresh);
                 step = shell.library_park_deadline_ns(now_ns, step, refresh);
                 step = shell.pointer_aids_park_deadline_ns(now_ns, step, refresh);
+                step = shell.drag_park_deadline_ns(now_ns, step, refresh);
                 step = fade.park_deadline_ns(now_ns, step, refresh);
                 step = park_within(step, compositor.next_elevation_frame_in(now_ns));
                 step = shell.clock().park_deadline_ns(now_ns, step);
@@ -4111,7 +4208,17 @@ mod program {
                 park = saver.park_deadline_ns(now_ns, park);
                 serve_park_ns(&switch, departure.as_ref(), now_ns, park)
             };
-            let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
+            // What the kernel had no memory for is offered again once its pause
+            // is over, through the hold-back's own wake, however busy the loop.
+            if owed_wake.is_none() && sink.retry_due() {
+                owed_wake = Some(HOLDBACK_TOKEN);
+            }
+            let waited = if let Some(owed) = owed_wake.take() {
+                token = owed;
+                0
+            } else {
+                tairix_rt::waitset_wait(set, timeout_ns, &mut token)
+            };
             // A held key's repeat, and a touch acting at its deadline, are
             // seat input the device never sent, so a wait that ended for one
             // is served exactly as the seat's input is.
@@ -4124,19 +4231,24 @@ mod program {
             } else if waited != 0 || idle.is_due(tairix_rt::clock_get()) {
                 // An idle deadline is served on whatever wake finds it passed,
                 // so a client that keeps the loop busy cannot hold the lock
-                // off; the member that woke re-reports on the next wait.
+                // off. The member that woke re-reports on the next wait, or,
+                // where the wait consumed its report, is served next without
+                // one.
                 if waited != 0 && Errno::from_syscall(waited) != Errno::TimedOut {
                     // A dead wait-set would degrade the loop into a busy poll;
                     // exit fail-loud instead and let the supervisor decide.
                     return app::fail(APP_NAME, EXIT_WAIT_FAILED, "seat wait failed");
                 }
-                // No member woke, so `token` still names the *previous*
-                // wake's source and dispatching on it would block in a
-                // `call_recv` with nothing to receive. Only what this loop
-                // armed the deadline for is owed: the next frame of whatever
-                // is animating, the bar gesture the clock owes an answer to,
-                // the next window thumbnail a hover picker is waiting on, and
-                // the held-back report.
+                if waited == 0 && reports_once(token) {
+                    owed_wake = Some(token);
+                }
+                // Nothing is dispatched on `token` here: after a timeout it
+                // still names the *previous* wake's source, and dispatching
+                // on it would block in a `call_recv` with nothing to receive.
+                // Only what this loop armed the deadline for is owed: the next
+                // frame of whatever is animating, the bar gesture the clock
+                // owes an answer to, the next window thumbnail a hover picker
+                // is waiting on, and the held-back report.
                 //
                 // One clock reading serves the whole frame: what the
                 // animation steps to and what the report's rate limit is
@@ -4242,12 +4354,23 @@ mod program {
                         compositor.refresh_rate(),
                     )
                 {
-                    latch_frames(
+                    let held = seat_held(
+                        &lock,
+                        (&picker, shell.router().focused()),
+                        (&confirm, &elevate, &resolution),
+                    );
+                    latch_frames(&mut server, &mut shell, &mut compositor, &mut windows, held);
+                    // A window first shown may have taken the keyboard.
+                    reconcile_focus(
+                        &mut focused,
                         &mut server,
+                        &mut sink,
                         &mut shell,
                         &mut compositor,
                         &mut windows,
-                        seat_held(&lock, &picker, (&confirm, &elevate, &resolution)),
+                        &mut picker,
+                        &mut apps.service,
+                        &mut menu,
                     );
                     match present(
                         &mut shell,
@@ -4325,9 +4448,14 @@ mod program {
                     tairix_rt::call_recv_ready(WINDOW_ENDPOINT, &mut request)
                 {
                     // Read before the bridge borrows the picker: a menu may
-                    // not be drawn over a lock screen or the trusted picker,
-                    // and an accepted open is answered `SeatBusy` instead.
-                    let seat_held = seat_held(&lock, &picker, (&confirm, &elevate, &resolution));
+                    // not be drawn over a lock screen or a picker with the
+                    // keyboard, and an accepted open is answered `SeatBusy`
+                    // instead.
+                    let seat_held = seat_held(
+                        &lock,
+                        (&picker, shell.router().focused()),
+                        (&confirm, &elevate, &resolution),
+                    );
                     let n = {
                         let mut bridge = ShellWindowHost {
                             shell: &mut shell,
@@ -4720,11 +4848,12 @@ mod program {
                     }
                 }
             } else if token == HOLDBACK_TOKEN {
-                // An app drained its full event mailbox, so what the session
-                // owes it can go out. The room member is armed exactly while
-                // a destination is owed something, so this never runs on a
-                // wake nobody asked for, and it is the only path that sends
-                // a held event — the desktop never polls for capacity.
+                // An app drained its full event mailbox, or the session's own
+                // budget freed, so what the session owes can go out; or the
+                // pause after a send the kernel had no memory for is over. The
+                // room member is armed exactly while a destination waits on its
+                // room, so this never runs on a wake nobody asked for — the
+                // desktop never polls for capacity.
                 for endpoint in sink.flush() {
                     // The send proved this owner gone before its exit was
                     // reaped. Its windows go with it, exactly as a refused
@@ -4790,6 +4919,8 @@ mod program {
                 if let Some(loaded) = catalogs.collect() {
                     adopt_programs(loaded, &mut shell, &mut compositor, &mut programs);
                 }
+                // A drop's wait that has run out takes none of what arrives now.
+                desktop.expire_landing(tairix_rt::clock_get());
                 // A listing landing and what the folder's watch reported change
                 // the icon cells they touch and nothing behind them.
                 let mut cells = damage::sink();
@@ -4904,10 +5035,14 @@ mod program {
                             serial,
                             opened,
                             created,
+                            made,
                         } => {
+                            // Made by the session, the file shows in a desktop
+                            // folder holding it even where no watch says so.
+                            let created_here = created.clone().filter(|_| opened.is_ok());
                             let discard = settle_pick(
                                 serial,
-                                (opened, created),
+                                (opened, created, made),
                                 &mut server,
                                 &mut sink,
                                 &mut shell,
@@ -4919,6 +5054,13 @@ mod program {
                             );
                             if let Some(job) = discard {
                                 let _ = files.submit(job);
+                            } else if let Some(path) = created_here {
+                                show_unreported(
+                                    Some(path.as_str()),
+                                    &mut desktop,
+                                    &mut shell,
+                                    &mut compositor,
+                                );
                             }
                         }
                         FileAnswer::Folder { serial, opened } => settle_folder_pick(
@@ -4933,8 +5075,17 @@ mod program {
                             &mut apps,
                             &mut menu,
                         ),
-                        FileAnswer::NewFolder { serial, made } => {
+                        FileAnswer::NewFolder { serial, made, path } => {
+                            let shown = made.is_ok();
                             picker.folder_made(serial, made, &mut shell, &mut compositor);
+                            if shown {
+                                show_unreported(
+                                    Some(path.as_str()),
+                                    &mut desktop,
+                                    &mut shell,
+                                    &mut compositor,
+                                );
+                            }
                         }
                         FileAnswer::Discarded => {}
                         FileAnswer::Desktop(done) => {
@@ -5061,6 +5212,8 @@ mod program {
                     &private_worker,
                     tairix_rt::clock_get(),
                 );
+            } else if token == MOUNTS_TOKEN {
+                show_unreported(None, &mut desktop, &mut shell, &mut compositor);
             } else if token == AUDIO_CAPTURE_TOKEN {
                 shell.set_sound(&mut compositor, sound.captures(live_captures()));
             } else if token == DISPLAY_OUTPUT_TOKEN {
@@ -5553,7 +5706,7 @@ mod program {
                         sound: &mut sound,
                         sound_worker: &sound_worker,
                         system: &system,
-                        memory: &mut memory,
+                        memory: &mut memory.launcher,
                     },
                     tairix_rt::clock_get(),
                 );
@@ -5677,7 +5830,7 @@ mod program {
                 // answer it.
                 let orphaned = matches!(
                     menu.owner(),
-                    Some(ChainOwner::Bar(MenuSubject::App { owner }))
+                    Some(ChainOwner::Bar(MenuSubject::App { owner, .. }))
                         if !apps.strip.iter().any(|group| group.owner == *owner)
                 );
                 if orphaned && menu.dismiss() {
@@ -5739,14 +5892,17 @@ mod program {
                     match tap.key {
                         TapKey::Ctrl => shell.locate_pointer(now_ns),
                         TapKey::Meta => {
-                            let held = seat_held(&lock, &picker, (&confirm, &elevate, &resolution));
-                            if !held
+                            let modal = tairix_desktop_session::seat_modal(
+                                &lock,
+                                (&confirm, &elevate, &resolution),
+                            );
+                            if !modal
                                 && !menu.is_open()
                                 && shell.toggle_library(&mut compositor, now_ns)
                                     == TaskbarResponse::OpenLibrary
                             {
                                 library_opened(
-                                    &memory,
+                                    &memory.launcher,
                                     &catalogs,
                                     (&mut shell, &mut compositor),
                                     &mut programs,
@@ -5757,10 +5913,17 @@ mod program {
                 }
             }
             launcher_turn(
-                &mut memory,
+                &mut memory.launcher,
                 &mut launched,
                 &mut apps,
                 (&mut shell, &mut compositor),
+            );
+            arrangement_turn(
+                &mut memory.arrangement,
+                &mut desktop,
+                &mut windows,
+                (&mut shell, &mut compositor),
+                now_ns,
             );
             pump_private(&mut effects, &mut memory, &private_worker, now_ns);
             animate(
@@ -5782,7 +5945,7 @@ mod program {
                 &mut compositor,
                 &mut server,
                 &mut sink,
-                seat_held(&lock, &picker, (&confirm, &elevate, &resolution)),
+                trusted_up(&lock, &picker, (&confirm, &elevate, &resolution)),
             );
             // One present per frame deadline: the compositor accumulates the
             // damage the pumped events and served presents produced, and the
@@ -5796,12 +5959,23 @@ mod program {
                     compositor.refresh_rate(),
                 )
             {
-                latch_frames(
+                let held = seat_held(
+                    &lock,
+                    (&picker, shell.router().focused()),
+                    (&confirm, &elevate, &resolution),
+                );
+                latch_frames(&mut server, &mut shell, &mut compositor, &mut windows, held);
+                // A window first shown may have taken the keyboard.
+                reconcile_focus(
+                    &mut focused,
                     &mut server,
+                    &mut sink,
                     &mut shell,
                     &mut compositor,
                     &mut windows,
-                    seat_held(&lock, &picker, (&confirm, &elevate, &resolution)),
+                    &mut picker,
+                    &mut apps.service,
+                    &mut menu,
                 );
                 match present(
                     &mut shell,
@@ -6630,6 +6804,9 @@ mod program {
         /// The wait-set the session parks in, which each listing's watch joins
         /// once its listing is taken.
         set: u64,
+        /// Whether the desktop's folder was said to be unfollowed since its
+        /// watch last joined, so the reason is given once, not at every read.
+        pinboard_unfollowed: core::sync::atomic::AtomicBool,
     }
 
     /// What [`Listings`] holds under its one lock: the worker reads every desk,
@@ -6670,13 +6847,12 @@ mod program {
         }
     }
 
-    /// State that a desktop folder no longer follows its changes, and why.
-    fn unfollowed(err: Errno) {
-        app::report(
-            APP_NAME,
-            format_args!("a desktop folder will not refresh by itself ({err})"),
-        );
-    }
+    /// Event id of the desktop's folder listed with no watch to follow it, so
+    /// what other programs change there shows only when it is read again.
+    const PINBOARD_UNFOLLOWED: EventId = EventId(20_036);
+
+    /// The exact message [`PINBOARD_UNFOLLOWED`] is emitted with.
+    const PINBOARD_UNFOLLOWED_MESSAGE: &str = "desktop folder not followed";
 
     /// The wait-set token a consumer's watch reports under.
     const fn watch_token(client: ListingClient) -> u64 {
@@ -6700,6 +6876,7 @@ mod program {
                 signal: tairix_rt::sync::Condvar::new(),
                 wake,
                 set,
+                pinboard_unfollowed: core::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -6736,6 +6913,7 @@ mod program {
                         // A reload of the folder already watched reads through
                         // that watch, so its pacing carries on.
                         let reuse = self.work.lock().watches.relisting(client, &target);
+                        let unfollowed = |err| self.unfollowed(client, err);
                         let (listed, armed) = WatchedDirectory::read(&target, reuse, unfollowed);
                         let (owed, unwanted) = {
                             let mut work = self.work.lock();
@@ -6795,9 +6973,55 @@ mod program {
         /// letting go of what it moved away from; a folder that cannot be
         /// followed says so and is unwatched.
         fn commit(&self, client: ListingClient, took: Took<alloc::sync::Arc<WatchedDirectory>>) {
-            if let Err(err) = took.commit(self.set, watch_token(client)) {
-                self.unwatch(client);
-                unfollowed(err);
+            let joins = took.join.is_some();
+            match took.commit(self.set, watch_token(client)) {
+                // Followed again, so a later loss is said again.
+                Ok(()) if joins && client == ListingClient::Pinboard => self
+                    .pinboard_unfollowed
+                    .store(false, core::sync::atomic::Ordering::Relaxed),
+                Ok(()) => {}
+                Err(err) => {
+                    self.unwatch(client);
+                    self.unfollowed(client, err);
+                }
+            }
+        }
+
+        /// State that `client`'s folder will not follow its changes, and why:
+        /// the desktop's once until its watch joins again, on the system log
+        /// too, and the picker's unless no volume records changes there, as
+        /// for a namespace root.
+        fn unfollowed(&self, client: ListingClient, err: Errno) {
+            match client {
+                ListingClient::Picker if err == Errno::NotImplemented => {}
+                ListingClient::Picker => app::report(
+                    APP_NAME,
+                    format_args!("a folder the picker shows will not refresh by itself ({err})"),
+                ),
+                ListingClient::Pinboard => {
+                    let said = self
+                        .pinboard_unfollowed
+                        .swap(true, core::sync::atomic::Ordering::Relaxed);
+                    if said {
+                        return;
+                    }
+                    app::report(
+                        APP_NAME,
+                        format_args!("the desktop folder will not refresh by itself ({err})"),
+                    );
+                    log(
+                        &LOG_SINK,
+                        &LogEvent {
+                            level: LogLevel::Warn,
+                            id: PINBOARD_UNFOLLOWED,
+                            message: PINBOARD_UNFOLLOWED_MESSAGE,
+                            fields: &[LogField {
+                                key: "reason",
+                                value: LogFieldValue::SignedInt(i64::from(err.as_i32())),
+                            }],
+                        },
+                    );
+                }
             }
         }
 
@@ -6893,6 +7117,7 @@ mod program {
             client: ListingClient,
             components: &[alloc::string::String],
         ) -> Result<Listing, Errno> {
+            let unfollowed = |err| self.unfollowed(client, err);
             let read = {
                 let mut work = self.work.lock();
                 let ListingWork { watches, alone, .. } = &mut *work;
@@ -7340,6 +7565,8 @@ mod program {
             path: alloc::string::String,
             access: PickAccess,
             edits: bool,
+            /// How a save's file is typed where it is made.
+            typing: Typing,
         },
         /// Open the files of the folder a pick chose whose content type is
         /// one of `kinds`, for the attempt `serial` names.
@@ -7394,12 +7621,14 @@ mod program {
     /// What a [`FileJob`] came to, in the shape its own kind of call yields,
     /// so an open never answers with nothing opened.
     enum FileAnswer {
-        /// What a pick chose, opened for the attempt `serial` names, and the
-        /// name the open made where it made a new file.
+        /// What a pick chose, opened for the attempt `serial` names, the
+        /// path the open made where it made a new file, and the path it is
+        /// at, a save's name finished.
         Pick {
             serial: u64,
             opened: Opened,
             created: Option<alloc::string::String>,
+            made: alloc::string::String,
         },
         /// The files of the folder a pick chose, opened for the attempt
         /// `serial` names.
@@ -7407,10 +7636,12 @@ mod program {
             serial: u64,
             opened: Result<FolderFiles, Errno>,
         },
-        /// The folder a save asked for, made for the attempt `serial` names.
+        /// The folder a save asked for at `path`, made for the attempt
+        /// `serial` names.
         NewFolder {
             serial: u64,
             made: Result<(), Errno>,
+            path: alloc::string::String,
         },
         /// A desktop gesture's call.
         Desktop(DesktopAnswer),
@@ -7451,29 +7682,23 @@ mod program {
                     path,
                     access,
                     edits,
+                    typing,
                 } => {
-                    let opened = match access.save_flags() {
-                        Some(flags) => tairix_rt::File::create(
-                            path.as_bytes(),
-                            flags,
-                            tairix_abi::fs::FS_NEW_FILE_MODE,
-                        )
-                        .map(|file| tairix_browse::document::Opened {
-                            file,
-                            writable: true,
-                        })
-                        .map_err(|ret| match Errno::from_syscall(ret) {
-                            Errno::AlreadyExists => occupant_of(&path),
-                            err => err,
-                        }),
-                        None => tairix_browse::document::open_for(path.as_bytes(), edits),
+                    let (opened, created, made) = match access.save_flags() {
+                        Some(flags) => {
+                            open_save(&path, flags, typing, access == PickAccess::Create)
+                        }
+                        None => (
+                            tairix_browse::document::open_for(path.as_bytes(), edits),
+                            None,
+                            path,
+                        ),
                     };
-                    // Only an exclusive create makes the name it opens.
-                    let created = (access == PickAccess::Create && opened.is_ok()).then_some(path);
                     FileAnswer::Pick {
                         serial,
                         opened,
                         created,
+                        made,
                     }
                 }
                 Self::Discard { file, path } => {
@@ -7494,6 +7719,7 @@ mod program {
                         path.as_bytes(),
                         tairix_abi::fs::FS_NEW_DIR_MODE,
                     )),
+                    path,
                 },
                 Self::Desktop(DesktopCall::Document {
                     run_path,
@@ -7529,19 +7755,21 @@ mod program {
         /// Answer the call as refused with `err`, without carrying it out.
         fn refused(self, err: Errno) -> FileAnswer {
             match self {
-                Self::Pick { serial, .. } => FileAnswer::Pick {
+                Self::Pick { serial, path, .. } => FileAnswer::Pick {
                     serial,
                     opened: Err(err),
                     created: None,
+                    made: path,
                 },
                 Self::Discard { .. } => FileAnswer::Discarded,
                 Self::Folder { serial, .. } => FileAnswer::Folder {
                     serial,
                     opened: Err(err),
                 },
-                Self::NewFolder { serial, .. } => FileAnswer::NewFolder {
+                Self::NewFolder { serial, path } => FileAnswer::NewFolder {
                     serial,
                     made: Err(err),
+                    path,
                 },
                 Self::Desktop(DesktopCall::Document {
                     run_path,
@@ -7594,6 +7822,73 @@ mod program {
     ///
     /// The node is resolved without following a link and opened for neither
     /// read nor write, so this reads only its kind.
+    /// Make, or open to replace, the file a save chose at `path`, with
+    /// `flags`: its name finished as `typing` says for the volume its folder
+    /// is on, and its file type recorded where that volume records one, before
+    /// any requester holds it. Made relative to the folder it asked of, so the
+    /// folder cannot change between the asking and the making. Answers what
+    /// was opened, the path a new file was made at where one was, and the
+    /// path the file is at.
+    fn open_save(
+        path: &str,
+        flags: tairix_abi::fs::OpenFlags,
+        typing: Typing,
+        exclusive: bool,
+    ) -> (Opened, Option<alloc::string::String>, alloc::string::String) {
+        let refused = |err: Errno, at: &str| (Err(err), None, alloc::string::String::from(at));
+        let Some((folder, asked)) = path.rsplit_once('/') else {
+            return refused(Errno::OutOfRange, path);
+        };
+        let folder = if folder.is_empty() { "/" } else { folder };
+        let dir = match tairix_rt::Dir::open(folder.as_bytes()) {
+            Ok(dir) => dir,
+            Err(ret) => return refused(Errno::from_syscall(ret), path),
+        };
+        let records = tairix_browse::vfs::keeps_filetypes(&dir);
+        let Some(leaf) = typing.leaf(asked, records) else {
+            return refused(Errno::LengthOutOfRange, path);
+        };
+        let made = if folder == "/" {
+            alloc::format!("/{leaf}")
+        } else {
+            alloc::format!("{folder}/{leaf}")
+        };
+        let file = match dir.create_file(leaf.as_bytes(), flags, tairix_abi::fs::FS_NEW_FILE_MODE) {
+            Ok(file) => file,
+            Err(ret) => {
+                let err = match Errno::from_syscall(ret) {
+                    Errno::AlreadyExists => occupant_of(&made),
+                    err => err,
+                };
+                return refused(err, &made);
+            }
+        };
+        if let (Some(filetype), true) = (typing.filetype, records) {
+            let value = tairix_fsmeta::preset::acorn::filetype_to_value(filetype);
+            let set = tairix_rt::fs_attr_set(
+                file.fd(),
+                tairix_fsmeta::preset::acorn::FILETYPE_KEY,
+                &value,
+            );
+            if set < 0 {
+                // A file of the wrong type is not left behind.
+                if exclusive {
+                    discard(&file, &made);
+                }
+                return refused(Errno::from_syscall(set), &made);
+            }
+        }
+        let created = exclusive.then(|| made.clone());
+        (
+            Ok(tairix_browse::document::Opened {
+                file,
+                writable: true,
+            }),
+            created,
+            made,
+        )
+    }
+
     fn occupant_of(path: &str) -> Errno {
         let kind = tairix_rt::File::open(path.as_bytes(), tairix_abi::fs::OpenFlags::NO_FOLLOW)
             .ok()
@@ -8501,9 +8796,8 @@ mod program {
                 seat.compositor,
                 self.windows,
                 seat.menu,
-                seat_held(
+                tairix_desktop_session::seat_modal(
                     seat.lock,
-                    self.picker,
                     (self.confirm, self.elevate, self.resolution),
                 ),
                 &mut LaunchCtx {
@@ -8643,22 +8937,31 @@ mod program {
                     answer: seat
                         .shell
                         .drag_items()
-                        .and_then(|(_, items)| self.slot_answer(index, &items)),
+                        .and_then(|(_, items)| self.slot_answer(index, items)),
                 },
                 DragPlace::AppWindow { index } => DragSurface::AppWindow {
                     index,
                     answer: seat
                         .shell
                         .drag_items()
-                        .and_then(|(_, items)| self.slot_answer(index, &items)),
+                        .and_then(|(_, items)| self.slot_answer(index, items)),
                 },
                 DragPlace::Window { window_id, x, y } => DragSurface::Window { window_id, x, y },
                 DragPlace::Offer { window_id, x, y } => DragSurface::Offer { window_id, x, y },
-                DragPlace::Desktop { icon, revision } => DragSurface::Desktop {
-                    folder: self.desktop.drop_folder(icon),
-                    icon,
-                    revision,
-                },
+                DragPlace::Desktop { icon, revision } => {
+                    // Let go over the bare desktop, what is carried lands there.
+                    let offer = seat
+                        .shell
+                        .drag_items()
+                        .filter(|_| icon.is_none())
+                        .map(|(_, items)| LandingOffer::of(items));
+                    self.desktop.offer_landing(offer);
+                    DragSurface::Desktop {
+                        folder: self.desktop.drop_folder(icon),
+                        icon,
+                        revision,
+                    }
+                }
             }
         }
 
@@ -8718,13 +9021,16 @@ mod program {
             if let Some(refusal) = &ended.refused {
                 state_drop_refusal(refusal, self.windows, seat.shell, seat.compositor);
             }
+            let on_desktop = matches!(ended.ended, DragConclusion::Desktop { .. });
             let Some(owner) = self.server.owner_of(ended.source) else {
+                self.land_drop(seat, false);
                 return;
             };
-            let concluded = match self
+            let concluded = self
                 .server
-                .conclude_drag(self.sink, ended.source, ended.ended)
-            {
+                .conclude_drag(self.sink, ended.source, ended.ended);
+            self.land_drop(seat, on_desktop && concluded.is_ok());
+            let concluded = match concluded {
                 // A window dropped on that has closed is a drop on nothing.
                 Err(Errno::OutOfRange) => {
                     self.server
@@ -8755,6 +9061,49 @@ mod program {
     }
 
     impl<S: DirectorySource, F: FnMut() -> S> SessionRoute<'_, S, F> {
+        /// Have what a drop on the bare desktop carried stand where it was let
+        /// go once its files arrive — only where the application making them
+        /// was told the drop `landed` there — and forget what the drag offered.
+        fn land_drop(&mut self, seat: &mut Seat<'_>, landed: bool) {
+            if landed {
+                self.land_offered(seat);
+            }
+            self.desktop.offer_landing(None);
+        }
+
+        /// Have a save dropped on the bare desktop stand where it was let go
+        /// once it is made, under the name it asked for or the one its volume
+        /// finishes it as.
+        fn land_save(&mut self, seat: &mut Seat<'_>, step: Option<&PickStep>) {
+            let Some(PickStep::Open { path, typing, .. }) = step else {
+                return;
+            };
+            let folder = self.desktop.folder_path();
+            let Some(name) = path
+                .strip_prefix(folder.as_str())
+                .and_then(|rest| rest.strip_prefix('/'))
+                .filter(|name| !name.contains('/'))
+            else {
+                return;
+            };
+            let finished = typing.leaf(name, false);
+            self.desktop
+                .offer_landing(Some(LandingOffer::saved(name, finished.as_deref())));
+            self.land_offered(seat);
+        }
+
+        /// Wait for what the desktop was offered, let go under the pointer.
+        fn land_offered(&mut self, seat: &mut Seat<'_>) {
+            let layout = seat.shell.desktop_layout(seat.compositor, self.desktop);
+            self.desktop.expect_offered(
+                seat.shell.router().pointer(),
+                &layout,
+                seat.compositor.scale(),
+                seat.shell.session().active_theme(),
+                tairix_rt::clock_get().saturating_add(LANDING_WAIT_NS),
+            );
+        }
+
         /// What the application on icon-bar slot `slot` answers a drag of
         /// `items` with: it opens the one file, or it refuses, said in its
         /// name; `None` for a slot no installed bundle is attested to.
@@ -8796,6 +9145,7 @@ mod program {
             let step = self
                 .picker
                 .save_dropped(end.dropped, seat.shell, seat.compositor);
+            self.land_save(seat, step.as_ref());
             if let Some(mut offer) = end.offer {
                 // A drop the panel refused asks the window for no folder.
                 let awaited = self.picker.awaits_drop(offer.window_id, offer.serial);
@@ -9150,21 +9500,18 @@ mod program {
         (shell, scale, now_ns): (&mut DesktopShell, tairix_wm::Scale, u64),
         desk: &mut DesktopMenuDesk<'_, S>,
     ) {
-        let item = match outcome {
-            ChainOutcome::Chosen(item) => *item,
-            // The bar's menus declare no quick-entry field, so a committed
-            // one answers a row nothing asked for.
-            ChainOutcome::Entered(..) | ChainOutcome::Dismissed => return,
+        let taskbar = shell.session_mut().taskbar_mut();
+        let response = match outcome {
+            ChainOutcome::Chosen(item) => taskbar.menu_chosen(subject, *item, now_ns, scale),
+            // Only an application's own menu declares a quick-entry field.
+            ChainOutcome::Entered(item, text) => subject.entered(*item, text.clone()),
+            ChainOutcome::Dismissed => return,
             ChainOutcome::Refused(reason) => {
                 app::report(APP_NAME, format_args!("no bar menu ({reason:?})"));
                 return;
             }
         };
-        if let Some(response) = shell
-            .session_mut()
-            .taskbar_mut()
-            .menu_chosen(subject, item, now_ns, scale)
-        {
+        if let Some(response) = response {
             desk.answered
                 .push(tairix_desktop_session::ShellOutcome::Taskbar(response));
         }
@@ -9179,14 +9526,14 @@ mod program {
     /// `stderr`, never a reason to draw one on the bar.
     fn open_bar_menu(
         request: MenuRequest,
-        seat_held: bool,
+        seat_modal: bool,
         menu: &mut MenuChain,
         (shell, compositor): (&mut DesktopShell, &mut Compositor),
         windows: &SessionWindows,
         apps: &AppBarService,
     ) {
         let mut model = request.model;
-        if let MenuSubject::App { owner } = request.subject {
+        if let MenuSubject::App { owner, .. } = request.subject {
             if let Some(bundle) = apps.attested_bundle(owner) {
                 model.set_info_source(&RowIcon::Bundle(alloc::string::String::from(bundle)));
             }
@@ -9197,7 +9544,7 @@ mod program {
             ChainOwner::Bar(request.subject),
             model,
             request.placement,
-            seat_held,
+            seat_modal,
             &geom,
         ) {
             Ok(()) => present_menu_chain(menu, shell, compositor, windows),
@@ -9234,7 +9581,10 @@ mod program {
         };
         let command = command?;
         let refresh = command == PinboardCommand::Refresh;
-        let acted = desk.desktop.command(command, &desk.programs.associations);
+        let layout = shell.desktop_layout(compositor, desk.desktop);
+        let acted = desk
+            .desktop
+            .command(command, &layout, &desk.programs.associations);
         let applied = apply_desktop_action(
             acted.action,
             desk.publisher,
@@ -9260,7 +9610,7 @@ mod program {
         if refresh {
             request_programs(desk.catalogs, shell, compositor, desk.programs);
         }
-        if acted.relisted || applied == Ok(true) {
+        if acted.rearranged || applied == Ok(true) {
             shell.present_desktop(compositor, desk.desktop);
         }
         applied.err()
@@ -9399,7 +9749,7 @@ mod program {
     fn serve_sound_call<S: DirectorySource, F: FnMut() -> S>(
         call: &SoundCall,
         ticket: u64,
-        (effects, memory): (&mut Effects, &mut LauncherMemory),
+        (effects, memory): (&mut Effects, &mut PrivateRecords),
         worker: &PrivateWorker,
         themes: &[alloc::string::String],
         picker: &mut SessionPicker<S, F>,
@@ -10327,7 +10677,7 @@ mod program {
                 // — the same service an application's `OpenMenu` reaches.
                 open_bar_menu(
                     request,
-                    seat_held(lock, picker, (confirm, elevate, resolution)),
+                    tairix_desktop_session::seat_modal(lock, (confirm, elevate, resolution)),
                     menu,
                     (shell, compositor),
                     windows,
@@ -10366,10 +10716,44 @@ mod program {
                     shell.raise_window(compositor, window);
                 }
             }
-            ShellOutcome::Taskbar(TaskbarResponse::AppMenuChosen { owner, item }) => {
-                // The row id is the application's own and the session never
-                // interprets one: it is relayed straight back to the process
-                // that declared the menu.
+            ShellOutcome::Taskbar(TaskbarResponse::AppMenuEntered {
+                owner,
+                item,
+                revision,
+                text,
+            }) => {
+                // Held for the application to pull, then announced: the text
+                // is wider than an event.
+                if let Err(err) = server.record_app_bar_text(owner, item, revision, &text) {
+                    app::report(
+                        APP_NAME,
+                        format_args!("an icon-bar entry could not be held ({err}); not sent"),
+                    );
+                } else {
+                    relay_app_bar(
+                        apps,
+                        owner,
+                        shell,
+                        compositor,
+                        server,
+                        sink,
+                        windows,
+                        picker,
+                        menu,
+                        &WindowEvent::AppBarEntered { item, revision },
+                    );
+                }
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::AppMenuChosen {
+                owner,
+                item,
+                revision,
+            }) => {
+                // The row id and the revision of the declaration it was
+                // chosen from are the application's own and the session never
+                // interprets either: both are relayed straight back to the
+                // process that declared the menu, which resolves the id
+                // against that declaration rather than a later one.
                 relay_app_bar(
                     apps,
                     owner,
@@ -10380,7 +10764,7 @@ mod program {
                     windows,
                     picker,
                     menu,
-                    &WindowEvent::AppBarMenu { item },
+                    &WindowEvent::AppBarMenu { item, revision },
                 );
             }
             ShellOutcome::Taskbar(TaskbarResponse::OpenSwitchboard { section }) => {
@@ -10521,7 +10905,7 @@ mod program {
                     requester: alloc::string::String::from(DATETIME_TITLE),
                     bundle: bundle.map(alloc::string::String::from),
                     purpose: alloc::string::String::from(SET_TIME_PURPOSE),
-                    window: None,
+                    asker: None,
                 };
                 if !elevate.ask(request, elevator, shell, compositor) {
                     io::write_stderr_line(
@@ -10553,10 +10937,33 @@ mod program {
         Routed::Continue
     }
 
+    /// The records this session keeps in its private scope beside the sound
+    /// choices: the launcher's, and where the user put their desktop icons.
+    struct PrivateRecords {
+        launcher: LauncherMemory,
+        arrangement: ArrangementMemory,
+    }
+
+    impl PrivateRecords {
+        /// Neither record read yet, each read due at once.
+        fn new() -> Self {
+            Self {
+                launcher: LauncherMemory::new(),
+                arrangement: ArrangementMemory::new(),
+            }
+        }
+
+        /// `park_ns` shortened to when either record's next read is due.
+        fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+            let park = self.launcher.park_deadline_ns(now_ns, park_ns);
+            self.arrangement.park_deadline_ns(now_ns, park)
+        }
+    }
+
     /// The private-store jobs the session asks for itself, each held one at a
-    /// time: the sound choices' load and push, and the launcher record's read
-    /// and write.
-    const OWN_PRIVATE_JOBS: usize = 4;
+    /// time: the sound choices' load and push, and each record's read and
+    /// write.
+    const OWN_PRIVATE_JOBS: usize = 6;
 
     /// The most private-store jobs held at once: the session's own, and the
     /// pinboard calls it holds. A containment bound, not a capacity: a call past
@@ -10570,6 +10977,13 @@ mod program {
         LauncherLoad,
         /// Write the launcher record's changes, the ask `number`.
         LauncherStore {
+            number: u64,
+            changes: Vec<(alloc::string::String, Option<alloc::string::String>)>,
+        },
+        /// Read where the user put their desktop icons.
+        ArrangementLoad,
+        /// Write the changes to where the icons stand, the ask `number`.
+        ArrangementStore {
             number: u64,
             changes: Vec<(alloc::string::String, Option<alloc::string::String>)>,
         },
@@ -10601,6 +11015,13 @@ mod program {
             number: u64,
             result: Result<Vec<(alloc::string::String, Option<alloc::string::String>)>, Errno>,
         },
+        /// Where the user put their desktop icons, read.
+        ArrangementLoaded(LoadedArrangement),
+        /// What the arrangement's write `number` left the store holding.
+        ArrangementStored {
+            number: u64,
+            result: Result<Vec<(alloc::string::String, Option<alloc::string::String>)>, Errno>,
+        },
         Loaded(LoadedChoices),
         Stored {
             number: u64,
@@ -10629,6 +11050,13 @@ mod program {
         match job {
             PrivateJob::LauncherLoad => PrivateAnswer::LauncherLoaded(load_personal(&mut RtHost)),
             PrivateJob::LauncherStore { number, changes } => PrivateAnswer::LauncherStored {
+                number: *number,
+                result: store_personal(&mut RtHost, changes),
+            },
+            PrivateJob::ArrangementLoad => {
+                PrivateAnswer::ArrangementLoaded(load_arrangement(&mut RtHost))
+            }
+            PrivateJob::ArrangementStore { number, changes } => PrivateAnswer::ArrangementStored {
                 number: *number,
                 result: store_personal(&mut RtHost, changes),
             },
@@ -10755,7 +11183,7 @@ mod program {
     /// for want of one; work it has no room for is refused with its reason.
     fn submit_effects(
         effects: &mut Effects,
-        memory: &mut LauncherMemory,
+        memory: &mut PrivateRecords,
         worker: &PrivateWorker,
         work: EffectsWork,
         now: u64,
@@ -10788,7 +11216,9 @@ mod program {
                 PrivateJob::Load
                 | PrivateJob::Read { .. }
                 | PrivateJob::LauncherLoad
-                | PrivateJob::LauncherStore { .. },
+                | PrivateJob::LauncherStore { .. }
+                | PrivateJob::ArrangementLoad
+                | PrivateJob::ArrangementStore { .. },
             ) => {}
             Err(PrivateJob::Store { number, ticket, .. }) => {
                 effects.stored(number, Err(Errno::Busy));
@@ -10808,7 +11238,7 @@ mod program {
     fn conclude_own_pick(
         own: OwnPick,
         effects: &mut Effects,
-        memory: &mut LauncherMemory,
+        memory: &mut PrivateRecords,
         worker: &PrivateWorker,
     ) {
         let Requester::Sound(_) = own.requester else {
@@ -10836,11 +11266,12 @@ mod program {
     }
 
     /// Adopt every private-store answer that has come back — the sound
-    /// choices' and the launcher record's — then ask for each read, push and
-    /// write owed.
+    /// choices', the launcher record's and the arrangement's — then ask for
+    /// each read, push and write owed.
+    #[allow(clippy::too_many_lines)] // One arm per record's answer; split, the order they land in would be hidden.
     fn pump_private(
         effects: &mut Effects,
-        memory: &mut LauncherMemory,
+        memory: &mut PrivateRecords,
         worker: &PrivateWorker,
         now: u64,
     ) {
@@ -10849,7 +11280,7 @@ mod program {
                 for warning in &loaded.warnings {
                     app::report_line(warning);
                 }
-                memory.loaded(now, loaded.personal);
+                memory.launcher.loaded(now, loaded.personal);
             }
             PrivateAnswer::LauncherStored { number, result } => {
                 if let Err(err) = &result {
@@ -10858,10 +11289,30 @@ mod program {
                         format_args!("the launcher's record could not be kept ({err})"),
                     );
                 }
-                for key in memory.stored(number, result) {
+                for key in memory.launcher.stored(number, result) {
                     app::report(
                         APP_NAME,
                         format_args!("the launcher record `{key}` reads back as none kept"),
+                    );
+                }
+            }
+            PrivateAnswer::ArrangementLoaded(loaded) => {
+                for warning in &loaded.warnings {
+                    app::report_line(warning);
+                }
+                memory.arrangement.loaded(now, loaded.arrangement);
+            }
+            PrivateAnswer::ArrangementStored { number, result } => {
+                if let Err(err) = &result {
+                    app::report(
+                        APP_NAME,
+                        format_args!("where the icons were put could not be kept ({err})"),
+                    );
+                }
+                for key in memory.arrangement.stored(number, result) {
+                    app::report(
+                        APP_NAME,
+                        format_args!("the icon place `{key}` reads back as none kept"),
                     );
                 }
             }
@@ -10906,14 +11357,14 @@ mod program {
         if let Some(work) = effects.next_push(now) {
             submit_effects(effects, memory, worker, work, now);
         }
-        if memory.next_load(now) {
+        if memory.launcher.next_load(now) {
             match worker.submit(PrivateJob::LauncherLoad) {
                 Ok(true) => pump_private(effects, memory, worker, now),
                 Ok(false) => {}
-                Err(_) => memory.loaded(now, None),
+                Err(_) => memory.launcher.loaded(now, None),
             }
         }
-        if let Some(ask) = memory.next_store() {
+        if let Some(ask) = memory.launcher.next_store() {
             let number = ask.number;
             match worker.submit(PrivateJob::LauncherStore {
                 number,
@@ -10922,7 +11373,25 @@ mod program {
                 Ok(true) => pump_private(effects, memory, worker, now),
                 Ok(false) => {}
                 // Nothing was asked: the edits ride with the next write.
-                Err(_) => memory.unasked(number),
+                Err(_) => memory.launcher.unasked(number),
+            }
+        }
+        if memory.arrangement.next_load(now) {
+            match worker.submit(PrivateJob::ArrangementLoad) {
+                Ok(true) => pump_private(effects, memory, worker, now),
+                Ok(false) => {}
+                Err(_) => memory.arrangement.loaded(now, None),
+            }
+        }
+        if let Some(ask) = memory.arrangement.next_store() {
+            let number = ask.number;
+            match worker.submit(PrivateJob::ArrangementStore {
+                number,
+                changes: ask.changes,
+            }) {
+                Ok(true) => pump_private(effects, memory, worker, now),
+                Ok(false) => {}
+                Err(_) => memory.arrangement.unasked(number),
             }
         }
     }
@@ -11138,7 +11607,7 @@ mod program {
         compositor.refresh_titles();
         shell.present(compositor);
         shell.present_desktop_text(compositor, desktop);
-        shell.redraw_drag_plate(compositor);
+        shell.relay_drag(compositor);
         if menu.refit(&chain_geometry(shell.session(), compositor)) {
             present_menu_chain(menu, shell, compositor, windows);
         }
@@ -11345,6 +11814,7 @@ mod program {
                     value: LogFieldValue::Str(match event {
                         WindowEvent::AppBarDefault => "default",
                         WindowEvent::AppBarMenu { .. } => "menu",
+                        WindowEvent::AppBarEntered { .. } => "entered",
                         _ => "other",
                     }),
                 },
@@ -11462,19 +11932,20 @@ mod program {
         }
     }
 
-    /// How long the session holds its exit for the launcher record's last
+    /// How long the session holds its exit for the private records' last
     /// writes: a containment bound, so a store that stopped answering costs a
     /// moment of the logout rather than all of it.
     const SEE_OUT_NS: u64 = 2_000_000_000;
 
-    /// Make the launcher record's last writes and wait — at most
-    /// [`SEE_OUT_NS`] — for the store to take them, so a launch made just
-    /// before the session ends is kept, saying so when one is not. What else
-    /// the worker answers meanwhile belongs to a session that is over.
-    fn see_out_launcher(memory: &mut LauncherMemory, worker: &PrivateWorker) {
+    /// Make the private records' last writes and wait — at most
+    /// [`SEE_OUT_NS`] — for the store to take them, so a launch made or an
+    /// icon put down just before the session ends is kept, saying so when one
+    /// is not. What else the worker answers meanwhile belongs to a session
+    /// that is over.
+    fn see_out_private(memory: &mut PrivateRecords, worker: &PrivateWorker) {
         let deadline = tairix_rt::clock_get().saturating_add(SEE_OUT_NS);
         loop {
-            if let Some(ask) = memory.next_store() {
+            if let Some(ask) = memory.launcher.next_store() {
                 let number = ask.number;
                 if worker
                     .submit(PrivateJob::LauncherStore {
@@ -11484,14 +11955,32 @@ mod program {
                     .is_err()
                 {
                     // An answer collected below frees the room to ask again.
-                    memory.unasked(number);
+                    memory.launcher.unasked(number);
                 }
             }
-            if !memory.writing() {
-                if memory.holds_unconfirmed() {
+            if let Some(ask) = memory.arrangement.next_store() {
+                let number = ask.number;
+                if worker
+                    .submit(PrivateJob::ArrangementStore {
+                        number,
+                        changes: ask.changes,
+                    })
+                    .is_err()
+                {
+                    memory.arrangement.unasked(number);
+                }
+            }
+            if !memory.launcher.writing() && !memory.arrangement.writing() {
+                if memory.launcher.holds_unconfirmed() {
                     app::report(
                         APP_NAME,
                         "the launcher's last changes were not kept: its record was never read",
+                    );
+                }
+                if memory.arrangement.holds_unconfirmed() {
+                    app::report(
+                        APP_NAME,
+                        "where the icons were last put was not kept: the record was never read",
                     );
                 }
                 return;
@@ -11504,13 +11993,23 @@ mod program {
                             format_args!("the launcher's last changes were not kept ({err})"),
                         );
                     }
-                    let _ = memory.stored(number, result);
+                    let _ = memory.launcher.stored(number, result);
+                }
+                Some(PrivateAnswer::ArrangementStored { number, result }) => {
+                    if let Err(err) = &result {
+                        app::report(
+                            APP_NAME,
+                            format_args!("where the icons were last put was not kept ({err})"),
+                        );
+                    }
+                    let _ = memory.arrangement.stored(number, result);
                 }
                 Some(_) => {}
                 None => {
                     app::report(
                         APP_NAME,
-                        "the launcher's last changes were not kept: the store did not answer in time",
+                        "the last changes to the launcher and the icons were not kept: the \
+                         store did not answer in time",
                     );
                     return;
                 }
@@ -11524,6 +12023,40 @@ mod program {
     fn launcher_now() -> Option<i64> {
         let reading = tairix_rt::wall_time().ok()?;
         (reading.state() != WallTimeState::Unset).then(|| reading.time().secs())
+    }
+
+    /// Carry the changes made on the desktop into the record of where its
+    /// icons stand, and hand the desktop the record whenever it moved: a
+    /// change the record had no room for puts the icon back, and says so.
+    fn arrangement_turn<S: DirectorySource>(
+        arrangement: &mut ArrangementMemory,
+        desktop: &mut Desktop<S>,
+        windows: &mut SessionWindows,
+        (shell, compositor): (&mut DesktopShell, &mut Compositor),
+        now_ns: u64,
+    ) {
+        desktop.expire_landing(now_ns);
+        let mut cells = damage::sink();
+        let full = desktop.keep_record(
+            arrangement,
+            |desk| shell.desktop_layout(compositor, desk),
+            &mut cells,
+        );
+        let refusal = desktop.take_refusal().or_else(|| {
+            full.then(|| {
+                GestureRefusal::new(
+                    "The desktop cannot keep where an icon was put",
+                    "Its record of where icons stand is full or still waiting on the store, \
+                     so the icon stands where it stood.",
+                )
+            })
+        });
+        if let Some(refusal) = refusal {
+            state_refusal(&refusal, windows, shell, compositor);
+        }
+        if !cells.is_empty() {
+            shell.present_desktop_area(compositor, desktop, &cells);
+        }
     }
 
     /// Count the launches the user asked for this turn into the launcher's
@@ -11584,7 +12117,7 @@ mod program {
         compositor: &mut Compositor,
         windows: &SessionWindows,
         menu: &mut MenuChain,
-        seat_held: bool,
+        seat_modal: bool,
         launch: &mut LaunchCtx<'_>,
         programs: &mut Programs,
         now_ns: u64,
@@ -11599,6 +12132,15 @@ mod program {
         // focus ring follows the window manager's one notion of focus rather
         // than a second one kept here.
         desktop.set_focused(shell.router().focused().is_none(), &layout, &mut damage);
+        // A press on an icon carries it until the button comes up, and the
+        // release may come with motion still to follow.
+        let carried = desktop.follow_press(
+            pointer,
+            shell.router().holds_primary(),
+            &layout,
+            compositor.scale(),
+            &mut damage,
+        );
         let acted = match &outcome.value {
             tairix_desktop_session::ShellOutcome::WindowManager(response) => match response {
                 InputResponse::DesktopPointerMoved => {
@@ -11633,7 +12175,7 @@ mod program {
                         &mut damage,
                     );
                     open_backdrop_menu(
-                        pointer, on_icon, seat_held, desktop, menu, shell, compositor, windows,
+                        pointer, on_icon, seat_modal, desktop, menu, shell, compositor, windows,
                     );
                     DesktopOutcome::ignored()
                 }
@@ -11649,7 +12191,9 @@ mod program {
         // rather than through a second path. The sources are exclusive — a
         // taskbar outcome is never also a desktop gesture — and `or` says so
         // without discarding either.
-        let action = shortcut_asked(&outcome.value, shell, desktop).or(acted.action);
+        let action = shortcut_asked(&outcome.value, shell, desktop)
+            .or(acted.action)
+            .or(carried.action);
         // The settings and folder edits `apply_desktop_action` performs are
         // the changes that genuinely repaint the whole layer.
         let applied = apply_desktop_action(
@@ -11772,7 +12316,7 @@ mod program {
     fn open_backdrop_menu<S: DirectorySource>(
         at: Point,
         on_icon: bool,
-        seat_held: bool,
+        seat_modal: bool,
         desktop: &Desktop<S>,
         menu: &mut MenuChain,
         shell: &mut DesktopShell,
@@ -11786,7 +12330,7 @@ mod program {
             ChainOwner::Backdrop,
             model,
             window_menu_placement(Rect::new(at.x, at.y, 0, 0)),
-            seat_held,
+            seat_modal,
             &geom,
         ) {
             Ok(()) => present_menu_chain(menu, shell, compositor, windows),
@@ -12000,12 +12544,28 @@ mod program {
             );
             return;
         }
-        // A followed folder reports what was made in it.
-        if desktop.follows() {
-            return;
-        }
+        show_unreported(Some(path), desktop, shell, compositor);
+    }
+
+    /// Show what the session knows changed in the desktop's folder that no
+    /// watch reports — the name made at `made`, or with none whatever the
+    /// mount table moving changed — reading the folder again where its
+    /// listing does not follow it, and repainting only the icon cells the
+    /// fresh listing moved.
+    fn show_unreported<S: DirectorySource>(
+        made: Option<&str>,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        let layout = |desk: &Desktop<S>| shell.desktop_layout(compositor, desk);
         let mut cells = damage::sink();
-        if desktop.relist_into(|desk| shell.desktop_layout(compositor, desk), &mut cells) {
+        let moved = if let Some(path) = made {
+            desktop.show_made(path, layout, &mut cells)
+        } else {
+            desktop.relist_unfollowed(layout, &mut cells)
+        };
+        if moved {
             shell.present_desktop_area(compositor, desktop, &cells);
         }
     }
@@ -13069,6 +13629,7 @@ mod program {
                 for_window,
                 path,
                 access: PickAccess::Folder,
+                ..
             }) => files.submit(FileJob::Folder {
                 serial,
                 path,
@@ -13082,6 +13643,7 @@ mod program {
                 for_window,
                 path,
                 access,
+                typing,
             }) => files.submit(FileJob::Pick {
                 serial,
                 path,
@@ -13089,6 +13651,7 @@ mod program {
                 edits: server
                     .owner_of(for_window)
                     .is_some_and(|owner| openers.edits(owner)),
+                typing,
             }),
         };
         // Answered at once: carried out here for want of a worker, or
@@ -13098,10 +13661,11 @@ mod program {
                 serial,
                 opened,
                 created,
+                made,
             }) => {
                 let discard = settle_pick(
                     serial,
-                    (opened, created),
+                    (opened, created, made),
                     server,
                     sink,
                     shell,
@@ -13118,7 +13682,7 @@ mod program {
             Some(FileAnswer::Folder { serial, opened }) => settle_folder_pick(
                 serial, opened, server, sink, shell, compositor, windows, picker, apps, menu,
             ),
-            Some(FileAnswer::NewFolder { serial, made }) => {
+            Some(FileAnswer::NewFolder { serial, made, .. }) => {
                 picker.folder_made(serial, made, shell, compositor);
             }
             Some(FileAnswer::Desktop(_) | FileAnswer::Discarded) | None => {}
@@ -13146,7 +13710,7 @@ mod program {
     ) {
         let status = result.as_ref().map(|_| ()).map_err(|err| *err);
         let Some(PickEnd::Chosen { for_window, .. }) =
-            picker.opened(serial, status, shell, compositor)
+            picker.opened(serial, (status, None), shell, compositor)
         else {
             return;
         };
@@ -13166,6 +13730,7 @@ mod program {
                 None => left_out = left_out.saturating_add(1),
             }
         }
+        release_pick_hold(windows, shell, compositor);
         let Some(owner) = server.owner_of(for_window) else {
             return;
         };
@@ -13194,7 +13759,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
     fn settle_pick<S: DirectorySource, F: FnMut() -> S>(
         serial: u64,
-        (result, created): (Opened, Option<alloc::string::String>),
+        (result, created, made): (Opened, Option<alloc::string::String>, alloc::string::String),
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
         shell: &mut DesktopShell,
@@ -13208,38 +13773,55 @@ mod program {
             Ok(_) => Ok(()),
             Err(err) => Err(*err),
         };
-        let (for_window, chosen) = match picker.opened(serial, opened, shell, compositor) {
-            None => {
-                return created
-                    .zip(result.ok())
-                    .map(|(path, made)| FileJob::Discard {
-                        file: made.file,
-                        path,
-                    });
-            }
-            Some(PickEnd::Refused { for_window }) => {
-                if let Err(err) = result {
-                    app::report(
-                        APP_NAME,
-                        format_args!("the chosen file could not be opened ({err})"),
-                    );
-                }
-                (for_window, None)
-            }
-            Some(PickEnd::Chosen { for_window, name }) => {
-                let granted =
-                    result
-                        .ok()
-                        .zip(DocumentName::new(&name).ok())
-                        .and_then(|(file, name)| {
-                            Some((delegate(&file, for_window, server)?, name, file.writable))
+        let (for_window, chosen) =
+            match picker.opened(serial, (opened, Some(made)), shell, compositor) {
+                None => {
+                    return created
+                        .zip(result.ok())
+                        .map(|(path, made)| FileJob::Discard {
+                            file: made.file,
+                            path,
                         });
-                if granted.is_none() {
-                    io::write_stderr_line("desktop: picker delegation refused");
                 }
-                (for_window, granted)
-            }
-        };
+                Some(PickEnd::Refused { for_window }) => {
+                    if let Err(err) = result {
+                        app::report(
+                            APP_NAME,
+                            format_args!("the chosen file could not be opened ({err})"),
+                        );
+                    }
+                    (for_window, None)
+                }
+                Some(PickEnd::Chosen { for_window, name }) => {
+                    let mut kept = None;
+                    let granted = result.ok().and_then(|file| {
+                        let granted = DocumentName::new(&name)
+                            .ok()
+                            .zip(delegate(&file, for_window, server))
+                            .map(|(name, handle)| (handle, name, file.writable));
+                        if granted.is_none() {
+                            kept = Some(file);
+                        }
+                        granted
+                    });
+                    if granted.is_none() {
+                        io::write_stderr_line("desktop: picker delegation refused");
+                    }
+                    // A file made for a requester that cannot be handed it is
+                    // not left behind, empty, under the name the user chose.
+                    if let Some((path, made)) = created.zip(kept) {
+                        conclude(
+                            for_window, None, server, sink, shell, compositor, windows, picker,
+                            apps, menu,
+                        );
+                        return Some(FileJob::Discard {
+                            file: made.file,
+                            path,
+                        });
+                    }
+                    (for_window, granted)
+                }
+            };
         conclude(
             for_window,
             chosen.as_ref().map(|(handle, name, writable)| PickedFile {
@@ -13275,6 +13857,7 @@ mod program {
         apps: &mut AppBarPanel,
         menu: &mut MenuChain,
     ) {
+        release_pick_hold(windows, shell, compositor);
         let Some(owner) = server.owner_of(window_id) else {
             return;
         };
@@ -13292,6 +13875,18 @@ mod program {
         }
     }
 
+    /// A pick concluded: the window it held takes input again, and the
+    /// keyboard the picker handed back goes to whatever still holds it.
+    fn release_pick_hold(
+        windows: &mut SessionWindows,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        if let Some(front) = windows.release_pick_hold(shell.router().focused()) {
+            let _ = shell.focus_holder(compositor, front);
+        }
+    }
+
     /// Tell the window that asked for a system task how it ended, tearing its
     /// owner's windows down when the owner's event port is gone.
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
@@ -13306,16 +13901,21 @@ mod program {
         apps: &mut AppBarPanel,
         menu: &mut MenuChain,
     ) {
-        let Some(owner) = server.owner_of(concluded.window_id) else {
+        let owner = match concluded.asker {
+            AuthoriseFor::Window(window_id) => server.owner_of(window_id),
+            AuthoriseFor::Slot(app) => Some(app),
+        };
+        let Some(owner) = owner else {
             return;
         };
-        if let Err(Errno::NotFound) = server.conclude_authorisation(
+        match server.conclude_authorisation(
             sink,
-            concluded.window_id,
+            concluded.asker,
             concluded.outcome,
             concluded.output,
         ) {
-            drop_departed(
+            Ok(()) => {}
+            Err(Errno::NotFound) => drop_departed(
                 owner,
                 server,
                 shell,
@@ -13324,7 +13924,12 @@ mod program {
                 picker,
                 &mut apps.service,
                 menu,
-            );
+            ),
+            // The answer could never be delivered, so it is stated, not lost
+            // unseen.
+            Err(refused) => io::write_stderr_line(format_args!(
+                "desktop: an application could not be told how its authorisation ended: {refused}"
+            )),
         }
     }
 

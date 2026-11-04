@@ -655,8 +655,9 @@ impl<G: Grid> Screen<G> {
                 None
             }
             // Parsed but with no rendered effect on this bitmap console: the
-            // bell and the input-reporting operations that flow program-ward
-            // (keys, meta chords, mouse, paste markers, mode toggles).
+            // bell, the saved-lines erase (it keeps no scrollback), and the
+            // input-reporting operations that flow program-ward (keys, meta
+            // chords, mouse, paste markers, mode toggles).
             _ => None,
         }
     }

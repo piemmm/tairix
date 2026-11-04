@@ -7,9 +7,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
-    FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned,
-    VolumeStats,
+    FilesystemAttrsProvider, FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats,
+    FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity,
+    NodeTimes, Unpinned, VolumeStats, VolumeTitle,
 };
 use tairix_abi::DriverError;
 
@@ -42,6 +42,8 @@ pub(crate) struct TestFs {
     pub(crate) overcount: usize,
     /// How many flushes the volume saw.
     pub(crate) flushes: usize,
+    /// The volume's title, or `None` for a format that keeps none.
+    pub(crate) label: Option<VolumeTitle>,
 }
 
 pub(crate) const ROOT: NodeId = NodeId::from_raw(1);
@@ -67,6 +69,7 @@ impl TestFs {
             class: AllocationClass::Ordinary,
             overcount: 0,
             flushes: 0,
+            label: None,
         }
     }
 
@@ -397,6 +400,18 @@ impl FilesystemStats for TestFs {
             files: 10,
             files_free: 10 - self.nodes.len().min(10) as u64,
         })
+    }
+}
+
+impl FilesystemLabel for TestFs {
+    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
+        self.label.ok_or(DriverError::Unsupported)
+    }
+
+    fn set_label(&mut self, title: &VolumeTitle) -> Result<(), DriverError> {
+        let label = self.label.as_mut().ok_or(DriverError::Unsupported)?;
+        *label = *title;
+        Ok(())
     }
 }
 

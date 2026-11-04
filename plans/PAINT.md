@@ -39,10 +39,11 @@ its address space and everything that grows with the picture off its loop.
 | PT29 | Help in every locale, the docs page and the README for all of it | done |
 | PT30 | The document host's secondary press on a close button: the window closes and its file is shown in the file manager (`plans/TEXTEDIT.md` TE17) | done |
 | PT31 | The document host's further windows onto one document: a member window shares its primary's file, is never asked to save, has its engine's changes handed to the application as they land, and closes with its primary | done |
-| PT32 | The sprite file window: a sprite area opens as a window of its sprites, each its thumbnail over its name, where sprites are made, renamed, copied, deleted and reordered | done |
+| PT32 | The sprite file window: a sprite area opens as a window of its sprites, the first window it shows, each its thumbnail over its name, where sprites are made, renamed, copied, deleted and reordered | done |
 | PT33 | Sprite windows: a sprite opens in a window of its own, sixteen at most a choice, across sprite files, its edits its file's as they land | done |
 | PT34 | The palette bar: one row of wells, scrolled sideways only when they do not all fit | done |
 | PT35 | CMYK, JPEG-data and YCbCr sprites drawn as well as kept: today the decoder keeps them byte-exact and the sprite window shows the picture glyph; their pixel layouts are to be confirmed against real samples before they are read | planned |
+| PT36 | The palette's tool window: a pop-out at the strip's right end and View ▸ Panes ▸ *Float palette* float the palette as a near-square grid of wells that never scrolls; it docks only in its strip — by its close mark, a refusal, or a move over the window's foot — and is stored as `palette:strip` | done |
 
 ## What it is
 
@@ -80,7 +81,11 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
 - **The sprite file window** (PT32): a sprite area — read as one, made as one,
   or holding a sprite's name — opens as a window of its sprites, as RISC OS
   Paint shows one: each sprite's thumbnail, at its pixel shape, over its name,
-  in a grid that reflows to the window's width and scrolls down. A thumbnail is
+  in a grid that reflows to the window's width and scrolls down. It is the
+  first window the file shows: the document host keeps a window opened for a
+  document off the screen until the document lands, so no picture window
+  stands in for it unless the read outlasts the host's one-second wait
+  (`plans/TEXTEDIT.md`). A thumbnail is
   drawn on the queue's worker from the sprite as it stands and kept until the
   sprite or the side it is drawn at changes, asked for each round the window
   lacks one; the paint draws what has landed at the side laid out, the
@@ -117,9 +122,24 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   own palette, or the desktop's colours where it has none, and the clear ink
   of its mask — stand in one row beneath the canvas, at least `LEAST_WELL`
   across; a row longer than the window scrolls sideways by the wheel or its
-  bar, which is shown only then, and keeps the well of the ink last changed in
-  view. Every event reaches the wells but a press beside the strip, so a well
-  pressed and let go elsewhere is let go.
+  bar, which is shown only then and repeats while held as the window's other
+  bars do, and keeps the well of the ink last changed in view. Every event
+  reaches the wells but a press beside the strip, so a well pressed and let go
+  elsewhere is let go; the primary button chooses the primary ink and the
+  middle the secondary, each by a press and release on one well, and a change
+  of ink repaints only the wells a mark left or reached.
+- **The floating palette** (PT36): a square control at the strip's right end,
+  as tall as the strip's inside and sized as one more well
+  (`layout::palette_row`), floats the palette in a tool window (PT28), and
+  View ▸ Panes ▸ *Float palette* floats or docks it. Floating, the wells stand
+  in a grid as near square as the entries make, never fewer than
+  `LEAST_COLUMNS` across, each `MOST_WELL` across, the clear ink after the
+  entries, and it never scrolls; the layout points the palette's rectangles
+  into the tool window's, so hit tests, keys — Up and Down a row — settling,
+  painting and damage are the strip's own code. The strip claims no band while
+  the palette floats or is hidden. A conversion or a mask change lays the
+  window out again and the host refits the tool window; an entry's edit
+  repaints its cell.
 
 ## Files
 
@@ -147,8 +167,14 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   it cannot keep (`save::Loss`) in the sheet's message. What each format
   loses is found on the worker (`Compute::Survey`, `save::survey`), since a
   loss reads every pixel; `ask_how` hands the host that request as an outcome
-  and the sheet goes up when it lands. The picker holds the name to that
-  format's endings. A plain Save with nowhere to write opens the sheet too; a
+  and the sheet goes up when it lands. The picker is offered that format alone
+  (`save::save_formats`), opens on it, and types the file it makes as it, so
+  the save writes the format the file says (`save::format_for` over the name
+  and the type it records); the rename the save makes records that type, and
+  a Save As that never lands leaves the document's own file and format as
+  they were. A
+  sprite file is named by its type alone: `Untitled`, never `Untitled.spr`. A
+  plain Save with nowhere to write opens the sheet too; a
   sheet put up for a save before closing holds a quit.
 - **Layers in a file**: OpenRaster (`tairix_image::encode_ora`, over borrowed
   `OraLayerSource`s, so no layer is copied whole) keeps them, each written
@@ -318,9 +344,10 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   flattens, shows and names layers (`Action::*Layer*`, `view_layers.rs`), the
   name and opacity through the layer form (`dialog::Form::layer`), which keeps
   the exact opacity until its slider moves.
-- **The palette strip**: the whole palette in as few rows as hold every well
-  at least 14 logical pixels across, a well up to 24; the grid's rows follow
-  the layout (`SwatchGrid::set_columns`).
+- **The palette strip**: the whole palette in one row of wells 14 to 24
+  logical pixels across beside its pop-out, or in a floating palette's grid;
+  the grid's columns follow the layout (`SwatchGrid::set_columns`), and the
+  strip's height is the one `PaletteRow::band` the floor and the layout share.
 - **The floor**, declared once as a window opens and so held for any document:
   the view strip beside the widest setting, the bar's band at the most rows
   any tool wraps to there, and round a canvas the Tools pane showing a tool,
@@ -333,7 +360,7 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   every key but Tab and its owner's chords (`tairix_controls::owner_chord`),
   and a chord settles the field before the window acts. A press elsewhere, or
   the menu, settles and releases the bar and the dock; the palette takes the
-  keyboard only from Tab and gives it up to any press.
+  keyboard only from Tab, docked or floating, and gives it up to any press.
 - **The pointer**: every part of the chrome sees every event, so a hover
   leaves and a press held on one part ends wherever it is let go; while a pane
   is dragged by its band nothing else takes the pointer.
@@ -348,6 +375,9 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   A dock is as wide as its widest pane and gives each its natural height in
   turn; a pane past the room left shows its header alone, and an empty dock
   takes no width.
+- **The palette** is a pane whose one dock is its strip beneath the canvas
+  (`PaneKind::Palette`): shown, floated and hidden as any pane is, it never
+  docks down a side, never rolls up, and has no band in its strip (PT36).
 - **A pane** is a header and a body. The header is a mini title band — one
   caption line between gaps, far shallower than a window's title bar — naming
   the pane, with a disclosure that collapses it to the header and a close
@@ -363,15 +393,19 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
 - **Closing** hides a pane, and View ▸ Panes shows it again; *Reset panes* puts
   every pane back where the settings say a new window starts. The arrangement
   is the window's; the one a new window opens with is a setting (PT26), stored
-  as each pane once, `pane:side` down each dock in turn and then the rest, a
-  floating pane marked `:floating` and a hidden one `:hidden`
-  (`Arrangement::spell`).
+  as each pane once, `pane:side` down each dock in turn, then `palette:strip`
+  where the palette lies in its strip, and then the rest, a floating pane
+  marked `:floating` and a hidden one `:hidden` (`Arrangement::spell`), the
+  palette's place always `strip`. A stored arrangement lacking the palette
+  does not read, and a new window takes the shipped one instead: nothing has
+  shipped, so the spelling evolves in place.
 
 ## Tool windows (PT28)
 
 - A floating pane is a **tool window**: a transient of its document window that
-  the window manager decorates with a mini title bar — the pane's name in the
-  caption face, close alone — above its owner, off the icon bar and the window
+  the window manager decorates with a mini title bar — what the pane's band
+  names, the open adjustment's for the Adjustment pane, in the caption face,
+  close alone — above its owner, off the icon bar and the window
   picker, hidden while its owner is minimised, closed with it, and given the
   keyboard only when pressed.
 - Carried to the window's edge — as far as a held press's pointer is reported
@@ -381,7 +415,8 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   without the press being let go. Let go in the window away from a dock, it
   opens where it was dropped, its band where the header would have been. A
   pane that starts floating, from the settings, opens under the top band
-  against the edge of its home side.
+  against the edge of its home side; the palette, popped out or floating from
+  the settings, against the canvas's lower right corner.
 - A floating pane is laid out at its own breadth and open height in a
   rectangle of the window's drawing beside the window's own area
   (`Layout::floating`), so one drawing and one set of hit tests serve the
@@ -389,12 +424,16 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   floating pane is held within that pane's own window (`Layout::pane_window`).
 - While a tool window is moved, the window manager says where the pointer is
   over its owner's client area, and nothing about the screen; over a dock the
-  landing place is marked, and let go there the pane docks and the tool window
-  closes.
-- Its close mark hides the pane, as a docked pane's does; a tool window the
-  desktop refuses to open docks its pane at the foot of its home side. A key
-  the pane does not take acts on the document as if typed in its window, and
-  a question the window asks veils its floating panes with it.
+  landing place is marked — for the palette, a band `EDGE_REACH` deep along the
+  window's foot between the docks — and let go there the pane docks and the
+  tool window closes.
+- Its close mark hides the pane, as a docked pane's does, but the palette's
+  docks it in its strip, so it is never lost; a tool window the desktop
+  refuses to open docks its pane where it last stood (`Arrangement::redock`).
+  A secondary press on a tool window opens the window's menu over that tool
+  window (`docapp::menu_over`). A key the pane does not take acts on the
+  document as if typed in its window, and a question the window asks veils
+  its floating panes with it.
 
 ## Adjustments (PT18–PT23)
 
@@ -579,7 +618,7 @@ began.
 - What a window shows is what a save writes: the layers are laid together by
   the one routine the paint and a flatten share.
 - Save As offers only names Paint can write: the picker holds the name to the
-  endings of the format the sheet chose before any file is made.
+  format the sheet chose before any file is made, and Paint writes that format.
 - A paint reads nothing and costs what the window shows, not what the picture
   holds.
 - Every allocation that grows with the picture is fallible; a refusal is

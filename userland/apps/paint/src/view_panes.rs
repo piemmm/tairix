@@ -1,6 +1,7 @@
 //! The panes of the window's chrome: each one's band, rolling it up, closing
 //! it, dragging it by its band from one place in a dock to another or out of
-//! the window into a tool window of its own, and docking it again.
+//! the window into a tool window of its own, and docking it again; and the
+//! palette, floated out of its strip and docked in it again.
 
 use tairix_controls::{TitleBar, TitleBarEvent, WindowControlKind};
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
@@ -13,7 +14,7 @@ use crate::layout::Layout;
 use crate::pane::{Arrangement, PaneKind, Side};
 
 /// How far in from the window's edge a dragged pane is taken to an empty
-/// dock there, in logical pixels.
+/// dock there, and a floating palette to its strip, in logical pixels.
 const EDGE_REACH: u32 = 24;
 
 impl View {
@@ -73,6 +74,25 @@ impl View {
             self.close_adjustment(layout, damage);
         }
         Outcome::relaid()
+    }
+
+    /// Float the palette in a tool window of its own, or dock it in its strip
+    /// again.
+    pub(super) fn float_palette(&mut self) -> Outcome {
+        if self.panes.floats(PaneKind::Palette) {
+            self.panes.redock(PaneKind::Palette);
+        } else {
+            self.panes.float(PaneKind::Palette);
+        }
+        Outcome::relaid()
+    }
+
+    /// Dock `kind` where `landing` marks.
+    fn land_pane(&mut self, kind: PaneKind, landing: Landing) {
+        match landing {
+            Landing::Dock { side, before } => self.panes.move_to(kind, side, before),
+            Landing::Strip => self.panes.redock(kind),
+        }
     }
 
     /// The pointer on the panes' bands. Every band sees every event, so a
@@ -159,7 +179,7 @@ impl View {
         if on_edge(layout.window(), to) {
             return self.tear_out(drag, to, true, layout);
         }
-        let landing = landing_at(layout, to, scale);
+        let landing = landing_at(layout, drag.kind, to, scale);
         if landing == drag.landing {
             return Outcome::none();
         }
@@ -186,7 +206,7 @@ impl View {
             return self.tear_out(drag, self.pointer, false, layout);
         };
         damage.add(landing_mark(layout, landing, scale, theme));
-        self.panes.move_to(drag.kind, landing.side, landing.before);
+        self.land_pane(drag.kind, landing);
         Outcome::relaid()
     }
 
@@ -201,11 +221,13 @@ impl View {
         let carry = carried.then(|| u32::try_from(drag.grab.x).unwrap_or(0));
         self.openings[drag.kind.index()] = Some(ToolOpening { offset, carry });
         // The band the press began on hears no more of it, so it starts
-        // afresh rather than believing a drag is still under way.
-        let furniture = self.headers[drag.kind.index()].furniture();
+        // afresh rather than believing a drag is still under way; it keeps
+        // its look and what it names.
         let header = &mut self.headers[drag.kind.index()];
-        *header = pane_header(drag.kind);
-        header.set_furniture(furniture);
+        let mut fresh = pane_header(drag.kind);
+        fresh.set_furniture(header.furniture());
+        fresh.set_title(header.title());
+        *header = fresh;
         self.panes.float(drag.kind);
         Outcome::relaid()
     }
@@ -222,9 +244,9 @@ impl View {
         })
     }
 
-    /// A floating pane's tool window is being moved: over a dock, mark where
-    /// the pane would land; let go there, dock it, which closes its tool
-    /// window.
+    /// A floating pane's tool window is being moved: over a dock, or the
+    /// palette over its strip, mark where the pane would land; let go there,
+    /// dock it, which closes its tool window.
     pub(super) fn tool_moved(
         &mut self,
         moved: ToolMove,
@@ -236,7 +258,9 @@ impl View {
         let Some(kind) = tool_pane(moved.id).filter(|&kind| self.panes.floats(kind)) else {
             return Outcome::none();
         };
-        let landing = moved.over.and_then(|at| landing_at(layout, at, scale));
+        let landing = moved
+            .over
+            .and_then(|at| landing_at(layout, kind, at, scale));
         let shown = if moved.ended { None } else { landing };
         if shown != self.tool_landing {
             for marked in [self.tool_landing, shown].into_iter().flatten() {
@@ -246,7 +270,7 @@ impl View {
         }
         match landing.filter(|_| moved.ended) {
             Some(landing) => {
-                self.panes.move_to(kind, landing.side, landing.before);
+                self.land_pane(kind, landing);
                 Outcome::relaid()
             }
             None => Outcome::none(),
@@ -254,8 +278,9 @@ impl View {
     }
 
     /// A floating pane's tool window went: closed, the pane is hidden as a
-    /// docked pane's close mark hides it; refused, it docks at the foot of its
-    /// home side.
+    /// docked pane's close mark hides it, but for the palette, which is never
+    /// lost and docks in its strip; refused, it docks at the foot of its home
+    /// side, or the palette in its strip.
     pub(super) fn tool_gone(
         &mut self,
         id: u32,
@@ -268,24 +293,29 @@ impl View {
         };
         self.openings[kind.index()] = None;
         match why {
-            ToolGone::Closed => self.toggle_pane(kind, layout, damage),
-            ToolGone::Refused => {
-                self.panes.move_to(kind, self.panes.home(kind), usize::MAX);
+            ToolGone::Closed if kind != PaneKind::Palette => self.toggle_pane(kind, layout, damage),
+            ToolGone::Closed | ToolGone::Refused => {
+                self.panes.redock(kind);
                 Outcome::relaid()
             }
         }
     }
 
     /// Note where each floating pane opens when nothing tore it out: just
-    /// under the top band, against the edge of its home side.
+    /// under the top band, against the edge of its home side; the palette
+    /// against the canvas's lower right corner, above where its strip lay.
     pub(super) fn settle_float_homes(&mut self, layout: &Layout) {
-        let below = layout.top().bottom();
+        let (window, canvas, below) = (layout.window(), layout.canvas(), layout.top().bottom());
         for slot in layout.floating() {
-            let left = match self.panes.home(slot.kind) {
-                Side::Left => layout.window().left(),
-                Side::Right => layout.window().right() - to_i32(slot.frame.width),
+            let (width, height) = (to_i32(slot.frame.width), to_i32(slot.frame.height));
+            self.float_homes[slot.kind.index()] = match self.panes.home(slot.kind) {
+                Some(Side::Left) => (window.left(), below),
+                Some(Side::Right) => (window.right() - width, below),
+                None => (
+                    (canvas.right() - width).max(window.left()),
+                    (canvas.bottom() - height).max(below),
+                ),
             };
-            self.float_homes[slot.kind.index()] = (left, below);
         }
     }
 
@@ -342,9 +372,16 @@ fn on_edge(window: Rect, at: Point) -> bool {
         || at.y >= window.bottom() - 1
 }
 
-/// Where a pane dragged to `at` lands: in the gap down a dock nearest the
-/// pointer, or at the head of an empty dock when the pointer is near its edge.
-fn landing_at(layout: &Layout, at: Point, scale: Scale) -> Option<Landing> {
+/// Where pane `kind` dragged to `at` lands: the palette in its strip when the
+/// pointer is over the window's foot between the docks; any other pane in the
+/// gap down a dock nearest the pointer, or at the head of an empty dock when
+/// the pointer is near its edge.
+fn landing_at(layout: &Layout, kind: PaneKind, at: Point, scale: Scale) -> Option<Landing> {
+    if kind == PaneKind::Palette {
+        return strip_zone(layout, scale)
+            .contains(at)
+            .then_some(Landing::Strip);
+    }
     Side::BOTH.into_iter().find_map(|side| {
         let zone = zone(layout, side, scale);
         if !zone.contains(at) {
@@ -357,7 +394,7 @@ fn landing_at(layout: &Layout, at: Point, scale: Scale) -> Option<Landing> {
                 at.y < slot.frame.top() + tairix_geometry::to_i32(slot.frame.height / 2)
             })
             .unwrap_or(panes.len());
-        Some(Landing { side, before })
+        Some(Landing::Dock { side, before })
     })
 }
 
@@ -388,28 +425,52 @@ fn zone(layout: &Layout, side: Side, scale: Scale) -> Rect {
 }
 
 /// The mark showing where a dragged pane lands: a bar across its dock in the
-/// gap it would take, or down the edge of an empty dock's zone.
+/// gap it would take, down the edge of an empty dock's zone, or along the
+/// strip's.
 #[must_use]
 pub(crate) fn landing_mark(layout: &Layout, landing: Landing, scale: Scale, theme: &Theme) -> Rect {
     let thickness = scale
         .scale_length(theme.metrics().seam_thickness)
         .max(1)
         .saturating_mul(2);
-    let zone = zone(layout, landing.side, scale);
-    let panes = &layout.dock_on(landing.side).panes;
+    let (side, before) = match landing {
+        Landing::Dock { side, before } => (side, before),
+        Landing::Strip => {
+            let zone = strip_zone(layout, scale);
+            let height = thickness.min(zone.height);
+            let top = zone.bottom() - tairix_geometry::to_i32(height);
+            return Rect::new(zone.left(), top, zone.width, height);
+        }
+    };
+    let zone = zone(layout, side, scale);
+    let panes = &layout.dock_on(side).panes;
     if panes.is_empty() {
-        let left = match landing.side {
+        let left = match side {
             Side::Left => zone.left(),
             Side::Right => zone.right() - tairix_geometry::to_i32(thickness),
         };
         return Rect::new(left, zone.top(), thickness, zone.height);
     }
     let half = tairix_geometry::to_i32(thickness / 2);
-    let y = match panes.get(landing.before) {
+    let y = match panes.get(before) {
         Some(slot) => slot.frame.top() - half - 1,
         None => panes
             .last()
             .map_or(zone.top(), |slot| slot.frame.bottom() + 1),
     };
     Rect::new(zone.left(), y.max(zone.top()), zone.width, thickness)
+}
+
+/// Where a floating palette let go docks in its strip: a band along the
+/// window's foot, above the status band, between the docks.
+fn strip_zone(layout: &Layout, scale: Scale) -> Rect {
+    let reach = scale.scale_length(EDGE_REACH);
+    let left = layout.dock_on(Side::Left).rect.right();
+    let right = layout.dock_on(Side::Right).rect.left();
+    Rect::new(
+        left,
+        layout.status().top().saturating_sub_unsigned(reach),
+        u32::try_from(right.saturating_sub(left)).unwrap_or(0),
+        reach,
+    )
 }

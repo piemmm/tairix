@@ -16,8 +16,9 @@
 //!   per-endpoint configuration and attach state, geometry validation, and
 //!   the service logic.
 //! * [`Dispatcher`] — the serve loop's work without its syscalls: a call
-//!   answered or a device event serviced over an injected [`ChannelIo`], so
-//!   the interrupt path and the region lifecycle are host-tested too.
+//!   answered or a device event serviced over an injected [`ChannelIo`], and
+//!   what the mixer's ports refused held until it can go, so the interrupt
+//!   path and the region lifecycle are host-tested too.
 //! * `serve` — the freestanding process loop the driver binary hands its
 //!   opened device to: claim a reserved device-channel endpoint, publish the
 //!   [`AUDIOCHAN_NODE_COMPATIBLE`](tairix_abi::driver::audio_channel::AUDIOCHAN_NODE_COMPATIBLE)
@@ -35,7 +36,9 @@
 //! boundary wakes it, it moves that period between the shared ring and the
 //! device, and it sends one notify carrying the clock pair the mixer's linear
 //! fit is built from. There is no audio tick and no poll loop: the device's
-//! own period events are the only timer in the stack.
+//! own period events are the only timer in the stack, beside the one-shot
+//! pause before a notification the kernel had no memory for is offered again,
+//! the one wait no event reports.
 //!
 //! # Fail closed
 //!
@@ -52,6 +55,7 @@
 
 pub mod cyclic;
 mod dispatch;
+mod owed;
 mod server;
 pub use dispatch::{ChannelIo, Dispatcher, MappedRegion};
 pub use server::{AudioChannelServer, Serviced};

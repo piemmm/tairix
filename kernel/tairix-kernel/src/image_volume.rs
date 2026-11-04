@@ -26,7 +26,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::blkio::{BlkForm, BlkMedium, BlkTransport};
 use tairix_abi::driver::block::{Block, BlockGeometry};
-use tairix_abi::driver::filesystem::MountFlags;
+use tairix_abi::driver::filesystem::{
+    FilesystemLabel, FilesystemWrite, MountFlags, VolumeTitle, VOLUME_TITLE_MAX,
+};
 use tairix_abi::fsserve::{ServeOffer, SERVED_IDLE_NS};
 use tairix_abi::imageattach::{ImageAccess, ImageAttach, ImageAttachReply, ImageRefusal};
 use tairix_abi::netattach::AttachReply;
@@ -90,6 +92,10 @@ const IMAGE_DETACH_REFUSED: EventId = EventId(4324);
 /// Audit event: an image volume left with its file's volume, or its driver
 /// was lost.
 const IMAGE_VOLUME_RETIRED: EventId = EventId(4325);
+/// Audit event: an image volume's owner retitled it.
+const IMAGE_VOLUME_RETITLED: EventId = EventId(4327);
+/// Audit event: an image volume's retitle was refused.
+const IMAGE_RETITLE_REFUSED: EventId = EventId(4328);
 
 /// Where image volumes' mount handles are numbered from (`"IMG"`): disjoint
 /// from every other volume's.
@@ -376,6 +382,8 @@ struct ImageVolume {
     medium: BlkMedium,
     /// What the mount listing names it from: the file's name.
     source: String,
+    /// What the mount listing titles it: its filesystem's label.
+    title: VolumeTitle,
     /// The catalog name it must take, held for it while it awaits.
     asked: Option<String>,
     /// What its catalog name is made from otherwise.
@@ -1052,6 +1060,7 @@ struct ServeTarget {
     medium: BlkMedium,
     served: Arc<ServedVolume<ImageBlock>>,
     source: String,
+    title: VolumeTitle,
     asked: Option<String>,
     base: NameBase,
     presented: Presented,
@@ -1417,6 +1426,7 @@ impl RuntimeVolumeService {
             fstype: probed.fstype,
             medium: image_medium(probed.form),
             source: shown_from,
+            title: probed_title(probed.label()),
             asked,
             base,
             presented,
@@ -1820,6 +1830,7 @@ impl RuntimeVolumeService {
             medium: entry.medium,
             served: Arc::clone(&entry.served),
             source: owned(&entry.source)?,
+            title: entry.title,
             asked: entry.asked.as_deref().map(owned).transpose()?,
             base: entry.base,
             presented: entry.presented,
@@ -1962,6 +1973,7 @@ impl RuntimeVolumeService {
             name
         };
         let _ = LATE_FILESYSTEM.set_served_state(target.handle, Some(state));
+        let _ = LATE_FILESYSTEM.set_title(target.handle, target.title);
         let _ = LATE_FILESYSTEM.set_availability(target.handle, MountAvailability::Available);
         Ok(name)
     }
@@ -2121,6 +2133,97 @@ impl RuntimeVolumeService {
         audit_detached(audit, name.as_str(), cause, force, given_up);
         // One that entered as it was detached is stranded with it.
         self.retire_images_on(handle);
+        Ok(())
+    }
+
+    /// Title the image volume published as `id` `title` for `caller`, its
+    /// owner: written as its filesystem's label through its driver and
+    /// flushed, the volume held against every other operation meanwhile, and
+    /// listed under it once its driver holds it. The catalog name it is shown
+    /// under stays as it is while it is attached.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no such volume shown in the catalog;
+    /// [`Errno::PermissionDenied`] for a caller other than its owner;
+    /// [`Errno::Busy`] for one an operation holds, an attach answers for, or
+    /// that owes its teardown; [`Errno::DeviceOffline`] for one no driver
+    /// serves; [`Errno::NotSupported`] for a format that keeps no title;
+    /// [`Errno::ReadOnly`] for one that takes no writes; the driver's refusal
+    /// of the title or of the flush.
+    pub(super) fn retitle_image(
+        &self,
+        audit: &'static (dyn Sink + Sync),
+        caller: &Principal<'_>,
+        id: &[u8; 16],
+        title: &VolumeTitle,
+    ) -> Result<(), Errno> {
+        let refused = |name: &str, cause: &'static str, errno: Errno| {
+            // Only a refusal of the caller's authority is a warning.
+            let level = if errno == Errno::PermissionDenied {
+                Level::Warn
+            } else {
+                Level::Info
+            };
+            record(
+                audit,
+                level,
+                IMAGE_RETITLE_REFUSED,
+                RETITLE_REFUSED,
+                name,
+                cause,
+            );
+            errno
+        };
+        let claimed = {
+            let mut registry = self.images.registry.lock();
+            let since = registry.releases;
+            let entry = registry
+                .volumes
+                .iter_mut()
+                .find(|v| v.id == *id)
+                .filter(|v| v.name().is_some())
+                .ok_or(Errno::NotFound)?;
+            if let Some((cause, errno)) = retitle_refusal(entry, caller.uid) {
+                let name = ArrayString::<VOLUME_NAME_MAX>::from_str_truncating(
+                    entry.name().unwrap_or_default(),
+                );
+                drop(registry);
+                return Err(refused(name.as_str(), cause, errno));
+            }
+            Claimed::of(self, entry, Holder::Operation, since)
+        };
+        let Claimed {
+            claim,
+            handle,
+            name,
+            ..
+        } = claimed;
+        let volume = claim.volume;
+        let listed = || {
+            let mut registry = self.images.registry.lock();
+            if let Some(at) = position(&registry.volumes, volume) {
+                registry.volumes[at].title = *title;
+            }
+            drop(registry);
+            let _ = LATE_FILESYSTEM.set_title(handle, *title);
+        };
+        let written = LATE_FILESYSTEM
+            .driver(handle)
+            .map_err(|_| ("volume_unserved", Errno::DeviceOffline))
+            .and_then(|driver| write_title(&mut *driver.lock(), title, listed));
+        drop(claim);
+        if let Err((cause, errno)) = written {
+            return Err(refused(name.as_str(), cause, errno));
+        }
+        record(
+            audit,
+            Level::Info,
+            IMAGE_VOLUME_RETITLED,
+            "image-volume: retitled by its owner",
+            name.as_str(),
+            "owner",
+        );
         Ok(())
     }
 
@@ -2306,11 +2409,9 @@ impl RuntimeVolumeService {
             };
             Self::stand_in(
                 handle,
-                source.as_ref().map_or("", ArrayString::as_str),
-                format,
-                id,
+                (source.as_ref().map_or("", ArrayString::as_str), format, id),
+                MountAvailability::UnavailableLost,
             );
-            let _ = LATE_FILESYSTEM.set_availability(handle, MountAvailability::UnavailableLost);
             record_retired(
                 audit,
                 IMAGE_VOLUME_RETIRED,
@@ -2387,8 +2488,7 @@ impl RuntimeVolumeService {
         };
         let (name, format, handle, id, source) = lost?;
         let unpublished = LATE_FILESYSTEM.holds_unpublished(handle);
-        Self::stand_in(handle, &source, format, id);
-        let _ = LATE_FILESYSTEM.set_availability(handle, MountAvailability::Recovering);
+        Self::stand_in(handle, (&source, format, id), MountAvailability::Recovering);
         record_retired(
             audit,
             IMAGE_VOLUME_RETIRED,
@@ -2611,6 +2711,65 @@ fn archive_place(
         name_key: directory.name_key,
     }))
 }
+
+/// The title a probed `label` is listed under: as much of it as a title
+/// holds, cut between characters, or none for a label that is no text.
+fn probed_title(label: &[u8]) -> VolumeTitle {
+    let Ok(text) = core::str::from_utf8(label) else {
+        return VolumeTitle::EMPTY;
+    };
+    let mut end = text.len().min(VOLUME_TITLE_MAX);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    VolumeTitle::new(&text[..end]).unwrap_or(VolumeTitle::EMPTY)
+}
+
+/// Why `entry` may not be retitled for `uid` now: only its owner retitles it,
+/// and only while a driver serves it and nothing else acts on it.
+fn retitle_refusal(entry: &ImageVolume, uid: u32) -> Option<(&'static str, Errno)> {
+    if entry.owner != uid {
+        return Some(("not_owner", Errno::PermissionDenied));
+    }
+    if entry.custody.claimed() || entry.custody.answering || entry.custody.owed != Owed::Nothing {
+        return Some(("volume_busy", Errno::Busy));
+    }
+    match entry.stage {
+        Stage::Mounted {
+            server: Some(_), ..
+        } if !entry.stranded() => None,
+        _ => Some(("volume_unserved", Errno::DeviceOffline)),
+    }
+}
+
+/// Write `title` through `fs`, the volume's driver, and flush it, telling
+/// `listed` once the driver holds the title: its writeback publishes it then,
+/// whether or not the flush succeeds. The title it replaces is never read,
+/// and the driver answers for its format, so one that keeps no title says so
+/// before a volume that takes no writes is refused for that.
+fn write_title<F: FilesystemLabel + FilesystemWrite>(
+    fs: &mut F,
+    title: &VolumeTitle,
+    listed: impl FnOnce(),
+) -> Result<(), (&'static str, Errno)> {
+    fs.set_label(title).map_err(driver_refusal)?;
+    listed();
+    fs.flush().map_err(|why| ("flush_failed", why.as_errno()))
+}
+
+/// Why a driver's refusal of a title refuses the retitle, and what it answers
+/// its caller: a format that keeps none is `NotSupported`, never the
+/// `NotImplemented` of a service not yet installed.
+const fn driver_refusal(why: DriverError) -> (&'static str, Errno) {
+    match why {
+        DriverError::Unsupported => ("untitled_format", Errno::NotSupported),
+        DriverError::ReadOnly => ("read_only", Errno::ReadOnly),
+        why => ("title_refused", why.as_errno()),
+    }
+}
+
+/// The message of a refused retitle.
+const RETITLE_REFUSED: &str = "image-volume: retitle refused";
 
 /// Why an image is not attached, given its driver's refusal.
 const fn refusal_of(why: DriverError) -> ImageRefusal {

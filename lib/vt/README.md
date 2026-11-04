@@ -7,9 +7,9 @@ TAIRiX's text stack. It is the single source of truth (`AGENTS.md` §2.2) for:
 - the SGR attribute set (bold, dim, italic, underline, blink, reverse,
   strike) and the three colour models — the 16 ANSI colours, the 256-colour
   palette (`38;5;n`), and 24-bit truecolour (`38;2;r;g;b`),
-- cursor movement and absolute positioning, erase-in-line / erase-in-display,
-  the scroll region, alt-screen enter/leave, cursor show/hide, and
-  save/restore,
+- cursor movement and absolute positioning, erase-in-line / erase-in-display
+  and the saved-lines erase (`CSI 3 J`), the scroll region, alt-screen
+  enter/leave, cursor show/hide, and save/restore,
 - a shared [`Cell`] / [`Attributes`] representation reused by both the
   *consumer* (the terminal emulator's `Grid`) and the *emitter* (the curses
   renderer),

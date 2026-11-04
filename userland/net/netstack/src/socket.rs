@@ -79,6 +79,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::num::NonZeroU8;
 
+use tairix_abi::ipc::{SendWait, Sent};
 use tairix_abi::net::{
     encode_bind_reply, encode_send_reply, encode_socket_reply, EchoOutcome, ShutdownHow,
     SocketAddr, SocketDatagram, SocketEcho, SocketId, SocketLinkEvent, SocketRequest,
@@ -94,7 +95,7 @@ use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::{CapabilityId, Duration64, Errno};
 use tairix_collections::HashMap;
 use tairix_hash::{BuildSipHash13, HashSeed};
-use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
+use tairix_log::{log, Doubling, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_net::addr::{zone_of, Ecn, IpAddr, Ipv4Addr};
 use tairix_net::checksum::Pseudo;
 use tairix_net::icmp::IcmpErrorKind;
@@ -528,6 +529,12 @@ pub struct SocketService {
     /// with the listening socket closing would vanish from the count
     /// instead of staying visible.
     retired_defence: ListenerStats,
+    /// A delivery pass had a post refused for want of kernel memory, which no
+    /// port's room reports ([`Self::take_starved`]).
+    starved: bool,
+    /// Deliveries given up on: datagrams a client's port refused, and events
+    /// a port refused for good.
+    lost: Doubling,
 }
 
 impl SocketService {
@@ -554,6 +561,8 @@ impl SocketService {
             delivery_scratch: Vec::new(),
             links_seen: 0,
             retired_defence: ListenerStats::default(),
+            starved: false,
+            lost: Doubling::new(),
         }
     }
 
@@ -1870,11 +1879,14 @@ impl SocketService {
     ///
     /// A connection's events go in order — its `Connected`, its received
     /// bytes, a `Room`, its `Closed` — and a listener's is one `Accepted`.
-    /// A port with no room takes the rest once it drains: received bytes
-    /// leave the connection only when a post of them lands, so the window
-    /// shuts on the peer rather than the bytes being lost, and the socket
-    /// stays owed. Returns the frames the pass owes the wire: the windows
-    /// the taken bytes reopened.
+    /// A port with no room, or the stack's own budget spent, takes the rest on
+    /// the port's room wake, and a post the kernel had no memory for on the
+    /// retry the loop times ([`Self::take_starved`]): received bytes leave the
+    /// connection only when a post of them lands, so the window shuts on the
+    /// peer rather than the bytes being lost, and the socket stays owed. A
+    /// post a port refuses for good gives its event up, counted
+    /// ([`Self::lost_to_report`]). Returns the frames the pass owes the wire:
+    /// the windows the taken bytes reopened.
     pub fn deliver_owed(
         &mut self,
         interfaces: &mut Netstack,
@@ -1908,7 +1920,10 @@ impl SocketService {
             }
             match paid {
                 Paid::InFull => self.unlist(index),
-                Paid::Blocked => at += 1,
+                Paid::Waits(wait) => {
+                    self.starved |= wait == SendWait::Memory;
+                    at += 1;
+                }
             }
         }
         self.delivery_scratch = scratch;
@@ -1932,9 +1947,32 @@ impl SocketService {
         ports
     }
 
-    /// Post what the socket at `index` is owed, stopping at a port with no
-    /// room; also answers whether received bytes were taken, which reopens
-    /// the window.
+    /// Whether a delivery pass since the last call had a post refused for want
+    /// of kernel memory. No wake reports memory freeing, so the loop retries
+    /// after a pause, and arms no room wake meanwhile, which would fire at once
+    /// for a post the kernel would refuse again.
+    pub fn take_starved(&mut self) -> bool {
+        core::mem::take(&mut self.starved)
+    }
+
+    /// Note how a datagram posted to its client's port fared: one a port
+    /// still there refused is lost — UDP drops one under congestion, but not
+    /// unseen — and one to a port gone with its client lost nobody anything.
+    pub fn datagram_posted(&mut self, sent: Result<(), Errno>) {
+        if !matches!(Sent::of(sent), Sent::Taken | Sent::Gone) {
+            self.lost.note();
+        }
+    }
+
+    /// How many deliveries have been given up on, once the count has doubled
+    /// since it was last reported.
+    pub fn lost_to_report(&mut self) -> Option<u64> {
+        self.lost.take_due()
+    }
+
+    /// Post what the socket at `index` is owed, stopping at the first post
+    /// refused for room, budget or memory; also answers whether received
+    /// bytes were taken, which reopens the window.
     fn pay_one(
         &mut self,
         index: usize,
@@ -1942,21 +1980,21 @@ impl SocketService {
         frame: &mut [u8],
         post: &mut Post<'_>,
     ) -> (Paid, bool) {
-        let entry = &mut self.sockets[index];
+        let Self { sockets, lost, .. } = self;
+        let entry = &mut sockets[index];
         let (to, socket) = (entry.deliver_port, entry.id);
         let mut landed = |event: &SocketStreamEvent<'_>, frame: &mut [u8]| match event.encode(frame)
         {
-            Ok(len) => !matches!(post(to, &frame[..len]), Err(Errno::WouldBlock)),
+            Ok(len) => delivered(post(to, &frame[..len]), lost),
             // A bounded event always encodes; one that did not is dropped
             // rather than delivered malformed.
-            Err(_) => true,
+            Err(_) => Ok(()),
         };
         let conn = match &mut entry.proto {
             Proto::Listen(_) => {
-                let paid = if landed(&SocketStreamEvent::Accepted { socket }, frame) {
-                    Paid::InFull
-                } else {
-                    Paid::Blocked
+                let paid = match landed(&SocketStreamEvent::Accepted { socket }, frame) {
+                    Ok(()) => Paid::InFull,
+                    Err(wait) => Paid::Waits(wait),
                 };
                 return (paid, false);
             }
@@ -1968,8 +2006,8 @@ impl SocketService {
             return (Paid::InFull, took);
         }
         if conn.tcb.is_established() && conn.notified == Notified::Nothing {
-            if !landed(&SocketStreamEvent::Connected { socket }, frame) {
-                return (Paid::Blocked, took);
+            if let Err(wait) = landed(&SocketStreamEvent::Connected { socket }, frame) {
+                return (Paid::Waits(wait), took);
             }
             conn.notified = Notified::Connected;
         }
@@ -1982,21 +2020,21 @@ impl SocketService {
                 socket,
                 payload: &payload[..n],
             };
-            if !landed(&data, frame) {
-                return (Paid::Blocked, took);
+            if let Err(wait) = landed(&data, frame) {
+                return (Paid::Waits(wait), took);
             }
             conn.tcb.consume(n);
             took = true;
         }
         if conn.room_owed && has_room(&conn.tcb) {
-            if !landed(&SocketStreamEvent::Room { socket }, frame) {
-                return (Paid::Blocked, took);
+            if let Err(wait) = landed(&SocketStreamEvent::Room { socket }, frame) {
+                return (Paid::Waits(wait), took);
             }
             conn.room_owed = false;
         }
         if let Some(reason) = close_reason(&conn.tcb) {
-            if !landed(&SocketStreamEvent::Closed { socket, reason }, frame) {
-                return (Paid::Blocked, took);
+            if let Err(wait) = landed(&SocketStreamEvent::Closed { socket, reason }, frame) {
+                return (Paid::Waits(wait), took);
             }
             conn.notified = Notified::Closed;
             conn.room_owed = false;
@@ -2101,8 +2139,10 @@ impl SocketService {
 
     /// Tell each member socket what moved on the links its memberships
     /// ride since it was last told, through `send`, and return the delivery
-    /// ports that had no room: each is owed the rest, which the next call
-    /// delivers once it drains.
+    /// ports that had no room, or the stack no budget: each is owed the rest,
+    /// which the next call delivers once the port's room wake comes. One the
+    /// kernel had no memory for is owed the retry [`Self::take_starved`] asks
+    /// for.
     ///
     /// A socket is told the difference between its view and `links`: a link
     /// that came up, one that went down or left, and one whose epoch moved
@@ -2132,14 +2172,27 @@ impl SocketService {
                 position += 1;
                 continue;
             }
-            match tell_one(entry.id, entry.family, port, &mut entry.proto, links, send) {
+            let told = tell_one(
+                entry.id,
+                entry.family,
+                port,
+                &mut entry.proto,
+                links,
+                send,
+                &mut self.lost,
+            );
+            match told {
                 Told::Caught => {
                     self.behind.swap_remove(position);
                 }
-                Told::Blocked => {
+                Told::Waits(SendWait::Room) => {
                     if blocked.try_reserve(1).is_ok() {
                         blocked.push(port);
                     }
+                    position += 1;
+                }
+                Told::Waits(SendWait::Memory) => {
+                    self.starved = true;
                     position += 1;
                 }
                 Told::Short => position += 1,
@@ -3057,8 +3110,23 @@ fn broadcast_consumer_ports(sockets: &[SocketEntry]) -> impl Iterator<Item = u16
 enum Paid {
     /// It holds everything it is owed.
     InFull,
-    /// Its port had no room; the rest waits for it to drain.
-    Blocked,
+    /// A post was refused; the rest waits for what refused it.
+    Waits(SendWait),
+}
+
+/// What a post's outcome leaves: `Ok` once its event is answered for —
+/// taken, its port gone with its client, or refused for good, given up on
+/// and counted in `lost` — else what the rest of the socket's events wait
+/// for.
+fn delivered(posted: Result<(), Errno>, lost: &mut Doubling) -> Result<(), SendWait> {
+    match Sent::of(posted) {
+        Sent::Waits(wait) => Err(wait),
+        Sent::Refused(_) => {
+            lost.note();
+            Ok(())
+        }
+        Sent::Taken | Sent::Gone => Ok(()),
+    }
 }
 
 /// Whether the connection's client is owed an event it can be given now.
@@ -3141,9 +3209,6 @@ fn peer_closed(state: State) -> bool {
     )
 }
 
-/// Write the success status frame into `response`.
-/// The link event a datagram socket holding memberships is owed for one
-/// edge, or `None` for a socket that holds none.
 /// Posts one message to a delivery port.
 pub type Post<'a> = dyn FnMut(u64, &[u8]) -> Result<(), Errno> + 'a;
 
@@ -3151,16 +3216,16 @@ pub type Post<'a> = dyn FnMut(u64, &[u8]) -> Result<(), Errno> + 'a;
 enum Told {
     /// It holds exactly what is published.
     Caught,
-    /// Its port had no room; the rest waits for it to drain.
-    Blocked,
+    /// A post was refused; the rest waits for what refused it.
+    Waits(SendWait),
     /// Its view could not grow for want of memory; the next call resumes.
     Short,
 }
 
 /// Bring one socket's told view to `links`, one event at a time: a link's
 /// view changes only once its event has landed, so an interrupted pass
-/// resumes exactly where it stopped. A port that is gone takes nothing
-/// further and reads as caught up, as a datagram to it would be dropped.
+/// resumes exactly where it stopped. A port that refuses for good takes
+/// nothing further and reads as caught up, the refusal counted in `lost`.
 fn tell_one(
     socket: SocketId,
     family: NetAddrFamily,
@@ -3168,6 +3233,7 @@ fn tell_one(
     proto: &mut Proto,
     links: &[PublishedLink],
     send: &mut Post<'_>,
+    lost: &mut Doubling,
 ) -> Told {
     let Proto::Datagram(dg) = proto else {
         return Told::Caught;
@@ -3184,9 +3250,9 @@ fn tell_one(
             up,
         })
         .encode() else {
-            return true;
+            return Ok(());
         };
-        !matches!(send(port, &frame), Err(Errno::WouldBlock))
+        delivered(send(port, &frame), lost)
     };
     let mut at = 0;
     while at < dg.told.len() {
@@ -3198,8 +3264,10 @@ fn tell_one(
             at += 1;
             continue;
         }
-        if told.up && !landed(told.name, false) {
-            return Told::Blocked;
+        if told.up {
+            if let Err(wait) = landed(told.name, false) {
+                return Told::Waits(wait);
+            }
         }
         dg.told.swap_remove(at);
     }
@@ -3208,8 +3276,10 @@ fn tell_one(
             if dg.told.try_reserve(1).is_err() {
                 return Told::Short;
             }
-            if link.up && !landed(link.name, true) {
-                return Told::Blocked;
+            if link.up {
+                if let Err(wait) = landed(link.name, true) {
+                    return Told::Waits(wait);
+                }
             }
             dg.told.push(*link);
             continue;
@@ -3220,13 +3290,15 @@ fn tell_one(
         // Up then up again under a new epoch is a flap: said as down first,
         // so the reader drops what it learned before it.
         if dg.told[at].up {
-            if !landed(link.name, false) {
-                return Told::Blocked;
+            if let Err(wait) = landed(link.name, false) {
+                return Told::Waits(wait);
             }
             dg.told[at].up = false;
         }
-        if link.up && !landed(link.name, true) {
-            return Told::Blocked;
+        if link.up {
+            if let Err(wait) = landed(link.name, true) {
+                return Told::Waits(wait);
+            }
         }
         dg.told[at] = *link;
     }

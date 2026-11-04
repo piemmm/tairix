@@ -354,7 +354,10 @@ impl Parser {
                 col: self.position(1),
             }),
             control::ED => {
-                if let Some(mode) = EraseMode::from_value(self.mode()) {
+                let mode = self.mode();
+                if mode == control::ERASE_SAVED_LINES {
+                    sink(Op::EraseSavedLines);
+                } else if let Some(mode) = EraseMode::from_value(mode) {
                     sink(Op::EraseInDisplay(mode));
                 }
             }

@@ -270,7 +270,8 @@ pub use desktop::{
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use drag::{
     DragEnd, DragPlace, DragStep, DragSurface, DropRefusal, ItemsEnd, ItemsReport, OfferEnd,
-    OwedReport, SaveDrop, SaveEnd, SaveOffer, SaveReport, SavedDocument, SlotAnswer, WindowUnder,
+    OwedReport, PictureGrab, SaveDrop, SaveEnd, SaveOffer, SaveReport, SavedDocument, SlotAnswer,
+    WindowUnder,
 };
 pub use drain::{
     adopt_unlocks, drain_authorising, drain_away, drain_locked, Routed, Seat, SeatDrain,
@@ -304,11 +305,11 @@ pub use layer::{
 };
 pub use library::{catalogued, load_library, load_programs, LoadedLibrary, LoadedPrograms};
 pub use lock::{LockOutcome, ScreenLock, UnlockAnswer, UnlockAsk};
-pub use notify::{is_settings_surface, producer_of, NotifySources};
+pub use notify::{is_own_component, producer_of, NotifySources};
 pub use pace::FramePacer;
 pub use picker::{
-    OwnPick, PickAccess, PickEnd, PickStep, PickerSlot, Requester, SessionPicker, PICKER_ORIGIN,
-    PICKER_SHOWN, PICKER_SHOWN_MESSAGE, PICKER_TITLE, PICKER_TOOLBAR, SAVE_TITLE,
+    OwnPick, PickAccess, PickEnd, PickStep, PickerSlot, Requester, SessionPicker, Typing,
+    PICKER_ORIGIN, PICKER_SHOWN, PICKER_SHOWN_MESSAGE, PICKER_TITLE, PICKER_TOOLBAR, SAVE_TITLE,
 };
 pub use pinboard::PinboardCommand;
 pub use presenter::TaskbarPresenter;
@@ -331,8 +332,9 @@ pub use settings::{
     PINBOARD_UNATTESTED_MESSAGE,
 };
 pub use shell::{
-    DesktopShell, InputSource, ScreensaverPreview, ShellOutcome, Stopped, Timed, DESKTOP_RESTYLED,
-    DESKTOP_RESTYLED_MESSAGE, SETTINGS_REQUEST_REFUSED, SETTINGS_REQUEST_REFUSED_MESSAGE,
+    DesktopShell, InputSource, ScreensaverPreview, ShellOutcome, Stopped, Timed,
+    COMPONENT_REQUEST_REFUSED, COMPONENT_REQUEST_REFUSED_MESSAGE, DESKTOP_RESTYLED,
+    DESKTOP_RESTYLED_MESSAGE,
 };
 pub use switchboard::{
     deliver_pending_open, drop_is_noteworthy, encode_switchboard_reply, maybe_send_seat_report,
@@ -355,11 +357,11 @@ pub use wallpaper::{
 };
 pub use windows::{
     chain_geometry, desktop_info, focus_reports, resize_drag_event, resolve_window_identities,
-    seat_held, seat_menu_refusal, settled_size_event, size_state_name, tool_move_abandoned_event,
-    tool_move_event, window_control_alternate_event, window_control_event, FrameShow,
-    ScreensaverServe, SessionWindows, ShellWindowHost, SizedRecord, CONTENT_RELEASED,
-    CONTENT_RELEASED_MESSAGE, FRAME_REFUSED, FRAME_REFUSED_MESSAGE, HAND_OVER_WITHHELD,
-    HAND_OVER_WITHHELD_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, RAISE_REFUSED,
+    seat_held, seat_menu_refusal, seat_modal, settled_size_event, size_state_name,
+    tool_move_abandoned_event, tool_move_event, trusted_up, window_control_alternate_event,
+    window_control_event, FrameShow, ScreensaverServe, SessionWindows, ShellWindowHost,
+    SizedRecord, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, FRAME_REFUSED, FRAME_REFUSED_MESSAGE,
+    HAND_OVER_WITHHELD, HAND_OVER_WITHHELD_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, RAISE_REFUSED,
     RAISE_REFUSED_MESSAGE, REVEAL_REFUSED, REVEAL_REFUSED_MESSAGE, WINDOW_RAISED,
     WINDOW_RAISED_MESSAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
     WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,

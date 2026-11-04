@@ -275,8 +275,11 @@ wait-set watches; `take` hands back `Keys::Typed` or `Keys::Ended`, and
 believes a message only from this process. Refused for want of the
 foreground, the reader parks on the terminal's foreground edge and reads again
 when the hands next change, so a program sent to the background keeps running
-and takes its keyboard back when it returns. A full mailbox is waited on, not
-polled. The input discipline is set before the relay starts, since a keystroke
+and takes its keyboard back when it returns. A full mailbox, or the process's
+spent IPC budget, is waited on through the mailbox's room member, and a
+keystroke the kernel had no memory for is offered again after
+`IPC_MEMORY_RETRY_NS`: none is dropped, and none polled for. The input
+discipline is set before the relay starts, since a keystroke
 read under the cooked one is already echoed.
 
 `stop_self` stops the process as a terminal's suspend key would, returning once

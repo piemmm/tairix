@@ -136,6 +136,24 @@ fn erase_ops_round_trip() {
         assert_round_trip(Op::EraseInDisplay(mode));
         assert_round_trip(Op::EraseInLine(mode));
     }
+    assert_round_trip(Op::EraseSavedLines);
+    // The saved lines have an erase of their own; a line has no such mode.
+    assert_eq!(parse_all(b"\x1b[3J"), vec![Op::EraseSavedLines]);
+    assert_eq!(parse_all(b"\x1b[3K"), vec![]);
+}
+
+#[test]
+fn the_session_reset_is_spelled_in_the_shared_vocabulary() {
+    assert_eq!(
+        parse_all(crate::control::SESSION_RESET),
+        vec![
+            Op::LeaveAltScreen,
+            Op::EraseInDisplay(EraseMode::All),
+            Op::EraseSavedLines,
+            Op::CursorPosition { row: 1, col: 1 },
+            Op::Sgr(Sgr::Reset),
+        ]
+    );
 }
 
 #[test]

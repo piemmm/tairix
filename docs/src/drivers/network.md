@@ -170,11 +170,12 @@ inverted and frames flowing both ways:
    and replies a `ServiceReport`. It is **not** on the receive path — a
    driver woken by its device interrupt masks its completion sources,
    harvests into the shared ring itself, and `ipc_send`s one
-   `NetChannelNotify` carrying the live link, a back-pressure flag, and the
-   device's cumulative receive-pre-filter count. The stack reads the ring
+   `NetChannelNotify` carrying a link-changed flag, a back-pressure flag, and
+   the device's cumulative receive-pre-filter count. The stack reads the ring
    locally and rings the doorbell only when the device has work this side
-   created (something in the transmit ring) or the notify said a source is
-   masked awaiting release. A pure receive therefore costs no call at all
+   created (something in the transmit ring), the notify said a source is
+   masked awaiting release, or the link changed — which the stack learns from
+   the reply alone, so a late notify can never override a newer link. A pure receive therefore costs no call at all
    (`plans/NETWORK.md` N17a–b). The count rides the notify for exactly that
    reason: a receive-only interface rings no doorbell, so a figure carried
    only on the `Service` reply would leave `stats:net/<iface>/rx.filtered`

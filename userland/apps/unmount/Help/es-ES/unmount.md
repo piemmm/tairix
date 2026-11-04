@@ -44,8 +44,11 @@ limpiamente; nada se descarta cuando es posible una confirmación
 limpia.
 
 Puede desmontar una imagen de disco o un recurso compartido de red que
-haya montado usted mismo; cualquier otro volumen requiere la autoridad
-de montaje (`CAP_FS_MOUNT`). El núcleo la comprueba y audita cada
+haya montado usted mismo, y también un disco extraíble — una memoria
+USB, una tarjeta de memoria — mientras usa el propio ordenador, aunque
+solo con un desmontaje simple, nunca con `--force`; cualquier otro
+volumen requiere la autoridad de montaje (`CAP_FS_MOUNT`). El núcleo
+la comprueba y audita cada
 decisión. Los volúmenes de arranque permanentes y los enlaces de vista
 del sistema no se pueden desmontar.
 

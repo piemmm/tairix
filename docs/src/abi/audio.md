@@ -127,10 +127,13 @@ A client parks on its stream's mailbox and never polls its ring.
 changed at), and `Xrun` (with the frames lost). The position never lies, so a
 client resynchronises exactly rather than drifting.
 
-Delivery is best effort: the service never blocks on a client, so a
-notification is dropped when the mailbox is full. What a client must not miss
-it reads back with `State`, whose reply carries the state, the frame it
-changed at, and the stream's whole under-run count.
+The service never blocks on a client, and drops no notification its mailbox
+has no room for: it holds it, and the rest behind it, until the client drains.
+A held notification folds into the next of its kind, so a client that falls
+behind is told where its stream now stands rather than every step on the way:
+the newest `SpaceAvailable` and `StateChanged` stand, and a held `Xrun` absorbs
+the next, its frames summed at the later position. `State` reads back the
+state, the frame it changed at, and the stream's whole under-run count.
 
 The port's id is **derived by the service** from the caller's kernel-attested
 pid (`notify_endpoint_for`) and handed back in the grant; the client binds it

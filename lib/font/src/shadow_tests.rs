@@ -207,3 +207,19 @@ fn the_shadow_lengths_are_logical_pixels_and_never_nothing() {
         "the shadow vanished"
     );
 }
+
+/// A shadow blurred once and kept lays down exactly what the shadow blurred
+/// where it is drawn does, wherever it is laid and however an edge cuts it.
+#[test]
+fn a_kept_shadow_draws_what_the_shadow_blurred_in_place_draws() {
+    let font = font();
+    let kept = font
+        .keep_run_shadow((0, 0), &["Hi"], shadow())
+        .expect("a shadow to keep");
+    for (at, width) in [((6, 8), 64), ((6 - 10, 8), 20)] {
+        let (mut blurred, mut laid) = (ground(width, 40), ground(width, 40));
+        font.draw_run_shadow(&mut blurred, at, &["Hi"], shadow());
+        kept.draw(&mut laid, at);
+        assert!(blurred.pixels() == laid.pixels(), "laid at {at:?}");
+    }
+}

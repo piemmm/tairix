@@ -33,10 +33,28 @@ La sesión termina cuando el shell sale (por ejemplo con `exit`) o
 cuando la ventana se cierra desde el escritorio; cerrar la ventana
 termina el shell con fin de archivo en su entrada.
 
+Cerrar la última ventana no termina el terminal. Su icono permanece en
+la barra de iconos del escritorio, y un clic en él abre una ventana
+nueva; *Salir* en el menú de ese icono cierra todas las ventanas y
+termina el programa.
+
+Las líneas que salen por la parte superior de la pantalla se conservan
+—las últimas 500, salvo que *Configuración…* indique otra cosa—
+y la rueda del ratón se desplaza hacia atrás por ellas;
+`Shift Page Up` y `Shift Page Down` desplazan la vista una pantalla cada
+vez, `Shift Home` va a la línea más antigua y `Shift End` vuelve a la
+pantalla. La salida que llega mientras usted está viendo líneas
+anteriores deja la vista donde está, y escribir la devuelve a la
+pantalla. Cambiar el tamaño de la ventana vuelve a ajustar las líneas al
+nuevo ancho en lugar de cortarlas, y la pantalla propia de un programa a
+pantalla completa no conserva ninguna. Cuando escasea la memoria, se
+liberan primero las líneas más antiguas.
+
 Al pulsar el botón secundario (derecho) del ratón en cualquier lugar de
-la pantalla se abre el menú del terminal. Cada fila tiene un atajo de
-teclado que funciona esté o no abierto el menú, y `Escape` —o un clic
-fuera del menú— lo descarta sin elegir nada.
+la pantalla se abre el menú del terminal. Todas las filas salvo
+*Limpiar historial* tienen un atajo de teclado que funciona esté o no
+abierto el menú, y `Escape` —o un clic fuera del menú— lo descarta sin
+elegir nada.
 
 | Fila | Atajo | Qué hace |
 | --- | --- | --- |
@@ -44,12 +62,19 @@ fuera del menú— lo descarta sin elegir nada.
 | Texto más grande | `Ctrl +` | Dibuja la pantalla un paso más grande. |
 | Texto más pequeño | `Ctrl -` | Dibuja la pantalla un paso más pequeño. |
 | Tamaño real | `Ctrl 0` | Vuelve al tamaño de texto predeterminado. |
-| Limpiar pantalla | `Ctrl Shift K` | Vacía la pantalla sin escribir en el shell. |
+| Limpiar pantalla | `Ctrl Shift K` | Vacía la pantalla sin escribir en el shell; lo que mostraba aún puede recuperarse desplazándose hacia atrás. |
+| Limpiar historial | — | Olvida las líneas conservadas por encima de la pantalla. |
 | Cerrar | `Ctrl Shift W` | Cierra la ventana y termina el shell. |
 
-La configuración se abre en la propia ventana y tiene dos pestañas.
+La configuración se abre en una ventana propia, que puede quedarse
+abierta mientras usted trabaja en el terminal; volver a elegir
+*Configuración…* la trae al frente. Tiene dos pestañas; gire la rueda
+sobre ellas para desplazarse. *Hecho*, `Escape` o el botón de cierre de
+la ventana la cierran.
 **Apariencia** elige el esquema de colores, establece el tamaño del
-texto y edita el esquema propio del usuario. Los esquemas incluidos son
+texto y cuántas líneas conserva el historial (de ninguna a 10.000,
+500 al principio), y edita el esquema propio del usuario. Los esquemas
+incluidos son
 *System* (que sigue la apariencia oscura o clara del escritorio),
 *Midnight*, *Phosphor*, *Amber*, *Ember*, *Contrast*, *Paper* y
 *Custom*. Elegir *Custom* utiliza los colores editados debajo del
@@ -60,7 +85,11 @@ seleccionado. El selector lo ajusta por tono, saturación y valor, por
 rojo, verde y azul, o por su notación hexadecimal, y muestra a su lado el
 color que tenía la casilla al seleccionarla, que un clic recupera.
 
-**Efectos** establece cómo se dibuja la pantalla.
+**Efectos** establece cómo se dibuja la pantalla. Un terminal nuevo se
+abre con un 80 % de opacidad, el fondo desenfocado a media intensidad y
+todos los demás efectos desactivados, de modo que el escritorio parece un
+cristal esmerilado detrás del texto en lugar de verse nítidamente a
+través de él.
 
 | Efecto | Qué hace |
 | --- | --- |

@@ -201,7 +201,8 @@ pub use open_with::{
 };
 pub use owner_edit::{validate_owner, OwnerChange, OwnerError};
 pub use places::{
-    bare_open_places, Place, PlaceKind, Places, Volume, VolumeFacts, FIXED_LABELS, MAX_PLACE_LABEL,
+    bare_open_places, Ejector, Place, PlaceKind, Places, Volume, VolumeFacts, FIXED_LABELS,
+    MAX_PLACE_LABEL,
 };
 pub use preferences::{FilerKey, FilerPreferences, Start, SETTINGS_PANE, SORT_KEYS};
 pub use presentation::{HiddenEndings, Pictures, Presentation};

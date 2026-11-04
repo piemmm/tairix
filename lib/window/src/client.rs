@@ -645,8 +645,8 @@ pub trait WindowTransport {
     ///
     /// # Errors
     ///
-    /// As [`call`](Self::call), and the endpoint already holding as many
-    /// requests as it takes.
+    /// As [`call`](Self::call), and [`Errno::WouldBlock`] while this process
+    /// holds as many calls at the endpoint as its depth there allows.
     fn post(&mut self, request: &[u8]) -> Result<u64, Errno>;
 
     /// The reply to the request posted as `ticket`, its length written into
@@ -842,6 +842,26 @@ enum Frames {
     /// Released because nobody can see the window, and not yet asked for
     /// again.
     Hidden,
+}
+
+impl LastPresent {
+    /// What the window is owed once a resize that had to wait may go: the
+    /// newest size the session reported, to lay out at, or, for a re-attach
+    /// of a window it never sized, its paint asked for again.
+    fn deferred_event(&self) -> Option<WindowEvent> {
+        match self.reported {
+            Some((width_px, height_px, state)) => Some(WindowEvent::Resized {
+                window_id: self.window_id,
+                width_px,
+                height_px,
+                state,
+            }),
+            None if self.frames == Frames::Released => Some(WindowEvent::RedrawRequested {
+                window_id: self.window_id,
+            }),
+            None => None,
+        }
+    }
 }
 
 /// A typed handle on the desktop session's window service.
@@ -1315,13 +1335,11 @@ impl<T: WindowTransport> WindowClient<T> {
     /// awaited present ended reaches the application as any posted request's
     /// answer does.
     pub fn await_present(&mut self, window_id: u64) {
-        loop {
-            self.reap_posted();
-            let Some(index) = self.posted.iter().position(|posting| {
-                posting.window_id == window_id && posting.kind == PostedRequest::Present
-            }) else {
-                return;
-            };
+        // Each present is awaited by its own answer and nothing else is
+        // reaped, so a window with none in flight costs no call.
+        while let Some(index) = self.posted.iter().position(|posting| {
+            posting.window_id == window_id && posting.kind == PostedRequest::Present
+        }) {
             let posting = self.posted[index];
             let Some(ticket) = posting.ticket else {
                 // A present that waited for room is sent as a call, which
@@ -1375,11 +1393,9 @@ impl<T: WindowTransport> WindowClient<T> {
         // has in flight is still reaped, unreported.
         self.presented
             .retain(|record| record.window_id != window_id);
-        self.posted
-            .retain(|posting| posting.window_id != window_id || posting.ticket.is_some());
+        self.forget_unsent(window_id, |_| true);
         for posting in &mut self.posted {
             if posting.window_id == window_id {
-                posting.held = None;
                 posting.orphaned = true;
             }
         }
@@ -1779,33 +1795,38 @@ impl<T: WindowTransport> WindowClient<T> {
     }
 
     /// Ask the desktop to authorise and perform `task` for window
-    /// `window_id`. The outcome arrives as a
-    /// [`WindowEvent::Authorised`]; a captured task's output is then taken
-    /// with [`take_authorised_output`](Self::take_authorised_output).
+    /// `window_id`, or for this application's icon-bar slot when `None`. The
+    /// outcome arrives as a [`WindowEvent::Authorised`]; a captured task's
+    /// output is then taken with
+    /// [`take_authorised_output`](Self::take_authorised_output).
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] for a task the wire cannot carry, the session's
-    /// refusal ([`Errno::PermissionDenied`] for any caller but its own
-    /// Settings application, [`Errno::OutOfRange`] for a task it will
-    /// not perform as asked, [`Errno::AlreadyExists`] while one is pending
-    /// on the window, [`Errno::SeatBusy`] while anything else holds the
-    /// seat), or a transport failure.
-    pub fn authorise(&mut self, window_id: u64, task: &SystemTask) -> Result<(), Errno> {
+    /// [`Errno::OutOfRange`] for window `0`, which names none, or a task the
+    /// wire cannot carry, the session's refusal ([`Errno::PermissionDenied`]
+    /// for any caller but the component the task belongs to,
+    /// [`Errno::OutOfRange`] for a task it will not perform as asked,
+    /// [`Errno::AlreadyExists`] while one is pending on the window or slot,
+    /// [`Errno::NotFound`] for a slot never declared, [`Errno::SeatBusy`]
+    /// while anything else holds the seat), or a transport failure.
+    pub fn authorise(&mut self, window_id: Option<u64>, task: &SystemTask) -> Result<(), Errno> {
         self.status_call(&WindowRequest::Authorise {
-            window_id,
+            window_id: asked_window(window_id)?,
             task: *task,
         })
     }
 
-    /// What window `window_id`'s last task printed, once its
+    /// What the last task asked for window `window_id`, or for this
+    /// application's icon-bar slot when `None`, printed, once its
     /// [`WindowEvent::Authorised`] said it was captured. One-shot.
     ///
     /// # Errors
     ///
+    /// [`Errno::OutOfRange`] for window `0`, which names none,
     /// [`Errno::NotFound`] when there is none to take, a transport failure,
     /// or a corrupt reply.
-    pub fn take_authorised_output(&mut self, window_id: u64) -> Result<Vec<u8>, Errno> {
+    pub fn take_authorised_output(&mut self, window_id: Option<u64>) -> Result<Vec<u8>, Errno> {
+        let window_id = asked_window(window_id)?;
         let output = decode_authorised_output_reply(
             self.pull(&WindowRequest::TakeAuthorisedOutput { window_id })?,
         )?;
@@ -2047,6 +2068,24 @@ impl<T: WindowTransport> WindowClient<T> {
         Ok(decode_menu_text_reply(reply)?.map(String::from))
     }
 
+    /// Take the text the user committed into this application's icon-bar
+    /// row `item` on the menu of its declaration `revision`, answering a
+    /// [`WindowEvent::AppBarEntered`] with the row and revision it carried:
+    /// `None` where the row holds none under that revision, or it was already
+    /// taken.
+    ///
+    /// # Errors
+    ///
+    /// The call's refusal, or a reply that does not decode.
+    pub fn take_app_bar_text(
+        &mut self,
+        item: tairix_abi::window_ipc::AppMenuItemId,
+        revision: u32,
+    ) -> Result<Option<String>, Errno> {
+        let reply = self.pull(&WindowRequest::TakeAppBarText { item, revision })?;
+        Ok(decode_menu_text_reply(reply)?.map(String::from))
+    }
+
     /// Ask the session to reach the live instance of the bundle whose entry
     /// binary is `run_path`, handing it `target`.
     ///
@@ -2278,16 +2317,21 @@ impl<T: WindowTransport> WindowClient<T> {
     }
 
     /// Remember `window_id`'s client extent, discarding any frame index
-    /// recorded against a previous extent. A window first recorded here was
-    /// just created at it, so the session has accepted it.
+    /// recorded against a previous extent and any present not yet sent, which
+    /// names a frame of the region the extent replaced. A window first
+    /// recorded here was just created at it, so the session has accepted it.
     fn note_extent(&mut self, window_id: u64, width_px: u32, height_px: u32) {
         if let Some(record) = self.record_mut(window_id) {
             record.width_px = width_px;
             record.height_px = height_px;
             record.frame_index = None;
-            // A fresh region, which the application paints whole.
-            record.frames = Frames::Mapped;
+            // A fresh region, which the application paints whole; a hidden
+            // window stays hidden until the session asks for it again.
+            if record.frames == Frames::Released {
+                record.frames = Frames::Mapped;
+            }
             record.owed_whole = false;
+            self.forget_unsent(window_id, |kind| kind == PostedRequest::Present);
             return;
         }
         self.presented.push(LastPresent {
@@ -2301,6 +2345,20 @@ impl<T: WindowTransport> WindowClient<T> {
             frames: Frames::Mapped,
             owed_whole: false,
         });
+    }
+
+    /// Forget what window `window_id` asked of each kind `forgets` names and
+    /// has not sent: what waits for room, and what is held behind its kind's
+    /// answer. What is in flight is still reaped.
+    fn forget_unsent(&mut self, window_id: u64, forgets: fn(PostedRequest) -> bool) {
+        self.posted.retain(|posting| {
+            posting.window_id != window_id || posting.ticket.is_some() || !forgets(posting.kind)
+        });
+        for posting in &mut self.posted {
+            if posting.window_id == window_id && forgets(posting.kind) {
+                posting.held = None;
+            }
+        }
     }
 
     /// Note the geometry the session reported for a window in `event`.
@@ -2442,9 +2500,9 @@ impl<T: WindowTransport> WindowClient<T> {
         posted
     }
 
-    /// Deliver again the size of every window whose resize waited for room,
-    /// now that room was made, unless a resize of it is still in flight —
-    /// whose own answer delivers it.
+    /// Deliver what every window whose resize waited for room is owed
+    /// ([`LastPresent::deferred_event`]), now that room was made, unless a
+    /// resize of it is still in flight — whose own answer delivers it.
     fn redeliver_deferred(&mut self) {
         let Self {
             presented,
@@ -2460,13 +2518,8 @@ impl<T: WindowTransport> WindowClient<T> {
                 continue;
             }
             record.deferred = false;
-            if let Some((width_px, height_px, state)) = record.reported {
-                owed.push_back(WindowEvent::Resized {
-                    window_id: record.window_id,
-                    width_px,
-                    height_px,
-                    state,
-                });
+            if let Some(event) = record.deferred_event() {
+                owed.push_back(event);
             }
         }
     }
@@ -2493,26 +2546,26 @@ impl<T: WindowTransport> WindowClient<T> {
         let state = record
             .reported
             .map_or_else(WindowSizeState::default, |(.., state)| state);
-        let owed = if answer.is_ok() {
+        let kept = if answer.is_ok() {
             record.accepted = (record.width_px, record.height_px);
             None
         } else {
             (record.width_px, record.height_px) = record.accepted;
             record.frame_index = None;
-            Some((record.accepted.0, record.accepted.1, state))
+            Some(WindowEvent::Resized {
+                window_id: posting.window_id,
+                width_px: record.accepted.0,
+                height_px: record.accepted.1,
+                state,
+            })
         };
         let owed = if core::mem::take(&mut record.deferred) {
-            record.reported
+            record.deferred_event()
         } else {
-            owed
+            kept
         };
-        if let Some((width_px, height_px, state)) = owed {
-            self.owed.push_back(WindowEvent::Resized {
-                window_id: posting.window_id,
-                width_px,
-                height_px,
-                state,
-            });
+        if let Some(event) = owed {
+            self.owed.push_back(event);
         }
     }
 
@@ -2614,6 +2667,18 @@ impl<T: WindowTransport> WindowClient<T> {
         let n = transport.call(&frame[..len], pull_reply)?;
         pull_reply.get(..n).ok_or(Errno::BufferTooSmall)
     }
+}
+
+/// The window an authorisation names, `None` asking for the icon-bar slot.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] for window `0`: the wire spells the slot so, and a
+/// window id left unset must not ask for it.
+fn asked_window(window_id: Option<u64>) -> Result<Option<core::num::NonZeroU64>, Errno> {
+    window_id
+        .map(|id| core::num::NonZeroU64::new(id).ok_or(Errno::OutOfRange))
+        .transpose()
 }
 
 /// The drain half of the event-arrival seam: read a queued event frame,

@@ -191,13 +191,23 @@ ending the chain and answering with the *field's own id*, which is not the
 row's. That distinction is what lets one row mean two things: the file
 manager's Rename row opens the in-place editor when clicked and commits a typed
 name when its field is used, and the two answers are told apart by id rather
-than by the application guessing which the user did.
+than by the application guessing which the user did. A row whose whole purpose
+is its field says so (`AppMenuEntry::opened_by_choosing`): choosing it opens the
+field rather than answering, as the file manager's *Title* row on a disk image
+does.
 
 The committed text does not ride in the answer — an event is one fixed frame
 and a name is far wider — so the desktop holds it for the window that owns the
 gesture and hands it over once, when that application asks. It is owner-bound,
 taken once, and cleared by that window's next menu, so a commit nobody
 collected can never answer a later gesture.
+
+A commit on an application's icon-bar menu, which no window owns, is held for
+the application and the row instead (`WindowServer::record_app_bar_text`),
+announced with `WindowEvent::AppBarEntered` and taken once with
+`WindowRequest::TakeAppBarText`: a row holds one text with the revision of the
+declaration whose menu committed it, answered only to a take naming that
+revision, replaced by its next commit and dropped when the application exits.
 
 Its band titles the surface and does not drag it: a plate is placed by the
 user, a child of a row is placed by the chain against the row it hangs off.
@@ -384,9 +394,12 @@ is; the only difference is that their model is built in process rather than
 decoded from the wire, and that difference is what lets their rows say things an
 application structurally cannot — the Authority Mark that says *the system*
 refused a command. Both open through one call (`menu::open_desktop_menu`), which
-applies the same seat rule an application's open resolves through, so a menu
-never takes the grab from the lock screen or the trusted picker whichever
-direction it arrives from.
+refuses while the lock screen or a system-modal prompt holds the seat
+(`seat_modal`), so a menu never takes the grab from one whichever direction it
+arrives from. The trusted picker holds only the window that asked for its pick:
+a desktop menu opens over it, takes the keyboard while it is up and leaves it
+with the picker as it closes, where an application's open is refused while the
+picker has the keyboard (`seat_held`).
 
 - **The backdrop menu** — a secondary press on the pinboard hands
   `pinboard::model`'s rows to the chain. See
@@ -405,8 +418,11 @@ is read back by the bar itself, over the same table the plate was built from,
 into the very typed response a click on the bar produces — so a *Log Out* row
 and a *Log Out* click are honoured in one place. The one exception that is not
 an exception: a chosen row of an application's **declared** menu is relayed to
-that application as `WindowEvent::AppBarMenu { item }`, because the row is the
-application's and the desktop never interprets one.
+that application as `WindowEvent::AppBarMenu { item, revision }`, because the
+row is the application's and the desktop never interprets one. The revision is
+the application's own number for the declaration the plate was built from
+(`AppBar::revision`), carried in the chain's `MenuSubject::App`, so a row
+chosen after a re-declaration is resolved against the menu the user saw.
 
 ## The applications that are clients
 

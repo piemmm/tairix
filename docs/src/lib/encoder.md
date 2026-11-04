@@ -86,7 +86,8 @@ with `serve_with_audio`: the audio device channel
 `DeviceWake::Calls` source, a second endpoint the driver serves — and its own
 event sources in the same wait set, and reads its device's causes after
 everything the encoder does, since a hotplug or a mode set may have changed
-what the audio endpoint offers.
+what the audio endpoint offers. The loop keeps the room members the channel
+asks for, so a notification the mixer's port refused goes once it has room.
 
 Every decision is logged with a stable event id:
 

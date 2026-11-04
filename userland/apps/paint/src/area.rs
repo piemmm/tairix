@@ -17,7 +17,7 @@ use core::ops::Range;
 use tairix_abi::fs::Filetype;
 use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::{
-    AppMenu, AppMenuItemId, AppMenuSymbol as S, CursorShape, SaveEndings,
+    AppMenu, AppMenuItemId, AppMenuSymbol as S, CursorShape, SaveFormats,
 };
 use tairix_controls::{
     fill_area, withheld, ControlState, IconTile, Keystroke, ScrollAction, ScrollBar, ScrollModel,
@@ -40,7 +40,7 @@ use crate::document::{
     SPRITE_STEM,
 };
 use crate::layout::Faces;
-use crate::save::{format_for, natural, save_endings};
+use crate::save::{format_for, natural, save_formats};
 use crate::view::{
     Action, Compute, Computed, MenuKind, Outcome, Own, Request, APP_TITLE, RENAME_ENTRY,
     SPRITE_SIZE,
@@ -1471,15 +1471,15 @@ impl AreaView {
         natural(self.document.entries(), self.document.origin()).extension()
     }
 
-    /// The endings a Save As holds the name to.
+    /// The one format a Save As writes the file in: its own.
     ///
     /// # Errors
     ///
     /// Why no name can hold the file.
-    pub fn save_endings(&self) -> Result<SaveEndings, String> {
+    pub fn save_formats(&self) -> Result<SaveFormats, String> {
         let entries = self.document.entries();
         let origin = self.document.origin();
-        save_endings(entries, origin, natural(entries, origin))
+        save_formats(entries, origin, natural(entries, origin))
             .map_err(|refusal| alloc::format!("{refusal}"))
     }
 

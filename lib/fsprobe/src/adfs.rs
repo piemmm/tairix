@@ -13,6 +13,7 @@
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
+use tairix_fsmeta::preset::acorn::name_char;
 
 use crate::{content_identity, read_present};
 
@@ -123,12 +124,16 @@ pub const DIR_MARKERS: [&[u8; 4]; 2] = [b"Hugo", b"Nick"];
 /// Where the old map's ten-byte disc name lives: characters alternate between
 /// sector 0 (`0x0F7..0x0FC`) and sector 1 (`0x1F6..0x1FB`), first character
 /// in sector 0.
-const OLD_NAME_BYTES: [usize; 10] = [
+pub const OLD_NAME_BYTES: [usize; 10] = [
     0x0F7, 0x1F6, 0x0F8, 0x1F7, 0x0F9, 0x1F8, 0x0FA, 0x1F9, 0x0FB, 0x1FA,
 ];
 
 /// The longest disc name either map flavour records.
 pub const NAME_LEN: usize = 10;
+
+/// The most UTF-8 bytes a disc name spells: up to three for each of its RISC
+/// OS Latin-1 characters.
+pub const NAME_UTF8_MAX: usize = 3 * NAME_LEN;
 
 /// One of a new map's two copies.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -518,18 +523,19 @@ impl Layout {
     /// The volume's stable identity.
     ///
     /// ADFS records no unique identifier — the disc id is cycled on mutation
-    /// — so the identity is a digest of the facts no ordinary write changes:
-    /// the geometry, the root's address, the size and the name. Two discs
-    /// formatted alike and named alike share it, as two FAT volumes sharing a
-    /// serial and label do.
+    /// — so the identity is a digest of what formatting fixes and neither an
+    /// ordinary write nor a retitle changes: a new map's disc record without
+    /// its disc id, boot option, name or big root's size, and an old map's
+    /// size and directory form. Two discs formatted alike share it.
     #[must_use]
     pub fn identity(&self) -> [u8; 16] {
         match self {
             Self::NewMap { record, .. } => {
                 let mut stable = record.encode();
                 // The disc id, boot option and a big root's size change under
-                // ordinary use; the rest is fixed when the disc is formatted.
+                // ordinary use, and the name with a retitle.
                 stable[0x14..0x16].fill(0);
+                stable[0x16..0x20].fill(0);
                 stable[7] = 0;
                 stable[0x30..0x34].fill(0);
                 content_identity(b"tairix.adfs.newmap", &[&stable])
@@ -537,18 +543,11 @@ impl Layout {
             Self::OldMap {
                 large_directories,
                 disc_sectors,
-                name,
                 ..
             } => {
-                let (name, len) = trimmed(*name);
-                content_identity(
-                    b"tairix.adfs.oldmap",
-                    &[
-                        &[u8::from(*large_directories)],
-                        &disc_sectors.to_le_bytes(),
-                        &name[..len],
-                    ],
-                )
+                let directories = [u8::from(*large_directories)];
+                let sectors = disc_sectors.to_le_bytes();
+                content_identity(b"tairix.adfs.oldmap", &[&directories, &sectors])
             }
         }
     }
@@ -560,6 +559,19 @@ impl Layout {
             Self::NewMap { record, .. } => trimmed(record.disc_name),
             Self::OldMap { name, .. } => trimmed(*name),
         }
+    }
+
+    /// The volume's disc name in UTF-8, read from RISC OS's Latin-1: the one
+    /// reading by which the probe labels the volume and its driver titles it.
+    #[must_use]
+    pub fn label(&self) -> ([u8; NAME_UTF8_MAX], usize) {
+        let (name, len) = self.name();
+        let mut label = [0u8; NAME_UTF8_MAX];
+        let mut used = 0;
+        for ch in name[..len].iter().filter_map(|&byte| name_char(byte)) {
+            used += ch.encode_utf8(&mut label[used..]).len();
+        }
+        (label, used)
     }
 }
 
@@ -660,15 +672,17 @@ fn old_map<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<Layout>, DriverEr
     }))
 }
 
-/// A name field with its trailing spaces, NULs and control padding removed.
-/// `FileCore` pads names with spaces, and an old map that was never named
-/// holds zeros, or the low bytes of the Level 3 partition fields it overlaps.
+/// A name field with its trailing spaces removed, ending at its first byte no
+/// name holds: a NUL or other control byte, or one RISC OS's Latin-1 leaves
+/// undefined. `FileCore` pads names with spaces, and an old map that was never
+/// named holds zeros, or the low bytes of the Level 3 partition fields it
+/// overlaps.
 fn trimmed(name: [u8; NAME_LEN]) -> ([u8; NAME_LEN], usize) {
-    let printable = name
+    let held = name
         .iter()
-        .position(|&b| b < 0x20 || b == 0x7F)
+        .position(|&b| name_char(b).is_none())
         .unwrap_or(NAME_LEN);
-    let len = name[..printable]
+    let len = name[..held]
         .iter()
         .rposition(|&b| b != b' ')
         .map_or(0, |last| last + 1);

@@ -49,12 +49,12 @@ use tairix_abi::driver::audio_ring::{PcmGeometry, PcmRing};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::{DriverError, Errno};
 
-/// Endpoint slots the server tracks.
+/// Endpoint slots the channel tracks.
 ///
 /// The ABI's own endpoint ceiling, so a device may not present an endpoint
-/// this server cannot hold state for. The interrupt bitmaps are the same
+/// the channel cannot hold state for. The interrupt bitmaps are the same
 /// width, which is what lets one word name every endpoint of a device.
-const ENDPOINT_SLOTS: usize = MAX_DEVICE_ENDPOINTS as usize;
+pub(crate) const ENDPOINT_SLOTS: usize = MAX_DEVICE_ENDPOINTS as usize;
 
 const _: () = assert!(ENDPOINT_SLOTS <= MAX_SIGNALLED_ENDPOINTS as usize);
 

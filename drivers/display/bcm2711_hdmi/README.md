@@ -102,5 +102,5 @@ It runs in user space and never requests `CAP_DRV_KERNEL`.
 | The sink has not seen the link scrambled | 24913 |
 
 The encoder server's own decisions are `lib/encoder`'s, 24800 to 24803, the
-audio channel's are `lib/audiochan`'s, 29010 and 29012, and the driver's
-ending is the driver runtime's record (`tairix_drvrt::exit`).
+audio channel's are `lib/audiochan`'s, 29010, 29012 and 29013, and the
+driver's ending is the driver runtime's record (`tairix_drvrt::exit`).

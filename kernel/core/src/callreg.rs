@@ -250,6 +250,8 @@ pub fn teardown_owned_by(owner: u64, aspaces: &RwLock<AddressSpaceRegistry>, aud
     }
     revoke_grants_for(owner, &removed, aspaces, audit);
     crate::waitq::call_wake();
+    // The cancelled calls gave back what they held of their callers' budgets.
+    crate::waitq::budget_released_everywhere();
     if let Ok(Some(observer)) = VANISH_OBSERVER.get() {
         for id in removed {
             observer.endpoint_vanished(id);

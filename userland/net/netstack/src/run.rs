@@ -95,8 +95,8 @@ mod program {
     /// Wait-set member token of the exits of the principals holding sockets.
     const PEER_EXIT_TOKEN: u64 = 3;
 
-    /// Wait-set member token of room in every delivery port still owed a
-    /// link event it had no room for.
+    /// Wait-set member token of room in every delivery port still owed an
+    /// event it had no room, or the stack no budget, for.
     const PORT_ROOM_TOKEN: u64 = 4;
 
     /// First wait-set token of a bound NIC channel's notify port. Channel
@@ -104,10 +104,10 @@ mod program {
     /// slot directly.
     const CHANNEL_TOKEN_BASE: u64 = 5;
 
-    /// Slots the notify port queues: the driver rings a single coalescing
-    /// doorbell, so a tiny queue absorbs one racing the previous drain — a
-    /// fail-closed memory bound.
-    const NOTIFY_CAPACITY: usize = 4;
+    /// Doorbells the one driver a notify port admits may have queued: it rings
+    /// a single coalescing doorbell, so a tiny depth absorbs one racing the
+    /// previous drain — a fail-closed memory bound.
+    const NOTIFY_DEPTH: usize = 4;
 
     /// Sensitivity class of the frame rings. Link-layer frames are not
     /// treated as secrets (confidentiality is an upper-layer concern, e.g.
@@ -339,21 +339,33 @@ mod program {
                 &mut channels,
                 &secret,
             ));
+            // Kernel memory is retried after a pause, since nothing wakes for
+            // it; a port armed for room meanwhile could fire at once, for a
+            // post the kernel would refuse again.
+            let starved = sockets.take_starved();
+            if starved {
+                owed.clear();
+            }
             arm_rooms(set, &mut rooms, &owed);
+            report_lost(&mut sockets);
             publish_state(&mut stack, &mut state_notice);
             // Renew before computing the park, so a deadline that has just
             // lapsed is renewed now rather than yielding a zero timeout the
             // loop would spin on.
             watchdog.renew_if_due(span_nanos(now()));
             // Park until a request arrives, a driver rings a notify port,
-            // the engines' one-shot deadline lapses, or the next liveness
-            // renewal falls due; a lapsed deadline (a non-zero wake) pumps
+            // the engines' one-shot deadline lapses, the next liveness
+            // renewal falls due, or a delivery the kernel had no memory for
+            // is due again; a lapsed deadline (a non-zero wake) pumps
             // every channel so the engines emit their timer-due frames
             // (DAD, SLAAC RS, IGMP, retransmits), then re-arms below
             // against the new `now`.
             let mut token = 0u64;
-            let woke =
-                tairix_rt::waitset_wait(set, timeout_ns(&stack, &sockets, &watchdog), &mut token);
+            let mut timeout = timeout_ns(&stack, &sockets, &watchdog);
+            if starved {
+                timeout = timeout.min(tairix_abi::ipc::IPC_MEMORY_RETRY_NS);
+            }
+            let woke = tairix_rt::waitset_wait(set, timeout, &mut token);
             if woke != 0 {
                 pump_all(&mut stack, &mut sockets, &mut channels, &secret, now());
                 continue;
@@ -828,10 +840,7 @@ mod program {
 
     /// Post one delivery frame to a client's port.
     fn post(port: u64, frame: &[u8]) -> Result<(), Errno> {
-        match tairix_rt::ipc_send(port, frame) {
-            0 => Ok(()),
-            ret => Err(Errno::from_syscall(ret)),
-        }
+        tairix_rt::ipc_send(port, frame)
     }
 
     /// Publish the links and tell each socket whose memberships ride one
@@ -887,6 +896,26 @@ mod program {
                 rooms.push(port);
             }
         }
+    }
+
+    /// Record how many deliveries client ports refused were given up on, once
+    /// the count has doubled since it was last recorded.
+    fn report_lost(sockets: &mut SocketService) {
+        let Some(total) = sockets.lost_to_report() else {
+            return;
+        };
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Warn,
+                id: events::DELIVERIES_LOST,
+                message: "netstack: deliveries client ports refused were given up on",
+                fields: &[Field {
+                    key: "total",
+                    value: FieldValue::UnsignedInt(total),
+                }],
+            },
+        );
     }
 
     /// Read and decode the caller's kernel-attested origin for `ticket`
@@ -1040,7 +1069,7 @@ mod program {
         // Bind the notify mailbox the driver rings on receive. Its id is
         // the non-reserved, per-(pid, slot) `notify_endpoint_for` name, so
         // the bind needs no privilege and cannot collide.
-        if tairix_rt::port_bind(notify, NET_CHANNEL_NOTIFY_LEN, NOTIFY_CAPACITY) != 0 {
+        if tairix_rt::port_bind(notify, NET_CHANNEL_NOTIFY_LEN, NOTIFY_DEPTH) != 0 {
             let _ = tairix_rt::shm_unmap(base, region_len);
             return Err(Errno::AlreadyExists);
         }
@@ -1176,12 +1205,15 @@ mod program {
         }
     }
 
-    /// `ipc_send` each datagram delivery to its socket's async port. A
-    /// datagram the port has no room for is dropped, as a full UDP receive
-    /// queue drops one.
-    fn emit_deliveries(deliveries: &[Delivery]) {
+    /// `ipc_send` each datagram delivery to its socket's async port. One the
+    /// port refuses is dropped, as a full UDP receive queue drops one, and
+    /// counted, so the loss is reported rather than silent.
+    fn emit_deliveries(sockets: &mut SocketService, deliveries: &[Delivery]) {
         for delivery in deliveries {
-            let _ = tairix_rt::ipc_send(delivery.deliver_port, &delivery.datagram);
+            sockets.datagram_posted(tairix_rt::ipc_send(
+                delivery.deliver_port,
+                &delivery.datagram,
+            ));
         }
     }
 
@@ -1259,7 +1291,8 @@ mod program {
                     StackEvent::UdpDatagram { .. }
                     | StackEvent::EchoReply { .. }
                     | StackEvent::EchoError { .. } => {
-                        emit_deliveries(&sockets.deliver(event, outcome.interface));
+                        let deliveries = sockets.deliver(event, outcome.interface);
+                        emit_deliveries(sockets, &deliveries);
                     }
                     StackEvent::TcpSegment {
                         source,
@@ -1349,11 +1382,11 @@ mod program {
     /// [`ServiceHint`].
     ///
     /// Every queued doorbell is consumed so the wait-set member is not
-    /// immediately ready again. Each carries the driver's live link, its
-    /// cumulative pre-filter count, and whether it masked its completion
-    /// source, so the fold keeps the *latest* link and count and any
-    /// back-pressure claim: a single notify demanding release must not be
-    /// lost behind a later one that does not.
+    /// immediately ready again. Each carries whether the driver saw its link
+    /// change, its cumulative pre-filter count, and whether it masked its
+    /// completion source, so the fold keeps the *latest* count and any
+    /// link-change or back-pressure claim: a single notify demanding a
+    /// doorbell must not be lost behind a later one that does not.
     ///
     /// A notify that will not decode is dropped but still counts as
     /// back-pressure — the safe direction, since the alternative is leaving
@@ -1365,7 +1398,7 @@ mod program {
         while let Ok(len) = tairix_rt::ipc_recv(notify, &mut frame, &mut sender) {
             match NetChannelNotify::decode(&frame[..len]) {
                 Ok(notify) => {
-                    hint.link = Some(notify.link);
+                    hint.link_changed |= notify.link_changed;
                     hint.back_pressure |= notify.back_pressure;
                     hint.filtered = Some(notify.filtered);
                 }

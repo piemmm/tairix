@@ -8,15 +8,20 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport};
+use tairix_abi::driver::filesystem::{VolumeTitle, VOLUME_TITLE_MAX};
+use tairix_abi::sysinfo::VolumeClass;
 
 use tairix_abi::window_ipc::{
     AppBar, AppMenuIconView, AppMenuItemId, AppMenuRowView, AppMenuSymbol, APP_MENU_LABEL_MAX,
     APP_MENU_MAX_ROWS,
 };
+use tairix_browse::mount::{MountAct, MountRefusal};
 use tairix_browse::{Places, Volume};
 
 use super::{
-    component_declaration, is_network, is_settings, place_of, CLOSING_ROWS, DESKTOP_SLOT_CLICK,
+    component_declaration, BarAnswer, BarRow, Declarations, CLOSING_ROWS, DECLARATIONS_HELD,
+    DESKTOP_SLOT_CLICK, NOT_TITLED, OUTDATED, READ_ONLY_TITLE, TITLE_EMPTY, TITLE_TOO_LONG,
+    VOLUME_GONE,
 };
 use crate::test_fs::mounted;
 
@@ -24,6 +29,9 @@ use crate::test_fs::mounted;
 const STICK: BlkMedium = BlkMedium::of_transport(BlkTransport::Usb).with_rotation(
     BlkRotation::NonRotating(BlkRotationEvidence::RotationRateVpd),
 );
+
+/// The user the file manager runs as.
+const VIEWER: Option<u32> = Some(1000);
 
 /// A home whose two derived places (Home, Desktop) open the rail.
 fn home() -> Vec<String> {
@@ -37,7 +45,7 @@ fn volume(label: &str) -> Volume {
 
 /// The kinds a declaration's rows carried, in order.
 fn kinds(places: &Places) -> Vec<AppMenuRowKind> {
-    let (bar, _) = component_declaration(7, places).expect("the rows fit");
+    let (bar, _) = component_declaration(7, places, VIEWER, 0).expect("the rows fit");
     bar.menu
         .rows()
         .map(|(row, _)| AppMenuRowKind::of(row))
@@ -46,7 +54,7 @@ fn kinds(places: &Places) -> Vec<AppMenuRowKind> {
 
 /// The labels of a declaration's place rows, in order.
 fn labels(places: &Places) -> Vec<String> {
-    let (bar, _) = component_declaration(7, places).expect("the rows fit");
+    let (bar, _) = component_declaration(7, places, VIEWER, 0).expect("the rows fit");
     place_labels(&bar)
 }
 
@@ -109,8 +117,9 @@ fn the_slot_can_always_produce_a_window() {
 #[test]
 fn the_component_offers_the_places_and_neither_of_the_conventions_rows() {
     let places = Places::new(&home(), &[]);
-    let (bar, skipped) = component_declaration(7, &places).expect("the rows fit");
+    let (bar, skipped) = component_declaration(7, &places, VIEWER, 3).expect("the rows fit");
     assert_eq!(bar.event_endpoint, 7);
+    assert_eq!(bar.revision, 3, "made under the revision it was asked for");
     assert_eq!(
         bar.click, DESKTOP_SLOT_CLICK,
         "a click on a component's slot opens a window rather than raising one"
@@ -144,7 +153,7 @@ fn each_row_draws_its_places_own_picture() {
     let mut usb = volume("Stick");
     usb.medium = Some(STICK);
     let places = Places::new(&home(), &[usb]);
-    let (bar, _) = component_declaration(7, &places).expect("the rows fit");
+    let (bar, _) = component_declaration(7, &places, VIEWER, 0).expect("the rows fit");
     let pictures: Vec<(String, AppMenuIconView<'_>)> = bar
         .menu
         .rows()
@@ -209,29 +218,421 @@ fn a_rule_opens_the_mounted_volumes_and_only_when_there_are_some() {
 #[test]
 fn a_chosen_row_names_the_place_the_user_saw() {
     let places = Places::new(&home(), &[volume("Backup")]);
-    let (bar, _) = component_declaration(7, &places).expect("the rows fit");
+    let (bar, _) = component_declaration(7, &places, VIEWER, 0).expect("the rows fit");
     for (row, _) in bar.menu.rows() {
         let AppMenuRowView::Item(item) = row else {
             continue;
         };
-        if is_settings(item.id) || is_network(item.id) {
+        let Some(BarRow::Place(index)) = BarRow::of(item.id) else {
             continue;
-        }
-        let index = place_of(item.id).expect("a declared id names a place");
+        };
         assert_eq!(
             places.rows()[index].label(),
             item.label,
             "the row resolves to the place whose label it drew"
         );
     }
-    // An id no declaration carried names nothing rather than a guessed place.
-    assert_eq!(place_of(AppMenuItemId::new(1).expect("non-zero")), Some(0));
-    let past_the_end =
-        place_of(AppMenuItemId::new(9999).expect("non-zero")).expect("the id maps to an index");
+    assert_eq!(
+        BarRow::of(AppMenuItemId::new(1).expect("non-zero")),
+        Some(BarRow::Place(0))
+    );
+    let Some(BarRow::Place(past_the_end)) = BarRow::of(AppMenuItemId::new(999).expect("non-zero"))
+    else {
+        panic!("the id names a place");
+    };
     assert!(
         places.rows().get(past_the_end).is_none(),
         "an index past the rail is the caller's to reject, and it is out of range"
     );
+}
+
+/// Every row's id names exactly the row it was declared for, and an id no
+/// declaration carries names nothing.
+#[test]
+fn every_rows_id_names_it_back() {
+    for row in [
+        BarRow::Place(0),
+        BarRow::Eject(0),
+        BarRow::Title(3),
+        BarRow::Retitled(30),
+        BarRow::Place(super::VERB_STRIDE as usize - 2),
+        BarRow::Network,
+        BarRow::Settings,
+    ] {
+        assert_eq!(BarRow::of(row.id().expect("an id")), Some(row), "{row:?}");
+    }
+    assert!(
+        BarRow::Eject(super::VERB_STRIDE as usize - 1).id().is_err(),
+        "an index past its range has no id"
+    );
+    for raw in [
+        super::VERB_STRIDE,
+        2 * super::VERB_STRIDE,
+        super::VERBS * super::VERB_STRIDE + 1,
+    ] {
+        assert_eq!(BarRow::of(AppMenuItemId::new(raw).expect("non-zero")), None);
+    }
+}
+
+/// A volume of `class` at `/Storage/<label>`, attached for `owner` and
+/// recording `title`, published under the identity its label spells.
+fn attached(label: &str, class: VolumeClass, owner: Option<u32>, title: &str) -> Volume {
+    let mut volume = volume(label);
+    volume.facts.class = class;
+    volume.facts.owner = owner;
+    volume.facts.title = title.to_string();
+    for (id, spelled) in volume.facts.volume_id.iter_mut().zip(label.bytes()) {
+        *id = spelled;
+    }
+    volume
+}
+
+/// Where the place labelled `label` stands on `places`' rail.
+fn index_of(places: &Places, label: &str) -> usize {
+    places
+        .rows()
+        .iter()
+        .position(|place| place.label() == label)
+        .expect("listed")
+}
+
+/// The revision a declaration of `places` was made under, which the session
+/// accepted.
+fn accepted(declarations: &mut Declarations, places: &Places) -> u32 {
+    let revision = declarations.next_revision();
+    declarations.accepted(revision, places);
+    revision
+}
+
+/// A plate row: what it names, whether it may be chosen, and its field's
+/// initial text, where the caret stands and whether choosing opens it.
+type PlateRow = (Option<BarRow>, bool, Option<(String, usize, bool)>);
+
+/// The rows of the plate the place labelled `label` opens, each as what it
+/// names, whether it may be chosen, and the field it carries.
+fn plate_of(bar: &AppBar, label: &str) -> Vec<PlateRow> {
+    let rows: Vec<_> = bar.menu.rows().collect();
+    let parent = rows
+        .iter()
+        .position(|(row, _)| matches!(row, AppMenuRowView::Item(item) if item.label == label))
+        .expect("the place is declared");
+    rows.iter()
+        .filter(|(_, under)| *under == Some(parent))
+        .map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => (
+                BarRow::of(item.id),
+                item.enabled,
+                item.entry.map(|entry| {
+                    (
+                        entry.initial.to_string(),
+                        entry.selected.range().start,
+                        entry.opens_on_choose,
+                    )
+                }),
+            ),
+            other => panic!("a plate row is an item, not {other:?}"),
+        })
+        .collect()
+}
+
+/// The name of the volume `answer` ejects.
+fn ejected(answer: BarAnswer<'_>) -> String {
+    match answer {
+        BarAnswer::Mount(MountAct::Eject { name, .. }) => name,
+        other => panic!("an eject, not {other:?}"),
+    }
+}
+
+/// A menu answered after the rail moved acts on what its own declaration
+/// showed — a place where it stood, a volume wherever the rail lists it now —
+/// never on whatever slid into its index; one copied from the latest acts on
+/// the latest.
+#[test]
+fn an_answer_acts_on_what_its_own_declaration_showed() {
+    let card = attached("Card", VolumeClass::Removable, None, "");
+    let before = Places::new(&home(), core::slice::from_ref(&card));
+    let after = Places::new(
+        &home(),
+        &[attached("Alpha", VolumeClass::Removable, None, ""), card],
+    );
+    let mut declarations = Declarations::default();
+    let first = accepted(&mut declarations, &before);
+    let latest = accepted(&mut declarations, &after);
+    let card_at = index_of(&before, "Card");
+    assert_eq!(
+        after.rows()[card_at].label(),
+        "Alpha",
+        "the rail re-sorted beneath the open menu"
+    );
+    let eject = BarRow::Eject(card_at).id().expect("an id");
+    assert_eq!(
+        ejected(declarations.chosen((eject, first), &after, VIEWER)),
+        "Card",
+        "the volume its row showed"
+    );
+    assert_eq!(
+        ejected(declarations.chosen((eject, latest), &after, VIEWER)),
+        "Alpha"
+    );
+    let open = BarRow::Place(card_at).id().expect("an id");
+    assert_eq!(
+        declarations.chosen((open, first), &after, VIEWER),
+        BarAnswer::Open(before.rows()[card_at].components()),
+        "a place where it stood"
+    );
+    let home_row = BarRow::Eject(0).id().expect("an id");
+    assert_eq!(
+        declarations.chosen((home_row, first), &after, VIEWER),
+        BarAnswer::Nothing,
+        "a row naming no volume"
+    );
+}
+
+/// A declaration the session refused was never shown, so the menu up is the
+/// one before it: its answers act on what it showed, and the refused one's
+/// revision, fresh as every one is, names nothing.
+#[test]
+fn a_refused_declaration_moves_nothing_answers_resolve_against() {
+    let card = attached("Card", VolumeClass::Removable, None, "");
+    let before = Places::new(&home(), core::slice::from_ref(&card));
+    let after = Places::new(
+        &home(),
+        &[attached("Alpha", VolumeClass::Removable, None, ""), card],
+    );
+    let mut declarations = Declarations::default();
+    let shown = accepted(&mut declarations, &before);
+    let refused = declarations.next_revision();
+    assert_ne!(refused, shown, "each declaration is made under its own");
+    let eject = BarRow::Eject(index_of(&before, "Card"))
+        .id()
+        .expect("an id");
+    assert_eq!(
+        ejected(declarations.chosen((eject, shown), &after, VIEWER)),
+        "Card"
+    );
+    assert!(matches!(
+        declarations.chosen((eject, refused), &after, VIEWER),
+        BarAnswer::Refused(MountRefusal {
+            reason: OUTDATED,
+            ..
+        })
+    ));
+}
+
+/// Only the latest few declarations are held: an answer copied from one let
+/// go is refused saying why, though Network and Settings… mean the same in
+/// every declaration.
+#[test]
+fn an_answer_from_a_declaration_let_go_is_refused_saying_why() {
+    let places = Places::new(
+        &home(),
+        &[attached("Card", VolumeClass::Removable, None, "")],
+    );
+    let mut declarations = Declarations::default();
+    let revisions: Vec<u32> = (0..=DECLARATIONS_HELD)
+        .map(|_| accepted(&mut declarations, &places))
+        .collect();
+    let card = index_of(&places, "Card");
+    let answer = |row: BarRow, revision| {
+        declarations.chosen((row.id().expect("an id"), revision), &places, VIEWER)
+    };
+    for row in [BarRow::Place(0), BarRow::Eject(card)] {
+        assert!(
+            matches!(
+                answer(row, revisions[0]),
+                BarAnswer::Refused(MountRefusal {
+                    reason: OUTDATED,
+                    ..
+                })
+            ),
+            "{row:?}"
+        );
+    }
+    assert_eq!(answer(BarRow::Network, revisions[0]), BarAnswer::Network);
+    assert_eq!(answer(BarRow::Settings, revisions[0]), BarAnswer::Settings);
+    assert!(
+        matches!(
+            answer(BarRow::Eject(card), revisions[1]),
+            BarAnswer::Mount(_)
+        ),
+        "the oldest still held"
+    );
+}
+
+/// An eject or a title chosen for a volume that has left since is refused
+/// naming the volume the row showed, never taken without a word.
+#[test]
+fn a_volume_that_left_is_refused_naming_it() {
+    let before = Places::new(
+        &home(),
+        &[attached("Floppy", VolumeClass::Image, VIEWER, "Workbench")],
+    );
+    let gone = Places::new(&home(), &[]);
+    let mut declarations = Declarations::default();
+    let revision = accepted(&mut declarations, &before);
+    let at = index_of(&before, "Floppy");
+    let eject = BarRow::Eject(at).id().expect("an id");
+    assert_eq!(
+        declarations.chosen((eject, revision), &gone, VIEWER),
+        BarAnswer::Refused(MountRefusal {
+            headline: String::from("\u{201c}Floppy\u{201d} could not be ejected"),
+            reason: VOLUME_GONE,
+        })
+    );
+    assert_eq!(
+        declarations.retitled((at, revision), &gone, VIEWER, "Games"),
+        Err(MountRefusal {
+            headline: String::from("\u{201c}Floppy\u{201d} could not be retitled"),
+            reason: VOLUME_GONE,
+        })
+    );
+}
+
+/// A committed title is checked against the disk as it stands now: the one it
+/// records asks nothing, an empty one or one longer than any disk records is
+/// refused saying why, and only a titled image still the user's is retitled.
+#[test]
+fn a_committed_title_is_checked_against_the_disk_as_it_stands() {
+    let floppy = attached("Floppy", VolumeClass::Image, VIEWER, "Workbench");
+    let places = Places::new(&home(), core::slice::from_ref(&floppy));
+    let mut declarations = Declarations::default();
+    let row = (
+        index_of(&places, "Floppy"),
+        accepted(&mut declarations, &places),
+    );
+    let retitled = |text: &str, now: &Places| declarations.retitled(row, now, VIEWER, text);
+    assert_eq!(
+        retitled("Workbench", &places),
+        Ok(None),
+        "the title it records"
+    );
+    assert_eq!(
+        retitled("Games", &places),
+        Ok(Some(MountAct::Retitle {
+            volume_id: floppy.facts.volume_id,
+            name: String::from("Floppy"),
+            title: alloc::boxed::Box::new(VolumeTitle::new("Games").expect("a title")),
+        }))
+    );
+    let reason = |text: &str, now: &Places| retitled(text, now).map_err(|refused| refused.reason);
+    assert_eq!(reason("", &places), Err(TITLE_EMPTY));
+    assert_eq!(
+        reason(&"t".repeat(VOLUME_TITLE_MAX + 1), &places),
+        Err(TITLE_TOO_LONG)
+    );
+    let mut theirs = floppy.clone();
+    theirs.facts.owner = Some(1001);
+    let mut untitled = floppy;
+    untitled.facts.title = String::new();
+    for changed in [theirs, untitled] {
+        assert_eq!(
+            reason("Games", &Places::new(&home(), &[changed])),
+            Err(NOT_TITLED)
+        );
+    }
+}
+
+/// A removable device's volume opens a plate offering *Eject*; a fixed one,
+/// and another user's disk image, open none.
+#[test]
+fn a_removable_volume_offers_eject_on_its_plate() {
+    let places = Places::new(
+        &home(),
+        &[
+            attached("Card", VolumeClass::Removable, None, ""),
+            attached("Data", VolumeClass::Local, None, ""),
+            attached("Theirs", VolumeClass::Image, Some(1001), "Their Disk"),
+        ],
+    );
+    let (bar, _) = component_declaration(7, &places, VIEWER, 0).expect("the rows fit");
+    let card = places
+        .rows()
+        .iter()
+        .position(|place| place.label() == "Card")
+        .expect("listed");
+    assert_eq!(
+        plate_of(&bar, "Card"),
+        [(Some(BarRow::Eject(card)), true, None)]
+    );
+    assert!(
+        plate_of(&bar, "Data").is_empty(),
+        "a fixed volume stays put"
+    );
+    assert!(
+        plate_of(&bar, "Theirs").is_empty(),
+        "another user's disk image is theirs to eject and title"
+    );
+    let (anonymous, _) = component_declaration(7, &places, None, 0).expect("the rows fit");
+    assert!(
+        plate_of(&anonymous, "Card").is_empty(),
+        "nothing is offered to a user the kernel would not name"
+    );
+}
+
+/// A disk image of the user's that records a title offers it in a field
+/// holding the title with the caret at its end, opened by choosing the row
+/// and answering as its own; read-only, the row says why it cannot.
+#[test]
+fn a_titled_image_offers_its_title_in_a_field() {
+    let mut locked = attached("Locked", VolumeClass::Image, VIEWER, "Archive");
+    locked.facts.read_only = true;
+    let places = Places::new(
+        &home(),
+        &[
+            attached("Floppy", VolumeClass::Image, VIEWER, "Workbench"),
+            attached("Blank", VolumeClass::Image, VIEWER, ""),
+            locked,
+        ],
+    );
+    let (bar, _) = component_declaration(7, &places, VIEWER, 0).expect("the rows fit");
+    let at = |label: &str| {
+        places
+            .rows()
+            .iter()
+            .position(|place| place.label() == label)
+            .expect("listed")
+    };
+    let floppy = at("Floppy");
+    assert_eq!(
+        plate_of(&bar, "Floppy"),
+        [
+            (Some(BarRow::Eject(floppy)), true, None),
+            (
+                Some(BarRow::Title(floppy)),
+                true,
+                Some(("Workbench".to_string(), "Workbench".len(), true))
+            ),
+        ]
+    );
+    let entry_id = bar
+        .menu
+        .rows()
+        .find_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) if item.label == "Title" => item.entry.map(|e| e.id),
+            _ => None,
+        })
+        .expect("the field");
+    assert_eq!(BarRow::of(entry_id), Some(BarRow::Retitled(floppy)));
+    assert_eq!(
+        plate_of(&bar, "Blank"),
+        [(Some(BarRow::Eject(at("Blank"))), true, None)],
+        "a disk with no title has none to change"
+    );
+    let reason = bar
+        .menu
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) if item.label == "Title" && !item.enabled => {
+                Some(item.reason.to_string())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        plate_of(&bar, "Locked")[1],
+        (Some(BarRow::Title(at("Locked"))), false, None)
+    );
+    assert_eq!(reason, [READ_ONLY_TITLE.to_string()]);
 }
 
 #[test]
@@ -241,7 +642,7 @@ fn a_label_the_menus_bounds_refuse_is_skipped_and_counted() {
     // and counted so the caller can say some are not shown.
     let long = "v".repeat(APP_MENU_LABEL_MAX + 1);
     let places = Places::new(&home(), &[volume(&long), volume("Stick")]);
-    let (bar, skipped) = component_declaration(7, &places).expect("the rows fit");
+    let (bar, skipped) = component_declaration(7, &places, VIEWER, 0).expect("the rows fit");
     assert_eq!(skipped, 1);
     let shown = item_labels(&bar);
     assert!(!shown.iter().any(|label| label.starts_with("vv")));
@@ -258,7 +659,7 @@ fn the_row_cap_drops_the_tail_and_reports_how_many() {
         .map(|n| volume(&alloc::format!("v{n:02}")))
         .collect();
     let places = Places::new(&home(), &volumes);
-    let (bar, skipped) = component_declaration(7, &places).expect("the rows fit");
+    let (bar, skipped) = component_declaration(7, &places, VIEWER, 0).expect("the rows fit");
     assert_eq!(bar.menu.len(), APP_MENU_MAX_ROWS, "the cap is filled");
     assert_eq!(
         skipped,
@@ -278,13 +679,91 @@ fn the_row_cap_drops_the_tail_and_reports_how_many() {
     assert_eq!(shown, expected);
 }
 
+/// The cap is the root plate's: a place's own plate rows are not counted
+/// against it, so the user's titled images fill it as far as plain volumes
+/// do, each with its whole plate.
+#[test]
+fn the_row_cap_counts_the_root_plates_rows_alone() {
+    let images: Vec<Volume> = (0..APP_MENU_MAX_ROWS)
+        .map(|n| attached(&alloc::format!("i{n:02}"), VolumeClass::Image, VIEWER, "T"))
+        .collect();
+    let places = Places::new(&home(), &images);
+    let (bar, skipped) = component_declaration(7, &places, VIEWER, 0).expect("the rows fit");
+    assert_eq!(
+        bar.menu
+            .rows()
+            .filter(|(_, parent)| parent.is_none())
+            .count(),
+        APP_MENU_MAX_ROWS,
+        "the root plate is filled"
+    );
+    assert_eq!(
+        skipped,
+        places.rows().len() - (APP_MENU_MAX_ROWS - 1 - CLOSING_ROWS)
+    );
+    assert_eq!(plate_of(&bar, "i25").len(), 2, "shown with its whole plate");
+}
+
+/// The places `bar`'s rows open, by their index.
+fn shown_places(bar: &AppBar) -> Vec<usize> {
+    bar.menu
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => match BarRow::of(item.id) {
+                Some(BarRow::Place(index)) => Some(index),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// A place whose rows the menu's text cannot hold is dropped whole and
+/// counted, however long its title, and never at the closing rows' cost:
+/// every declaration is admissible, ends on Network and Settings…, and shows
+/// each image it shows with all of its plate.
+#[test]
+fn a_place_the_menus_text_cannot_hold_is_dropped_whole_and_counted() {
+    for title in 150..=250 {
+        let images: Vec<Volume> = (0..10)
+            .map(|n| {
+                let label = alloc::format!("{n:02}{}", "x".repeat(28));
+                attached(&label, VolumeClass::Image, VIEWER, &"t".repeat(title))
+            })
+            .collect();
+        let places = Places::new(&home(), &images);
+        let (bar, skipped) =
+            component_declaration(7, &places, VIEWER, 0).expect("the menu is admissible");
+        let shown = shown_places(&bar);
+        assert!(skipped > 0, "{title}: the text is exceeded");
+        assert_eq!(shown.len() + skipped, places.rows().len(), "{title}");
+        let items = item_labels(&bar);
+        assert_eq!(
+            items[items.len() - 2..],
+            [NETWORK.to_string(), SETTINGS.to_string()],
+            "{title}: the closing rows always fit"
+        );
+        for index in shown
+            .into_iter()
+            .filter(|&index| places.rows()[index].facts().is_some())
+        {
+            assert_eq!(
+                plate_of(&bar, places.rows()[index].label()).len(),
+                2,
+                "{title}"
+            );
+        }
+    }
+}
+
 #[test]
 fn an_empty_rail_still_offers_the_network_and_settings() {
     // A session with no home and nothing attached has no place to offer, but
     // the network and its file manager's settings are still the user's to
     // reach.
     let places = Places::default();
-    let (bar, skipped) = component_declaration(7, &places).expect("the menu is admissible");
+    let (bar, skipped) =
+        component_declaration(7, &places, VIEWER, 0).expect("the menu is admissible");
     assert_eq!(
         item_labels(&bar),
         [NETWORK.to_string(), SETTINGS.to_string()]
@@ -302,7 +781,7 @@ fn an_empty_rail_still_offers_the_network_and_settings() {
 #[test]
 fn the_file_manager_never_offers_quit() {
     let places = Places::new(&home(), &[]);
-    let (bar, _) = component_declaration(7, &places).expect("the rows fit");
+    let (bar, _) = component_declaration(7, &places, VIEWER, 0).expect("the rows fit");
     assert!(
         bar.menu.rows().all(|(row, _)| !matches!(
             row,
@@ -322,14 +801,6 @@ fn the_file_manager_never_offers_quit() {
             .expect("declared")
     };
     let (network, settings) = (id_of(NETWORK), id_of(SETTINGS));
-    assert!(is_settings(settings) && !is_network(settings));
-    assert!(is_network(network) && !is_settings(network));
-    assert_eq!(
-        place_of(settings).filter(|&index| index < APP_MENU_MAX_ROWS),
-        None
-    );
-    assert_eq!(
-        place_of(network).filter(|&index| index < APP_MENU_MAX_ROWS),
-        None
-    );
+    assert_eq!(BarRow::of(settings), Some(BarRow::Settings));
+    assert_eq!(BarRow::of(network), Some(BarRow::Network));
 }

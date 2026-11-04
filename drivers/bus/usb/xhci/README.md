@@ -71,11 +71,15 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
   driver can neither map another's region nor aim the HCD's wakes at another
   process. Each stream takes a number of its own, which its grant and every
   notification carry, so a notification a stopped stream left behind is never
-  read as one about its successor. `deliver_streams` runs after every
-  controller interrupt and every
-  served request: each finished slot becomes an `IsoNotify::SlotDone`, and a
-  stream that halted, or whose notification its port refused, is stopped and
-  told why. A departing device's streams end `NotFound` before its node is
+  read as one about its successor. `deliver_streams` runs on every pass of the
+  event loop: each finished slot becomes an `IsoNotify::SlotDone`, and a
+  stream that halted is stopped and told why. A notice its port refuses for
+  room or the HCD's IPC budget is held, with every notice after it, until the
+  port's room wake (`Seam::watch_room`); one refused for kernel memory, until a
+  timed retry (`next_notice_retry`). A stream holds no more completions than
+  it has slots, and its halt is owed like any notice, past the stream and its
+  node; a stream whose port is gone, or refuses it for good, is stopped, the
+  loss logged. A departing device's streams end `NotFound` before its node is
   retracted; a controller reset ends every stream with the reissuable
   `WouldBlock`, and the node governs its own interface alone again.
 - `domain` — `ControllerHealth`, the controller's interior fault domain (the
@@ -86,8 +90,9 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
   interrupter enabled as part of `UsbHost::start`) → bring-up (a failure logs
   the **whole** diagnostic breadcrumb: phase, error, open stage,
   `USBCMD`/`USBSTS`) → an **asynchronous wait-set event loop** that parks on
-  the URB endpoints **and** the controller IRQ, bounded only by the earliest
-  deadline an operation, a held URB or a retry owes. Every wake runs one
+  the URB endpoints, the controller IRQ **and** the room of each notify port
+  owed a notice, bounded only by the earliest deadline an operation, a held
+  URB or a retry owes. Every wake runs one
   engine service step (`UsbHost::service`), which routes every posted event
   and runs every operation it moved: enumerations, port resets, hub service,
   recoveries. Its topology report publishes a node per served interface — a

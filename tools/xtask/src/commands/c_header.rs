@@ -51,7 +51,7 @@ use tairix_abi::field::{
     TAG_BOOL, TAG_BYTES, TAG_CAP, TAG_DECIMAL, TAG_DURATION, TAG_ERROR, TAG_IP, TAG_LIST, TAG_MAC,
     TAG_NULL, TAG_SIGNED, TAG_STR, TAG_TIME, TAG_UNSIGNED, TAG_UUID,
 };
-use tairix_abi::sysinfo::SYSINFO_QUERIES;
+use tairix_abi::sysinfo::{VolumeRemovalRecord, SYSINFO_QUERIES};
 use tairix_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CallRecvFlags, CapabilityId, DirChange,
     DirChangeBatch, DirEntry, DirWatchStatus, DriverBindKey, DriverError, DriverHandle, DriverKind,
@@ -1890,8 +1890,29 @@ fn sysinfo_emit_mount_owners(out: &mut String) {
             VolumeClass::Local => "LOCAL",
             VolumeClass::Network => "NETWORK",
             VolumeClass::Image => "IMAGE",
+            VolumeClass::Removable => "REMOVABLE",
         })
     });
+}
+
+/// Emit what a volume removal record carries: what became of the removed
+/// volume's writes, and how many removals the kernel keeps.
+fn sysinfo_emit_removals(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::sysinfo::{RemovedWrites, VOLUME_REMOVALS_KEPT};
+    out.push_str("/* What became of a removed volume's unwritten writes (uint8_t). */\n");
+    emit_u8_discriminants(out, "TAIRIX_REMOVED_WRITES", |raw| {
+        RemovedWrites::from_u8(raw).ok().map(|writes| match writes {
+            RemovedWrites::None => "NONE",
+            RemovedWrites::Held => "HELD",
+            RemovedWrites::Lost => "LOST",
+        })
+    });
+    out.push_str("/* The most recent volume removals the kernel keeps. */\n");
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_VOLUME_REMOVALS_KEPT {VOLUME_REMOVALS_KEPT}u"
+    );
 }
 
 /// Emit the bytes of a storage-medium record (`tairix_blk_medium_t`), every
@@ -2061,6 +2082,11 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
     let _ = writeln!(out, "#define TAIRIX_MOUNT_SOURCE_MAX {MOUNT_SOURCE_MAX}u");
     let _ = writeln!(out, "#define TAIRIX_MOUNT_TARGET_MAX {MOUNT_TARGET_MAX}u");
     let _ = writeln!(out, "#define TAIRIX_MOUNT_FSTYPE_MAX {MOUNT_FSTYPE_MAX}u");
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_VOLUME_TITLE_MAX {}u",
+        tairix_abi::driver::filesystem::VOLUME_TITLE_MAX
+    );
     let _ = writeln!(out, "#define TAIRIX_VOLUME_ID_LEN {VOLUME_ID_LEN}u");
     let _ = writeln!(
         out,
@@ -2088,6 +2114,7 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
         let _ = writeln!(out, "#define {name} ((uint8_t){}u)", state.as_u8());
     }
     sysinfo_emit_mount_owners(out);
+    sysinfo_emit_removals(out);
     sysinfo_emit_mount_media(out);
     sysinfo_emit_account_bounds(out);
     sysinfo_emit_dma_states(out);
@@ -2117,6 +2144,10 @@ fn sysinfo_emit_wire_lens(out: &mut String) {
         (
             "TAIRIX_VIEW_BINDING_RECORD_WIRE_LEN",
             ViewBindingRecord::WIRE_LEN,
+        ),
+        (
+            "TAIRIX_VOLUME_REMOVAL_RECORD_WIRE_LEN",
+            VolumeRemovalRecord::WIRE_LEN,
         ),
         (
             "TAIRIX_RESOURCE_LIMIT_RECORD_WIRE_LEN",
@@ -2289,9 +2320,10 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * source or usage, else 0; `withheld` is 1 on the record so listed, whose\n\
          * empty source and all-zero usage are then unknown rather than absent;\n\
          * `source_cut` is 1 when the source is only the first bytes of a longer\n\
-         * name, cut between characters to fit.\n\
-         * The inline source/target/fstype buffers are valid for their respective\n\
-         * *_len byte counts. */\n\
+         * name, cut between characters to fit. `title` is the volume's own\n\
+         * label: empty where its filesystem records none, and on a withheld record.\n\
+         * The inline source/target/fstype/title buffers are valid for their\n\
+         * respective *_len byte counts. */\n\
          typedef struct tairix_mount_record {\n\
          \x20   uint32_t flags;\n\
          \x20   uint8_t source_len;\n\
@@ -2309,6 +2341,8 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t source[TAIRIX_MOUNT_SOURCE_MAX];\n\
          \x20   uint8_t target[TAIRIX_MOUNT_TARGET_MAX];\n\
          \x20   uint8_t fstype[TAIRIX_MOUNT_FSTYPE_MAX];\n\
+         \x20   uint8_t title_len;\n\
+         \x20   uint8_t title[TAIRIX_VOLUME_TITLE_MAX];\n\
          } tairix_mount_record_t;\n\n",
     "/* One view binding: a view path (`target`), the path within an attached\n\
          * volume it shows (`subtree`, `/` for the volume's root), and the\n\
@@ -2334,6 +2368,17 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t target[TAIRIX_MOUNT_TARGET_MAX];\n\
          \x20   uint8_t subtree[TAIRIX_MOUNT_TARGET_MAX];\n\
          } tairix_view_binding_record_t;\n\n",
+    "/* One device-backed volume whose device went away while it was attached,\n\
+         * rather than being detached first: its place among the removals since\n\
+         * boot, from 1; the volume's identity, the key of the\n\
+         * tairix_mount_record_t it had; and what became of the writes it had not\n\
+         * given its device (TAIRIX_REMOVED_WRITES_*). */\n\
+         typedef struct tairix_volume_removal_record {\n\
+         \x20   uint64_t sequence;\n\
+         \x20   uint8_t volume_id[TAIRIX_VOLUME_ID_LEN];\n\
+         \x20   uint8_t writes;\n\
+         \x20   uint8_t reserved[7];\n\
+         } tairix_volume_removal_record_t;\n\n",
     "/* One row of the RESOURCE_LIMITS response: a resource's effective soft/hard\n\
          * bound (a tairix_resource_limit_t) and the caller's current live usage of it.\n\
          * The full response is TAIRIX_LIMIT_KIND_COUNT records in LimitKind order. */\n\
@@ -2993,6 +3038,7 @@ fn generate_syscall() -> String {
     emit_spawn_attach_contract(&mut out);
     emit_attach_contract(&mut out);
     emit_detach_contract(&mut out);
+    emit_retitle_contract(&mut out);
     emit_readdir_contract(&mut out);
     emit_dir_watch_contract(&mut out);
     emit_grant_contract(&mut out);
@@ -4194,6 +4240,23 @@ fn emit_detach_contract(out: &mut String) {
             DetachMode::Idle => "IDLE",
         })
     });
+    out.push('\n');
+}
+
+/// Emit the frame `volume_retitle()` takes, its bound read from `lib/abi`.
+fn emit_retitle_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::volume::{VOLUME_ID_LEN, VOLUME_RETITLE_MAX_LEN};
+    let _ = writeln!(
+        out,
+        "/* The frame volume_retitle() takes: the {VOLUME_ID_LEN}-byte identity an attach\n\
+         \x20* reply names, one length byte, then that many bytes of UTF-8 with no\n\
+         \x20* control character, at most TAIRIX_VOLUME_TITLE_MAX; none clears it. */"
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_VOLUME_RETITLE_MAX_LEN {VOLUME_RETITLE_MAX_LEN}u"
+    );
     out.push('\n');
 }
 
@@ -5821,6 +5884,10 @@ mod tests {
             format!("#define TAIRIX_MOUNT_SOURCE_MAX {MOUNT_SOURCE_MAX}u"),
             format!("#define TAIRIX_MOUNT_TARGET_MAX {MOUNT_TARGET_MAX}u"),
             format!("#define TAIRIX_MOUNT_FSTYPE_MAX {MOUNT_FSTYPE_MAX}u"),
+            format!(
+                "#define TAIRIX_VOLUME_TITLE_MAX {}u",
+                tairix_abi::driver::filesystem::VOLUME_TITLE_MAX
+            ),
             format!("#define TAIRIX_MEMORY_CLASS_COUNT {MEMORY_CLASS_COUNT}u"),
             format!(
                 "#define TAIRIX_SYSINFO_REQUEST_HEADER_WIRE_LEN {}u",
@@ -6268,7 +6335,7 @@ mod tests {
             (
                 "MountRecord",
                 core::mem::size_of::<MountRecord>(),
-                232,
+                488,
                 core::mem::align_of::<MountRecord>(),
                 8,
             ),
@@ -6564,8 +6631,9 @@ mod tests {
             ("tairix_sysinfo.h", "} tairix_uptime_t;", size_of::<Uptime>(), 32, align_of::<Uptime>(), 8),
             ("tairix_sysinfo.h", "} tairix_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),
             ("tairix_sysinfo.h", "} tairix_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),
-            ("tairix_sysinfo.h", "} tairix_mount_record_t;", size_of::<MountRecord>(), 232, align_of::<MountRecord>(), 8),
+            ("tairix_sysinfo.h", "} tairix_mount_record_t;", size_of::<MountRecord>(), 488, align_of::<MountRecord>(), 8),
             ("tairix_sysinfo.h", "} tairix_view_binding_record_t;", size_of::<ViewBindingRecord>(), 160, align_of::<ViewBindingRecord>(), 4),
+            ("tairix_sysinfo.h", "} tairix_volume_removal_record_t;", size_of::<VolumeRemovalRecord>(), 32, align_of::<VolumeRemovalRecord>(), 8),
             ("tairix_driver.h", "} tairix_volume_stats_t;", size_of::<VolumeStats>(), 48, align_of::<VolumeStats>(), 8),
             ("tairix_driver.h", "} tairix_driver_manifest_t;", size_of::<DriverManifest>(), 140, align_of::<DriverManifest>(), 4),
             ("tairix_driver.h", "} tairix_driver_bind_key_t;", size_of::<DriverBindKey>(), 80, align_of::<DriverBindKey>(), 4),

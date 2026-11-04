@@ -125,7 +125,8 @@ pub fn check<S: ScreenModel>(screen: &mut S) -> Result<(), Divergence> {
     scroll_region(screen)?;
     cursor_addressing(screen)?;
     alternate_screen(screen)?;
-    saved_cursor(screen)
+    saved_cursor(screen)?;
+    saved_lines(screen)
 }
 
 /// Filling the last column owes a wrap; the next glyph pays it.
@@ -283,6 +284,16 @@ fn saved_cursor<S: ScreenModel>(screen: &mut S) -> Result<(), Divergence> {
     screen.apply(&Op::CursorPosition { row: ROWS, col: 1 });
     screen.apply(&Op::RestoreCursor);
     cursor_is(screen, step, (2, 1))
+}
+
+/// `CSI 3 J` erases what scrolled off, and nothing on screen.
+fn saved_lines<S: ScreenModel>(screen: &mut S) -> Result<(), Divergence> {
+    let step = "erasing the saved lines leaves the screen and the cursor as they are";
+    home(screen);
+    print(screen, "kept");
+    screen.apply(&Op::EraseSavedLines);
+    cursor_is(screen, step, (4, 0))?;
+    rows_are(screen, step, ["kept      ", BLANK, BLANK, BLANK])
 }
 
 /// Blank the display and home the cursor, so each step starts from a known

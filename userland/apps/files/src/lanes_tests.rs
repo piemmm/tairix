@@ -111,8 +111,10 @@ fn artwork_runs_on_the_lane_of_the_file_it_reads() {
     );
 }
 
+/// The eject desk carries an eject out behind the reads on its volume; an act
+/// that never waits there is placed where its own reads would run.
 #[test]
-fn an_eject_runs_on_its_volumes_lane_and_a_mount_on_its_images() {
+fn an_eject_waits_on_its_volumes_lane() {
     let routes = installed();
     let eject = MountAct::Eject {
         volume_id: [3; 16],

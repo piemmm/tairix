@@ -15,7 +15,7 @@
 
 use alloc::string::String;
 
-use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, DialogModality, SaveEndings};
+use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, DialogModality, SaveFormats};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
@@ -174,6 +174,27 @@ impl ToolWindow<'_> {
 #[must_use]
 pub fn fits_beside(rect: Rect, area: Rect) -> bool {
     rect.surface_origin().is_some() && !rect.is_empty() && rect.intersection(&area).is_empty()
+}
+
+/// Where a menu a view anchors at `anchor` in its drawing opens: over the
+/// first of `tools` — each a tool window's name and the part of the drawing
+/// it shows — that holds the anchor's corner, the anchor then in that tool
+/// window's own pixels, or else over the window itself.
+#[must_use]
+pub fn menu_over<T>(anchor: Rect, tools: impl IntoIterator<Item = (T, Rect)>) -> (Option<T>, Rect) {
+    let corner = Point::new(anchor.left(), anchor.top());
+    tools
+        .into_iter()
+        .find(|(_, shown)| shown.contains(corner))
+        .map_or((None, anchor), |(tool, shown)| {
+            let local = Rect::new(
+                corner.x.saturating_sub(shown.left()),
+                corner.y.saturating_sub(shown.top()),
+                anchor.width,
+                anchor.height,
+            );
+            (Some(tool), local)
+        })
 }
 
 /// The dialog a document window wants open: a form or a question about its
@@ -364,19 +385,22 @@ pub trait DocumentView: SavedDocument {
         None
     }
 
-    /// The extension a Save As offers the document under a name of its own:
-    /// one it has never had, or one its own name cannot be written as.
+    /// The extension a Save As offers the document under a name of its own —
+    /// one it has never had, or one its own name cannot be written as — or
+    /// `""` for a format named by its file type alone.
     fn offered_extension(&self) -> &'static str;
 
-    /// The endings a Save As holds the chosen name to, so the picker refuses
-    /// a name the save would before it makes the file: by default none, as
+    /// The formats a Save As can write and the one the document is in now,
+    /// which the picker opens on and holds the chosen name to before it makes
+    /// the file — typed as the format chosen, by its recorded file type or its
+    /// name, so the save tells the format from the file: by default none, as
     /// any name holds the document.
     ///
     /// # Errors
     ///
     /// Why no name can hold it: no picker is opened.
-    fn save_endings(&self) -> Result<SaveEndings, String> {
-        Ok(SaveEndings::ANY)
+    fn save_formats(&self) -> Result<SaveFormats, String> {
+        Ok(SaveFormats::ANY)
     }
 
     /// The `index`th tool window the window wants open as laid out by
@@ -614,5 +638,20 @@ mod tests {
         assert!(!fits(Rect::new(399, 0, 120, 200)), "over its last column");
         assert!(!fits(Rect::new(-1, 400, 120, 200)), "left of the drawing");
         assert!(!fits(Rect::new(400, 0, 0, 200)), "with no pixels");
+    }
+
+    #[test]
+    fn a_menu_anchored_on_a_tool_window_opens_over_it() {
+        let tools = [(7_u64, Rect::new(400, 20, 120, 200))];
+        assert_eq!(
+            super::menu_over(Rect::new(450, 60, 0, 0), tools),
+            (Some(7), Rect::new(50, 40, 0, 0)),
+            "in the tool window's own pixels"
+        );
+        assert_eq!(
+            super::menu_over(Rect::new(30, 60, 0, 0), tools),
+            (None, Rect::new(30, 60, 0, 0)),
+            "over the window itself"
+        );
     }
 }

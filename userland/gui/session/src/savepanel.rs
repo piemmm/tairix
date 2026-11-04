@@ -12,9 +12,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::home::{HOME_DESKTOP_DIR, HOME_FILES_DIR, HOME_FILES_SUBDIRS};
-use tairix_abi::window_ipc::{AppMenuItemId, AppMenuSymbol, SaveEndings};
+use tairix_abi::window_ipc::{AppMenuItemId, AppMenuSymbol, SaveFormat, SaveFormats};
 use tairix_abi::FS_NAME_MAX;
-use tairix_browse::media::{media_for_name, MediaType};
+use tairix_browse::media::{media_for_filetype, media_for_name, MediaType};
 use tairix_browse::Ending;
 use tairix_colour::Rgba;
 use tairix_controls::{
@@ -116,7 +116,7 @@ pub(crate) struct PanelLayout {
     pub(crate) labels_right: i32,
     pub(crate) name: Rect,
     pub(crate) where_box: Rect,
-    /// The format chooser, where the requester writes more than one ending.
+    /// The format chooser, where the requester offers formats.
     pub(crate) format_box: Option<Rect>,
     /// The line under the controls that states progress or a refusal.
     pub(crate) status: Rect,
@@ -163,8 +163,10 @@ pub(crate) enum Said {
 /// and the answers.
 pub(crate) struct SavePanel {
     pub(crate) name: TextField,
-    /// The endings the requester can write a name under: each a format.
-    endings: SaveEndings,
+    /// The formats the requester can write.
+    formats: SaveFormats,
+    /// The one of them the document is to be written in, while it offers any.
+    chosen: Option<usize>,
     /// The name offered when the pick began, put back after the field named a
     /// folder the picker then went into.
     pub(crate) suggested: String,
@@ -186,11 +188,14 @@ pub(crate) struct SavePanel {
 }
 
 impl SavePanel {
-    /// A panel offering `suggested`, its stem selected, held to `endings`.
-    pub(crate) fn new(suggested: &str, endings: SaveEndings) -> Self {
+    /// A panel offering `suggested`, its stem selected, in the format of
+    /// `formats` the document is in now.
+    pub(crate) fn new(suggested: &str, formats: &SaveFormats) -> Self {
+        let chosen = formats.current();
         let mut panel = Self {
-            name: offered(suggested, endings),
-            endings,
+            name: offered(suggested, formats, chosen),
+            formats: *formats,
+            chosen,
             suggested: String::from(suggested),
             where_box: ComboBox::new(Vec::new()),
             format_box: None,
@@ -310,7 +315,7 @@ impl SavePanel {
     /// Folder* only while the folders show.
     fn focusable(&self, focus: PanelFocus) -> bool {
         match focus {
-            PanelFocus::Format => self.format_box.is_some() && self.naming.is_none(),
+            PanelFocus::Format => self.formats.len() > 1 && self.naming.is_none(),
             PanelFocus::Listing | PanelFocus::NewFolder => self.expanded,
             _ => true,
         }
@@ -344,7 +349,7 @@ impl SavePanel {
         let Some(document) = self.naming.take() else {
             return;
         };
-        self.name = offered(&document, self.endings);
+        self.name = offered(&document, &self.formats, self.chosen);
         self.restate_validation();
         self.save = primary(SAVE_LABEL);
         self.restate_format();
@@ -354,15 +359,15 @@ impl SavePanel {
     /// Offer `name` in the field as a pick begins, its stem selected so
     /// typing replaces it and keeps its ending.
     pub(crate) fn offer(&mut self, name: &str) {
-        self.name = offered(name, self.endings);
+        self.name = offered(name, &self.formats, self.chosen);
         self.restate_validation();
         self.restate_format();
         self.set_focus(PanelFocus::Name);
     }
 
-    /// The endings the requester can write.
-    pub(crate) const fn endings(&self) -> SaveEndings {
-        self.endings
+    /// The formats the requester can write.
+    pub(crate) const fn formats(&self) -> &SaveFormats {
+        &self.formats
     }
 
     /// Whether the folder browser shows.
@@ -385,67 +390,75 @@ impl SavePanel {
         }
     }
 
-    /// The format the name is in now, as an index of the endings, or `None`
-    /// for a name in none of them.
-    pub(crate) fn format(&self) -> Option<usize> {
-        let name = self.name.text();
-        self.endings
-            .iter()
-            .position(|ending| ends_with_ignoring_case(name, ending))
+    /// The format the document is to be written in, as an index of those
+    /// offered, or `None` where none is offered.
+    pub(crate) const fn format(&self) -> Option<usize> {
+        self.chosen
     }
 
-    /// Put the name in the format at `index`, keeping its stem.
+    /// Write the document in the format at `index`, its name keeping its stem
+    /// and taking the format's extension, if it is named by one.
     pub(crate) fn set_format(&mut self, index: usize) -> bool {
-        let Some(ending) = self.endings.iter().nth(index) else {
+        let Some(format) = self.formats.get(index) else {
             return false;
         };
         let name = self.name.text();
-        let stem = &name[..stem_len(name, self.endings)];
-        let renamed = format!("{stem}{ending}");
+        let stem = &name[..stem_len(name, &self.formats, self.chosen)];
+        let renamed = format!("{stem}{}", format.extensions().next().unwrap_or(""));
+        self.chosen = Some(index);
         self.name.set_text(&renamed);
         self.restate_format();
         true
     }
 
-    /// Show the format the name is in, after it was edited.
+    /// Show the format the document is written in, after the name was
+    /// edited: a name typed into another format offered takes that format.
     pub(crate) fn restate_format(&mut self) {
-        if self.endings.iter().nth(1).is_none() {
+        if let Some(typed) = self.formats.of(self.name.text()) {
+            self.chosen = Some(typed);
+        }
+        let Some(format) = self.chosen.and_then(|index| self.formats.get(index)) else {
             self.format_box = None;
             return;
-        }
-        let label = self
-            .format()
-            .and_then(|index| self.endings.iter().nth(index))
-            .map_or_else(|| String::from("Other"), format_label);
+        };
+        let label = format_label(format);
         let shown = self.format_box.as_ref().and_then(ComboBox::selected_text);
         if shown != Some(label.as_str()) {
-            let mut format = ComboBox::new(alloc::vec![label]).with_selected(0);
-            format.set_focused(self.focus == PanelFocus::Format);
-            if self.naming.is_some() {
-                format.set_state(ControlState::disabled());
+            let mut combo = ComboBox::new(alloc::vec![label]).with_selected(0);
+            combo.set_focused(self.focus == PanelFocus::Format);
+            // One format offered is one to state, not to choose.
+            if self.naming.is_some() || self.formats.len() == 1 {
+                combo.set_state(ControlState::disabled());
             }
-            self.format_box = Some(format);
+            self.format_box = Some(combo);
         }
     }
 
-    /// The picture the document is drawn with: its format's own.
+    /// The picture the document is drawn with: its format's own, or its
+    /// name's where no format is offered.
     pub(crate) fn icon(&self) -> IconKind {
-        media_for_name(self.name.text()).map_or(IconKind::File, MediaType::icon)
+        self.chosen
+            .and_then(|index| self.formats.get(index))
+            .and_then(format_media)
+            .or_else(|| media_for_name(self.name.text()))
+            .map_or(IconKind::File, MediaType::icon)
     }
 
-    /// The menu *Format* opens: every ending by its type's name, the one the
-    /// name is in marked.
+    /// The menu *Format* opens: every format offered by its type's name, the
+    /// one chosen marked.
     pub(crate) fn format_menu(&self) -> ChainModel {
-        let chosen = self.format();
         let mut model = ChainModel::new(FORMAT_LABEL);
-        for (index, ending) in self.endings.iter().enumerate() {
+        for (index, format) in self.formats.iter().enumerate() {
             let Some(id) = AppMenuItemId::for_index(index) else {
                 continue;
             };
             model.push(ChainRow::item(
                 id,
                 AppMenuSymbol::File,
-                crate::menu::marked(MenuItem::new(format_label(ending)), chosen == Some(index)),
+                crate::menu::marked(
+                    MenuItem::new(format_label(format)),
+                    self.chosen == Some(index),
+                ),
             ));
         }
         model
@@ -781,14 +794,34 @@ pub(crate) fn where_menu(places: &[Place], shown: Option<&[String]>) -> ChainMod
     model
 }
 
-/// The name field offering `name`, focused, its stem selected.
-fn offered(name: &str, endings: SaveEndings) -> TextField {
+/// The name field offering `name` for the format of `formats` at `chosen`,
+/// focused, its stem selected: an ending another type names is left off, so
+/// a document saved in another format is not offered under its old type's
+/// name.
+fn offered(name: &str, formats: &SaveFormats, chosen: Option<usize>) -> TextField {
+    let format = chosen.and_then(|index| formats.get(index));
+    let foreign =
+        format.is_some_and(|format| !format.types(name) && named_by_another(name, format));
+    let name = if foreign { Ending::of(name).stem } else { name };
     let mut field = TextField::new()
         .with_text(name)
         .with_max_len(FS_NAME_MAX)
-        .with_selection(0..stem_len(name, endings));
+        .with_selection(0..stem_len(name, formats, chosen));
     field.set_focused(true);
     field
+}
+
+/// Whether `name` ends as the registry names a type other than `format`'s.
+fn named_by_another(name: &str, format: &SaveFormat) -> bool {
+    media_for_name(name).is_some_and(|media| Some(media) != format_media(format))
+}
+
+/// The type `format` is: its file type's, else its first extension's.
+pub(crate) fn format_media(format: &SaveFormat) -> Option<MediaType> {
+    format.filetype().and_then(media_for_filetype).or_else(|| {
+        let extension = format.extensions().next()?;
+        media_for_name(&format!("x{extension}"))
+    })
 }
 
 /// The panel's committing button, labelled `label`.
@@ -799,33 +832,35 @@ fn primary(label: &str) -> Button {
     )
 }
 
-/// How long the stem of `name` is: what comes before the requester's ending
-/// it ends in, or before whatever ending it has.
-fn stem_len(name: &str, endings: SaveEndings) -> usize {
-    endings
-        .iter()
-        .find(|ending| ends_with_ignoring_case(name, ending))
-        .map_or_else(
-            || Ending::of(name).stem.len(),
-            |ending| name.len() - ending.len(),
-        )
+/// How long the stem of `name` is: what comes before the ending a type is
+/// named by — the chosen format's, or the registry's — where it has one, the
+/// whole name where it has none.
+fn stem_len(name: &str, formats: &SaveFormats, chosen: Option<usize>) -> usize {
+    let typed = chosen
+        .and_then(|index| formats.get(index))
+        .is_some_and(|format| format.types(name));
+    if typed || media_for_name(name).is_some() {
+        Ending::of(name).stem.len()
+    } else {
+        name.len()
+    }
 }
 
-/// Whether `name` ends in `ending`, ignoring ASCII case, with a stem before
-/// it.
-fn ends_with_ignoring_case(name: &str, ending: &str) -> bool {
-    name.len() > ending.len()
-        && name
-            .get(name.len() - ending.len()..)
-            .is_some_and(|tail| tail.eq_ignore_ascii_case(ending))
-}
-
-/// What a format is called: its type's name in the registry, and the ending.
-fn format_label(ending: &str) -> String {
-    let probe = format!("x{ending}");
-    media_for_name(&probe).map_or_else(
-        || String::from(ending),
-        |media| format!("{} ({ending})", media.name()),
+/// What a format is called: its type's name in the registry, else the ending
+/// it is named by.
+fn format_label(format: &SaveFormat) -> String {
+    format_media(format).map_or_else(
+        || {
+            format.extensions().next().map_or_else(
+                || {
+                    format.filetype().map_or_else(String::new, |filetype| {
+                        format!("File type &{:03X}", filetype.get())
+                    })
+                },
+                String::from,
+            )
+        },
+        |media| String::from(media.name()),
     )
 }
 

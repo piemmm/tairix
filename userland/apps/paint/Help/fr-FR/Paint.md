@@ -91,7 +91,10 @@ bande déplace son volet sur son côté ou vers l'autre, l'endroit où il se
 posera étant marqué en chemin ; lâché loin des deux côtés, ou tiré hors de la
 fenêtre, le volet flotte dans une petite fenêtre à lui, déplacée par sa
 bande, gardée au-dessus de l'image et fermée par sa marque ; ramené au-dessus
-d'un côté, il s'y ancre de nouveau.
+d'un côté, il s'y ancre de nouveau. La palette flotte aussi : le bouton au
+bout droit de sa bande, ou Affichage ▸ Volets ▸ Détacher la palette, la place
+dans une petite fenêtre à elle, ses couleurs disposées en grille ; fermer
+cette fenêtre, ou la ramener au bas de la fenêtre, la remet dans la bande.
 
 L'outil de sélection délimite un rectangle, une ellipse, un lasso à main
 levée, un polygone cliqué coin par coin, ou avec la baguette magique les

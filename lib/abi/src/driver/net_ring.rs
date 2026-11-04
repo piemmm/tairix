@@ -1127,8 +1127,8 @@ pub struct ServiceReport {
     /// Cumulative, unlike the two counts above, and deliberately: a driver
     /// drains its rings on its own interrupt and the stack does not
     /// doorbell for every batch, so a per-call delta would simply be lost.
-    /// A consumer stores the latest value it saw; it is monotonic, so it
-    /// can neither double-count nor go backwards.
+    /// A consumer keeps the largest value it saw: it is monotonic, so reports
+    /// read out of order can neither double-count it nor take it back.
     pub filtered: u64,
     /// The RX ring filled while the device still had frames pending.
     pub rx_ring_full: bool,

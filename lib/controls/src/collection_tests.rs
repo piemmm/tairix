@@ -19,6 +19,7 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -2176,6 +2177,104 @@ fn a_tile_that_sets_no_label_shadow_draws_the_bare_name() {
     assert_eq!(bare.pixels(), clear.pixels());
 }
 
+/// An owner whose tile rests on ground the theme does not know states the ink
+/// its name reads in there, and the built-in glyph wearing the name's ink takes
+/// it too: the theme's foreground is drawn nowhere.
+#[test]
+fn a_label_ink_takes_the_place_of_the_theme_foreground() {
+    let ink = Color::rgb(250, 251, 252);
+    for theme in [Theme::dark(), Theme::light()] {
+        let inked = tile_with(
+            &IconTile::new("Report.txt", IconKind::Text).with_label_ink(ink),
+            &theme,
+        );
+        assert!(
+            has_pixel(&inked, ink.premultiply()),
+            "the name was not drawn in the owner's ink"
+        );
+        assert!(
+            !has_pixel(&inked, premul(theme.palette().on_surface)),
+            "the theme's foreground was drawn beside it"
+        );
+    }
+}
+
+/// A name drawn over its shadow stays inside its tile at every density, so a
+/// view that repaints one tile repaints all of what that tile drew.
+#[test]
+fn a_shadowed_name_never_draws_outside_its_tile() {
+    let theme = Theme::light();
+    let layout = TileLayout::new(2);
+    let margin = 16;
+    for percent in [50, 100, 150, 200] {
+        let scale = Scale::from_percent(percent).expect("a scale");
+        let side = scale.scale_length(32);
+        let (width, height) = (
+            layout.width_for(side, scale, &theme),
+            layout.height_for(side, scale, &theme),
+        );
+        let bounds = Rect::new(to_i32(margin), to_i32(margin), width, height);
+        let mut s = Surface::new(width + 2 * margin, height + 2 * margin).expect("surface");
+        s.fill(BEHIND);
+        IconTile::new("Quarterly figures for every region.txt", IconKind::Text)
+            .with_layout(layout)
+            .with_name_cut(Cut::Middle { keep: 4 })
+            .with_label_ink(Color::rgb(250, 250, 250))
+            .with_label_shadow(TextShadow::new(Color::rgba(0, 0, 0, 200), scale))
+            .render(&mut s, bounds, scale, &theme, None);
+        let behind = BEHIND.premultiply();
+        for y in 0..s.height() {
+            for x in 0..s.width() {
+                let inside = bounds.contains(Point::new(to_i32(x), to_i32(y)));
+                assert!(
+                    inside || s.get(x, y) == Some(behind),
+                    "{percent}%: the tile drew at ({x}, {y}), outside its bounds"
+                );
+            }
+        }
+    }
+}
+
+/// A name's halo blurred once and handed back draws exactly what its shadow
+/// blurred in place draws, wherever the tile stands and however many lines
+/// its name takes.
+#[test]
+fn a_kept_label_halo_draws_what_the_shadow_blurred_in_place_draws() {
+    let theme = Theme::light();
+    let scale = Scale::ONE;
+    let layout = TileLayout::new(2);
+    let icon_side = scale.scale_length(32);
+    let size = (
+        layout.width_for(icon_side, scale, &theme),
+        layout.height_for(icon_side, scale, &theme),
+    );
+    let tile = IconTile::new("Quarterly figures for every region.txt", IconKind::Text)
+        .with_layout(layout)
+        .with_name_cut(Cut::Middle { keep: 4 })
+        .with_label_ink(Color::rgb(250, 250, 250))
+        .with_label_shadow(TextShadow::new(Color::rgba(0, 0, 0, 200), scale));
+    let halo = tile
+        .label_halo(size, scale, &theme)
+        .expect("a shadowed name keeps its halo");
+    let paint = |tile: &IconTile| {
+        let mut s = Surface::new(size.0 + 32, size.1 + 32).expect("surface");
+        s.fill(BEHIND);
+        tile.render(
+            &mut s,
+            Rect::new(16, 16, size.0, size.1),
+            scale,
+            &theme,
+            None,
+        );
+        s
+    };
+    let kept = tile.clone().with_label_halo(Arc::new(halo));
+    assert!(
+        paint(&tile).pixels() == paint(&kept).pixels(),
+        "the kept halo drew other pixels"
+    );
+}
+
 /// Hover, selection, and press are three different marks: the pointer washes
 /// are crisp plates in the shared plate colours, selection is the accent at
 /// three tenths opacity over a frosted backdrop, and each keeps its own ink. A pointer
@@ -2824,6 +2923,44 @@ fn a_live_tile_marks_itself_under_its_picture_in_its_names_ink() {
         assert!(
             changed.iter().any(|&(x, y)| live.get(x, y) == Some(ink)),
             "{}: the mark is not in the name's ink",
+            theme.name()
+        );
+    }
+}
+
+/// A tile fronting a stack wears its count in an accent pill over its
+/// picture's top trailing corner, and changes nothing else.
+#[test]
+fn a_counted_tile_wears_its_count_over_its_pictures_corner() {
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        let plain = tile_with(&IconTile::new("a.txt", IconKind::File), &theme);
+        let counted = tile_with(
+            &IconTile::new("a.txt", IconKind::File).with_count(12),
+            &theme,
+        );
+        let changed: Vec<(u32, u32)> = (0..TH)
+            .flat_map(|y| (0..TW).map(move |x| (x, y)))
+            .filter(|&(x, y)| plain.get(x, y) != counted.get(x, y))
+            .collect();
+        assert!(!changed.is_empty(), "{}: no pill drawn", theme.name());
+        let picture = ONE_LINE
+            .parts(TILE, Scale::ONE, &theme, "a.txt", Cut::End)
+            .and_then(|parts| parts.picture)
+            .expect("a picture part");
+        let middle = picture.left() + to_i32(picture.width / 2);
+        for &(x, y) in &changed {
+            assert!(
+                to_i32(x) >= middle && picture.contains(Point::new(to_i32(x), to_i32(y))),
+                "{}: the pill strayed to ({x},{y})",
+                theme.name()
+            );
+        }
+        let accent = premul(theme.palette().accent);
+        assert!(
+            changed
+                .iter()
+                .any(|&(x, y)| counted.get(x, y) == Some(accent)),
+            "{}: the pill is not the accent",
             theme.name()
         );
     }

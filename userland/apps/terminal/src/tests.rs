@@ -7,11 +7,14 @@
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
 use tairix_abi::Errno;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect};
+use tairix_input::{Key, Modifiers, NamedKey};
 use tairix_raster::Color;
+use tairix_reclaim::PressureBand;
 use tairix_theme::Theme;
 
 use tairix_vt::{encode_all_into, BasicColor, Color as VtColor, Op, Sgr};
@@ -34,7 +37,7 @@ use crate::grid::{Grid, MAX_DIMENSION};
 use crate::parser::Parser;
 use crate::render::Screen;
 use crate::shell::ShellSource;
-use crate::terminal::Terminal;
+use crate::terminal::{Reshaped, Terminal};
 use crate::Cell;
 
 /// An in-memory shell channel: each `read` returns the next queued chunk (or
@@ -92,52 +95,69 @@ fn put_row(grid: &mut Grid, row: u16, text: &str) {
     }
 }
 
-/// The visible text of one grid row, with trailing blanks trimmed.
-fn row_text(grid: &Grid, row: u16) -> String {
-    let mut text = String::new();
-    for col in 0..grid.cols() {
-        text.push(glyph(grid, col, row));
-    }
+/// The text of one row as `read` reads it, with trailing blanks trimmed.
+fn text_of(grid: &Grid, row: u16, read: fn(&Grid, u16, u16) -> Option<Cell>) -> String {
+    let text: String = (0..grid.cols())
+        .map(|col| read(grid, col, row).map_or(' ', |cell| cell.ch))
+        .collect();
     String::from(text.trim_end())
 }
 
+/// The visible text of one grid row, with trailing blanks trimmed.
+fn row_text(grid: &Grid, row: u16) -> String {
+    text_of(grid, row, Grid::cell)
+}
+
+/// The text the view shows on one row, with trailing blanks trimmed.
+fn view_text(grid: &Grid, row: u16) -> String {
+    text_of(grid, row, Grid::view_cell)
+}
+
+/// Lines enough in a test's scrollback that no test meets its limit unless it
+/// means to.
+pub(crate) const ROOM: usize = 1 << 20;
+
 /// Feed `bytes` through a fresh parser into a fresh `cols`×`rows` grid.
 fn render_bytes(cols: u16, rows: u16, bytes: &[u8]) -> Grid {
-    let mut grid = Grid::new(cols, rows).expect("valid grid size");
+    let mut grid = Grid::new(cols, rows, ROOM).expect("valid grid size");
     let mut parser = Parser::new();
     parser.feed(&mut grid, bytes);
     grid
 }
 
-#[test]
-fn grid_new_rejects_degenerate_sizes() {
-    assert!(Grid::new(0, 24).is_none());
-    assert!(Grid::new(80, 0).is_none());
-    assert!(Grid::new(MAX_DIMENSION + 1, 24).is_none());
-    assert!(Grid::new(80, MAX_DIMENSION + 1).is_none());
-    assert!(Grid::new(1, 1).is_some());
+/// A `cols`×`rows` terminal over an idle shell.
+fn terminal(cols: u16, rows: u16) -> Terminal<QueueShell> {
+    Terminal::new(cols, rows, QueueShell::default(), ROOM).expect("valid size")
 }
 
 #[test]
-fn grid_resize_preserves_top_left_and_clamps_cursor() {
+fn grid_new_rejects_degenerate_sizes() {
+    assert!(Grid::new(0, 24, ROOM).is_none());
+    assert!(Grid::new(80, 0, ROOM).is_none());
+    assert!(Grid::new(MAX_DIMENSION + 1, 24, ROOM).is_none());
+    assert!(Grid::new(80, MAX_DIMENSION + 1, ROOM).is_none());
+    assert!(Grid::new(1, 1, ROOM).is_some());
+}
+
+#[test]
+fn a_shrink_keeps_the_cursors_line_on_screen_and_a_grow_takes_back_what_it_gave_up() {
     let mut grid = render_bytes(6, 3, b"abc\r\ndef");
-    assert_eq!(row_text(&grid, 0), "abc");
-    assert_eq!(row_text(&grid, 1), "def");
 
-    // Shrink: the overlapping top-left content is kept and the cursor is
-    // clamped into the new bounds.
-    assert!(grid.resize(4, 2));
-    assert_eq!((grid.cols(), grid.rows()), (4, 2));
-    assert_eq!(row_text(&grid, 0), "abc");
-    assert_eq!(row_text(&grid, 1), "def");
-    assert!(grid.cursor_col() < 4 && grid.cursor_row() < 2);
+    // The row above the cursor's goes to the scrollback rather than being
+    // dropped, and growing takes it back.
+    assert!(grid.resize(4, 1));
+    assert_eq!((grid.cols(), grid.rows()), (4, 1));
+    assert_eq!(row_text(&grid, 0), "def");
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (3, 0));
+    assert_eq!(grid.scrollback_len(), 1);
 
-    // Grow: the preserved content stays put and the newly exposed row is blank.
     assert!(grid.resize(8, 4));
     assert_eq!((grid.cols(), grid.rows()), (8, 4));
     assert_eq!(row_text(&grid, 0), "abc");
     assert_eq!(row_text(&grid, 1), "def");
     assert_eq!(row_text(&grid, 3), "");
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (3, 1));
+    assert_eq!(grid.scrollback_len(), 0);
 
     // A degenerate, oversized, or no-op resize changes nothing (fail closed).
     assert!(!grid.resize(0, 4));
@@ -148,7 +168,7 @@ fn grid_resize_preserves_top_left_and_clamps_cursor() {
 
 #[test]
 fn a_bell_is_heard_once_however_often_it_rang_and_never_drawn() {
-    let mut term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
+    let mut term = terminal(20, 3);
     assert!(!term.take_bell());
     term.feed(b"a\x07b\x07\x07");
     assert_eq!(row_text(term.grid(), 0), "ab", "the bell leaves no mark");
@@ -162,14 +182,18 @@ fn a_bell_is_heard_once_however_often_it_rang_and_never_drawn() {
 
 #[test]
 fn terminal_resize_reshapes_the_grid() {
-    let mut term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
+    let mut term = terminal(20, 3);
     term.feed(b"hi");
-    assert_eq!(term.grid().cols(), 20);
-    assert!(term.resize(40, 10));
+    term.resize(40, 10);
+    assert_eq!(term.grid().cols(), 20, "nothing moves until given");
+    assert_eq!(term.settle(), Reshaped::Took { cols: 40, rows: 10 });
     assert_eq!((term.grid().cols(), term.grid().rows()), (40, 10));
-    // The content survives the reshape; a no-op resize reports no change.
+    // The content survives the reshape; the size in force, or none asked for,
+    // is no change.
     assert_eq!(row_text(term.grid(), 0), "hi");
-    assert!(!term.resize(40, 10));
+    term.resize(40, 10);
+    assert_eq!(term.settle(), Reshaped::Unchanged);
+    assert_eq!(term.settle(), Reshaped::Unchanged);
 }
 
 #[test]
@@ -318,8 +342,12 @@ fn the_screen_model_passes_the_shared_conformance_script() {
     // The framebuffer console runs this same script, so the two screens a
     // program can be drawn on cannot disagree about where its output lands.
     let mut screen = ConformanceGrid {
-        grid: Grid::new(tairix_vt::conformance::COLS, tairix_vt::conformance::ROWS)
-            .expect("valid conformance size"),
+        grid: Grid::new(
+            tairix_vt::conformance::COLS,
+            tairix_vt::conformance::ROWS,
+            ROOM,
+        )
+        .expect("valid conformance size"),
     };
     if let Err(divergence) = tairix_vt::conformance::check(&mut screen) {
         panic!("screen conformance: {divergence:?}");
@@ -329,7 +357,7 @@ fn the_screen_model_passes_the_shared_conformance_script() {
 #[test]
 fn overwriting_either_half_of_a_wide_glyph_clears_the_other_half() {
     for col in [0, 1] {
-        let mut grid = Grid::new(4, 1).expect("valid size");
+        let mut grid = Grid::new(4, 1, ROOM).expect("valid size");
         grid.write_char('日');
         grid.move_to(col, 0);
         grid.write_char('x');
@@ -341,7 +369,7 @@ fn overwriting_either_half_of_a_wide_glyph_clears_the_other_half() {
 
 #[test]
 fn partial_erase_expands_to_clear_a_complete_wide_glyph() {
-    let mut grid = Grid::new(4, 1).expect("valid size");
+    let mut grid = Grid::new(4, 1, ROOM).expect("valid size");
     grid.write_char('日');
     grid.move_to(0, 0);
     grid.erase_in_line(tairix_vt::EraseMode::ToStart);
@@ -462,7 +490,7 @@ fn unrecognised_escape_and_high_bytes_are_dropped() {
 #[test]
 fn pump_applies_shell_output_to_the_screen() {
     let shell = QueueShell::with_output(&[b"hello"]);
-    let mut term = Terminal::new(20, 3, shell).expect("valid size");
+    let mut term = Terminal::new(20, 3, shell, ROOM).expect("valid size");
     let applied = term.pump().expect("read succeeds");
     assert_eq!(applied, 5);
     assert_eq!(row_text(term.grid(), 0), "hello");
@@ -471,7 +499,7 @@ fn pump_applies_shell_output_to_the_screen() {
 #[test]
 fn pump_with_no_output_changes_nothing() {
     let shell = QueueShell::default();
-    let mut term = Terminal::new(20, 3, shell).expect("valid size");
+    let mut term = Terminal::new(20, 3, shell, ROOM).expect("valid size");
     let applied = term.pump().expect("empty read succeeds");
     assert_eq!(applied, 0);
     assert_eq!(row_text(term.grid(), 0), "");
@@ -481,14 +509,14 @@ fn pump_with_no_output_changes_nothing() {
 fn pump_propagates_a_read_error_and_leaves_the_screen_unchanged() {
     let mut shell = QueueShell::with_output(&[b"after"]);
     shell.read_error = Some(Errno::NotFound);
-    let mut term = Terminal::new(20, 3, shell).expect("valid size");
+    let mut term = Terminal::new(20, 3, shell, ROOM).expect("valid size");
     assert_eq!(term.pump(), Err(Errno::NotFound));
     assert_eq!(row_text(term.grid(), 0), "");
 }
 
 #[test]
 fn send_forwards_input_to_the_shell() {
-    let mut term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
+    let mut term = terminal(20, 3);
     term.send_str("ls\n").expect("write succeeds");
     term.send(b"\x03").expect("write succeeds");
     // The model never echoes input to the screen.
@@ -509,7 +537,7 @@ fn send_propagates_a_write_error() {
         write_error: Some(Errno::PermissionDenied),
         ..QueueShell::default()
     };
-    let mut term = Terminal::new(20, 3, shell).expect("valid size");
+    let mut term = Terminal::new(20, 3, shell, ROOM).expect("valid size");
     assert_eq!(term.send_str("x"), Err(Errno::PermissionDenied));
 }
 
@@ -553,7 +581,7 @@ fn cell_rect(col: u32, row: u32, cols: u32, rows: u32) -> Rect {
 /// A `cols` × `rows` terminal and a screen sized exactly to it.
 fn grid_and_screen(cols: u16, rows: u16) -> (Terminal<QueueShell>, Screen) {
     let font = test_font();
-    let terminal = Terminal::new(cols, rows, QueueShell::default()).expect("valid size");
+    let terminal = terminal(cols, rows);
     let screen = Screen::new(
         font.cell_width() * u32::from(cols),
         font.line_height() * u32::from(rows),
@@ -565,7 +593,7 @@ fn grid_and_screen(cols: u16, rows: u16) -> (Terminal<QueueShell>, Screen) {
 #[test]
 fn render_produces_a_surface_of_the_viewport_size() {
     let shell = QueueShell::with_output(&[b"hi"]);
-    let mut term = Terminal::new(20, 3, shell).expect("valid size");
+    let mut term = Terminal::new(20, 3, shell, ROOM).expect("valid size");
     term.pump().expect("read succeeds");
     let theme = Theme::dark();
     let screen = painted_screen(term.grid(), &system_colors(&theme), 120, 40);
@@ -585,7 +613,7 @@ fn hebrew_glyphs_occupy_distinct_single_cells() {
 
 #[test]
 fn render_keeps_hebrew_ink_inside_each_coloured_cell() {
-    let mut term = Terminal::new(4, 1, QueueShell::default()).expect("valid size");
+    let mut term = terminal(4, 1);
     term.feed("\u{1B}[?25l\u{1B}[48;2;10;20;30mאבם".as_bytes());
     let theme = Theme::dark();
     let screen = painted_screen(term.grid(), &system_colors(&theme), 60, 28);
@@ -606,7 +634,7 @@ fn render_keeps_hebrew_ink_inside_each_coloured_cell() {
 
 #[test]
 fn render_keeps_wide_japanese_ink_over_a_coloured_background() {
-    let mut term = Terminal::new(3, 1, QueueShell::default()).expect("valid size");
+    let mut term = terminal(3, 1);
     term.feed("\u{1B}[?25l\u{1B}[48;2;10;20;30m日".as_bytes());
     let theme = Theme::dark();
     let screen = painted_screen(term.grid(), &system_colors(&theme), 45, 28);
@@ -624,7 +652,7 @@ fn render_keeps_wide_japanese_ink_over_a_coloured_background() {
 
 #[test]
 fn render_highlights_the_cursor_cell() {
-    let mut term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
+    let mut term = terminal(20, 3);
     term.feed(b"\x1b[H");
     let theme = Theme::dark();
     let screen = painted_screen(term.grid(), &system_colors(&theme), 120, 40);
@@ -640,7 +668,7 @@ fn render_highlights_the_cursor_cell() {
 
 #[test]
 fn render_handles_a_zero_sized_viewport_without_panicking() {
-    let term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
+    let term = terminal(20, 3);
     let theme = Theme::dark();
     // A zero-width viewport is degenerate but allocatable: it paints nothing.
     let screen = painted_screen(term.grid(), &system_colors(&theme), 0, 40);
@@ -846,7 +874,8 @@ fn a_resize_repaints_the_whole_new_surface() {
     let _ = screen.paint(term.grid(), &painted, font);
 
     assert!(screen.resize(font.cell_width() * 10, font.line_height() * 2));
-    let _ = term.resize(10, 2);
+    term.resize(10, 2);
+    assert_eq!(term.settle(), Reshaped::Took { cols: 10, rows: 2 });
 
     assert_eq!(
         screen.paint(term.grid(), &painted, font),
@@ -863,7 +892,8 @@ fn a_reshaped_grid_repaints_the_whole_window() {
     let (mut term, mut screen) = grid_and_screen(20, 3);
     let _ = screen.paint(term.grid(), &painted, test_font());
 
-    let _ = term.resize(3, 20);
+    term.resize(3, 20);
+    assert_eq!(term.settle(), Reshaped::Took { cols: 3, rows: 20 });
 
     assert_eq!(
         screen.paint(term.grid(), &painted, test_font()),
@@ -905,7 +935,7 @@ fn sgr_256_index_and_truecolour_reach_the_cells() {
 #[test]
 fn scroll_region_confines_scrolling_to_its_rows() {
     // Width 4 leaves a trailing blank column so filling a row never wraps.
-    let mut grid = Grid::new(4, 3).expect("valid size");
+    let mut grid = Grid::new(4, 3, ROOM).expect("valid size");
     put_row(&mut grid, 0, "aaa");
     put_row(&mut grid, 1, "bbb");
     put_row(&mut grid, 2, "ccc");
@@ -919,7 +949,7 @@ fn scroll_region_confines_scrolling_to_its_rows() {
 
 #[test]
 fn line_feed_at_the_bottom_margin_scrolls_only_the_region() {
-    let mut grid = Grid::new(4, 3).expect("valid size");
+    let mut grid = Grid::new(4, 3, ROOM).expect("valid size");
     put_row(&mut grid, 0, "aaa");
     put_row(&mut grid, 1, "bbb");
     put_row(&mut grid, 2, "ccc");
@@ -937,7 +967,7 @@ fn line_feed_at_the_bottom_margin_scrolls_only_the_region() {
 
 #[test]
 fn alternate_screen_saves_and_restores_the_main_screen() {
-    let mut term = Terminal::new(10, 2, QueueShell::default()).expect("valid size");
+    let mut term = terminal(10, 2);
     term.feed(b"main");
     term.feed(b"\x1b[?1049h");
     assert!(term.grid().on_alternate_screen());
@@ -952,7 +982,7 @@ fn alternate_screen_saves_and_restores_the_main_screen() {
 
 #[test]
 fn cursor_visibility_follows_the_show_hide_sequences() {
-    let mut term = Terminal::new(10, 2, QueueShell::default()).expect("valid size");
+    let mut term = terminal(10, 2);
     assert!(term.grid().cursor_visible());
     term.feed(b"\x1b[?25l");
     assert!(!term.grid().cursor_visible());
@@ -962,7 +992,7 @@ fn cursor_visibility_follows_the_show_hide_sequences() {
 
 #[test]
 fn hidden_cursor_is_not_painted() {
-    let mut term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
+    let mut term = terminal(20, 3);
     term.feed(b"\x1b[H\x1b[?25l");
     let theme = Theme::dark();
     let screen = painted_screen(term.grid(), &system_colors(&theme), 120, 40);
@@ -1250,4 +1280,470 @@ fn a_closed_windows_shell_is_reaped_on_its_own_exit_and_an_unwatched_one_on_any_
     );
     assert_eq!(gone, [unwatched, watched]);
     assert!(!ending.watches(40), "a reaped shell is let go");
+}
+
+#[test]
+fn a_reflow_rejoins_what_it_wrapped_and_a_round_trip_restores_it() {
+    let mut grid = render_bytes(10, 3, b"abcdefghijklmno");
+    assert!(grid.resize(4, 3));
+    // Fifteen glyphs at four columns are four rows, the first in the
+    // scrollback.
+    assert_eq!(grid.scrollback_len(), 1);
+    assert_eq!(row_text(&grid, 0), "efgh");
+    assert_eq!(row_text(&grid, 1), "ijkl");
+    assert_eq!(row_text(&grid, 2), "mno");
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (3, 2));
+
+    assert!(grid.resize(10, 3));
+    assert_eq!(grid.scrollback_len(), 0);
+    assert_eq!(row_text(&grid, 0), "abcdefghij");
+    assert_eq!(row_text(&grid, 1), "klmno");
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (5, 1));
+}
+
+#[test]
+fn a_wide_glyph_reflows_whole_without_the_padding_it_left() {
+    let mut grid = render_bytes(5, 2, "abcd世".as_bytes());
+    assert_eq!(glyph(&grid, 4, 0), ' ');
+    assert_eq!(glyph(&grid, 0, 1), '世');
+
+    assert!(grid.resize(10, 2));
+    assert_eq!(
+        glyph(&grid, 4, 0),
+        '世',
+        "the padding was never part of the line"
+    );
+    assert_eq!(glyph(&grid, 5, 0), tairix_vt::CONTINUATION);
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (6, 0));
+
+    assert!(grid.resize(5, 2));
+    assert_eq!(row_text(&grid, 0), "abcd");
+    assert_eq!(glyph(&grid, 0, 1), '世');
+    assert_eq!(glyph(&grid, 1, 1), tairix_vt::CONTINUATION);
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (2, 1));
+}
+
+#[test]
+fn a_reflow_keeps_an_owed_wrap_and_a_cursor_past_its_lines_end() {
+    let mut grid = render_bytes(4, 2, b"abcd");
+    assert!(grid.resize(8, 2));
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (4, 0));
+    assert!(grid.resize(4, 2));
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (3, 0));
+    grid.write_char('e');
+    assert_eq!(row_text(&grid, 1), "e", "the wrap was owed again, and paid");
+
+    let mut grid = render_bytes(10, 3, b"ab\x1b[6G");
+    assert!(grid.resize(4, 3));
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (1, 1));
+    assert!(grid.resize(10, 3));
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (5, 0));
+}
+
+#[test]
+fn the_alternate_screen_is_clipped_over_a_reflowed_main_screen() {
+    let mut grid = render_bytes(10, 2, b"abcdefghijkl\x1b[?1049h0123456789");
+    assert!(grid.resize(5, 2));
+    assert_eq!(row_text(&grid, 0), "01234");
+
+    let mut parser = Parser::new();
+    parser.feed(&mut grid, b"\x1b[?1049l");
+    assert_eq!(grid.scrollback_len(), 1);
+    assert_eq!(row_text(&grid, 0), "fghij");
+    assert_eq!(row_text(&grid, 1), "kl");
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (2, 1));
+}
+
+#[test]
+fn the_alternate_screen_gives_the_scrollback_nothing() {
+    let mut grid = render_bytes(10, 2, b"one\r\ntwo\r\nthree");
+    assert_eq!(grid.scrollback_len(), 1);
+    let mut parser = Parser::new();
+    parser.feed(&mut grid, b"\x1b[?1049ha\r\nb\r\nc\r\n\x1b[2J");
+    assert_eq!(grid.scrollback_len(), 0, "the view reaches none from it");
+    assert!(!grid.scroll_view(5));
+    parser.feed(&mut grid, b"\x1b[?1049l");
+    assert_eq!(grid.scrollback_len(), 1);
+}
+
+#[test]
+fn erasing_the_display_keeps_its_rows_and_erasing_the_saved_lines_forgets_them() {
+    let mut grid = render_bytes(10, 3, b"a\r\nb\x1b[2J");
+    assert_eq!(row_text(&grid, 0), "");
+    assert_eq!(
+        grid.scrollback_len(),
+        2,
+        "the rows down to the last one written"
+    );
+    assert!(grid.scroll_view(2));
+    assert_eq!(view_text(&grid, 0), "a");
+    assert_eq!(view_text(&grid, 1), "b");
+    assert_eq!(view_text(&grid, 2), "");
+
+    let mut parser = Parser::new();
+    parser.feed(&mut grid, b"\x1b[3J");
+    assert_eq!(grid.scrollback_len(), 0);
+    assert_eq!(grid.view_offset(), 0);
+}
+
+#[test]
+fn the_view_stays_on_its_lines_while_output_arrives() {
+    let mut term = terminal(10, 2);
+    term.feed(b"1\r\n2\r\n3\r\n4\r\n5");
+    assert!(term.scroll_view(2));
+    let shown = [view_text(term.grid(), 0), view_text(term.grid(), 1)];
+    assert_eq!(shown, ["2", "3"]);
+
+    term.feed(b"\r\n6\r\n7");
+    assert_eq!(term.grid().view_offset(), 4);
+    assert_eq!(
+        [view_text(term.grid(), 0), view_text(term.grid(), 1)],
+        shown
+    );
+
+    assert!(term.view_to_bottom());
+    assert_eq!(view_text(term.grid(), 1), "7");
+}
+
+#[test]
+fn scrolling_the_view_clamps_to_the_scrollback() {
+    let mut term = terminal(10, 2);
+    assert!(!term.scroll_view(1), "there is nothing to scroll back over");
+    term.feed(b"1\r\n2\r\n3\r\n4");
+    assert!(term.scroll_view(100));
+    assert_eq!(term.grid().view_offset(), 2);
+    assert!(!term.scroll_view(1));
+    assert!(term.scroll_view(-1));
+    assert_eq!(term.grid().view_offset(), 1);
+    assert!(term.scroll_view(i32::MIN));
+    assert_eq!(term.grid().view_offset(), 0);
+    assert!(!term.view_to_bottom());
+}
+
+#[test]
+fn the_view_shows_the_cursor_only_where_its_row_is() {
+    let mut term = terminal(10, 3);
+    term.feed(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\x1b[H");
+    assert_eq!(term.grid().view_cursor(), Some((0, 0)));
+    assert!(term.scroll_view(2));
+    assert_eq!(term.grid().view_cursor(), Some((0, 2)));
+    assert!(term.scroll_view(1));
+    assert_eq!(term.grid().view_cursor(), None);
+}
+
+#[test]
+fn a_view_on_the_oldest_line_moves_on_when_that_line_gives_way() {
+    let mut term = Terminal::new(10, 1, QueueShell::default(), 3).expect("valid size");
+    term.feed(b"1\r\n2\r\n3\r\n4\r\n5\r\n6");
+    assert_eq!(term.grid().scrollback_len(), 3);
+    assert!(term.scroll_view(3));
+    assert_eq!(view_text(term.grid(), 0), "3", "the oldest two gave way");
+
+    term.feed(b"\r\n7");
+    assert_eq!(term.grid().view_offset(), 3);
+    assert_eq!(view_text(term.grid(), 0), "4");
+
+    assert!(term.shed_for(PressureBand::Severe));
+    assert_eq!(
+        term.grid().scrollback_len(),
+        0,
+        "severe pressure takes it all"
+    );
+    assert_eq!(term.grid().view_offset(), 0);
+    term.feed(b"\r\n8");
+    assert_eq!(
+        term.grid().scrollback_len(),
+        0,
+        "and keeps none while it lasts"
+    );
+}
+
+/// The scrollback keeps the last lines of output up to the user's limit, 500
+/// unless they set another: a line wrapped across rows counts once, and a
+/// lowered limit lets the oldest go at once.
+#[test]
+fn the_scrollback_keeps_the_last_lines_up_to_the_users_limit() {
+    let lines = usize::from(crate::profile::Profile::default().scrollback_lines);
+    assert_eq!(lines, 500);
+    let mut term = Terminal::new(10, 1, QueueShell::default(), lines).expect("valid size");
+    let output = (0..600).fold(String::new(), |mut output, n| {
+        let _ = write!(output, "{n}\r\n");
+        output
+    });
+    term.feed(output.as_bytes());
+    assert_eq!(term.grid().scrollback_len(), 500);
+    assert!(term.scroll_view(500));
+    assert_eq!(
+        view_text(term.grid(), 0),
+        "100",
+        "the oldest hundred gave way"
+    );
+
+    let mut term = Terminal::new(4, 1, QueueShell::default(), 3).expect("valid size");
+    term.feed(b"abcdefghij\r\nk\r\nl\r\nm");
+    assert_eq!(
+        term.grid().scrollback_len(),
+        5,
+        "a line wrapped over three rows counts once among three"
+    );
+    assert!(term.set_scrollback_limit(1));
+    assert_eq!(term.grid().scrollback_len(), 1);
+    assert!(term.scroll_view(1));
+    assert_eq!(view_text(term.grid(), 0), "l");
+    assert!(!term.set_scrollback_limit(1), "nothing more to let go");
+}
+
+#[test]
+fn the_clear_command_hands_what_it_cleared_to_the_scrollback() {
+    let mut term = terminal(10, 3);
+    term.feed(b"1\r\n2\r\n3\r\n4");
+    assert!(term.scroll_view(1));
+    term.clear();
+    assert_eq!(row_text(term.grid(), 0), "");
+    assert_eq!((term.grid().cursor_col(), term.grid().cursor_row()), (0, 0));
+    assert_eq!(
+        term.grid().view_offset(),
+        0,
+        "the view returns to the live screen"
+    );
+    assert_eq!(term.grid().scrollback_len(), 4);
+    term.clear_scrollback();
+    assert_eq!(term.grid().scrollback_len(), 0);
+}
+
+#[test]
+fn a_view_scrolled_back_paints_as_a_whole_paint_of_it_would() {
+    let theme = Theme::dark();
+    let painted = system_colors(&theme);
+    let font = test_font();
+    let (mut term, mut screen) = grid_and_screen(12, 4);
+    term.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven");
+    let _ = screen.paint(term.grid(), &painted, font);
+    for delta in [2, 1, -3, 10, i32::MIN] {
+        term.scroll_view(delta);
+        let _ = screen.paint(term.grid(), &painted, font);
+        let whole = painted_screen(
+            term.grid(),
+            &painted,
+            screen.surface().width(),
+            screen.surface().height(),
+        );
+        assert_eq!(
+            screen.surface().pixels(),
+            whole.surface().pixels(),
+            "the retained screen diverged after scrolling {delta}"
+        );
+    }
+}
+
+#[test]
+fn a_view_scrolled_past_the_cursors_row_draws_no_cursor() {
+    let theme = Theme::dark();
+    let painted = system_colors(&theme);
+    let accent: Color = theme.palette().accent.into();
+    let mut term = terminal(20, 3);
+    term.feed(b"\r\n\r\n\r\n\r\n\r\n\x1b[H");
+    let top_left = |term: &Terminal<QueueShell>| {
+        painted_screen(term.grid(), &painted, 120, 40)
+            .surface()
+            .get(0, 0)
+            .map(tairix_raster::Pixel::unpremultiply)
+    };
+    assert_eq!(top_left(&term), Some(accent));
+    assert!(term.scroll_view(3));
+    assert_ne!(top_left(&term), Some(accent));
+}
+
+/// A wheel detent moves the view three lines back, a turn the other way
+/// brings it forward, and a turn short of a line is carried to the next.
+#[test]
+fn the_wheel_scrolls_the_view_three_lines_a_detent_and_carries_the_rest() {
+    use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
+    let mut term = terminal(10, 2);
+    term.feed(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
+    assert!(term.scroll_wheel(-SCROLL_UNITS_PER_DETENT));
+    assert_eq!(term.grid().view_offset(), 3);
+    assert!(term.scroll_wheel(SCROLL_UNITS_PER_DETENT));
+    assert_eq!(term.grid().view_offset(), 0);
+    // A sixth of a detent is half a line.
+    let sixth = -SCROLL_UNITS_PER_DETENT / 6;
+    assert!(!term.scroll_wheel(sixth), "short of a line moves nothing");
+    assert!(term.scroll_wheel(sixth), "but is carried");
+    assert_eq!(term.grid().view_offset(), 1);
+}
+
+/// Shift with Page Up, Page Down, Home and End moves the view; the same keys
+/// unshifted, or with another modifier held, are the shell's.
+#[test]
+fn the_scrolling_chords_move_the_view_and_leave_every_other_key_to_the_shell() {
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    let mut term = terminal(10, 4);
+    term.feed(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10");
+    let named = Key::Named;
+    assert_eq!(term.view_key(named(NamedKey::PageUp), shift), Some(true));
+    assert_eq!(term.grid().view_offset(), 3, "a screen less a line");
+    assert_eq!(term.view_key(named(NamedKey::Home), shift), Some(true));
+    assert_eq!(term.grid().view_offset(), term.grid().scrollback_len());
+    assert_eq!(term.view_key(named(NamedKey::PageDown), shift), Some(true));
+    assert_eq!(term.view_key(named(NamedKey::End), shift), Some(true));
+    assert_eq!(term.grid().view_offset(), 0);
+    assert_eq!(term.view_key(named(NamedKey::End), shift), Some(false));
+    for modifiers in [
+        Modifiers::default(),
+        Modifiers {
+            ctrl: true,
+            ..shift
+        },
+    ] {
+        assert_eq!(term.view_key(named(NamedKey::PageUp), modifiers), None);
+    }
+    assert_eq!(term.view_key(Key::Char('a'), shift), None);
+}
+
+/// What the user keeps is all working set: no pressure short of severe takes
+/// any, severe takes it all and none is kept while that lasts, and the band
+/// lifting lets it grow again. A limit of none keeps none.
+#[test]
+fn a_windows_scrollback_gives_way_only_to_severe_pressure() {
+    let mut term = Terminal::new(10, 1, QueueShell::default(), ROOM).expect("valid size");
+    term.feed(b"1\r\n2\r\n3\r\n4\r\n5\r\n6");
+    assert_eq!(term.grid().scrollback_len(), 5);
+    for band in [
+        PressureBand::Normal,
+        PressureBand::Mild,
+        PressureBand::Moderate,
+    ] {
+        assert!(!term.shed_for(band), "{band:?} takes none");
+    }
+    assert!(term.shed_for(PressureBand::Severe));
+    assert_eq!(term.grid().scrollback_len(), 0);
+    term.feed(b"\r\n7");
+    assert_eq!(term.grid().scrollback_len(), 0);
+    assert!(!term.shed_for(PressureBand::Normal));
+    term.feed(b"\r\n8");
+    assert_eq!(term.grid().scrollback_len(), 1, "and lifts with it");
+
+    let mut term = Terminal::new(10, 1, QueueShell::default(), 0).expect("valid size");
+    term.feed(b"1\r\n2");
+    assert_eq!(term.grid().scrollback_len(), 0);
+}
+
+/// What `clear` writes for the terminal this emulator advertises leaves
+/// nothing it erased to scroll back to, and with `-x` keeps the history, the
+/// erased screen with it.
+#[test]
+fn what_clear_writes_leaves_nothing_to_scroll_back_to() {
+    let caps = tairix_termcap::from_term(crate::TERM).capabilities();
+    let clear = tairix_clear::clear_bytes(&caps, false).expect("this terminal can clear");
+    let mut term = terminal(10, 3);
+    term.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nsecret");
+    assert_eq!(term.grid().scrollback_len(), 2);
+    term.feed(&clear);
+    assert_eq!(
+        term.grid().scrollback_len(),
+        0,
+        "the erased screen cannot be scrolled back to"
+    );
+    assert_eq!(row_text(term.grid(), 0), "");
+    assert_eq!((term.grid().cursor_col(), term.grid().cursor_row()), (0, 0));
+
+    let kept = tairix_clear::clear_bytes(&caps, true).expect("this terminal can clear");
+    let mut term = terminal(10, 3);
+    term.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nsecret");
+    term.feed(&kept);
+    assert_eq!(term.grid().scrollback_len(), 5, "-x keeps it all");
+}
+
+/// The trace: the rows `ED 2` gave the scrollback and a prompt written at the
+/// top. The erased screen counts in use to its full height, so a resize wider,
+/// narrower or shorter keeps it where it is rather than bringing them back.
+#[test]
+fn a_resize_after_an_erase_brings_no_erased_row_back() {
+    for (cols, rows) in [(11, 3), (9, 3), (10, 2)] {
+        let mut grid = render_bytes(10, 3, b"1\r\n2\r\n3\r\n4\x1b[H\x1b[2J$ ");
+        assert!(grid.resize(cols, rows));
+        assert_eq!(row_text(&grid, 0), "$", "at {cols}x{rows}");
+        assert_eq!(
+            (grid.cursor_col(), grid.cursor_row()),
+            (2, 0),
+            "at {cols}x{rows}"
+        );
+        assert_eq!(grid.scrollback_len(), 4, "at {cols}x{rows}");
+    }
+}
+
+/// The trace: a screen left blank by scrolling, the cursor homed. Its one row
+/// in use ends the screen whichever way it is resized, the lines above it
+/// coming back to fill it.
+#[test]
+fn a_blank_screen_ends_at_its_cursor_when_the_width_changes() {
+    let mut bytes = b"x\r\n".to_vec();
+    bytes.extend([b' '; 40]);
+    bytes.extend_from_slice(b"\r\n\r\n\r\n\x1b[H");
+    let mut grid = render_bytes(10, 3, &bytes);
+    assert!(grid.resize(40, 3));
+    assert_eq!(row_text(&grid, 0), "x");
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (0, 2));
+    assert_eq!(grid.scrollback_len(), 0);
+}
+
+/// A full-screen program on the alternate screen, which keeps no scrollback,
+/// is sent the scrolling chords; the view takes them again once it is gone.
+#[test]
+fn a_full_screen_program_is_sent_the_scrolling_chords() {
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    let named = Key::Named;
+    let mut term = terminal(10, 4);
+    term.feed(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\x1b[?1049h");
+    for key in [
+        NamedKey::PageUp,
+        NamedKey::PageDown,
+        NamedKey::Home,
+        NamedKey::End,
+    ] {
+        assert_eq!(term.view_key(named(key), shift), None, "{key:?}");
+    }
+    term.feed(b"\x1b[?1049l");
+    assert_eq!(term.view_key(named(NamedKey::PageUp), shift), Some(true));
+}
+
+/// A drag hands the screen many sizes before the window is painted: the paint
+/// gives it the last once, laying the scrollback out again only for a new
+/// width, and a size the grid refuses is not given, so the shell is never told
+/// it.
+#[test]
+fn a_burst_of_resizes_reflows_once_and_only_for_a_new_width() {
+    let mut term = terminal(20, 4);
+    term.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+    for (cols, rows) in [(18, 4), (12, 9), (30, 2), (25, 6)] {
+        term.resize(cols, rows);
+    }
+    assert_eq!(term.settle(), Reshaped::Took { cols: 25, rows: 6 });
+    assert_eq!(term.grid().relays(), 1, "one burst, one reflow");
+    for rows in [3, 8, 5] {
+        term.resize(25, rows);
+    }
+    assert_eq!(term.settle(), Reshaped::Took { cols: 25, rows: 5 });
+    assert_eq!(
+        term.grid().relays(),
+        1,
+        "a burst that keeps the width lays nothing out"
+    );
+    term.resize(40, 5);
+    term.resize(25, 5);
+    assert_eq!(
+        term.settle(),
+        Reshaped::Unchanged,
+        "a burst back to the size in force"
+    );
+    term.resize(MAX_DIMENSION + 1, 5);
+    assert_eq!(term.settle(), Reshaped::Refused);
+    assert_eq!((term.grid().cols(), term.grid().rows()), (25, 5));
+    assert_eq!(term.grid().relays(), 1);
 }

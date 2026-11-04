@@ -749,10 +749,7 @@ impl<'d> RtEntryReader<'d> {
                 Some(_) => None,
                 None => tairix_rt::Dir::open(directory.as_bytes()).ok(),
             };
-            let keeps = self.lent.or(opened.as_ref()).is_some_and(|dir| {
-                Errno::from_syscall(attr_read(dir.as_file(), &mut [0u8; acorn::ATTR_VALUE_MAX]))
-                    != Errno::NotSupported
-            });
+            let keeps = self.lent.or(opened.as_ref()).is_some_and(keeps_filetypes);
             self.current = Some((String::from(directory), opened, keeps));
         }
         let (_, opened, keeps) = self.current.as_ref()?;
@@ -761,6 +758,16 @@ impl<'d> RtEntryReader<'d> {
         }
         self.lent.or(opened.as_ref())
     }
+}
+
+/// Whether the volume `dir` is on records RISC OS file types: asked of the
+/// directory itself, a refusal of any kind but its having none being no proof
+/// it records none.
+#[cfg(feature = "rt")]
+#[must_use]
+pub fn keeps_filetypes(dir: &tairix_rt::Dir) -> bool {
+    Errno::from_syscall(attr_read(dir.as_file(), &mut [0u8; acorn::ATTR_VALUE_MAX]))
+        != Errno::NotSupported
 }
 
 /// `fs_attr_get` of the filetype through `handle` into `out`: the value's

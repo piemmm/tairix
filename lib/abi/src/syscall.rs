@@ -1647,9 +1647,12 @@ impl SyscallNumber {
     /// D4b) retracts the volume anyway, deliberately discarding the retained
     /// set with its own audit event; a **lost** detach forces a volume
     /// recorded lost and is a plain detach of any other. A network or
-    /// disk-image volume's owner may detach it; any other volume needs
-    /// `CAP_FS_MOUNT`, checked by the handler once it knows the volume. Every
-    /// detach decision is audited.
+    /// disk-image volume's owner may detach it, and the user at the seat — the
+    /// ordinary account whose login holds the primary seat — may plainly
+    /// detach a removable device's volume; any other detach needs
+    /// `CAP_FS_MOUNT`, checked by the handler once it knows the volume. A
+    /// parser sandbox is refused the call before any of that. Every detach
+    /// decision is audited.
     pub const VOLUME_DETACH: Self = Self(81);
 
     /// Grant the serving task of a call endpoint the right to map a shared
@@ -3234,6 +3237,18 @@ impl SyscallNumber {
     /// process is being killed, the call left posted.
     pub const CALL_AWAIT: Self = Self(167);
 
+    /// Title a published volume: write the label its filesystem records
+    /// (`plans/DISK-IMAGES.md` DI23).
+    ///
+    /// Arguments: a pointer to the encoded
+    /// [`crate::volume::VolumeRetitleRequest`] — the volume's identity and the
+    /// title — and its length, at most
+    /// [`crate::volume::VOLUME_RETITLE_MAX_LEN`]. The dispatcher checks no
+    /// capability: only the principal a disk image's volume was attached for
+    /// may retitle it, whatever authority anyone else holds, so the handler
+    /// decides once it knows the volume. Every decision is audited.
+    pub const VOLUME_RETITLE: Self = Self(168);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3552,6 +3567,7 @@ mod tests {
         assert_eq!(SyscallNumber::ARCHIVE_READ.as_u16(), 165);
         assert_eq!(SyscallNumber::ARCHIVE_WRITE.as_u16(), 166);
         assert_eq!(SyscallNumber::CALL_AWAIT.as_u16(), 167);
+        assert_eq!(SyscallNumber::VOLUME_RETITLE.as_u16(), 168);
     }
 
     #[test]

@@ -298,38 +298,6 @@ impl core::fmt::Display for OpenFailure {
     }
 }
 
-/// When a client draining its notify mailbox must read its stream's state
-/// back.
-///
-/// The service's notifications are best effort, and it drops one only when the
-/// mailbox is full. A dropped notification therefore leaves a full mailbox
-/// behind it, which wakes the client, and the drain that empties it takes at
-/// least a mailbox's worth — so that drain, and only that one, may have missed
-/// something, a stream's `Idle` or `DeviceLost` included.
-#[derive(Copy, Clone, Debug)]
-pub struct NotifyDrain {
-    capacity: usize,
-    taken: usize,
-}
-
-impl NotifyDrain {
-    /// A drain of a mailbox holding `capacity` notifications.
-    #[must_use]
-    pub const fn new(capacity: usize) -> Self {
-        Self { capacity, taken: 0 }
-    }
-
-    /// One notification was taken.
-    pub fn took(&mut self) {
-        self.taken = self.taken.saturating_add(1);
-    }
-
-    /// The mailbox is empty: whether the stream's state must be read back.
-    pub fn emptied(&mut self) -> bool {
-        core::mem::take(&mut self.taken) >= self.capacity
-    }
-}
-
 /// What one [`StreamClient::write_at`] moved.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub struct Written {
@@ -608,35 +576,22 @@ impl StreamClient {
     }
 
     /// Adopt the next notification waiting, never parking; `None` once the
-    /// mailbox is empty. A drain that may have lost one to a full mailbox
-    /// ([`NotifyDrain`]) ends instead with the stream's state read back from
-    /// the service, handed over as a `StateChanged` at the frame it changed
-    /// at.
+    /// mailbox is empty.
     ///
     /// # Errors
     ///
-    /// As [`Self::await_notify`], or the service's refusal to report.
+    /// As [`Self::await_notify`].
     pub fn take_notify<T: AudioTransport>(
         &mut self,
         transport: &mut T,
-        drain: &mut NotifyDrain,
     ) -> Result<Option<AudioNotify>, Errno> {
         let mut frame = [0u8; AUDIO_NOTIFY_LEN];
-        if let Some(length) = transport.try_notify(self.grant.notify_endpoint, &mut frame)? {
-            drain.took();
-            let notify = decode_notify(&frame, length)?;
-            self.adopt(notify);
-            return Ok(Some(notify));
-        }
-        if !drain.emptied() {
+        let Some(length) = transport.try_notify(self.grant.notify_endpoint, &mut frame)? else {
             return Ok(None);
-        }
-        let report = self.report(transport)?;
-        Ok(Some(AudioNotify::StateChanged {
-            stream_id: self.grant.stream_id,
-            state: report.state,
-            at: report.changed_at,
-        }))
+        };
+        let notify = decode_notify(&frame, length)?;
+        self.adopt(notify);
+        Ok(Some(notify))
     }
 
     /// Adopt a notification's state change, if it is this stream's.

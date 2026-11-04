@@ -290,9 +290,11 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// The volume's stable identity: a digest of what formatting fixes — the
-    /// type, the geometry, the creation date — and the name. AmigaDOS tells
-    /// volumes apart by name and creation date, as this does.
+    /// The volume's stable identity: a digest of what formatting fixes and
+    /// neither a write nor a retitle changes — the type, the geometry and the
+    /// root's creation date. AmigaDOS tells volumes apart by name and creation
+    /// date; the name is a retitle's to change, so this keeps to the date,
+    /// stamped to the fiftieth of a second.
     #[must_use]
     pub fn identity(&self) -> [u8; 16] {
         let mut created = [0u8; 12];
@@ -305,7 +307,6 @@ impl Layout {
                 &self.blocks.to_le_bytes(),
                 &self.root.to_le_bytes(),
                 &created,
-                self.name(),
             ],
         )
     }

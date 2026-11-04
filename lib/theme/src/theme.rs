@@ -633,6 +633,7 @@ fn common_motion() -> MotionTheme {
         160,  // pointer enlarge
         360,  // pointer restore
         1500, // progress sweep
+        220,  // drag gather
     ])
 }
 

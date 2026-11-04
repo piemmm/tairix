@@ -1109,9 +1109,9 @@ a whole reservation left the userland heap unable to shrink at all, and —
 because a refusal changed nothing — asking again on every free (D114). The reservation's page-rounded size is what the
 `AddressSpaceBytes` ceiling and the pinned-memory budget are charged at map
 time, so those bounds are enforced up front and the fault path re-checks no
-limit. The copy path stays fault-aware: `copy_in_user` offers a staging
-miss to `resolve_anon_fault` (after the file and stack resolvers) exactly as
-the hardware fault path does.
+limit. The copy path stays fault-aware: a kernel copy in either direction
+offers its miss to `resolve_anon_fault` (after the file, stack and compressed
+resolvers) exactly as the hardware fault path does.
 
 This is staged (`plans/SPAWN.md` SP5):
 
@@ -2186,28 +2186,27 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   exit reclaims resident pages through the live space's drop and the region
   records through the registry withdraw.
 - **The kernel copy path resolves misses too.** A syscall buffer inside an
-  untouched mapping works without pre-touching (`write(fd, mapped, n)`):
-  the copy walk reports the missing page's base
-  (`UaccessError::NotMapped { va }`), and the one fault-aware staging
-  helper (`KernelSyscallHandlers::copy_in_user`, used by every handler
-  that copies a user buffer in) offers exactly that page to the same
-  resolvers — the file resolver, then the stack-growth resolver (§7c),
-  over the same region/span tables and identities the hardware path
-  uses — releasing
-  the registry guard around each resolution and retrying under a budget
-  of one resolution per touched page (an unresolvable miss stays the
-  stable `BadAddress`). Copy-*out* is unchanged: file mappings are
-  read-only, so a write into one fails closed regardless. aarch64,
-  riscv64, and x86_64 all resolve faults today and pass their
-  `user_windows` file window at spawn; wasm32 has no user-fault source
-  and reserves nothing.
+  untouched mapping works without pre-touching, in either direction
+  (`write(fd, mapped, n)`, an answer into a fresh heap page): the copy walk
+  reports the missing page's base (`UaccessError::NotMapped { va }`), and
+  the one fault-aware copy (`KernelSyscallHandlers::copy_user`, under
+  `copy_in_user` and `copy_out_user`, which every handler that reaches user
+  memory uses) offers exactly that page to the same resolvers in the
+  hardware path's order — file, stack growth (§7c), the compressed tier,
+  then anonymous memory — releasing the registry guard around each
+  resolution and running the copy again under a budget of one resolution
+  per page it spans plus each buffer's two unaligned ends (an unresolvable
+  miss stays the stable `BadAddress`). A write into a file mapping still
+  fails closed: those mappings are read-only. aarch64, riscv64, and x86_64
+  all resolve faults today and pass their `user_windows` file window at
+  spawn; wasm32 has no user-fault source and reserves nothing.
 - **Tested.** `kernel/mem` `filemap` engine tests (fill/zero-tail/W^X/
   scrub-on-error, sparse release), `LiveSpace` file-region tests
   (reserve/fault/read-back/release, fail-closed coverage checks, drop
   reclaim), `kernel/core` handler + resolver tests (shape/fd/limit
   refusals, exact-match unmap, page read at the right file offset, EOF and
-  foreign-task refusal, benign-race fold), the `copy_in_user`
-  resolve-retry tests (miss offered + bounded, outside-region and
+  foreign-task refusal, benign-race fold), the `copy_in_user` and
+  `copy_out_user` resolve-retry tests (miss offered + bounded, outside-region and
   resident-page behaviour), the fault-kill audit test, per-port fault
   classification tests (aarch64 `is_write_data_abort`, riscv64
   `is_load_page_fault` / `is_store_page_fault`, x86_64

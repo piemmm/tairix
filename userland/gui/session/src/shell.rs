@@ -58,6 +58,7 @@ use tairix_icon::{
 use tairix_log::{EventId, Field, FieldValue, Level, Sink};
 use tairix_proglib::Catalog;
 use tairix_reclaim::PressureGauge;
+use tairix_taskbar::system::SETTINGS_BUNDLE;
 use tairix_taskbar::{
     arrival_sound, icon_cache, AppSlot, Edge, Raised, TaskbarConfig, TaskbarRenderer,
     TaskbarResponse, TransientNotification,
@@ -83,7 +84,7 @@ use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
 use crate::keyboard::{KeyInputChannel, KeyboardInputSource};
 use crate::menu::{resolve_chain_icons, MenuChain, SurfaceKind};
-use crate::notify::{is_settings_surface, producer_of, NotifySources};
+use crate::notify::{is_own_component, producer_of, NotifySources};
 use crate::presenter::TaskbarPresenter;
 use crate::session::DesktopSession;
 use crate::switchuser::park_within;
@@ -107,13 +108,14 @@ pub const DESKTOP_RESTYLED: EventId = EventId(20_017);
 /// matches on this constant rather than on a copy of its text.
 pub const DESKTOP_RESTYLED_MESSAGE: &str = "desktop restyled on screen";
 
-/// Event id of a request only the desktop's own Settings application may
-/// make — the lock, the notifying sources, a screensaver preview — refused to
-/// another caller.
-pub const SETTINGS_REQUEST_REFUSED: EventId = EventId(20_019);
+/// Event id of a request only one of the desktop's own components may make —
+/// Settings' lock, notifying sources and screensaver preview, the file
+/// manager's eject — refused to another caller.
+pub const COMPONENT_REQUEST_REFUSED: EventId = EventId(20_019);
 
-/// The exact message [`SETTINGS_REQUEST_REFUSED`] is emitted with.
-pub const SETTINGS_REQUEST_REFUSED_MESSAGE: &str = "request only Settings may make refused";
+/// The exact message [`COMPONENT_REQUEST_REFUSED`] is emitted with.
+pub const COMPONENT_REQUEST_REFUSED_MESSAGE: &str =
+    "request only a desktop component may make refused";
 
 /// Something the input path carries, with when the input it came from
 /// happened on the monotonic clock — as its device reported it, where it did:
@@ -623,8 +625,8 @@ impl DesktopShell {
     }
 
     /// Whether the pointer carries what the next frame moves: a window it
-    /// moves or resizes, or a drag's plate. Its cursor plane then moves with
-    /// that frame rather than ahead of it.
+    /// moves or resizes, or what a drag carries. Its cursor plane then moves
+    /// with that frame rather than ahead of it.
     #[must_use]
     pub fn pointer_carries(&self) -> bool {
         self.router.is_moving() || self.router.wm().resizing().is_some() || self.drag_active()
@@ -1340,6 +1342,7 @@ impl DesktopShell {
         }
         self.style = self.style.wrapping_add(1);
         self.present(compositor);
+        self.relay_drag(compositor);
         self.refresh_cursor(compositor);
         true
     }
@@ -1371,6 +1374,7 @@ impl DesktopShell {
         let changed = compositor.set_theme(self.session.active_theme().clone());
         if changed {
             self.style = self.style.wrapping_add(1);
+            self.relay_drag(compositor);
         }
         changed
     }
@@ -1546,6 +1550,7 @@ impl DesktopShell {
         let scale = compositor.scale();
         self.session.taskbar_mut().adopt_icon_artwork(landed, scale);
         self.present(compositor);
+        self.repaint_drag(compositor, landed);
     }
 
     /// Ask for the picture of every icon `desktop` shows, drawing nothing, so
@@ -1678,7 +1683,7 @@ impl DesktopShell {
     ) {
         let layout = self.desktop_layout(compositor, desktop);
         let mut cells = damage::sink();
-        desktop.mark_text(&layout, &mut cells);
+        desktop.text_landed(&layout, &mut cells);
         if !cells.is_empty() {
             self.present_desktop_area(compositor, desktop, &cells);
         }
@@ -1716,6 +1721,7 @@ impl DesktopShell {
         let backdrop = self.backdrop_colour(desktop.settings().backdrop);
         let theme = self.session.active_theme();
         let wallpaper = self.wallpaper.as_ref();
+        let ground = wallpaper.is_none().then_some(backdrop);
         let fade = &self.backdrop_fade;
         let cache = &mut self.artwork;
         let resolver = self.artwork_resolver.as_mut();
@@ -1732,7 +1738,7 @@ impl DesktopShell {
                 surface.with_clip(x, y, rect.width, rect.height, |surface| {
                     surface.fill_rect(0, 0, screen.width, screen.height, backdrop);
                     paint_ground(surface, wallpaper, fade);
-                    desktop.render(surface, &layout, scale, theme, &mut artwork, *rect);
+                    desktop.render(surface, &layout, scale, theme, &mut artwork, *rect, ground);
                 });
             }
         });
@@ -2443,25 +2449,40 @@ impl DesktopShell {
     }
 
     /// Whether `caller` is the desktop's own Settings application, recording
-    /// the refusal of `request` to any other caller: an application reaching
-    /// for what only Settings may do is a decision the audit trail keeps.
+    /// the refusal of `request` to any other caller.
     pub(crate) fn settings_only(
         &self,
         caller: Option<&AppIdentity>,
         request: &'static str,
     ) -> bool {
-        let settings = is_settings_surface(caller, self.own_app.as_ref());
-        if !settings {
+        self.component_only(caller, SETTINGS_BUNDLE, request)
+    }
+
+    /// Whether `caller` is the desktop's own component `bundle`, recording the
+    /// refusal of `request` to any other caller: an application reaching for
+    /// what only a component may do is a decision the audit trail keeps.
+    pub(crate) fn component_only(
+        &self,
+        caller: Option<&AppIdentity>,
+        bundle: &'static str,
+        request: &'static str,
+    ) -> bool {
+        let own = is_own_component(caller, self.own_app.as_ref(), bundle);
+        if !own {
             tairix_log::log(
                 self.audit,
                 &tairix_log::Event {
                     level: Level::Warn,
-                    id: SETTINGS_REQUEST_REFUSED,
-                    message: SETTINGS_REQUEST_REFUSED_MESSAGE,
+                    id: COMPONENT_REQUEST_REFUSED,
+                    message: COMPONENT_REQUEST_REFUSED_MESSAGE,
                     fields: &[
                         Field {
                             key: "request",
                             value: FieldValue::Str(request),
+                        },
+                        Field {
+                            key: "component",
+                            value: FieldValue::Str(bundle),
                         },
                         Field {
                             key: "caller",
@@ -2471,7 +2492,7 @@ impl DesktopShell {
                 },
             );
         }
-        settings
+        own
     }
 
     /// Relay a tray-signal summary from the attested Switchboard service to
@@ -3041,6 +3062,7 @@ impl DesktopShell {
         // A tip shown, moved, or taken down by this batch reaches the screen
         // with it, so the plate never lags the pointer that asked for it.
         self.present_tooltip(compositor);
+        self.settle_drag(compositor);
         // The hotspot follows pointer motion and the shape follows what is
         // under it (or the move cursor during a drag), so the desktop always
         // shows a live pointer.
@@ -3117,9 +3139,10 @@ impl DesktopShell {
     /// level-triggered — a pinch's scale is relative to where it began — so
     /// the newest of a run supersedes the rest; wheel turns are additive, so a
     /// run in one direction with the same modifiers held sums and a reversal
-    /// or a modifier change ends it. A run holds only over one window and one
-    /// kind of sample, and anything else ends it, so nothing an app must see
-    /// is dropped or reordered.
+    /// or a modifier change ends it. A run holds only over one window, or the
+    /// bare desktop, which reads the one pointer the seat holds, and one kind
+    /// of sample; anything else ends it, so nothing an app must see is
+    /// dropped or reordered.
     ///
     /// The batch settles its frame once, at the end. The next batch's owner
     /// lookup hit-tests the windows the taskbar presenter placed, so a surface
@@ -3283,11 +3306,11 @@ fn flatten_ground(picture: &Surface, colour: Color) -> Option<Surface> {
 }
 
 /// Fold `next` into `last` when the two are one continuing gesture over the
-/// same window — motion, resize and pinch updates by latest-wins, wheel turns
-/// by summing a
-/// run in one direction made with the same modifiers held, at the newest
-/// place — returning [`None`] once folded and `Some(next)` when it must be
-/// kept as its own outcome. [`DesktopShell::pump`] states the rules.
+/// same window or the bare desktop — motion, resize and pinch updates by
+/// latest-wins, wheel turns by summing a run in one direction made with the
+/// same modifiers held, at the newest place — returning [`None`] once folded
+/// and `Some(next)` when it must be kept as its own outcome.
+/// [`DesktopShell::pump`] states the rules.
 fn fold_outcome(last: &mut ShellOutcome, next: ShellOutcome) -> Option<ShellOutcome> {
     match (&mut *last, next) {
         (
@@ -3299,6 +3322,10 @@ fn fold_outcome(last: &mut ShellOutcome, next: ShellOutcome) -> Option<ShellOutc
             *last = moved;
             None
         }
+        (
+            ShellOutcome::WindowManager(InputResponse::DesktopPointerMoved),
+            ShellOutcome::WindowManager(InputResponse::DesktopPointerMoved),
+        ) => None,
         (
             ShellOutcome::WindowManager(InputResponse::Resized { window: into }),
             ShellOutcome::WindowManager(InputResponse::Resized { window }),

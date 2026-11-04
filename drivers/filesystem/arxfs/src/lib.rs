@@ -5868,6 +5868,9 @@ impl<B: Block> FilesystemStats for ARXFS<B> {
     }
 }
 
+/// The format records no title.
+impl<B: Block> tairix_abi::driver::filesystem::FilesystemLabel for ARXFS<B> {}
+
 impl<B: Block> FilesystemAttrsProvider for ARXFS<B> {
     /// `ARXFS` stores a per-inode attribute set as first-class metadata,
     /// so the mounted volume serves the `fs_attr_*` surface itself.

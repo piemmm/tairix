@@ -25,10 +25,10 @@ use tairix_abi::window_ipc::{
     AppMenuSymbol, AuthorisedOutcome, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape,
     DialogModality, DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget,
     HandOverDocument, HandOverOutcome, HandOverTarget, LayerDepth, MenuOutcome, MenuRefusal,
-    PaneName, PickPurpose, PointerAction, PreviewOutcome, PreviewSubject, SaveEndings, SystemTask,
+    PaneName, PickPurpose, PointerAction, PreviewOutcome, PreviewSubject, SaveFormats, SystemTask,
     TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX,
-    DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX, WINDOW_FOLDER_PICK_MAX,
-    WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
+    APP_MENU_MAX_TOTAL_ROWS, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX,
+    TOOLTIP_TEXT_MAX, WINDOW_FOLDER_PICK_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
@@ -42,10 +42,10 @@ use crate::client::{
 use crate::damage_in;
 use crate::desktop::Desktop;
 use crate::server::{
-    client_frame_budget_bytes, Activation, AlertOpen, CallerIdentity, ClientRegion, CursorSetName,
-    DialogSpec, DragConclusion, DragReport, EventSink, FrameHost, HandOverDesk, LayerSpec,
-    OpenEntry, PickedFile, PopupSpec, PreviewSize, ToolSpec, TransientSpec, WallpaperName,
-    WindowHost, WindowServer, WindowSizeState, WindowSizing, WINDOW_REPLY_MAX,
+    client_frame_budget_bytes, Activation, AlertOpen, AuthoriseFor, CallerIdentity, ClientRegion,
+    CursorSetName, DialogSpec, DragConclusion, DragReport, EventSink, FrameHost, HandOverDesk,
+    LayerSpec, OpenEntry, PickedFile, PopupSpec, PreviewSize, ToolSpec, TransientSpec,
+    WallpaperName, WindowHost, WindowServer, WindowSizeState, WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -339,7 +339,7 @@ struct RecordingHost {
     previews: Vec<String>,
     /// Every authorisation the engine passed on, and the refusal this host
     /// answers them with.
-    authorisations: Vec<(Option<AppIdentity>, u64, SystemTask)>,
+    authorisations: Vec<(Option<AppIdentity>, AuthoriseFor, SystemTask)>,
     refuse_authorise: Option<Errno>,
 }
 
@@ -794,11 +794,10 @@ impl WindowHost for RecordingHost {
     fn authorise_requested(
         &mut self,
         caller: Option<&AppIdentity>,
-        window_id: u64,
+        asker: AuthoriseFor,
         task: &SystemTask,
     ) -> Result<(), Errno> {
-        self.authorisations
-            .push((caller.copied(), window_id, *task));
+        self.authorisations.push((caller.copied(), asker, *task));
         if caller.is_none() {
             return Err(Errno::PermissionDenied);
         }
@@ -969,6 +968,8 @@ struct Loopback {
     holds_frames: bool,
     /// Every post ticket a client waited on, in order.
     awaited: alloc::vec::Vec<u64>,
+    /// How many times a client asked after a posted request's reply.
+    reaps: usize,
 }
 
 impl Loopback {
@@ -991,6 +992,7 @@ impl Loopback {
             lane: None,
             holds_frames: false,
             awaited: alloc::vec::Vec::new(),
+            reaps: 0,
         }))
     }
 
@@ -1020,10 +1022,21 @@ impl Loopback {
     /// Serve every posted request still waiting, oldest first, as the session
     /// reaches them.
     fn serve_posted(&mut self) {
-        while let Some((ticket, request)) = self.unserved.pop_front() {
-            let reply = self.serve_frame(&request);
-            self.answered.push((ticket, reply));
-        }
+        while self.serve_next().is_some() {}
+    }
+
+    /// Serve the posted requests waiting, oldest first, up to and including
+    /// `ticket`: the session reaches a client's requests in order.
+    fn serve_through(&mut self, ticket: u64) {
+        while self.serve_next().is_some_and(|served| served != ticket) {}
+    }
+
+    /// Serve the oldest posted request waiting, answering its ticket.
+    fn serve_next(&mut self) -> Option<u64> {
+        let (ticket, request) = self.unserved.pop_front()?;
+        let reply = self.serve_frame(&request);
+        self.answered.push((ticket, reply));
+        Some(ticket)
     }
 }
 
@@ -1110,6 +1123,7 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
 
     fn reap(&mut self, ticket: u64, reply: &mut [u8]) -> Result<Option<usize>, Errno> {
         let inner = &mut *self.borrow_mut();
+        inner.reaps += 1;
         let Some(index) = inner.answered.iter().position(|(at, _)| *at == ticket) else {
             return if inner.unserved.iter().any(|(at, _)| *at == ticket) {
                 Ok(None)
@@ -1127,8 +1141,9 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
         {
             let inner = &mut *self.borrow_mut();
             inner.awaited.push(ticket);
-            // A waited-on post is reached however busy the session is.
-            inner.serve_posted();
+            // A waited-on post is reached however busy the session is, after
+            // those posted before it and before any posted since.
+            inner.serve_through(ticket);
         }
         self.reap(ticket, reply)?.ok_or(Errno::NotFound)
     }
@@ -2927,8 +2942,8 @@ fn a_resize_or_a_release_drops_the_pending_frame() {
     assert!(loopback.borrow().host.presented.is_empty());
 }
 
-/// A frame the compositor cannot show is reported once, never retried on every
-/// desktop frame after, and what it changed is shown with the next present.
+/// A frame the compositor cannot show is reported once however often it is
+/// tried again, and what it changed is shown with the next frame that shows.
 #[test]
 fn a_frame_the_host_cannot_show_is_reported_once_and_owed_to_the_next() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
@@ -3086,6 +3101,203 @@ fn a_present_with_no_room_goes_as_a_call() {
     assert!(inner.awaited.is_empty());
     assert_eq!(inner.host.presented.len(), 1, "answered before it returned");
     assert_eq!(inner.host.cursors, [(window, CursorShape::Text)]);
+}
+
+/// A refused frame is tried again with the next frame the desktop composes,
+/// asking for none of its own, and is reported once until the window next
+/// shows one: a window whose first frame was refused would otherwise stay off
+/// screen until its application happened to present again.
+#[test]
+fn a_refused_frame_is_tried_again_with_the_next_desktop_frame() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    {
+        let inner = &mut *loopback.borrow_mut();
+        inner.holds_frames = true;
+        inner.host.refuse_frames = Some(Errno::OutOfMemory);
+    }
+    client.present(window, 0, full_damage()).expect("posted");
+    loopback.borrow_mut().latch();
+    client.present(window, 1, full_damage()).expect("posted");
+    loopback.borrow_mut().latch();
+    {
+        let inner = &mut *loopback.borrow_mut();
+        assert_eq!(inner.host.frames_refused, [(window, Errno::OutOfMemory)]);
+        assert!(
+            !inner.server.has_pending_frames(),
+            "a refused frame asks the desktop for no frame of its own"
+        );
+        inner.host.refuse_frames = None;
+    }
+    loopback.borrow_mut().latch();
+    assert_eq!(
+        loopback.borrow().host.presented.len(),
+        1,
+        "shown with the next frame, no present needed"
+    );
+
+    loopback.borrow_mut().host.refuse_frames = Some(Errno::OutOfMemory);
+    client.present(window, 0, full_damage()).expect("posted");
+    loopback.borrow_mut().latch();
+    assert_eq!(
+        loopback.borrow().host.frames_refused.len(),
+        2,
+        "refused again after showing, it is reported again"
+    );
+}
+
+/// A closed window's frame asks the desktop for no frame.
+#[test]
+fn a_closed_windows_frame_asks_for_no_desktop_frame() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_frames = true;
+    client.present(window, 0, full_damage()).expect("posted");
+    assert!(loopback.borrow().server.has_pending_frames());
+    client.close(window).expect("closed");
+    assert!(!loopback.borrow().server.has_pending_frames());
+}
+
+/// A resize drops the presents not yet sent for the region it replaces: the
+/// redraw held behind a present in flight names a frame of the old region, so
+/// sent after the resize it would show the new region unpainted, or be refused
+/// as damage the window no longer has.
+#[test]
+fn a_resize_drops_a_redraw_held_for_the_region_it_replaced() {
+    const SMALL: DisplayMode = DisplayMode {
+        width_px: 2,
+        height_px: 3,
+        stride_bytes: 8,
+        format: DisplayFormat::Bgra8888,
+    };
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * 24)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+    client.present(window, 0, full_damage()).expect("posted");
+    assert_eq!(client.answer_redraw(window), Ok(true), "held behind it");
+    client.resize(window, 8, 2, &SMALL).expect("posted");
+
+    loopback.borrow_mut().serve_posted();
+    client.reap_posted();
+    loopback.borrow_mut().serve_posted();
+    {
+        let host = &loopback.borrow().host;
+        assert_eq!(host.presented.len(), 1, "only the present made before it");
+        assert_eq!(host.resized.len(), 1);
+    }
+    assert_eq!(client.take_owed(), None, "and nothing was refused");
+}
+
+/// A resize while the window is hidden leaves it hidden: nobody can see it
+/// until the session asks for it again, so nothing is painted at the new size
+/// before then.
+#[test]
+fn a_resize_while_hidden_keeps_the_window_hidden() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    client.present(window, 0, full_damage()).expect("posted");
+    loopback.borrow_mut().server.release_frames(window);
+    let released = WindowEvent::ContentReleased { window_id: window };
+    let mut events = WindowEvents::new(QueueSource::new([released.to_le_bytes()]));
+    assert_eq!(events.try_wait(&mut client), Ok(Some(released)));
+
+    client.resize(window, 8, 2, &SURFACE).expect("posted");
+    assert!(client.is_hidden(window), "nobody can see it yet");
+}
+
+/// A re-attach refused for room leaves the window released and, once room is
+/// made, asks for its paint again: a window the session never sized has no
+/// size to deliver back in its place.
+#[test]
+fn a_reattach_refused_for_room_asks_for_the_paint_again() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    client.present(window, 0, full_damage()).expect("posted");
+    loopback.borrow_mut().server.release_frames(window);
+    let released = WindowEvent::ContentReleased { window_id: window };
+    let asked = WindowEvent::RedrawRequested { window_id: window };
+    let mut events = WindowEvents::new(QueueSource::new([
+        released.to_le_bytes(),
+        asked.to_le_bytes(),
+    ]));
+    assert_eq!(events.try_wait(&mut client), Ok(Some(released)));
+    assert_eq!(events.try_wait(&mut client), Ok(Some(asked)));
+    {
+        let mut inner = loopback.borrow_mut();
+        inner.holds_posts = true;
+        inner.lane = Some(1);
+    }
+    client
+        .set_cursor(window, CursorShape::Text)
+        .expect("fills the lane");
+    assert_eq!(
+        client.resize(window, 8, 2, &SURFACE),
+        Err(Errno::WouldBlock)
+    );
+    assert!(client.content_released(window), "still released");
+    assert_eq!(
+        events.try_wait(&mut client),
+        Ok(None),
+        "nothing answered yet"
+    );
+
+    loopback.borrow_mut().serve_posted();
+    assert_eq!(
+        events.try_wait(&mut client),
+        Ok(Some(asked)),
+        "its paint is asked for again once room is made"
+    );
+}
+
+/// A frame is drawn only once the window's previous present is answered —
+/// until then the session may still read it — and a re-mapped ring starts
+/// again from its first frame.
+#[cfg(feature = "rt")]
+#[test]
+fn a_frame_is_drawn_only_once_the_previous_present_is_answered() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+    let mut ring = crate::frames::FrameRing::new(&SURFACE);
+    let mut drawn = Vec::new();
+    for remapped in [false, true, false] {
+        if remapped {
+            ring.reset(&SURFACE);
+        }
+        ring.present(&mut client, window, full_damage(), |index, _| {
+            drawn.push((index, loopback.borrow().unserved.len()));
+            Ok(())
+        })
+        .expect("presented");
+    }
+    assert_eq!(
+        drawn,
+        [(0, 0), (0, 0), (1, 0)],
+        "each frame drawn with nothing in flight, a re-mapped ring from its first"
+    );
+}
+
+/// Waiting for a window's present reaps nothing else: each present is awaited
+/// by its own answer, so a window with none in flight costs no call.
+#[test]
+fn awaiting_a_present_reaps_nothing_else() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+    client
+        .set_cursor(window, CursorShape::Text)
+        .expect("posted");
+    let reaps = loopback.borrow().reaps;
+    client.await_present(window);
+    client.present(window, 0, full_damage()).expect("posted");
+    assert_eq!(loopback.borrow().reaps, reaps, "nothing was reaped");
 }
 
 /// No per-input request waits on the session: each is posted and answered
@@ -3717,21 +3929,27 @@ fn an_authorisation_reaches_the_host_and_concludes_once() {
     let window = settings_window(&loopback, &mut client);
     let mut sink = QueueSink::default();
 
-    assert_eq!(client.authorise(window, &configure_task()), Ok(()));
+    assert_eq!(client.authorise(Some(window), &configure_task()), Ok(()));
     assert_eq!(
         loopback.borrow().host.authorisations,
-        alloc::vec![(Some(settings_app()), window, configure_task())]
+        alloc::vec![(
+            Some(settings_app()),
+            AuthoriseFor::Window(window),
+            configure_task()
+        )]
     );
     assert_eq!(
-        client.authorise(window, &SystemTask::ShowAccounts),
+        client.authorise(Some(window), &SystemTask::ShowAccounts),
         Err(Errno::AlreadyExists),
         "one pends per window"
     );
     let conclude = |sink: &mut QueueSink, outcome| {
-        loopback
-            .borrow_mut()
-            .server
-            .conclude_authorisation(sink, window, outcome, Vec::new())
+        loopback.borrow_mut().server.conclude_authorisation(
+            sink,
+            AuthoriseFor::Window(window),
+            outcome,
+            Vec::new(),
+        )
     };
     assert_eq!(
         conclude(&mut sink, AuthorisedOutcome::Ran { exit_code: 0 }),
@@ -3747,9 +3965,131 @@ fn an_authorisation_reaches_the_host_and_concludes_once() {
         alloc::vec![AuthorisedOutcome::Ran { exit_code: 0 }]
     );
     assert_eq!(
-        client.authorise(window, &SystemTask::SetClock),
+        client.authorise(Some(window), &SystemTask::SetClock),
         Ok(()),
         "a fresh one is accepted once the last concluded"
+    );
+}
+
+/// An application with no window asks from its icon-bar slot: only one it
+/// declared, one at a time, answered on its bar route with no window named,
+/// with what a captured task printed its to take once, and nothing left of
+/// it once the application exits.
+#[test]
+fn a_slot_authorisation_is_answered_on_the_bar_route() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, settings_app())];
+    let mut sink = QueueSink::default();
+    let task = SystemTask::ShowAccounts;
+
+    assert_eq!(
+        client.authorise(None, &task),
+        Err(Errno::NotFound),
+        "no slot was declared"
+    );
+    assert!(loopback.borrow().host.authorisations.is_empty());
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_B))
+        .expect("declared");
+    assert_eq!(client.authorise(None, &task), Ok(()));
+    let slot = AuthoriseFor::Slot(proc_id(0xA1));
+    assert_eq!(
+        loopback.borrow().host.authorisations,
+        alloc::vec![(Some(settings_app()), slot, task)]
+    );
+    assert_eq!(
+        client.authorise(None, &task),
+        Err(Errno::AlreadyExists),
+        "one pends per slot"
+    );
+    let listing = b"alice 1000\n".to_vec();
+    let captured = AuthorisedOutcome::Captured {
+        exit_code: 0,
+        len: u32::try_from(listing.len()).expect("short"),
+    };
+    let conclude = |sink: &mut QueueSink, asker, outcome, output: Vec<u8>| {
+        loopback
+            .borrow_mut()
+            .server
+            .conclude_authorisation(sink, asker, outcome, output)
+    };
+    assert_eq!(
+        conclude(
+            &mut sink,
+            AuthoriseFor::Slot(proc_id(0xB2)),
+            AuthorisedOutcome::Declined,
+            Vec::new()
+        ),
+        Err(Errno::NotFound),
+        "a slot no one declared"
+    );
+    assert_eq!(conclude(&mut sink, slot, captured, listing.clone()), Ok(()));
+    assert_eq!(
+        conclude(&mut sink, slot, AuthorisedOutcome::Declined, Vec::new()),
+        Err(Errno::OutOfRange),
+        "it concluded once"
+    );
+    assert_eq!(
+        sink.delivered,
+        alloc::vec![(
+            EVENTS_B,
+            WindowEvent::Authorised {
+                window_id: None,
+                outcome: captured,
+            }
+            .to_le_bytes()
+        )]
+    );
+    assert_eq!(client.take_authorised_output(None), Ok(listing));
+    assert_eq!(
+        client.take_authorised_output(None),
+        Err(Errno::NotFound),
+        "one-shot"
+    );
+
+    assert_eq!(client.authorise(None, &task), Ok(()));
+    {
+        let inner = &mut *loopback.borrow_mut();
+        inner.server.client_exited(&mut inner.host, proc_id(0xA1));
+    }
+    assert_eq!(
+        loopback.borrow_mut().server.conclude_authorisation(
+            &mut sink,
+            slot,
+            AuthorisedOutcome::Declined,
+            Vec::new()
+        ),
+        Err(Errno::NotFound),
+        "nothing is owed to an application that has gone"
+    );
+}
+
+/// A window numbered zero names no window: asking for one, or for what its
+/// task printed, is refused before anything is sent, rather than read as the
+/// icon-bar slot the wire spells that way.
+///
+/// Regression: `Some(0)` went out as the slot's zero and asked for the slot.
+#[test]
+fn window_zero_is_refused_rather_than_taken_for_the_slot() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, settings_app())];
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_B))
+        .expect("declared");
+
+    assert_eq!(
+        client.authorise(Some(0), &SystemTask::ShowAccounts),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(
+        client.take_authorised_output(Some(0)),
+        Err(Errno::OutOfRange)
+    );
+    assert!(
+        loopback.borrow().host.authorisations.is_empty(),
+        "no slot was asked for"
     );
 }
 
@@ -3764,7 +4104,7 @@ fn an_authorisation_is_refused_whole_for_a_foreign_window_or_a_refused_prompt() 
 
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.authorise(window, &configure_task()),
+        client.authorise(Some(window), &configure_task()),
         Err(Errno::NotFound)
     );
     loopback.borrow_mut().ticket = TICKET_A;
@@ -3772,13 +4112,13 @@ fn an_authorisation_is_refused_whole_for_a_foreign_window_or_a_refused_prompt() 
 
     loopback.borrow_mut().host.refuse_authorise = Some(Errno::SeatBusy);
     assert_eq!(
-        client.authorise(window, &configure_task()),
+        client.authorise(Some(window), &configure_task()),
         Err(Errno::SeatBusy)
     );
     assert_eq!(
         loopback.borrow_mut().server.conclude_authorisation(
             &mut sink,
-            window,
+            AuthoriseFor::Window(window),
             AuthorisedOutcome::Declined,
             Vec::new()
         ),
@@ -3803,18 +4143,20 @@ fn a_captured_output_is_the_owners_to_take_once() {
     };
 
     assert_eq!(
-        client.take_authorised_output(window),
+        client.take_authorised_output(Some(window)),
         Err(Errno::NotFound),
         "nothing was captured"
     );
     client
-        .authorise(window, &SystemTask::ShowAccounts)
+        .authorise(Some(window), &SystemTask::ShowAccounts)
         .expect("accepted");
     let mut conclude = |outcome, output: Vec<u8>| {
-        loopback
-            .borrow_mut()
-            .server
-            .conclude_authorisation(&mut sink, window, outcome, output)
+        loopback.borrow_mut().server.conclude_authorisation(
+            &mut sink,
+            AuthoriseFor::Window(window),
+            outcome,
+            output,
+        )
     };
     assert_eq!(
         conclude(captured, b"short".to_vec()),
@@ -3828,14 +4170,14 @@ fn a_captured_output_is_the_owners_to_take_once() {
 
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.take_authorised_output(window),
+        client.take_authorised_output(Some(window)),
         Err(Errno::NotFound),
         "another client cannot read what this window was shown"
     );
     loopback.borrow_mut().ticket = TICKET_A;
-    assert_eq!(client.take_authorised_output(window), Ok(listing));
+    assert_eq!(client.take_authorised_output(Some(window)), Ok(listing));
     assert_eq!(
-        client.take_authorised_output(window),
+        client.take_authorised_output(Some(window)),
         Err(Errno::NotFound),
         "one-shot"
     );
@@ -3849,14 +4191,14 @@ fn an_authorised_event_is_not_delivered_as_any_other() {
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = settings_window(&loopback, &mut client);
     client
-        .authorise(window, &SystemTask::SetClock)
+        .authorise(Some(window), &SystemTask::SetClock)
         .expect("accepted");
     let mut sink = QueueSink::default();
     assert_eq!(
         loopback.borrow_mut().server.deliver_event(
             &mut sink,
             &WindowEvent::Authorised {
-                window_id: window,
+                window_id: Some(window),
                 outcome: AuthorisedOutcome::Launched,
             }
         ),
@@ -3872,12 +4214,12 @@ fn an_authorisation_from_no_application_is_refused_by_the_host() {
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a window");
     assert_eq!(
-        client.authorise(window, &configure_task()),
+        client.authorise(Some(window), &configure_task()),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(
         loopback.borrow().host.authorisations,
-        alloc::vec![(None, window, configure_task())]
+        alloc::vec![(None, AuthoriseFor::Window(window), configure_task())]
     );
 }
 
@@ -4152,7 +4494,7 @@ fn pick_file_is_owner_bound_single_pending_and_concluded_by_delivery() {
         Ok(WindowEvent::FilePicked {
             window_id: window,
             handle: 9,
-            writable: false
+            writable: false,
         })
     );
     // Exactly one conclusion follows each acceptance: a second one is
@@ -4163,7 +4505,7 @@ fn pick_file_is_owner_bound_single_pending_and_concluded_by_delivery() {
     );
     let save = PickPurpose::Save {
         suggested: DocumentName::new("Untitled.txt").expect("a valid name"),
-        endings: SaveEndings::ANY,
+        formats: SaveFormats::ANY,
     };
     client
         .pick_file(window, save)
@@ -4228,7 +4570,7 @@ fn the_chosen_name_is_the_owners_to_take_once() {
         Some(Ok(WindowEvent::FilePicked {
             window_id: window,
             handle: 10,
-            writable: true
+            writable: true,
         })),
         "the owner learns it may write what it was handed"
     );
@@ -4363,6 +4705,10 @@ fn one_file() -> DragItems {
         DocumentName::new("notes.txt").expect("a valid name"),
         1,
         true,
+        [tairix_abi::window_ipc::DragPicture {
+            icon: tairix_abi::window_ipc::IconAsset::new("text").expect("a valid asset id"),
+            from: None,
+        }],
     )
     .expect("one openable file")
 }
@@ -5343,6 +5689,91 @@ fn a_host_with_no_menu_service_refuses_an_open() {
     );
 }
 
+/// An icon-bar row's committed text is held for that application and that
+/// row alone, answered once, and replaced by the row's next commit; two rows
+/// committed one after the other never answer for each other.
+#[test]
+fn committed_app_bar_text_is_held_per_row_and_taken_once() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let row = |raw| AppMenuItemId::new(raw).expect("a valid id");
+    let record = |item, text: &str| {
+        loopback
+            .borrow_mut()
+            .server
+            .record_app_bar_text(proc_id(0xA1), item, 0, text)
+    };
+    assert_eq!(
+        record(row(4), "Disc"),
+        Err(Errno::NotFound),
+        "no presence, nothing to hold for"
+    );
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+    let over = "n".repeat(APP_MENU_ENTRY_MAX + 1);
+    assert_eq!(record(row(4), &over), Err(Errno::LengthOutOfRange));
+    record(row(4), "First").expect("held");
+    record(row(4), "Archive").expect("the row's next commit replaces it");
+    record(row(5), "Photos").expect("another row holds its own");
+    assert_eq!(client.take_app_bar_text(row(9), 0), Ok(None));
+    assert_eq!(
+        client.take_app_bar_text(row(5), 0),
+        Ok(Some(String::from("Photos")))
+    );
+    assert_eq!(
+        client.take_app_bar_text(row(4), 0),
+        Ok(Some(String::from("Archive")))
+    );
+    assert_eq!(client.take_app_bar_text(row(4), 0), Ok(None), "taken once");
+
+    record(row(6), "Kept").expect("held");
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.take_app_bar_text(row(6), 0),
+        Ok(None),
+        "another application reads none of it"
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+    for raw in 100..100 + APP_MENU_MAX_TOTAL_ROWS {
+        let raw = u16::try_from(raw).expect("small");
+        let _ = record(row(raw), "x");
+    }
+    assert_eq!(
+        record(row(999), "one too many"),
+        Err(Errno::LimitExceeded),
+        "bounded by the rows a declaration carries"
+    );
+    record(row(6), "replaced").expect("a held row is replaced at the bound");
+}
+
+/// A row's held text answers only a take naming the revision it was committed
+/// under, so an answer from an earlier declaration's menu never collects a
+/// later commit; the commit stays held for the take that names it.
+#[test]
+fn committed_app_bar_text_answers_only_its_own_revision() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let row = AppMenuItemId::new(4).expect("a valid id");
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+    loopback
+        .borrow_mut()
+        .server
+        .record_app_bar_text(proc_id(0xA1), row, 2, "Archive")
+        .expect("held");
+    assert_eq!(
+        client.take_app_bar_text(row, 1),
+        Ok(None),
+        "a take naming another revision collects nothing"
+    );
+    assert_eq!(
+        client.take_app_bar_text(row, 2),
+        Ok(Some(String::from("Archive")))
+    );
+}
+
 /// The declaration a test application makes: it handles the click and
 /// offers one chooseable row plus the session-rendered information row.
 fn sample_app_bar(endpoint: u64) -> AppBar {
@@ -5358,6 +5789,7 @@ fn sample_app_bar(endpoint: u64) -> AppBar {
         event_endpoint: endpoint,
         click: AppBarClick::Open,
         menu,
+        revision: 0,
     }
 }
 
@@ -5436,6 +5868,7 @@ fn an_icon_bar_declaration_reaches_the_host_and_routes_its_events() {
         WindowEvent::AppBarDefault,
         WindowEvent::AppBarMenu {
             item: AppMenuItemId::new(1).expect("a valid id"),
+            revision: 0,
         },
     ] {
         loopback
@@ -5451,7 +5884,8 @@ fn an_icon_bar_declaration_reaches_the_host_and_routes_its_events() {
             (
                 EVENTS_A,
                 WindowEvent::AppBarMenu {
-                    item: AppMenuItemId::new(1).expect("a valid id")
+                    item: AppMenuItemId::new(1).expect("a valid id"),
+                    revision: 0,
                 }
                 .to_le_bytes()
             )
@@ -6844,6 +7278,7 @@ fn a_window_is_raised_on_request_only_under_an_activation_the_engine_minted() {
 
     deliver_app(&WindowEvent::AppBarMenu {
         item: AppMenuItemId::new(1).expect("a valid id"),
+        revision: 0,
     });
     loopback
         .borrow_mut()

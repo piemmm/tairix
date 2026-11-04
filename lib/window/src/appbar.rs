@@ -65,7 +65,9 @@ pub const DESKTOP_ROLE_SWITCH: &str = "--desktop";
 /// The menu is always the information row, then `rows`, then a rule and
 /// *Quit*. `endpoint` is the application's own event mailbox, where the
 /// session delivers the chosen row; `click` is what a primary press on the
-/// slot does ([`AppBarClick`]).
+/// slot does ([`AppBarClick`]). The declaration's [`AppBar::revision`] is
+/// zero: an application whose row ids change meaning from one declaration to
+/// the next sets its own.
 ///
 /// # Errors
 ///
@@ -104,6 +106,7 @@ pub fn declaration(
         event_endpoint: endpoint,
         click,
         menu,
+        revision: 0,
     })
 }
 

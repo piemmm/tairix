@@ -28,6 +28,12 @@ workspace = true
 # hardware-tree node/resource vocabulary, and the `Errno`/`DriverError` types
 # it fails closed with — one ABI definition.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The bounded store the notifications the mixer is owed are held in, so
+# holding them allocates nothing.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+# Structured logging: the count of notifications given up on, recorded each
+# time it doubles, and the serve loop's records over the `log_emit` syscall.
+tairix-log = { path = "../log", version = "=0.0.0" }
 
 # The serve loop is a freestanding user-space program path, so its runtime is
 # linked only for the bare-metal targets a driver binary is built for; on the
@@ -40,9 +46,6 @@ tairix-caps = { path = "../caps", version = "=0.0.0" }
 # / `ipc_send` / `shm_map` / `waitset_*` / `hw_emit_node` wrappers the serve
 # loop issues (one syscall trap).
 tairix-rt = { path = "../rt", version = "=0.0.0" }
-# Structured audit logging over the `log_emit` syscall: the one-shot
-# "device channel published, serving" readiness beacon.
-tairix-log = { path = "../log", version = "=0.0.0" }
 # The one vocabulary a driver ends with.
 tairix-drvrt = { path = "../drvrt", version = "=0.0.0" }
 # The DMA client a cyclic stream's production channel (`cyclic::LinkDma`)

@@ -168,7 +168,9 @@ clear, and so never reach a round at all — spinning hot while a peer blocks on
 work only it can do. Stating it once in `spin_until` is also what makes it
 testable, since the window it guards (a release landing between one CPU's
 compare-exchange and its next load) is not one a test can schedule from
-outside the lock.
+outside the lock. It is public so a waiter outside the crate that no
+scheduler can park — the call endpoint's `await_settle` — spins through the
+same round.
 
 The case that needs it is a cross-CPU TLB shootdown whose targets must
 acknowledge in software. x86_64 has no broadcast invalidation, so the

@@ -1,9 +1,11 @@
 //! The seat's drag carrier: items the user drags out of an application,
 //! carried by the desktop to where they are dropped.
 //!
-//! Only the first item's name and the count reach the session — what the
-//! plate says, and what an application slot's declared types are matched
-//! against. Over one of the dragging application's own windows, or over the
+//! What reaches the session of the items is what it shows of them and what an
+//! application slot's declared types are matched against: the pressed item's
+//! name, the ending its listing hides of it and the filetype its volume
+//! records, the count, and the class picture of each item shown with where it
+//! stood (`DragItems`). Over one of the dragging application's own windows, or over the
 //! desktop, the session reports where the drag is and shows on the pointer
 //! the verdict the application answers: copy, move, or nothing. The
 //! application keeps the items and performs every drop itself, so no path of
@@ -19,45 +21,38 @@
 //!
 //! A drag is the press that began it, carried on: it holds the pointer until
 //! that press comes up, and `Escape` or any other button ends it with nothing
-//! dropped. The plate naming what is carried floats beside the pointer the way
-//! the seat's tooltip plate does — input-transparent, above everything — so it
-//! can never become the thing it is dropped on.
+//! dropped. What is carried is shown under the pointer as its listing shows it
+//! (`stack`) — one item as its tile, held where it was pressed, several as a
+//! stack gathering from where they stood — in windows nothing can be dropped
+//! on, above everything, so it can never become the thing it is dropped on.
+
+mod stack;
 
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::window_ipc::{
     AlertSeverity, AlertSpec, DragItems, DropOperation, DropTarget, WindowEvent,
 };
 use tairix_abi::Errno;
 use tairix_browse::media::{name_endings, MediaType};
-use tairix_controls::{
-    paint_icon_slot, paint_surface_plate, plate_border, ArtworkTone, ChromeLayer, Tooltip,
-};
-use tairix_font::{BitmapFont, ELLIPSIS};
-use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::IconKind;
-use tairix_theme::{CursorKind, TextRole, Theme};
+use tairix_browse::render::Tiles;
+use tairix_controls::{ControlState, SelectionState};
+use tairix_geometry::{Point, Rect};
+use tairix_icon::{IconKind, Landed};
+use tairix_theme::CursorKind;
 use tairix_util::utf8::shown;
 use tairix_window::DragConclusion;
-use tairix_wm::{
-    Compositor, Corners, InputEvent, Key, NamedKey, PointerButton, PointerCatch, Surface, WindowId,
-};
+use tairix_wm::{Compositor, InputEvent, Key, NamedKey, PointerButton, WindowId};
 
 use crate::shell::DesktopShell;
+use crate::switchuser::park_within;
 
-/// How far the plate sits from the pointer's hotspot, right and down, in
-/// *logical* pixels: clear of the cursor it follows.
-const PLATE_OFFSET: u32 = 14;
-
-/// The side of the document picture a save's plate carries, in logical
-/// pixels.
-const SAVE_PLATE_ICON: u32 = 32;
-
-/// The widest a save's plate shows the document's name, in logical pixels.
-const SAVE_PLATE_NAME_MAX: u32 = 240;
+pub use stack::PictureGrab;
+use stack::{Look, Stack};
 
 /// How a carried drag ended.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -110,13 +105,15 @@ pub enum SaveDrop {
     },
 }
 
-/// The document a save drag carries: what its plate shows.
+/// The document a save drag carries: what it is shown as.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SavedDocument {
     /// The name it is saved under.
     pub name: String,
     /// Its format's picture.
     pub icon: IconKind,
+    /// Where on its picture the press that carried it out held it.
+    pub grab: PictureGrab,
 }
 
 /// A save offered to the window under the pointer, at a point in it.
@@ -507,8 +504,8 @@ enum Cargo {
 #[derive(Debug)]
 struct Carried {
     cargo: Cargo,
-    /// The compositor window of the plate naming what is carried.
-    plate: Option<WindowId>,
+    /// What is shown of what is carried, under the pointer.
+    stack: Stack,
     /// What the pointer is over.
     over: DragSurface,
     /// The last report's number.
@@ -607,18 +604,16 @@ impl DesktopShell {
         }
         self.yield_pointer(compositor);
         let at = self.router().pointer();
-        let plate = place_plate(
-            None,
-            &cargo,
-            at,
-            self.session().floating_theme(),
-            compositor,
-        );
+        let source = compositor.window(wm).map(tairix_wm::Window::client_rect);
+        let scale = compositor.scale();
+        let (theme, mut artwork) = self.theme_and_artwork();
+        let mut stack = shown_as(&cargo, at, source, (scale, theme));
+        stack.paint(compositor, theme, &mut artwork);
         let shift = self.modifiers().shift;
         let issued = self.drag.issued;
         self.drag.carried = Some(Carried {
             cargo,
-            plate,
+            stack,
             over: DragSurface::Nothing,
             serial: issued,
             place_serial: issued.wrapping_add(1),
@@ -634,10 +629,10 @@ impl DesktopShell {
 
     /// Carry the drag through one pointer `event`.
     ///
-    /// A motion moves the plate and answers where to, for the caller to
-    /// resolve what is there ([`drag_over`](Self::drag_over)); the press
-    /// coming up drops the drag where it is, and any other press ends it with
-    /// nothing dropped.
+    /// A motion answers where to, for the caller to resolve what is there
+    /// ([`drag_over`](Self::drag_over)), and what is carried follows it once
+    /// the batch is taken ([`settle`](Self::settle)); the press coming up drops
+    /// the drag where it is, and any other press ends it with nothing dropped.
     pub fn drag_pointer(&mut self, compositor: &mut Compositor, event: &InputEvent) -> DragStep {
         if self.drag.carried.is_none() {
             return DragStep::Held;
@@ -645,7 +640,6 @@ impl DesktopShell {
         match *event {
             InputEvent::PointerMoved { to } => {
                 self.track_pointer(to, compositor);
-                self.place_drag_plate(compositor, to);
                 DragStep::Moved(to)
             }
             InputEvent::PointerReleased {
@@ -663,9 +657,9 @@ impl DesktopShell {
     /// The window the carried drag began in and what it carries, for an
     /// application's drag.
     #[must_use]
-    pub fn drag_items(&self) -> Option<(u64, DragItems)> {
+    pub fn drag_items(&self) -> Option<(u64, &DragItems)> {
         match &self.drag.carried.as_ref()?.cargo {
-            Cargo::Items { source, items } => Some((*source, **items)),
+            Cargo::Items { source, items } => Some((*source, &**items)),
             Cargo::Save { .. } => None,
         }
     }
@@ -923,34 +917,70 @@ impl DesktopShell {
         None
     }
 
-    /// Paint the carried drag's plate afresh where the pointer is: the name it
-    /// shows was drawn provisionally and its text has landed.
-    pub fn redraw_drag_plate(&mut self, compositor: &mut Compositor) {
-        let Some(old) = self
-            .drag
-            .carried
-            .as_mut()
-            .map(|carried| carried.plate.take())
-        else {
+    /// Paint afresh, where they are, the parts of what the carried drag shows
+    /// whose picture `landed` moved.
+    pub(crate) fn repaint_drag(&mut self, compositor: &mut Compositor, landed: &Landed) {
+        let Some(mut carried) = self.drag.carried.take() else {
             return;
         };
-        if let Some(old) = old {
-            compositor.remove(old);
-        }
-        let at = self.router().pointer();
-        self.place_drag_plate(compositor, at);
+        let (theme, mut artwork) = self.theme_and_artwork();
+        carried
+            .stack
+            .paint_landed(compositor, theme, (&mut artwork, landed));
+        self.drag.carried = Some(carried);
     }
 
-    /// Show the carried drag's plate beside the pointer at `at`.
-    fn place_drag_plate(&mut self, compositor: &mut Compositor, at: Point) {
-        let Some(carried) = self.drag.carried.as_ref() else {
+    /// Lay what the carried drag shows out afresh and paint it, at rest under
+    /// the pointer: the theme, the scale or the fonts it is laid out by moved.
+    pub fn relay_drag(&mut self, compositor: &mut Compositor) {
+        let Some(mut carried) = self.drag.carried.take() else {
             return;
         };
-        let theme = self.session().floating_theme();
-        let plate = place_plate(carried.plate, &carried.cargo, at, theme, compositor);
+        carried.stack.close(compositor);
+        let at = self.router().pointer();
+        let scale = compositor.scale();
+        let (theme, mut artwork) = self.theme_and_artwork();
+        carried.stack = shown_as(&carried.cargo, at, None, (scale, theme));
+        carried.stack.paint(compositor, theme, &mut artwork);
+        self.drag.carried = Some(carried);
+    }
+
+    /// Bring what the carried drag shows to the pointer once a batch of input
+    /// has been taken: what rests on it moves with this batch, and what
+    /// travels after it sets out at the next frame.
+    pub(crate) fn settle_drag(&mut self, compositor: &mut Compositor) {
+        let at = self.router().pointer();
         if let Some(carried) = self.drag.carried.as_mut() {
-            carried.plate = plate;
+            carried.stack.follow(at, compositor);
         }
+    }
+
+    /// Move what the carried drag shows through its travel at `now_ns`.
+    pub fn advance_drag(&mut self, now_ns: u64, compositor: &mut Compositor) {
+        let at = self.router().pointer();
+        if let Some(carried) = self.drag.carried.as_mut() {
+            carried.stack.advance(now_ns, at, compositor);
+        }
+    }
+
+    /// Fold the next frame what the carried drag shows owes, on a display
+    /// refreshing at `refresh`, into `park_ns`; nothing while it is at rest.
+    #[must_use]
+    pub fn drag_park_deadline_ns(&self, now_ns: u64, park_ns: u64, refresh: RefreshRate) -> u64 {
+        let due = self
+            .drag
+            .carried
+            .as_ref()
+            .and_then(|carried| carried.stack.next_frame_in(now_ns, refresh));
+        park_within(park_ns, due)
+    }
+
+    /// The windows showing what the carried drag carries, the front first.
+    pub fn drag_windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.drag
+            .carried
+            .iter()
+            .flat_map(|carried| carried.stack.windows())
     }
 
     /// Stop carrying, answering how it ended: where the pointer is if
@@ -958,11 +988,9 @@ impl DesktopShell {
     /// place whose last answer the pointer shows — and otherwise on nothing.
     /// The slot it lit is latched dark for the caller's settle to paint.
     pub fn end_drag(&mut self, compositor: &mut Compositor, dropped: bool) -> Option<DragEnd> {
-        let carried = self.drag.carried.take()?;
+        let mut carried = self.drag.carried.take()?;
         self.drag.issued = carried.serial;
-        if let Some(plate) = carried.plate {
-            compositor.remove(plate);
-        }
+        carried.stack.close(compositor);
         let scale = compositor.scale();
         self.session_mut().taskbar_mut().set_drop_slot(None, scale);
         self.cursor_mut().hold(None);
@@ -1057,104 +1085,86 @@ fn save_end(
     SaveEnd { dropped, offer }
 }
 
-/// What the plate beside the pointer says: the one item's name, or how many
-/// are carried.
-fn plate_text(items: &DragItems) -> String {
-    if items.count() == 1 {
-        shown(items.first().as_str()).into_owned()
-    } else {
-        format!("{} items", items.count())
-    }
+/// The label the one item of an application's drag shows: its name less the
+/// ending its listing hides, shown as a name from elsewhere is.
+fn item_label(items: &DragItems) -> String {
+    shown(items.shown_name()).into_owned()
 }
 
-/// Show the plate naming what `cargo` carries beside the pointer at `at`:
-/// `plate` moved when it is still up, since what it says never changes, and
-/// painted anew when it is not. Answers the plate, or `None` when the heap will
-/// not give one — the drag is still carried, only unlabelled.
-fn place_plate(
-    plate: Option<WindowId>,
+/// What `cargo` is shown as with the pointer at `pointer`, carried out of a
+/// window whose client area is `source` on the screen: one item as its tile,
+/// held where it was pressed — an application's in the state its listing marks
+/// it carried in — and several as a stack of their pictures, each setting out
+/// from where it stood within that window, or from its rest without one.
+fn shown_as(
     cargo: &Cargo,
-    at: Point,
-    theme: &Theme,
-    compositor: &mut Compositor,
-) -> Option<WindowId> {
-    let scale = compositor.scale();
-    let offset = i32::try_from(scale.scale_length(PLATE_OFFSET)).unwrap_or(i32::MAX);
-    let origin = Point::new(at.x.saturating_add(offset), at.y.saturating_add(offset));
-    if let Some(plate) = plate.filter(|plate| compositor.window(*plate).is_some()) {
-        compositor.move_window(plate, origin);
-        return Some(plate);
-    }
-    let (pixels, radius) = match cargo {
-        Cargo::Items { items, .. } => {
-            let tip = Tooltip::new(plate_text(items));
-            let (width, height) = tip.preferred_size(scale, theme);
-            let mut pixels = Surface::new(width, height)?;
-            tip.render(&mut pixels, Rect::new(0, 0, width, height), scale, theme);
-            (
-                pixels,
-                scale.scale_length(theme.metrics().popup_corner_radius),
-            )
-        }
-        Cargo::Save { document, .. } => save_plate(document, scale, theme)?,
+    pointer: Point,
+    source: Option<Rect>,
+    (scale, theme): (tairix_geometry::Scale, &tairix_theme::Theme),
+) -> Stack {
+    let listed = {
+        let metrics = Tiles::Large.metrics(scale, theme);
+        let cell = Rect::new(0, 0, metrics.cell_width, metrics.cell_height);
+        Tiles::Large.layout().icon_side(cell, scale, theme)
     };
-    let id = compositor.add_window(origin, pixels);
-    compositor.set_pointer_catch(id, PointerCatch::None);
-    compositor.set_corners(id, Corners::painted(radius));
-    compositor.set_casts_shadow(id, true);
-    compositor.raise(id);
-    Some(id)
+    match cargo {
+        Cargo::Items { items, .. } => {
+            let selected = ControlState {
+                selection: SelectionState::Selected,
+                ..ControlState::idle()
+            };
+            let one = items.count() == 1;
+            let looks = items.pictures().enumerate().map(|(index, picture)| {
+                let look = Look {
+                    label: one.then(|| item_label(items)),
+                    icon: IconKind::for_asset(picture.icon.as_str()),
+                    state: if one { selected } else { ControlState::idle() },
+                    count: (!one && index == 0).then_some(items.count()),
+                };
+                let stood = picture
+                    .from
+                    .zip(source)
+                    .map(|(from, source)| stood_at(pointer, from, source));
+                (look, stood)
+            });
+            let grab = items.pictures().next().and_then(|lead| lead.from).map_or(
+                PictureGrab::CENTRE,
+                |(dx, dy)| PictureGrab {
+                    offset: (dx.saturating_neg(), dy.saturating_neg()),
+                    side: listed,
+                },
+            );
+            Stack::new(looks, pointer, grab, (scale, theme))
+        }
+        Cargo::Save { document, .. } => {
+            let look = Look {
+                label: Some(shown(&document.name).into_owned()),
+                icon: document.icon,
+                state: ControlState::idle(),
+                count: None,
+            };
+            Stack::new([(look, None)], pointer, document.grab, (scale, theme))
+        }
+    }
 }
 
-/// The plate a save carries, and its corner radius: the document's picture
-/// and the name it is saved under, on the raised plate a dragged item's name
-/// is drawn on. `None` when the heap will not give one.
-fn save_plate(document: &SavedDocument, scale: Scale, theme: &Theme) -> Option<(Surface, u32)> {
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let metrics = theme.metrics();
-    let border = plate_border(theme, scale);
-    let margin = border.saturating_add(scale.scale_length(metrics.control_inset).max(1));
-    let gap = scale.scale_length(metrics.control_gap);
-    let side = scale.scale_length(SAVE_PLATE_ICON);
-    let name = shown(&document.name);
-    let (fitted, elided) = font.elide_to_width(&name, scale.scale_length(SAVE_PLATE_NAME_MAX));
-    let mark = if elided { font.text_width(ELLIPSIS) } else { 0 };
-    let text_x = margin.saturating_add(side).saturating_add(gap);
-    let width = text_x
-        .saturating_add(font.text_width(fitted))
-        .saturating_add(mark)
-        .saturating_add(margin);
-    let height = margin
-        .saturating_mul(2)
-        .saturating_add(side.max(font.line_height()));
-    let radius = scale
-        .scale_length(metrics.popup_corner_radius)
-        .min(height / 2);
-    let mut pixels = Surface::new(width, height)?;
-    let palette = theme.palette();
-    let _ = paint_surface_plate(
-        &mut pixels,
-        (0, 0, width, height),
-        (radius, border),
-        theme,
-        (palette.surface_raised, ChromeLayer::Ground),
+/// Where a picture whose centre stood `from` the pointer at `pointer` stood
+/// on the screen, kept within `source`, the window it was carried out of.
+fn stood_at(pointer: Point, from: (i32, i32), source: Rect) -> Point {
+    let at = Point::new(
+        pointer.x.saturating_add(from.0),
+        pointer.y.saturating_add(from.1),
     );
-    paint_icon_slot(
-        &mut pixels,
-        (margin, height.saturating_sub(side) / 2, side),
-        document.icon,
-        palette.accent.into(),
-        None,
-        ArtworkTone::FULL,
-    );
-    let ink = palette.on_surface.into();
-    let x = i32::try_from(text_x).unwrap_or(i32::MAX);
-    let y = i32::try_from(height.saturating_sub(font.line_height()) / 2).unwrap_or(0);
-    let pen = font.draw_text(&mut pixels, x, y, fitted, ink);
-    if elided {
-        font.draw_text(&mut pixels, pen, y, ELLIPSIS, ink);
+    if source.is_empty() {
+        return pointer;
     }
-    Some((pixels, radius))
+    let last = |start: i32, extent: u32| {
+        start.saturating_add(i32::try_from(extent.saturating_sub(1)).unwrap_or(i32::MAX))
+    };
+    Point::new(
+        at.x.clamp(source.left(), last(source.left(), source.width)),
+        at.y.clamp(source.top(), last(source.top(), source.height)),
+    )
 }
 
 #[cfg(test)]

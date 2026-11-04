@@ -10,6 +10,7 @@ use tairix_abi::discovery_ipc::{
     Answer, Change, CollectReply, Entry, COLLECT_MIN_CAPACITY, DISCOVERY_MAX_REPLY,
     REQUESTS_PER_ACCOUNT, SESSIONS_PER_ACCOUNT, SESSION_QUEUE_BYTES,
 };
+use tairix_abi::ipc::IPC_MEMORY_RETRY_NS;
 use tairix_abi::net_ipc::IF_NAME_LEN;
 use tairix_abi::{Errno, ProcId};
 
@@ -409,6 +410,35 @@ fn synced(sessions: &mut Sessions, watch_takes: bool) -> (Vec<u64>, Vec<u64>) {
     (watched, unwatched)
 }
 
+/// A doorbell owed at a port whose room watch is refused waits on the memory
+/// retry, the only other wake, and is offered once its pause has run; a later
+/// refusal for room tries the watch again.
+///
+/// Regression: a refused watch was tried again only at the port's next owed
+/// doorbell, so a session owed its only one was never told.
+#[test]
+fn a_doorbell_whose_room_cannot_be_watched_is_offered_on_the_retry() {
+    let (mut sessions, id, request) = one();
+    assert_eq!(sessions.queue(id, request, &text(b"\x01x")).ring, Some(77));
+    sessions.rang(id, Err(Errno::WouldBlock));
+    assert_eq!(synced(&mut sessions, false), (vec![77], vec![]));
+    assert!(sessions.rooms.ports.is_empty(), "no room is left owed");
+    sessions.assert_consistent();
+    sessions.retry_starved(5, &mut |_, _| panic!("not yet due"));
+    let mut rung = Vec::new();
+    sessions.retry_starved(5 + IPC_MEMORY_RETRY_NS, &mut |port, session| {
+        rung.push((session, port));
+        Err(Errno::WouldBlock)
+    });
+    assert_eq!(rung, [(id, 77)], "offered when the pause has run");
+    assert_eq!(
+        synced(&mut sessions, true),
+        (vec![77], vec![]),
+        "refused for room again, the watch is tried again"
+    );
+    sessions.assert_consistent();
+}
+
 /// A port is watched once while any doorbell there is owed, and unwatched
 /// with the last.
 #[test]
@@ -502,6 +532,129 @@ fn a_doorbell_refused_for_room_is_owed_until_it_is_posted() {
     assert_eq!(rung, [(id, 77), (id, 77)]);
     assert_eq!(owed_ports(&sessions).len(), 0);
     sessions.retry_owed(&mut |_, _| panic!("nothing is owed"));
+}
+
+/// A doorbell the service's own budget refused is owed and its port watched,
+/// as one a full port refused is, until it is posted. Regression: a
+/// `LimitExceeded` was taken as rung, so the client was never told.
+#[test]
+fn a_doorbell_the_budget_refused_is_owed_until_it_is_posted() {
+    let (mut sessions, id, request) = one();
+    assert_eq!(sessions.queue(id, request, &text(b"\x01x")).ring, Some(77));
+    sessions.rang(id, Err(Errno::LimitExceeded));
+    assert_eq!(owed_ports(&sessions), [77]);
+    assert_eq!(synced(&mut sessions, true), (vec![77], vec![]));
+    let mut rung = Vec::new();
+    sessions.retry_owed(&mut |port, session| {
+        rung.push((session, port));
+        Ok(())
+    });
+    assert_eq!(rung, [(id, 77)]);
+    assert_eq!(synced(&mut sessions, true), (vec![], vec![77]));
+    sessions.assert_consistent();
+}
+
+/// A doorbell the kernel had no memory for is owed with no port watched, is
+/// left alone by a room wake, and is offered once the pause begun at the
+/// owner's next turn has run. Regression: an `OutOfMemory` was taken as
+/// rung, so the client was never told.
+#[test]
+fn a_doorbell_refused_for_memory_is_offered_once_its_pause_has_run() {
+    let (mut sessions, id, request) = one();
+    assert_eq!(sessions.queue(id, request, &text(b"\x01x")).ring, Some(77));
+    sessions.rang(id, Err(Errno::OutOfMemory));
+    assert_eq!(owed_ports(&sessions), [77]);
+    assert_eq!(
+        synced(&mut sessions, true),
+        (vec![], vec![]),
+        "no room is watched"
+    );
+    sessions.retry_owed(&mut |_, _| panic!("a room wake offers it nothing"));
+    let mut rung = Vec::new();
+    let mut offer = |port: u64, session: u32| -> Result<(), Errno> {
+        rung.push((session, port));
+        Ok(())
+    };
+    sessions.retry_starved(5, &mut offer);
+    assert_eq!(sessions.retry_at(), Some(5 + IPC_MEMORY_RETRY_NS));
+    sessions.retry_starved(4 + IPC_MEMORY_RETRY_NS, &mut offer);
+    sessions.retry_starved(5 + IPC_MEMORY_RETRY_NS, &mut offer);
+    assert_eq!(rung, [(id, 77)], "offered once, when its pause has run");
+    assert_eq!(owed_ports(&sessions).len(), 0);
+    assert_eq!(sessions.retry_at(), None);
+    sessions.assert_consistent();
+}
+
+/// A retried doorbell waits for whatever refused it this time: one owed for
+/// memory and refused for room is watched for room, and one owed for room
+/// and refused for memory is watched no more.
+#[test]
+fn a_retried_doorbell_waits_for_whatever_refused_it_this_time() {
+    let (mut sessions, id, request) = one();
+    assert_eq!(sessions.queue(id, request, &text(b"\x01x")).ring, Some(77));
+    sessions.rang(id, Err(Errno::OutOfMemory));
+    sessions.retry_starved(0, &mut |_, _| panic!("not yet due"));
+    sessions.retry_starved(IPC_MEMORY_RETRY_NS, &mut |_, _| Err(Errno::WouldBlock));
+    assert_eq!(sessions.retry_at(), None, "nothing waits on memory");
+    assert_eq!(synced(&mut sessions, true), (vec![77], vec![]));
+    sessions.retry_owed(&mut |_, _| Err(Errno::OutOfMemory));
+    assert_eq!(synced(&mut sessions, true), (vec![], vec![77]));
+    assert_eq!(owed_ports(&sessions), [77], "still owed");
+    sessions.assert_consistent();
+}
+
+/// A doorbell refused for good is given up on, not owed: offered again only
+/// once its client has collected and a later answer rings, and counted, the
+/// count reported each time it doubles.
+#[test]
+fn a_doorbell_refused_for_good_is_given_up_and_counted() {
+    let (mut sessions, id, request) = one();
+    let mut reported = Vec::new();
+    for _ in 0..4 {
+        assert_eq!(sessions.queue(id, request, &text(b"\x01x")).ring, Some(77));
+        sessions.rang(id, Err(Errno::MessageTooLarge));
+        assert_eq!(owed_ports(&sessions).len(), 0);
+        assert_eq!(
+            sessions.queue(id, request, &text(b"\x01y")).ring,
+            None,
+            "not offered again"
+        );
+        sessions.retry_owed(&mut |_, _| panic!("nothing is owed"));
+        sessions.retry_starved(0, &mut |_, _| panic!("nothing is owed"));
+        reported.extend(sessions.lost_to_report());
+        collect(&mut sessions, id);
+    }
+    assert_eq!(reported, [1, 2, 4], "a record each time the count doubles");
+    assert_eq!(synced(&mut sessions, true), (vec![], vec![]));
+    sessions.assert_consistent();
+}
+
+/// A doorbell to a port that is gone is dropped, neither owed nor counted:
+/// its owner's exit closes the session.
+#[test]
+fn a_doorbell_to_a_port_that_is_gone_is_dropped_unreported() {
+    let (mut sessions, id, request) = one();
+    assert_eq!(sessions.queue(id, request, &text(b"\x01x")).ring, Some(77));
+    sessions.rang(id, Err(Errno::NotFound));
+    assert_eq!(owed_ports(&sessions).len(), 0);
+    assert_eq!(synced(&mut sessions, true), (vec![], vec![]));
+    sessions.retry_starved(0, &mut |_, _| panic!("nothing is owed"));
+    assert_eq!(sessions.retry_at(), None);
+    assert_eq!(sessions.lost_to_report(), None);
+}
+
+/// Closing a session whose doorbell waits on memory ends the pause timed
+/// for it.
+#[test]
+fn closing_a_session_starved_of_memory_ends_its_pause() {
+    let (mut sessions, id, request) = one();
+    sessions.queue(id, request, &text(b"\x01x"));
+    sessions.rang(id, Err(Errno::OutOfMemory));
+    sessions.retry_starved(0, &mut |_, _| panic!("not yet due"));
+    assert!(sessions.retry_at().is_some());
+    sessions.close(id, owner(1)).unwrap();
+    assert_eq!(sessions.retry_at(), None);
+    sessions.assert_idle();
 }
 
 /// Every listed session knows where it sits in the owed list.

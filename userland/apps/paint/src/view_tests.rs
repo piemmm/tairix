@@ -1076,6 +1076,37 @@ fn save_as_asks_how_first_and_then_where_in_the_format_chosen() {
     assert!(!window.view.asking() && !window.view.asking_to_close());
 }
 
+/// A Save As that lands leaves the document typed as the format its sheet
+/// chose — a PNG made a sprite file called plain "photo" — so a later save to
+/// that file is held to that format, and the sheet's choice is spent.
+///
+/// Regression: the rename after the save forgot the file's type, so a save to
+/// "photo" was checked as the picture's own format.
+#[test]
+fn a_landed_save_as_types_the_document_as_its_chosen_format() {
+    use tairix_window::document::SavedDocument as _;
+    let mut window = Window::white(10, 10);
+    window.view.save_as = Some(SaveFormat::Sprites);
+    window.view.rename(alloc::string::String::from("photo"));
+    assert_eq!(window.view.recorded, tairix_abi::fs::Filetype::new(0xFF9));
+    assert_eq!(window.view.save_as, None, "the choice is spent");
+    assert_eq!(window.view.save_format("photo"), Ok(SaveFormat::Sprites));
+}
+
+/// A Save As that never lands — its picker cancelled, or its save refused —
+/// leaves the document's own file as it was: a later save to it is checked in
+/// the format the file's name says, not the one the abandoned sheet chose.
+///
+/// Regression: the sheet's choice was kept for every later save, so saving
+/// "photo.png" after a Save As as GIF was cancelled was checked as a GIF.
+#[test]
+fn a_save_as_that_did_not_land_leaves_the_files_own_format() {
+    let mut window = Window::white(10, 10);
+    window.view.name = alloc::string::String::from("photo.png");
+    window.view.save_as = Some(SaveFormat::Gif);
+    assert_eq!(window.view.save_format("photo.png"), Ok(SaveFormat::Png));
+}
+
 #[test]
 fn zooming_with_the_wheel_keeps_the_pixel_under_the_pointer() {
     // Larger than the window at every rung, so it scrolls rather than
@@ -2219,7 +2250,6 @@ fn the_arrows_walk_the_palette_only_while_it_has_the_keyboard() {
     );
 }
 
-/// The palette's rows follow the window it is laid out in.
 /// A 256-colour palette is one row longer than the strip: the wheel scrolls
 /// it along, and a well scrolled into view is chosen where it is shown.
 #[test]
@@ -3874,7 +3904,7 @@ fn a_band_dragged_over_the_other_dock_marks_where_it_lands_and_lands_there() {
     assert_eq!(drag.kind, PaneKind::Tools);
     assert_eq!(
         drag.landing,
-        Some(super::Landing {
+        Some(super::Landing::Dock {
             side: Side::Right,
             before: 1
         })
@@ -3883,7 +3913,7 @@ fn a_band_dragged_over_the_other_dock_marks_where_it_lands_and_lands_there() {
     window.move_to(over_colour);
     assert_eq!(
         window.view.pane_drag.and_then(|drag| drag.landing),
-        Some(super::Landing {
+        Some(super::Landing::Dock {
             side: Side::Right,
             before: 0
         })
@@ -3915,7 +3945,7 @@ fn a_band_dragged_to_the_edge_of_an_empty_dock_lands_in_it() {
     window.move_to(Point::new(2, middle));
     assert_eq!(
         window.view.pane_drag.and_then(|drag| drag.landing),
-        Some(super::Landing {
+        Some(super::Landing::Dock {
             side: Side::Left,
             before: 0
         })
@@ -4028,7 +4058,7 @@ fn a_tool_window_moved_over_a_dock_marks_it_and_let_go_there_docks_its_pane() {
     assert_eq!(outcome.relayout, Relayout::None);
     assert_eq!(
         window.view.landing(),
-        Some(super::Landing {
+        Some(super::Landing::Dock {
             side: Side::Left,
             before: 0
         })
@@ -4102,7 +4132,7 @@ fn floating_panes_are_laid_out_apart_and_open_at_home_when_nothing_tore_them_out
     }
     window.relayout();
     let slots = window.layout.floating();
-    assert_eq!(slots.len(), 3);
+    assert_eq!(slots.len(), PaneKind::ALL.len());
     for (index, slot) in slots.iter().enumerate() {
         assert!(slot.frame.intersection(&window.layout.window()).is_empty());
         assert!(slot.header.is_empty(), "the window manager draws its band");
@@ -4558,4 +4588,338 @@ fn the_strip_scrolls_to_the_ink_that_changed_and_repaints_its_bar() {
             .any(|rect| rect.intersection(&bar) == bar),
         "its bar is repainted"
     );
+}
+
+/// The button at the strip's right end floats the palette on a press and a
+/// release over it: its tool window, titled as the pane, opens against the
+/// canvas's lower right corner, and its tip says what it does.
+#[test]
+fn the_pop_out_floats_the_palette_over_the_canvas_corner() {
+    let mut window = Window::white(16, 16);
+    let pop_out = window.layout.pop_out();
+    window.move_to(pop_out.center());
+    let theme = window.registry.active();
+    let tip = window
+        .view
+        .tool_tip(&window.layout, Scale::ONE, theme)
+        .map(|(_, tip)| tip);
+    assert_eq!(tip, Some("Float the palette in a window of its own"));
+    window.press(PointerButton::Primary);
+    assert!(
+        !window.view.panes().floats(PaneKind::Palette),
+        "a press alone floats nothing"
+    );
+    let outcome = window.release(PointerButton::Primary);
+    assert_eq!(outcome.relayout, Relayout::Whole);
+    assert!(window.view.panes().floats(PaneKind::Palette));
+    assert!(window.layout.pop_out().is_empty());
+    let wanted = window
+        .view
+        .tool_window(&window.layout, 0)
+        .expect("its tool window");
+    assert_eq!(
+        (wanted.id, wanted.title),
+        (super::tool_id(PaneKind::Palette), "Palette")
+    );
+    let (id, frame) = (wanted.id, wanted.rect);
+    assert!(frame.intersection(&window.layout.window()).is_empty());
+    let canvas = window.layout.canvas();
+    let opening = window.view.tool_opening(id);
+    assert_eq!(
+        opening,
+        ToolOpening {
+            offset: (
+                canvas.right() - to_i32(frame.width),
+                canvas.bottom() - to_i32(frame.height)
+            ),
+            carry: None,
+        }
+    );
+}
+
+/// Floating, the palette's wells set both inks as they do in its strip.
+#[test]
+fn the_floating_palette_sets_both_inks() {
+    let mut window = Window::white(16, 16);
+    window.act(Action::FloatPalette);
+    let red = well_rect(&window, 11);
+    assert!(
+        red.intersection(&window.layout.window()).is_empty(),
+        "in its tool window"
+    );
+    click_on(&mut window, red);
+    assert_eq!(window.view.inks().0, window.view.wells[11]);
+    let blue = well_rect(&window, 8);
+    window.move_to(blue.center());
+    window.press(PointerButton::Middle);
+    window.release(PointerButton::Middle);
+    assert_eq!(window.view.inks().1, window.view.wells[8]);
+}
+
+/// A floating palette's grid is walked by the arrows a row at a time.
+#[test]
+fn the_arrows_walk_the_floating_palette_by_rows() {
+    let mut window = Window::white(16, 16);
+    window.act(Action::FloatPalette);
+    window.act(Action::Tool(Tool::Pencil));
+    window.key(Key::Named(NamedKey::Tab), plain());
+    assert!(window.view.swatches.state().focus.focused);
+    let black = window
+        .view
+        .swatches
+        .selected()
+        .expect("black is a Wimp colour");
+    window.key(Key::Named(NamedKey::Down), plain());
+    assert_eq!(
+        window.view.inks().0,
+        window.view.wells[black + 4],
+        "a row of four down"
+    );
+    window.key(Key::Named(NamedKey::Up), plain());
+    assert_eq!(window.view.inks().0, window.view.wells[black]);
+}
+
+/// Moved over the window's foot, a floating palette's landing there is
+/// marked, a dock down a side is no landing of its, and let go there it docks
+/// in its strip, closing its tool window.
+#[test]
+fn a_palette_moved_over_its_strip_docks_there() {
+    let mut window = Window::white(10, 10);
+    window.act(Action::FloatPalette);
+    let id = super::tool_id(PaneKind::Palette);
+    let foot = Point::new(
+        window.layout.canvas().center().x,
+        window.layout.status().top() - 2,
+    );
+    let over_dock = window.layout.dock_on(Side::Right).rect.center();
+    let moved = |over, ended| ToolMove { id, over, ended };
+    let theme = window.registry.active();
+    let mut damage = Region::new();
+    let outcome = window.view.tool_moved(
+        moved(Some(foot), false),
+        &window.layout,
+        Scale::ONE,
+        theme,
+        &mut damage,
+    );
+    assert_eq!(outcome.relayout, Relayout::None);
+    assert_eq!(window.view.landing(), Some(super::Landing::Strip));
+    assert!(!damage.is_empty(), "the mark is drawn");
+    let outcome = window.view.tool_moved(
+        moved(Some(over_dock), false),
+        &window.layout,
+        Scale::ONE,
+        theme,
+        &mut damage,
+    );
+    assert_eq!(outcome.relayout, Relayout::None);
+    assert_eq!(window.view.landing(), None, "a side's dock is not its");
+    let outcome = window.view.tool_moved(
+        moved(Some(foot), true),
+        &window.layout,
+        Scale::ONE,
+        theme,
+        &mut damage,
+    );
+    window.apply(&outcome);
+    assert!(window.view.panes().in_strip());
+    assert!(
+        window.view.tool_window(&window.layout, 0).is_none(),
+        "its tool window goes"
+    );
+}
+
+/// Closed, a floating palette's tool window docks the palette in its strip —
+/// it is never lost — as a refused one does.
+#[test]
+fn closing_the_floating_palette_docks_it_in_the_strip() {
+    let mut window = Window::white(10, 10);
+    let strip = window.layout.palette();
+    for why in [ToolGone::Closed, ToolGone::Refused] {
+        window.act(Action::FloatPalette);
+        let outcome = window.view.tool_gone(
+            super::tool_id(PaneKind::Palette),
+            why,
+            &window.layout,
+            &mut Region::new(),
+        );
+        window.apply(&outcome);
+        assert!(window.view.panes().in_strip(), "{why:?}");
+        assert_eq!(window.layout.palette(), strip, "{why:?}");
+    }
+}
+
+/// View ▸ Panes floats the palette and docks it again, marked while it
+/// floats, and its Palette row hides it.
+#[test]
+fn the_float_palette_row_toggles_and_is_marked() {
+    let mut window = Window::white(10, 10);
+    let marked = |window: &Window| {
+        window
+            .view
+            .menu(MenuKind::Window)
+            .rows()
+            .any(|(row, _)| match row {
+                AppMenuRowView::Item(item) => {
+                    item.id.get() == Action::FloatPalette.id()
+                        && item.mark == tairix_abi::window_ipc::AppMenuMark::Check
+                }
+                _ => false,
+            })
+    };
+    assert!(!marked(&window) && ticked(&window, PaneKind::Palette));
+    window.act(Action::FloatPalette);
+    assert!(window.view.panes().floats(PaneKind::Palette));
+    assert!(marked(&window) && ticked(&window, PaneKind::Palette));
+    window.act(Action::FloatPalette);
+    assert!(window.view.panes().in_strip() && !marked(&window));
+    window.act(Action::Pane(PaneKind::Palette));
+    assert!(!window.view.shows(PaneKind::Palette));
+    assert!(window.layout.palette().is_empty(), "it claims no strip");
+}
+
+/// Floating, the palette's window follows its wells: a mask taken away takes
+/// its clear ink's row with it.
+#[test]
+fn a_mask_change_resizes_the_floating_palette() {
+    let mut window = four_colours();
+    window.act(Action::FloatPalette);
+    let before = window.layout.palette();
+    let row = window.layout.swatches().height / 2;
+    let outcome = window.act(Action::RemoveMask);
+    window.run_worker(outcome);
+    assert!(window.view.panes().floats(PaneKind::Palette));
+    assert_eq!(window.layout.swatches().height, row, "one row of four");
+    assert_eq!(window.layout.palette().height, before.height - row);
+}
+
+/// Held on its arrow, the palette bar goes on scrolling the strip.
+#[test]
+fn a_held_palette_arrow_goes_on_scrolling() {
+    let mut window = long_palette();
+    let theme = window.registry.active();
+    let arrow = window
+        .view
+        .palette_bar
+        .part_rect(
+            tairix_controls::ScrollPart::Increment,
+            window.layout.palette_bar(),
+            Scale::ONE,
+            theme,
+        )
+        .expect("its forward arrow");
+    window.move_to(arrow.center());
+    window.press(PointerButton::Primary);
+    let stepped = window.view.palette_bar.model().range().offset();
+    assert!(stepped > 0, "the press steps once");
+    window.run_until(window.now + 1_000_000_000);
+    assert!(
+        window.view.palette_bar.model().range().offset() > stepped,
+        "and the hold steps on"
+    );
+    window.release(PointerButton::Primary);
+}
+
+/// A torn-out Adjustment pane keeps the name of the adjustment open in it,
+/// on its band and on its tool window.
+#[test]
+fn a_torn_out_adjustment_keeps_its_name() {
+    let mut window = Window::white(30, 30);
+    let outcome = window.act(Action::Adjust(filter_index("Blur")));
+    window.run_worker(outcome);
+    assert_eq!(window.view.header(PaneKind::Adjustment).title(), "Blur");
+    let grip = band_point(&window, PaneKind::Adjustment, None);
+    drag_band(
+        &mut window,
+        PaneKind::Adjustment,
+        Point::new(to_i32(WINDOW.0) - 1, grip.y + 40),
+    );
+    assert!(window.view.arrangement().floats(PaneKind::Adjustment));
+    assert_eq!(window.view.header(PaneKind::Adjustment).title(), "Blur");
+    let wanted = window
+        .view
+        .tool_window(&window.layout, 0)
+        .expect("its tool window");
+    assert_eq!(wanted.title, "Blur");
+}
+
+/// A change of ink repaints the wells its marks leave and reach, and none of
+/// the rest of the palette.
+#[test]
+fn an_ink_change_repaints_only_the_wells_its_marks_move_between() {
+    let mut window = Window::white(16, 16);
+    let untouched = well_rect(&window, 11);
+    let mut damage = Region::new();
+    window
+        .view
+        .act(Action::SwapColours, &window.layout, &mut damage);
+    for well in [0, 7] {
+        let mut uncovered = Region::new();
+        uncovered.add(well_rect(&window, well));
+        uncovered.subtract_region(&damage);
+        assert!(uncovered.is_empty(), "well {well} is repainted");
+    }
+    assert!(!damage.intersects(untouched), "a swap");
+    window.move_to(window.dock_point((40, 30)));
+    let theme = window.registry.active();
+    let mut damage = Region::new();
+    window.view.on_pointer(
+        &InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        window.now,
+        &window.layout,
+        Scale::ONE,
+        theme,
+        &mut damage,
+    );
+    window.release(PointerButton::Primary);
+    assert!(!damage.intersects(untouched), "a colour picked in the dock");
+}
+
+/// The middle button chooses a well as the primary does: on its release over
+/// the well it was pressed on, never on the press alone.
+#[test]
+fn the_middle_button_chooses_a_well_on_its_release_over_it() {
+    let mut window = Window::white(16, 16);
+    let before = window.view.inks().1;
+    let (blue, red) = (well_rect(&window, 8), well_rect(&window, 11));
+    window.move_to(blue.center());
+    window.press(PointerButton::Middle);
+    assert_eq!(
+        window.view.inks().1,
+        before,
+        "a press alone chooses nothing"
+    );
+    window.move_to(red.center());
+    window.release(PointerButton::Middle);
+    assert_eq!(window.view.inks().1, before, "let go over another well");
+    window.press(PointerButton::Middle);
+    window.release(PointerButton::Middle);
+    assert_eq!(window.view.inks().1, window.view.wells[11]);
+}
+
+/// A secondary press on a floating pane's tool window opens the window's
+/// menu where it was pressed, as one anywhere in the window does.
+#[test]
+fn a_secondary_press_on_a_tool_window_opens_the_window_menu() {
+    let mut window = Window::white(10, 10);
+    window.view.panes.float(PaneKind::Tools);
+    window.relayout();
+    let at = window
+        .layout
+        .pane(PaneKind::Tools)
+        .expect("floating")
+        .frame
+        .center();
+    window.move_to(at);
+    let outcome = window.press(PointerButton::Secondary);
+    let Some(Request::Menu {
+        kind: MenuKind::Window,
+        anchor,
+    }) = outcome.request
+    else {
+        panic!("the window's menu, not {:?}", outcome.request);
+    };
+    assert_eq!((anchor.left(), anchor.top()), (at.x, at.y));
 }

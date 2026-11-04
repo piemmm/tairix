@@ -104,6 +104,8 @@ pub mod pressure;
 mod replace;
 pub use replace::{replace_file, replace_with_link, staging_name, NewLink, ParentDir};
 
+pub mod room;
+
 pub mod servicenotice;
 
 pub mod shm;
@@ -184,6 +186,8 @@ const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
 
 /// `volume_detach` syscall number (as above).
 const NUM_VOLUME_DETACH: u64 = SyscallNumber::VOLUME_DETACH.as_u16() as u64;
+/// `volume_retitle` syscall number (as above).
+const NUM_VOLUME_RETITLE: u64 = SyscallNumber::VOLUME_RETITLE.as_u16() as u64;
 /// `volume_read` syscall number (as above).
 const NUM_VOLUME_READ: u64 = SyscallNumber::VOLUME_READ.as_u16() as u64;
 /// `volume_write` syscall number (as above).
@@ -2304,6 +2308,24 @@ pub fn volume_detach(request: &[u8]) -> i64 {
     ret as i64
 }
 
+/// Title a published volume: write the label its filesystem records
+/// (`SyscallNumber::VOLUME_RETITLE`, `plans/DISK-IMAGES.md` DI23).
+///
+/// `request` is an encoded [`tairix_abi::volume::VolumeRetitleRequest`]. Only
+/// the user a disk image's volume was attached for may retitle it. Returns
+/// `0` on success or `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn volume_retitle(request: &[u8]) -> i64 {
+    let ptr = request.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(ptr, len)` pair against the caller's address space before
+    // reading it. `request` is a live shared `&[u8]` for the duration of
+    // the call.
+    let ret = unsafe { raw_syscall(NUM_VOLUME_RETITLE, [ptr, request.len() as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
 /// A syscall's `0`-or-`-errno` answer as a result.
 pub(crate) fn status(ret: i64) -> Result<(), Errno> {
     if ret == 0 {
@@ -3653,19 +3675,20 @@ pub fn users_admin(req: &[u8], out: &mut [u8]) -> Result<usize, i64> {
 /// `register()` outcome back to the driver host on the reply endpoint
 /// handed to it through its startup args (`PLAN.md` Stage 4.HW).
 ///
-/// Returns `0` on success or `-errno` (recover the [`tairix_abi::Errno`]
-/// discriminant as `-ret`), the standard `abi-v1` signed-result
-/// convention; the wrapper hides no error.
-#[must_use]
+/// # Errors
+///
+/// The kernel's refusal, which a sender holding a payload its receiver must
+/// not lose reads through [`tairix_abi::ipc::SendRefusal`]; the wrapper hides
+/// none.
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn ipc_send(endpoint: u64, payload: &[u8]) -> i64 {
+pub fn ipc_send(endpoint: u64, payload: &[u8]) -> Result<(), Errno> {
     let ptr = payload.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // the `(ptr, len)` pair against the caller's address space before
     // reading it. `payload` is a live shared `&[u8]` for
     // the duration of the call, so the pair denotes readable memory.
     let ret = unsafe { raw_syscall(NUM_IPC_SEND, [endpoint, ptr, payload.len() as u64, 0, 0, 0]) };
-    ret as i64
+    status(ret as i64)
 }
 
 /// Bind an asynchronous IPC message port owned by the calling task
@@ -3754,21 +3777,21 @@ pub struct PrivatePort(u64);
 
 impl PrivatePort {
     /// Bind a fresh port taking messages of up to `max_payload` bytes, at most
-    /// `capacity` of them queued.
+    /// `per_sender` of them queued from any one sender.
     ///
     /// # Errors
     ///
     /// The random source's refusal, the bind's own refusal (a port past the
     /// `ipc-queue-bytes` limit, malformed bounds), or [`Errno::AddressInUse`]
     /// once every drawn id clashed.
-    pub fn bind(max_payload: usize, capacity: usize) -> Result<Self, Errno> {
+    pub fn bind(max_payload: usize, per_sender: usize) -> Result<Self, Errno> {
         draw_private_port(
             || {
                 let mut bytes = [0u8; 8];
                 random_fill(&mut bytes)?;
                 Ok(u64::from_le_bytes(bytes))
             },
-            |id| match port_bind(id, max_payload, capacity) {
+            |id| match port_bind(id, max_payload, per_sender) {
                 ret if ret < 0 => Err(Errno::from_syscall(ret)),
                 _ => Ok(()),
             },
@@ -5658,9 +5681,10 @@ impl Drop for WaitSet {
 /// observed rather than parked through), a message port the caller bound
 /// via [`port_bind`] ([`WaitSourceKind::Port`], ready on a delivered
 /// message awaiting [`ipc_recv`]), room in a port the caller may *send* to
-/// ([`WaitSourceKind::PortRoom`], ready when an [`ipc_send`] would not be
-/// refused for want of room, so a sender holding a message the receiver
-/// must not lose parks instead of dropping it), or a pipe read end of the
+/// ([`WaitSourceKind::PortRoom`], ready when an [`ipc_send`] of the port's
+/// largest message would not be refused for want of room or of the caller's
+/// budget, so a sender holding a message the receiver must not lose parks
+/// instead of dropping it), or a pipe read end of the
 /// caller's own open table ([`WaitSourceKind::Stream`] — the descriptor
 /// from [`pipe_create`], ready on buffered bytes or end-of-stream, drained
 /// by [`fs_read`]); `token` is the caller's opaque
@@ -8853,7 +8877,7 @@ mod tests {
     fn ipc_send_marshals_endpoint_pointer_and_len() {
         let payload = *b"reply-record";
         let (number, args) = capture(0, || {
-            assert_eq!(ipc_send(42, &payload), 0);
+            assert_eq!(ipc_send(42, &payload), Ok(()));
         });
         assert_eq!(number, NUM_IPC_SEND);
         assert_eq!(args[0], 42);
@@ -8863,14 +8887,14 @@ mod tests {
     }
 
     #[test]
-    fn ipc_send_surfaces_negative_errno_encoding() {
-        // `NotFound` (unbound endpoint) is encoded as the two's-complement
-        // negation; the wrapper hands that signed value back unchanged.
+    fn ipc_send_surfaces_the_kernels_refusal() {
+        // `NotFound` (unbound endpoint) arrives as the two's-complement
+        // negation, read back as itself.
         let payload = [0u8; 4];
-        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
-        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let raw = -i64::from(tairix_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(raw.to_ne_bytes());
         let (_, _) = capture(neg, || {
-            assert_eq!(ipc_send(7, &payload), want);
+            assert_eq!(ipc_send(7, &payload), Err(tairix_abi::Errno::NotFound));
         });
     }
 

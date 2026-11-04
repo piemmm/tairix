@@ -340,8 +340,9 @@ family, whether that family can speak there — the link up and a source address
 held — under an epoch that moves on each edge, and tells each member socket
 what changed in its own family since it was last told (`SocketLinkEvent`), a
 flap as down then up. A
-socket whose port had no room keeps its place: the service waits on that port's
-room and tells it the rest, so no edge is lost to a full mailbox. A principal's
+socket whose port had no room, or the stack no budget, keeps its place: the
+service waits on that port's room and tells it the rest, so no edge is lost to a
+full mailbox or a spent budget. A principal's
 first socket asks the kernel's `peer_watch` for its exit, and the exit releases
 everything the principal held — groups, connections, listeners, ports — so a
 crashed process never holds a port for the rest of the boot. The multicast DNS
@@ -388,8 +389,20 @@ bytes leave a connection only once a post of them lands, so a client whose
 port is full shuts the connection's window on the peer instead of losing
 acknowledged bytes; the service parks on `PortRoom` for every port still
 owed (level-triggered, so a port that drained wakes it at once) and resumes
-there. A send the buffer takes only part of owes the client one `Room` once
-half the buffer is free.
+there. A post refused for the stack's own IPC budget waits the same way, the
+kernel waking the member as the budget frees; one the kernel had no memory for,
+which nothing reports, is offered again after `IPC_MEMORY_RETRY_NS`, folded
+into the park, with no room member armed meanwhile. A post a port refuses for
+good gives its event up, and one to a port gone with its client takes nothing
+more. Each refusal is read by the one rule every sender shares
+(`tairix_abi::ipc::SendRefusal`). A send the buffer takes only part of owes the
+client one `Room` once half the buffer is free.
+
+A datagram, or an echo answer, a client's port refuses is dropped, as UDP
+allows under congestion, but counted: every delivery given up on — refused by
+a port still there — is reported (`DELIVERIES_LOST`, 16030) with the running
+total each time it doubles, so a flood of losses costs the log a record per
+doubling.
 
 ## Observability
 

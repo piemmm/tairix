@@ -88,7 +88,10 @@ mueve su panel en su lado o al otro, marcando por el camino dónde caerá;
 soltado lejos de ambos lados, o arrastrado fuera de la ventana, el panel flota
 en una ventanita propia, que se mueve por su banda, se mantiene sobre la
 imagen y se cierra con su marca; arrastrado de nuevo sobre un lado, vuelve a
-acoplarse allí.
+acoplarse allí. También la paleta flota: el botón del extremo derecho de su
+tira, o Ver ▸ Paneles ▸ Hacer flotar la paleta, la lleva a una ventanita
+propia, con sus colores dispuestos en una cuadrícula; cerrar esa ventana, o
+arrastrarla de nuevo al borde inferior de la ventana, la devuelve a la tira.
 
 La herramienta de selección marca un rectángulo, una elipse, un lazo a mano
 alzada, un polígono pulsado esquina a esquina o, con la varita mágica, los

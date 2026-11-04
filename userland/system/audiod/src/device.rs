@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::appinfo::BundleId;
 use tairix_abi::audio::{
-    AudioGain, AudioLocation, AudioNotify, StreamGrant, StreamRole, StreamState, AUDIO_NOTIFY_LEN,
+    AudioGain, AudioLocation, AudioNotify, StreamGrant, StreamRole, StreamState,
 };
 use tairix_abi::driver::audio::{
     AudioEndpointFacts, Frames, GainRange, Rate, SampleFormat, StreamDirection,
@@ -47,7 +47,8 @@ use tairix_util::fallible;
 use crate::channel::{AudioChannelClient, AudioChannelTransport};
 use crate::events;
 use crate::region::{RegionHost, RegionId};
-use crate::service::{audit, Notifier};
+use crate::service::audit;
+use crate::wakes::Wake;
 
 /// The encoding a resampled contribution is staged in for the mixer.
 ///
@@ -478,33 +479,27 @@ impl Stream {
 
     /// Move the stream to `state` at `at`, and tell the client the exact
     /// frame what it sees changed on.
-    pub(crate) fn set_state(
-        &mut self,
-        state: StreamState,
-        at: Frames,
-        notifier: &mut dyn Notifier,
-    ) {
+    pub(crate) fn set_state(&mut self, state: StreamState, at: Frames, notifier: &mut dyn Wake) {
         let told = self.reported();
         self.state = state;
         self.tell(told, at, notifier);
     }
 
     /// Hold the stream for the room, or release it, at `at`.
-    pub(crate) fn set_held(&mut self, held: bool, at: Frames, notifier: &mut dyn Notifier) {
+    pub(crate) fn set_held(&mut self, held: bool, at: Frames, notifier: &mut dyn Wake) {
         let told = self.reported();
         self.held = held;
         self.tell(told, at, notifier);
     }
 
     /// Tell the client what it now sees, if that is not `told`.
-    fn tell(&mut self, told: StreamState, at: Frames, notifier: &mut dyn Notifier) {
+    fn tell(&mut self, told: StreamState, at: Frames, notifier: &mut dyn Wake) {
         let state = self.reported();
         if state == told {
             return;
         }
         self.state_at = at;
-        send(
-            notifier,
+        notifier.wake(
             self.grant.notify_endpoint,
             AudioNotify::StateChanged {
                 stream_id: self.id,
@@ -516,7 +511,7 @@ impl Stream {
 
     /// Stop moving a stream whose ring its client corrupted, tell the client,
     /// and record whose it was. Every other stream, and the device, carry on.
-    fn fault(&mut self, err: Errno, notifier: &mut dyn Notifier, sink: &dyn Sink) {
+    fn fault(&mut self, err: Errno, notifier: &mut dyn Wake, sink: &dyn Sink) {
         let at = self.position;
         self.set_state(StreamState::Faulted, at, notifier);
         audit(
@@ -543,14 +538,13 @@ impl Stream {
 
     /// Record `lost` missed frames at the stream's position and tell the
     /// client, so it resynchronises exactly rather than drifting.
-    fn account_loss(&mut self, lost: u64, notifier: &mut dyn Notifier) {
+    fn account_loss(&mut self, lost: u64, notifier: &mut dyn Wake) {
         if lost == 0 {
             return;
         }
         self.xrun_frames = self.xrun_frames.saturating_add(lost);
         self.xruns = self.xruns.saturating_add(1);
-        send(
-            notifier,
+        notifier.wake(
             self.grant.notify_endpoint,
             AudioNotify::Xrun {
                 stream_id: self.id,
@@ -586,13 +580,6 @@ impl Stream {
             samples,
         })
     }
-}
-
-/// Send one notification, best effort: a lost wake costs the client a late
-/// refill, which its next period recovers.
-pub(crate) fn send(notifier: &mut dyn Notifier, endpoint: u64, what: AudioNotify) {
-    let frame: [u8; AUDIO_NOTIFY_LEN] = what.encode();
-    notifier.notify(endpoint, &frame);
 }
 
 /// The device encoding an endpoint is programmed in for a client asking for
@@ -878,7 +865,7 @@ pub(crate) fn pump_endpoint<H: RegionHost>(
     slot: usize,
     streams: &mut [Stream],
     regions: &mut H,
-    notifier: &mut dyn Notifier,
+    notifier: &mut dyn Wake,
     sink: &dyn Sink,
 ) -> Result<Pumped, Errno> {
     let endpoint = device.endpoints.get_mut(slot).ok_or(Errno::NotFound)?;
@@ -901,7 +888,7 @@ pub(crate) fn pump_endpoint<H: RegionHost>(
 struct Pump<'a> {
     device_index: usize,
     slot: usize,
-    notifier: &'a mut dyn Notifier,
+    notifier: &'a mut dyn Wake,
     sink: &'a dyn Sink,
 }
 
@@ -1205,7 +1192,7 @@ fn push_capture<H: RegionHost>(
     active: &Active,
     regions: &mut H,
     decoded: usize,
-    notifier: &mut dyn Notifier,
+    notifier: &mut dyn Wake,
 ) -> Result<(), Errno> {
     let Some(region) = stream.region else {
         return Ok(());
@@ -1263,13 +1250,12 @@ fn push_capture<H: RegionHost>(
 }
 
 /// Tell every live stream on the endpoint that its ring moved.
-fn wake_clients(device_index: usize, slot: usize, streams: &[Stream], notifier: &mut dyn Notifier) {
+fn wake_clients(device_index: usize, slot: usize, streams: &[Stream], notifier: &mut dyn Wake) {
     for stream in streams {
         if !stream.on(device_index, slot) || !stream.is_live() {
             continue;
         }
-        send(
-            notifier,
+        notifier.wake(
             stream.grant.notify_endpoint,
             AudioNotify::SpaceAvailable {
                 stream_id: stream.id,

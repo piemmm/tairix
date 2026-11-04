@@ -44,6 +44,7 @@ use tairix_drvhost::{
 use tairix_fdt::Fdt;
 use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
 use tairix_kernel_core::console::NULL_CONSOLE_INPUT;
+use tairix_kernel_core::seat::InputKind;
 use tairix_kernel_core::SeatRegistry;
 use tairix_kernel_mem::{AddressSpace, HostPageTable, MmioMap, VirtAddr};
 use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
@@ -486,15 +487,22 @@ fn drive_multi_seat(env: &dyn QemuEnv, mapper: &dyn MmioMapper, config: Framebuf
         env.fail("multi-seat: inject hotplug seat");
     }
     let mut buf = [0u8; KeyInput::WIRE_LEN];
-    if SEATS.read_key(second, SeatOwner(CLIENT_A), &mut buf) != Err(Errno::SeatNotOwner) {
+    if SEATS.read(second, SeatOwner(CLIENT_A), InputKind::Key, &mut buf) != Err(Errno::SeatNotOwner)
+    {
         env.fail("multi-seat: cross-seat drain not refused");
     }
-    if SEATS.read_key(SEAT_PRIMARY, SeatOwner(CLIENT_A), &mut buf) != Ok(KeyInput::WIRE_LEN)
+    if SEATS
+        .read(SEAT_PRIMARY, SeatOwner(CLIENT_A), InputKind::Key, &mut buf)
+        .map(|lease| lease.is_some())
+        != Ok(true)
         || KeyInput::from_bytes(&buf) != Ok(press('a'))
     {
         env.fail("multi-seat: boot-seat drain");
     }
-    if SEATS.read_key(second, SeatOwner(CLIENT_B), &mut buf) != Ok(KeyInput::WIRE_LEN)
+    if SEATS
+        .read(second, SeatOwner(CLIENT_B), InputKind::Key, &mut buf)
+        .map(|lease| lease.is_some())
+        != Ok(true)
         || KeyInput::from_bytes(&buf) != Ok(press('b'))
     {
         env.fail("multi-seat: hotplug-seat drain");

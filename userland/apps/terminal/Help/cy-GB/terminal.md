@@ -32,10 +32,27 @@ Daw'r sesiwn i ben pan fydd y gragen yn gadael (er enghraifft gydag
 `exit`) neu pan gaeir y ffenestr o'r bwrdd gwaith; mae cau'r ffenestr
 yn gorffen y gragen gyda diwedd ffeil ar ei mewnbwn.
 
+Nid yw cau'r ffenestr olaf yn gorffen y derfynell. Mae ei heicon yn aros
+ar far eiconau'r bwrdd gwaith, ac mae clicio arno yn agor ffenestr
+newydd; mae *Gadael* ar ddewislen yr eicon hwnnw yn cau pob ffenestr ac
+yn gorffen y rhaglen.
+
+Cedwir llinellau sy'n sgrolio oddi ar frig y sgrin — y 500 olaf
+oni bai bod *Gosodiadau…* yn dweud fel arall — ac mae olwyn y llygoden
+yn sgrolio'n ôl drostynt; mae
+`Shift Page Up` a `Shift Page Down` yn symud sgrin ar y tro, mae
+`Shift Home` yn mynd i'r llinell hynaf a `Shift End` yn ôl i'r sgrin.
+Mae allbwn sy'n cyrraedd tra byddwch chi wedi sgrolio'n ôl yn gadael yr
+olwg lle mae, ac mae teipio yn ei dychwelyd i'r sgrin. Mae newid maint y
+ffenestr yn ail-lapio'r llinellau i'r lled newydd yn hytrach na'u torri
+i ffwrdd, ac nid yw rhaglen sgrin lawn yn cadw dim ar ei sgrin ei hun.
+Pan fydd y cof yn brin, gollyngir y llinellau hynaf yn gyntaf.
+
 Mae gwasgu ail fotwm (de) y llygoden unrhyw le ar y sgrin yn agor
-dewislen y derfynell. Mae gan bob rhes lwybr byr bysellfwrdd sy'n
-gweithio p'un a yw'r ddewislen yn agored ai peidio, ac mae `Escape` —
-neu glicio i ffwrdd o'r ddewislen — yn ei diswyddo heb ddewis.
+dewislen y derfynell. Mae gan bob rhes ac eithrio *Clirio'r ôl-sgrolio*
+lwybr byr bysellfwrdd sy'n gweithio p'un a yw'r ddewislen yn agored ai
+peidio, ac mae `Escape` — neu glicio i ffwrdd o'r ddewislen — yn ei
+diswyddo heb ddewis.
 
 | Rhes | Llwybr byr | Beth mae'n ei wneud |
 | --- | --- | --- |
@@ -43,11 +60,16 @@ neu glicio i ffwrdd o'r ddewislen — yn ei diswyddo heb ddewis.
 | Testun mwy | `Ctrl +` | Tynnu'r sgrin un cam yn fwy. |
 | Testun llai | `Ctrl -` | Tynnu'r sgrin un cam yn llai. |
 | Maint gwirioneddol | `Ctrl 0` | Dychwelyd i'r maint testun rhagosodedig. |
-| Clirio'r sgrin | `Ctrl Shift K` | Gwagio'r sgrin heb ysgrifennu at y gragen. |
+| Clirio'r sgrin | `Ctrl Shift K` | Gwagio'r sgrin heb ysgrifennu at y gragen; gellir dal i sgrolio'n ôl at yr hyn yr oedd yn ei ddangos. |
+| Clirio'r ôl-sgrolio | — | Anghofio'r llinellau a gedwir uwchben y sgrin. |
 | Cau | `Ctrl Shift W` | Cau'r ffenestr a gorffen y gragen. |
 
-Mae'r gosodiadau'n agor yn y ffenestr ei hun ac mae ganddynt ddau dab.
-**Ymddangosiad** sy'n dewis y cynllun lliw, yn gosod maint y testun, ac
+Mae'r gosodiadau'n agor yn eu ffenestr eu hunain, a all aros ar agor tra
+byddwch chi'n gweithio yn y derfynell; mae dewis *Gosodiadau…* eto yn dod
+â hi i'r blaen. Mae ganddi ddau dab; trowch yr olwyn drostynt i sgrolio.
+Mae *Gorffen*, `Escape` neu fotwm cau'r ffenestr yn ei chau.
+**Ymddangosiad** sy'n dewis y cynllun lliw, yn gosod maint y testun a
+faint o linellau ôl-sgrolio a gedwir (o ddim i 10,000, 500 i ddechrau), ac
 yn golygu cynllun y defnyddiwr ei hun. Y cynlluniau a gludir yw *System*
 (sy'n dilyn ymddangosiad tywyll neu olau'r bwrdd gwaith), *Midnight*,
 *Phosphor*, *Amber*, *Ember*, *Contrast*, *Paper*, a *Custom*. Mae dewis
@@ -59,7 +81,11 @@ gyfer pa un bynnag sydd wedi'i ddewis. Mae'r dewisydd yn gosod y lliw yn
 ôl ei sillafiad hecsadegol, ac yn dangos wrth ei ymyl y lliw oedd yn y
 blwch pan gafodd ei ddewis, y mae clic yn ei adfer.
 
-**Effeithiau** sy'n gosod sut mae'r sgrin yn cael ei thynnu.
+**Effeithiau** sy'n gosod sut mae'r sgrin yn cael ei thynnu. Mae
+terfynell newydd yn agor gyda didreiddedd 80 %, y cefndir wedi'i niwlio
+ar hanner cryfder a phob effaith arall i ffwrdd, fel bod y bwrdd gwaith
+yn edrych fel gwydr barugog y tu ôl i'r testun yn hytrach na dangos
+drwodd yn finiog.
 
 | Effaith | Beth mae'n ei wneud |
 | --- | --- |

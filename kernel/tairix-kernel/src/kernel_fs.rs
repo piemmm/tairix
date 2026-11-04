@@ -2,8 +2,8 @@
 //!
 //! [`KernelFs`] is the one trait bound every registered mount driver
 //! satisfies: the structural surfaces the secured VFS delegates to —
-//! read, write, security, and the whole-volume space accounting the
-//! mount snapshot reports — plus [`Send`] (the mount lives behind a
+//! read, write, security, the whole-volume space accounting the mount
+//! snapshot reports and the volume's title — plus [`Send`] (the mount lives behind a
 //! sleeping lock shared across the per-CPU syscall handlers). The
 //! blanket impl makes every concrete driver (a `ARXFS<…>`, a
 //! `CachedFs<…>` wrapper) a `KernelFs`; the `Box<dyn KernelFs>`
@@ -21,8 +21,9 @@ use alloc::boxed::Box;
 
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrsFs, FilesystemAttrsProvider,
-    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
-    NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned, VolumeHost, VolumeStats,
+    FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned, VolumeHost,
+    VolumeStats, VolumeTitle,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -36,6 +37,7 @@ pub trait KernelFs:
     + FilesystemSecurity
     + FilesystemStats
     + FilesystemAttrsProvider
+    + FilesystemLabel
     + Send
 {
 }
@@ -46,6 +48,7 @@ impl<T> KernelFs for T where
         + FilesystemSecurity
         + FilesystemStats
         + FilesystemAttrsProvider
+        + FilesystemLabel
         + Send
 {
 }
@@ -199,6 +202,16 @@ impl FilesystemStats for Box<dyn KernelFs> {
     }
 }
 
+impl FilesystemLabel for Box<dyn KernelFs> {
+    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
+        (**self).label()
+    }
+
+    fn set_label(&mut self, title: &VolumeTitle) -> Result<(), DriverError> {
+        (**self).set_label(title)
+    }
+}
+
 impl FilesystemAttrsProvider for Box<dyn KernelFs> {
     fn attrs_fs(&mut self) -> Option<&mut dyn FilesystemAttrsFs> {
         (**self).attrs_fs()
@@ -227,5 +240,6 @@ mod tests {
         conformance::assert_security_forwards(&mut boxed);
         conformance::assert_stats_forwards(&mut boxed);
         conformance::assert_attrs_forwards(&mut boxed);
+        conformance::assert_label_forwards(&mut boxed);
     }
 }

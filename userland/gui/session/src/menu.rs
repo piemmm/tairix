@@ -1024,9 +1024,11 @@ pub enum DesktopMenuRefused {
 /// exactly as an application's is; the only difference is that their models are
 /// built in process, so their rows may state things an application
 /// structurally cannot. Both arrive through here, so a desktop press cannot
-/// take the grab from the lock screen or the trusted picker by arriving from a
-/// direction that skipped the seat rule — the same rule an application's
-/// `OpenMenu` resolves through.
+/// take the grab from the lock screen or a prompt by arriving from a direction
+/// that skipped the seat rule: `seat_modal` says whether one holds the seat
+/// ([`crate::seat_modal`]). The trusted picker holds only the window that
+/// asked for its pick, so a desktop menu opens over it, taking the keyboard
+/// while it is up and leaving it with the picker as it closes.
 ///
 /// # Errors
 ///
@@ -1037,10 +1039,10 @@ pub fn open_desktop_menu(
     owner: ChainOwner,
     model: ChainModel,
     placement: PlatePlacement,
-    seat_held: bool,
+    seat_modal: bool,
     geom: &ChainGeometry<'_>,
 ) -> Result<(), DesktopMenuRefused> {
-    if let Some(reason) = seat_menu_refusal(geom.screen, seat_held) {
+    if let Some(reason) = seat_menu_refusal(geom.screen, seat_modal) {
         return Err(DesktopMenuRefused::Seat(reason));
     }
     chain

@@ -42,8 +42,11 @@ gyfrol iach mae `--force` yn dal i wagio a datgysylltu'n lân; ni
 thaflir dim pan fo cadarnhad glân yn bosibl.
 
 Cewch ddatgysylltu delwedd ddisg neu gyfran rwydwaith a osodoch chi
-eich hun; mae unrhyw gyfrol arall yn gofyn am yr awdurdod gosod
-(`CAP_FS_MOUNT`). Mae'r cnewyllyn yn ei wirio ac yn archwilio pob
+eich hun, a chewch ddatgysylltu disg symudadwy — cof bach USB, cerdyn
+cof — tra byddwch chi'n defnyddio'r cyfrifiadur ei hun, ond dim ond
+yn blaen, byth â `--force`; mae unrhyw gyfrol arall yn gofyn am yr
+awdurdod gosod (`CAP_FS_MOUNT`). Mae'r cnewyllyn yn ei wirio ac yn
+archwilio pob
 penderfyniad. Nid yw'r cyfrolau cychwyn parhaol na rhwymiadau golwg y
 system yn ddatgysylltadwy.
 

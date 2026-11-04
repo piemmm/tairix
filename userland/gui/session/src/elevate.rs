@@ -34,10 +34,11 @@
 //!
 //! # Asked for an application
 //!
-//! The desktop's own Settings asks through its window for one of a closed set
-//! of tasks ([`crate::systask`]); such a request names the window, and its
-//! end is owed to that window exactly once ([`AuthorisePrompt::take_concluded`]).
-//! A window that closes takes its question down unanswered
+//! The desktop's own components ask for one of a closed set of tasks
+//! ([`crate::systask`]) through a window, or through their icon-bar slot when
+//! they have none; such a request names who asked, and its end is owed to them
+//! exactly once ([`AuthorisePrompt::take_concluded`]). A window that closes, or
+//! an application that exits, takes its question down unanswered
 //! ([`AuthorisePrompt::abort_for`]).
 
 use alloc::string::String;
@@ -53,6 +54,7 @@ use tairix_controls::Keystroke;
 use tairix_greeter::{AccountTile, AuthoriseAction, AuthoriseSheet, Cooldown, Ticket};
 use tairix_raster::Color;
 use tairix_util::secret::WipedBuf;
+use tairix_window::AuthoriseFor;
 use tairix_wm::{Compositor, InputEvent, Point, Rect, Scale, Surface, WindowId};
 
 use crate::shell::{prompt_origin, DesktopShell};
@@ -100,9 +102,10 @@ pub struct Request {
     pub bundle: Option<String>,
     /// What the request does, in words, after the requester's name.
     pub purpose: String,
-    /// The application window the request was asked for, which is told how
-    /// it ended; `None` for the desktop's own.
-    pub window: Option<u64>,
+    /// The application that asked — through a window of its own or its
+    /// icon-bar slot — which is told how it ended; `None` for the desktop's
+    /// own.
+    pub asker: Option<AuthoriseFor>,
 }
 
 /// What the broker did with an allowed request.
@@ -287,12 +290,11 @@ pub enum PromptOutcome {
     },
 }
 
-/// What a request asked for an application window owes that window once the
-/// prompt ends.
+/// What a request an application asked for owes it once the prompt ends.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Concluded {
-    /// The window that asked.
-    pub window_id: u64,
+    /// The window or slot that asked.
+    pub asker: AuthoriseFor,
     /// What became of its task.
     pub outcome: AuthorisedOutcome,
     /// What a captured task printed, and nothing for any other outcome.
@@ -355,11 +357,11 @@ impl AuthorisePrompt {
         core::mem::take(&mut self.concluded)
     }
 
-    /// Window `window_id` has closed: a question it asked comes down
-    /// unanswered, and nothing is owed to a window no longer there to tell.
-    pub fn abort_for(&mut self, window_id: u64, compositor: &mut Compositor) {
-        self.concluded.retain(|owed| owed.window_id != window_id);
-        if self.pending().and_then(|request| request.window) != Some(window_id) {
+    /// The window or slot `asker` has gone: a question it asked comes down
+    /// unanswered, and nothing is owed to one no longer there to tell.
+    pub fn abort_for(&mut self, asker: AuthoriseFor, compositor: &mut Compositor) {
+        self.concluded.retain(|owed| owed.asker != asker);
+        if self.pending().and_then(|request| request.asker) != Some(asker) {
             return;
         }
         if let Some(showing) = self.showing.take() {
@@ -800,17 +802,17 @@ impl AuthorisePrompt {
             (Some(done), Some(request)) => PromptOutcome::Done { request, done },
             (_, request) => PromptOutcome::Cancelled { request },
         };
-        let (window, done) = match &outcome {
-            PromptOutcome::Done { request, done } => (request.window, Some(done.clone())),
+        let (asker, done) = match &outcome {
+            PromptOutcome::Done { request, done } => (request.asker, Some(done.clone())),
             PromptOutcome::Cancelled { request } => {
-                (request.as_ref().and_then(|request| request.window), None)
+                (request.as_ref().and_then(|request| request.asker), None)
             }
             PromptOutcome::Pending => (None, None),
         };
-        if let Some(window_id) = window {
+        if let Some(asker) = asker {
             let (owed, output) = crate::systask::outcome_of(done);
             self.concluded.push(Concluded {
-                window_id,
+                asker,
                 outcome: owed,
                 output,
             });

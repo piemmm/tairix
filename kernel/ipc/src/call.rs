@@ -23,13 +23,17 @@
 //!
 //! Every caller process's calls sit in a lane of their own
 //! (`kernel/ipc/src/lanes.rs`), charged to that caller's own `ipc-queue-bytes`
-//! limit and served in turn with every other caller's, each caller's own
-//! requests oldest first. The endpoint's per-caller depth bounds the calls a
-//! caller has waiting on the server, so no caller can make the endpoint refuse
-//! another, and room comes back as the server answers. An answer the caller has
-//! not collected is its own memory, paid for until it collects it: it never
-//! keeps the caller from posting, so a blocking call waits on the server and
-//! never on its own caller.
+//! limit as it grows and served in turn with every other caller's, each
+//! caller's own requests oldest first. The endpoint's per-caller depth bounds
+//! the calls a caller has waiting on the server, so no caller can make the
+//! endpoint refuse another, and room comes back as the server answers. An
+//! answer the caller has not collected is its own memory, paid for until it
+//! collects it, and never holds that room, so a blocking call waits on the
+//! server and never on its own caller. A caller holding
+//! [`IPC_SENDER_DEPTH_MAX`] answers it has not collected is refused every post
+//! until it holds fewer — the calls it posted below that may all be answered,
+//! taking it up to its depth past it — so no search of a lane grows with the
+//! caller's budget.
 //!
 //! # Not a scheduler primitive
 //!
@@ -38,7 +42,9 @@
 //! parking until a request arrives — is layered above through the same
 //! park seam the IRQ wait and `wait` syscalls use (`kernel/core`), so the
 //! primitive stays synchronous-test-friendly and free of any scheduler
-//! dependency.
+//! dependency. A caller that cannot park spins in
+//! [`CallEndpoint::await_settle`], for its answer or for room, never taking
+//! the lock either must take.
 //!
 //! # Fail closed
 //!
@@ -131,6 +137,12 @@ impl BindAuthority {
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct CallTicket(pub u64);
+
+/// How many calls a [`CallEndpoint`] had settled — answered, withdrawn, timed
+/// out, or cancelled by its teardown — when [`CallEndpoint::settle_mark`] was
+/// read.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SettleMark(u64);
 
 /// The outcome of a server-side [`CallEndpoint::recv_call`].
 ///
@@ -344,7 +356,9 @@ struct CallLane {
     pending: VecDeque<PendingCall>,
     /// Received and not yet answered.
     in_service: Vec<InServiceCall>,
-    /// Answered and not yet collected.
+    /// Answered and not yet collected: fewer than [`IPC_SENDER_DEPTH_MAX`]
+    /// plus the depth, since a post is refused once [`IPC_SENDER_DEPTH_MAX`]
+    /// wait.
     completed: Vec<CompletedCall>,
     /// Unanswered calls carrying a deadline, so a lane with none is never
     /// searched for one.
@@ -384,26 +398,69 @@ impl CallLane {
 
     /// The bytes the lane's storage holds, whatever is in it.
     fn storage(&self) -> u64 {
-        let bytes = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        bytes(lane_cost::<u64, Self>())
-            .saturating_add(
-                bytes(self.pending.capacity()).saturating_mul(bytes(size_of::<PendingCall>())),
-            )
-            .saturating_add(
-                bytes(self.in_service.capacity()).saturating_mul(bytes(size_of::<InServiceCall>())),
-            )
-            .saturating_add(
-                bytes(self.completed.capacity()).saturating_mul(bytes(size_of::<CompletedCall>())),
-            )
+        Self::storage_for(
+            self.pending.capacity(),
+            self.in_service.capacity(),
+            self.completed.capacity(),
+        )
     }
 
-    /// Charge the caller for storage grown past `before` bytes. Held whatever
-    /// the limit says, because the memory is real; the call charge taken at
-    /// each post is what refuses a caller at its limit.
-    fn pay_growth(&mut self, before: u64) {
-        let grown = self.storage().saturating_sub(before);
-        if let Some(paid) = self.paid.as_mut().filter(|_| grown > 0) {
-            let _ = paid.grow(grown, u64::MAX);
+    /// The bytes a lane with room for these many calls in each list holds.
+    fn storage_for(pending: usize, in_service: usize, completed: usize) -> u64 {
+        let bytes = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        bytes(lane_cost::<u64, Self>())
+            .saturating_add(bytes(pending).saturating_mul(bytes(size_of::<PendingCall>())))
+            .saturating_add(bytes(in_service).saturating_mul(bytes(size_of::<InServiceCall>())))
+            .saturating_add(bytes(completed).saturating_mul(bytes(size_of::<CompletedCall>())))
+    }
+
+    /// Room for one more call in each list it will pass through, so its
+    /// service and its answer need none later. The caller pays for the growth
+    /// under `limit` before it is taken, so its limit bounds the lane too.
+    fn reserve_post(&mut self, per_sender: usize, limit: u64) -> Result<(), Errno> {
+        let pending =
+            crate::grown_capacity(self.pending.capacity(), self.pending.len() + 1, per_sender);
+        let in_service = crate::grown_capacity(
+            self.in_service.capacity(),
+            self.unanswered() + 1,
+            per_sender,
+        );
+        // Calls posted below the uncollected bound may be answered past it.
+        let completed = crate::grown_capacity(
+            self.completed.capacity(),
+            self.outstanding() + 1,
+            IPC_SENDER_DEPTH_MAX - 1 + per_sender,
+        );
+        let wanted = Self::storage_for(pending, in_service, completed);
+        let grown = wanted.saturating_sub(self.storage());
+        if grown == 0 {
+            return Ok(());
+        }
+        let Some(paid) = self.paid.as_mut() else {
+            return Err(Errno::OutOfMemory);
+        };
+        paid.grow(grown, limit)?;
+        let reserved = self
+            .pending
+            .try_reserve_exact(pending - self.pending.len())
+            .is_ok()
+            && self
+                .in_service
+                .try_reserve_exact(in_service - self.in_service.len())
+                .is_ok()
+            && self
+                .completed
+                .try_reserve_exact(completed - self.completed.len())
+                .is_ok();
+        // Paid for only as far as the heap granted it.
+        let unspent = wanted.saturating_sub(self.storage());
+        if let Some(paid) = self.paid.as_mut() {
+            paid.shrink(unspent);
+        }
+        if reserved {
+            Ok(())
+        } else {
+            Err(Errno::OutOfMemory)
         }
     }
 
@@ -460,18 +517,14 @@ struct Inner {
 
 impl Inner {
     /// Reserve everything `sender`'s next call will need once it is posted,
-    /// charging its caller for the lane storage that took.
-    fn reserve_post(&mut self, sender: u64) -> Result<(), Errno> {
+    /// its caller paying for the lane storage that takes under `limit`.
+    fn reserve_post(&mut self, sender: u64, per_sender: usize, limit: u64) -> Result<(), Errno> {
         let pending = self.pending;
         let Some(lane) = self.lanes.get_mut(sender) else {
             return Err(Errno::OutOfMemory);
         };
-        let before = lane.storage();
-        let reserved = lane.pending.try_reserve(1).is_ok()
-            && lane.in_service.try_reserve(lane.pending.len() + 1).is_ok()
-            && lane.completed.try_reserve(lane.unanswered() + 1).is_ok();
-        lane.pay_growth(before);
-        if !reserved || self.serving.try_reserve(pending + 1).is_err() {
+        lane.reserve_post(per_sender, limit)?;
+        if self.serving.try_reserve(pending + 1).is_err() {
             return Err(Errno::OutOfMemory);
         }
         self.lanes.join_turn(sender);
@@ -524,6 +577,9 @@ pub struct CallEndpoint {
     server_task: AtomicU64,
     /// Liveness read on the post fast path before taking the lock.
     state: AtomicU32,
+    /// Calls settled so far, which a caller no scheduler can park watches
+    /// ([`Self::await_settle`]) rather than polling `inner`.
+    settled: AtomicU64,
     inner: tairix_sync::SpinLock<Inner>,
     /// Callers' threads parked in a blocking call until their own lane has
     /// room.
@@ -787,6 +843,7 @@ impl CallEndpoint {
             owner_instance: creator.proc_id(),
             server_task: AtomicU64::new(0),
             state: AtomicU32::new(state::OPEN),
+            settled: AtomicU64::new(0),
             inner: tairix_sync::SpinLock::new(Inner {
                 next_ticket: 0,
                 lanes,
@@ -918,6 +975,39 @@ impl CallEndpoint {
         self.state.load(Ordering::Acquire) == state::CLOSED
     }
 
+    /// The calls settled so far, read without the endpoint's lock.
+    ///
+    /// Read it before the look an [`await_settle`](Self::await_settle)
+    /// follows — a [`take_reply`](Self::take_reply), or a
+    /// [`has_room_for`](Self::has_room_for) — so a call settling between the
+    /// two still ends the wait.
+    #[must_use]
+    pub fn settle_mark(&self) -> SettleMark {
+        SettleMark(self.settled.load(Ordering::Acquire))
+    }
+
+    /// Spin until a call is answered, withdrawn or timed out, or the endpoint
+    /// torn down, after `mark` was read, or until `over` reports the wait
+    /// over: the wait of a caller no scheduler can park, for its answer or for
+    /// room. It never takes the endpoint's lock, which polling would keep
+    /// retaking from the answer that needs it; once it returns for a settle, a
+    /// look under the lock sees the change.
+    pub fn await_settle(&self, mark: SettleMark, mut over: impl FnMut() -> bool) {
+        tairix_sync::spinwait::spin_until(|| {
+            self.settled.load(Ordering::Acquire) != mark.0 || over()
+        });
+    }
+
+    /// Count a call settled. Called under `inner` once the change is in
+    /// place, so a caller that reads the new count and then takes the lock
+    /// finds it; the lock orders every count, so no locked read-modify-write
+    /// is needed.
+    fn settle(&self) {
+        let settled = self.settled.load(Ordering::Relaxed);
+        self.settled
+            .store(settled.wrapping_add(1), Ordering::Release);
+    }
+
     /// Number of outstanding calls (posted, in service, or unclaimed) across
     /// every caller.
     ///
@@ -961,10 +1051,12 @@ impl CallEndpoint {
         let (retired, in_service) = {
             let mut g = self.inner.lock();
             g.pending = 0;
-            (
+            let taken = (
                 g.lanes.take_all(),
                 core::mem::replace(&mut g.serving, serving()),
-            )
+            );
+            self.settle();
+            taken
         };
         let cancelled: usize = retired.iter().map(|(_, lane)| lane.outstanding()).sum();
         drop(in_service);
@@ -1018,6 +1110,7 @@ impl CallEndpoint {
             for call in &lane.in_service {
                 serving.remove(&call.ticket);
             }
+            self.settle();
             lane
         };
         // Its threads have ended, so nothing it waited for room with is woken.
@@ -1068,10 +1161,19 @@ impl CallEndpoint {
     ///    is taken from the caller's own `ipc-queue-bytes` budget under
     ///    `sender_limit`, else [`Errno::LimitExceeded`] +
     ///    [`AuditEvent::IpcSenderLimitReached`].
-    /// 5. **Depth check.** If the caller already has the endpoint's per-caller
+    /// 5. **Uncollected check.** If the caller holds [`IPC_SENDER_DEPTH_MAX`]
+    ///    or more answers it has not collected, [`Errno::LimitExceeded`] +
+    ///    [`AuditEvent::IpcSenderLimitReached`], whatever its depth: only its
+    ///    collecting enough to hold fewer lets it post again, so this refusal
+    ///    is never waited out. The calls it posted below that may all be
+    ///    answered, so it can come to hold up to its depth more.
+    /// 6. **Depth check.** If the caller already has the endpoint's per-caller
     ///    depth of calls waiting on the server, [`Errno::WouldBlock`] +
     ///    [`AuditEvent::CallQueueFull`] — the server answering one of them is
-    ///    what makes room. Its uncollected answers never count.
+    ///    what makes room. Its uncollected answers never count toward it.
+    ///
+    /// The caller's lane grows with its calls, the growth charged under
+    /// `sender_limit` like the call itself and refused past it the same way.
     ///
     /// On success the request is copied into a kernel-owned
     /// [`SensitiveBuffer`] — so a request that carried a passphrase, key, or
@@ -1225,6 +1327,13 @@ impl CallEndpoint {
                 &[id_field, sender_field][..],
                 Err(Errno::WouldBlock),
             ),
+            // The caller's own limits refuse it, never the heap: its budget,
+            // paying for its lane included, or the answers it left uncollected.
+            Err(Errno::LimitExceeded) => (
+                AuditEvent::IpcSenderLimitReached,
+                &[id_field, sender_field][..],
+                Err(Errno::LimitExceeded),
+            ),
             Err(err) => (
                 AuditEvent::PayloadAllocFailed,
                 &[id_field, sender_field, len_field][..],
@@ -1258,7 +1367,7 @@ impl CallEndpoint {
                 break Err(Errno::NotFound);
             }
             match g.lanes.open(sender, &mut fresh) {
-                Ok(Opened::Ready) => {}
+                Ok(Opened::Held | Opened::Made) => {}
                 Ok(Opened::NeedsFresh) => {
                     drop(g);
                     match self.fresh_lane(caller, sender_limit) {
@@ -1278,17 +1387,18 @@ impl CallEndpoint {
                 Some(_) => Ok(()),
                 None => Err(Errno::OutOfMemory),
             };
-            let full = g
-                .lanes
-                .get(sender)
-                .is_none_or(|lane| lane.unanswered() >= self.per_sender);
-            let admitted = paid.and_then(|()| {
-                if full {
-                    Err(Errno::WouldBlock)
-                } else {
-                    g.reserve_post(sender)
+            // Past the ceiling no room waited for helps, so it refuses first.
+            let room = match g.lanes.get(sender) {
+                Some(lane) if lane.completed.len() >= IPC_SENDER_DEPTH_MAX => {
+                    Err(Errno::LimitExceeded)
                 }
-            });
+                Some(lane) if lane.unanswered() >= self.per_sender => Err(Errno::WouldBlock),
+                Some(_) => Ok(()),
+                None => Err(Errno::OutOfMemory),
+            };
+            let admitted = paid
+                .and(room)
+                .and_then(|()| g.reserve_post(sender, self.per_sender, sender_limit));
             if let Err(err) = admitted {
                 let idle = g.lanes.retire_if_idle(sender);
                 drop(g);
@@ -1527,6 +1637,7 @@ impl CallEndpoint {
             _charge: charge,
         });
         serving.remove(&ticket.0);
+        self.settle();
         drop(g);
         let room = self.room.lock().take_waiting_as(sender);
         record(
@@ -1622,6 +1733,7 @@ impl CallEndpoint {
                     dead_service = Some(lane.in_service.swap_remove(pos));
                     serving.remove(&ticket.0);
                 }
+                self.settle();
                 let idle = lanes.retire_if_idle(claimant);
                 let shed = g.shed_idle_room();
                 drop(g);
@@ -1773,6 +1885,7 @@ impl CallEndpoint {
         if emptied {
             lanes.leave_turn(claimant);
         }
+        self.settle();
         let idle = lanes.retire_if_idle(claimant);
         let shed = g.shed_idle_room();
         drop(g);
@@ -1812,6 +1925,22 @@ impl CallEndpoint {
     #[must_use]
     pub fn room_wake_for(&self, sender: u64) -> RoomWake<u64> {
         self.room.lock().take_waiting_as(sender)
+    }
+
+    /// `true` when a post from `sender` would not be refused for want of
+    /// room: the endpoint is closed, or `sender` has fewer than the per-caller
+    /// depth of calls waiting on the server. The peek a blocking call woken
+    /// for room takes before it posts again; every other refusal of a post is
+    /// an answer, never something to wait out.
+    #[must_use]
+    pub fn has_room_for(&self, sender: u64) -> bool {
+        self.is_closed()
+            || self
+                .inner
+                .lock()
+                .lanes
+                .get(sender)
+                .is_none_or(|lane| lane.unanswered() < self.per_sender)
     }
 }
 
@@ -3384,6 +3513,171 @@ mod tests {
             .expect("one caller's budget is never another's");
     }
 
+    /// Paying for its lane is the caller's own budget refusing it, whether the
+    /// lane is fresh or a spare another caller left, and is recorded as that,
+    /// never as the heap failing.
+    #[test]
+    fn a_caller_that_cannot_pay_for_its_lane_is_refused_as_over_its_limit() {
+        let sink = RecordingSink::new();
+        let ep = endpoint_of_depth(8, &sink);
+        let charge = CallEndpointLimits {
+            max_request: 64,
+            max_reply: 64,
+            per_sender: 8,
+        }
+        .call_charge();
+        let fresh = task_with(7, &[]);
+        assert_eq!(
+            ep.post(&fresh, POSTER_SCHED, b"q", u64::MAX, charge, &sink),
+            Err(Errno::LimitExceeded),
+            "the call fits its budget but a fresh lane does not"
+        );
+        let early = task_with(8, &[]);
+        let ticket = ep
+            .post(&early, POSTER_SCHED, b"q", u64::MAX, NO_LIMIT, &sink)
+            .expect("posted");
+        let call = recv_one(&ep).expect("received");
+        let _ = ep.reply(call.ticket, b"r", &sink).expect("replied");
+        let _ = ready_bytes(ep.take_reply(8, ticket, 0, &sink));
+        assert_eq!(ep.inner.lock().lanes.spares(), 1, "its lane is kept");
+        let late = task_with(9, &[]);
+        assert_eq!(
+            ep.post(&late, POSTER_SCHED, b"q", u64::MAX, charge, &sink),
+            Err(Errno::LimitExceeded),
+            "nor does the spare it would take"
+        );
+        let refused = AuditEvent::IpcSenderLimitReached.id().0;
+        assert_eq!(sink.ids().iter().filter(|&&id| id == refused).count(), 2);
+        assert!(!sink.ids().contains(&AuditEvent::PayloadAllocFailed.id().0));
+        for caller in [&fresh, &late] {
+            assert_eq!(caller.charges().held(LimitKind::IpcQueueBytes), 0);
+        }
+    }
+
+    /// A lane grows as its caller's calls need, and only as far as the caller
+    /// can pay: its budget bounds what it holds, the lane's storage included.
+    #[test]
+    fn a_lane_grows_only_as_far_as_its_caller_can_pay() {
+        let sink = RecordingSink::new();
+        let ep = endpoint_of_depth(8, &sink);
+        let caller = task_with(7, &[]);
+        let charge = CallEndpointLimits {
+            max_request: 64,
+            max_reply: 64,
+            per_sender: 8,
+        }
+        .call_charge();
+        let limit = CallLane::fresh(8).expect("a lane").storage() + 5 * charge;
+        let post = || ep.post(&caller, POSTER_SCHED, b"q", u64::MAX, limit, &sink);
+        for _ in 0..SPARE_LANE_ITEMS {
+            post().expect("the lane as made has room");
+        }
+        assert_eq!(
+            post(),
+            Err(Errno::LimitExceeded),
+            "growing the lane would carry its caller past its limit"
+        );
+        assert!(caller.charges().held(LimitKind::IpcQueueBytes) <= limit);
+        assert_eq!(ep.outstanding(), SPARE_LANE_ITEMS);
+        assert_room_reserved(&ep);
+    }
+
+    /// A caller that never collects its answers is refused once it holds the
+    /// ceiling of them, however large its budget, so its lane stays a bounded
+    /// search; collecting one lets it post again, and no other caller is
+    /// refused for it.
+    #[test]
+    fn a_caller_leaving_its_answers_uncollected_is_refused_at_the_ceiling() {
+        let sink = RecordingSink::new();
+        let ep = endpoint_of_depth(1, &sink);
+        let hoarder = task_with(9, &[]);
+        let post = || ep.post(&hoarder, POSTER_SCHED, b"q", u64::MAX, NO_LIMIT, &sink);
+        let mut answered = alloc::vec::Vec::new();
+        for _ in 0..IPC_SENDER_DEPTH_MAX {
+            answered.push(post().expect("below the ceiling"));
+            let call = recv_one(&ep).expect("received");
+            let _ = ep.reply(call.ticket, b"r", &sink).expect("replied");
+        }
+        assert_eq!(post(), Err(Errno::LimitExceeded));
+        assert!(sink
+            .ids()
+            .contains(&AuditEvent::IpcSenderLimitReached.id().0));
+        assert_eq!(ep.outstanding(), IPC_SENDER_DEPTH_MAX);
+        let other = task_with(7, &[]);
+        ep.post(&other, POSTER_SCHED, b"q", u64::MAX, NO_LIMIT, &sink)
+            .expect("another caller is never refused for it");
+        let _ = ready_bytes(ep.take_reply(9, answered[0], 0, &sink));
+        post().expect("a collected answer lets it post again");
+        assert_room_reserved(&ep);
+    }
+
+    /// The calls posted below the ceiling may all be answered, taking a caller
+    /// past it, and it is then refused, never told to wait, until it has
+    /// collected enough to hold fewer: collecting one is not always enough.
+    #[test]
+    fn a_caller_answered_past_the_ceiling_collects_below_it_to_post() {
+        let sink = RecordingSink::new();
+        let ep = endpoint_of_depth(2, &sink);
+        let hoarder = task_with(9, &[]);
+        let post = || ep.post(&hoarder, POSTER_SCHED, b"q", u64::MAX, NO_LIMIT, &sink);
+        let answer = || {
+            let call = recv_one(&ep).expect("received");
+            let _ = ep.reply(call.ticket, b"r", &sink).expect("replied");
+        };
+        let mut answered = alloc::vec::Vec::new();
+        for _ in 1..IPC_SENDER_DEPTH_MAX {
+            answered.push(post().expect("below the ceiling"));
+            answer();
+        }
+        for _ in 0..2 {
+            answered.push(post().expect("below the ceiling, to its depth"));
+        }
+        answer();
+        answer();
+        assert_eq!(
+            post(),
+            Err(Errno::LimitExceeded),
+            "past it, never WouldBlock"
+        );
+        assert!(ep.has_room_for(9), "no room is waited for");
+        let _ = ready_bytes(ep.take_reply(9, answered[0], 0, &sink));
+        assert_eq!(
+            post(),
+            Err(Errno::LimitExceeded),
+            "one collected is not enough"
+        );
+        let _ = ready_bytes(ep.take_reply(9, answered[1], 0, &sink));
+        post().expect("below the ceiling again");
+        assert_room_reserved(&ep);
+    }
+
+    /// Room is the depth of calls waiting on the server, exactly what refuses
+    /// a post `WouldBlock`: an answer leaves room whether or not it is
+    /// collected, and a closed endpoint has room, so a woken caller posts and
+    /// finds it gone.
+    #[test]
+    fn room_is_the_depth_of_calls_waiting_on_the_server() {
+        let sink = RecordingSink::new();
+        let ep = endpoint_of_depth(2, &sink);
+        let caller = task_with(9, &[]);
+        let post = || ep.post(&caller, POSTER_SCHED, b"q", u64::MAX, NO_LIMIT, &sink);
+        assert!(ep.has_room_for(9), "a caller with no lane has room");
+        for _ in 0..2 {
+            post().expect("posted");
+        }
+        assert!(!ep.has_room_for(9), "its depth is waiting on the server");
+        assert_eq!(post(), Err(Errno::WouldBlock));
+        assert!(ep.has_room_for(7), "another caller's room is untouched");
+        let call = recv_one(&ep).expect("received");
+        let _ = ep.reply(call.ticket, b"r", &sink).expect("replied");
+        assert!(ep.has_room_for(9), "an answer makes room, collected or not");
+        ep.destroy(&sink);
+        assert!(
+            ep.has_room_for(9),
+            "a closed endpoint has room to find it gone"
+        );
+    }
+
     fn named(wake: &RoomWake<u64>) -> alloc::vec::Vec<u64> {
         let mut tasks: alloc::vec::Vec<u64> = wake.tasks().collect();
         tasks.sort_unstable();
@@ -3510,6 +3804,81 @@ mod tests {
             1,
             "and its storage kept, so the next post allocates no lane"
         );
+    }
+
+    /// The settle count moves exactly when a caller's look could change: an
+    /// answer, a withdrawal, a timeout, a dead poster's calls cancelled, the
+    /// teardown. Posting, receiving and collecting move it not at all.
+    #[test]
+    fn the_settle_mark_moves_only_when_a_call_settles() {
+        /// What `act` returned, and whether it moved `ep`'s settle mark.
+        fn settles<T>(ep: &CallEndpoint, act: impl FnOnce() -> T) -> (T, bool) {
+            let mark = ep.settle_mark();
+            let out = act();
+            (out, ep.settle_mark() != mark)
+        }
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        let post = || {
+            ep.post(&caller, POSTER_SCHED, b"q", u64::MAX, NO_LIMIT, &sink)
+                .expect("posted")
+        };
+
+        let (ticket, moved) = settles(&ep, post);
+        assert!(!moved, "a post settles nothing");
+        let (call, moved) = settles(&ep, || recv_one(&ep).expect("received"));
+        assert!(!moved, "nor does a receive");
+        let (_, moved) = settles(&ep, || ep.reply(call.ticket, b"r", &sink).expect("replied"));
+        assert!(moved, "an answer settles its call");
+        let (_, moved) = settles(&ep, || ready_bytes(ep.take_reply(7, ticket, 0, &sink)));
+        assert!(!moved, "collecting it settles nothing more");
+
+        let withdrawn = post();
+        let (_, moved) = settles(&ep, || ep.cancel_one(7, withdrawn).expect("withdrawn"));
+        assert!(moved, "a withdrawal settles its call");
+        let timed = ep
+            .post(&caller, POSTER_SCHED, b"q", 5, NO_LIMIT, &sink)
+            .expect("posted");
+        let (outcome, moved) = settles(&ep, || ep.take_reply(7, timed, 5, &sink));
+        assert!(matches!(outcome, ReplyOutcome::TimedOut));
+        assert!(moved, "so does a timeout, which frees its room");
+        let _ = post();
+        let (cancelled, moved) = settles(&ep, || ep.cancel_posted_by(7, &sink));
+        assert_eq!(cancelled, 1);
+        assert!(moved, "so does a dead poster's call cancelled");
+        let _ = post();
+        let ((), moved) = settles(&ep, || ep.destroy(&sink));
+        assert!(moved, "and the teardown");
+    }
+
+    /// An unparked caller's wait never takes the endpoint's lock: with the
+    /// lock held elsewhere it still runs, and ends as soon as a call
+    /// settles. A wait that polled `take_reply` would sit on that lock, the
+    /// only way an answer gets in.
+    #[test]
+    fn an_unparked_wait_ends_on_a_settle_while_the_lock_is_held_elsewhere() {
+        extern crate std;
+        use std::sync::{mpsc, Arc};
+
+        let sink = RecordingSink::new();
+        let ep = Arc::new(open_endpoint(&sink));
+        let mark = ep.settle_mark();
+        let held = ep.inner.lock();
+        let (spinning, spun) = mpsc::channel();
+        let waiter = {
+            let ep = Arc::clone(&ep);
+            std::thread::spawn(move || {
+                ep.await_settle(mark, || {
+                    let _ = spinning.send(());
+                    false
+                });
+            })
+        };
+        spun.recv().expect("the wait runs with the lock held");
+        ep.settle();
+        waiter.join().expect("the wait ends on the settle");
+        drop(held);
     }
 
     #[test]

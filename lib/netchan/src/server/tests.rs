@@ -252,6 +252,57 @@ fn detach_returns_to_the_detached_state() {
     assert_eq!(server.geometry(), None);
 }
 
+/// A device whose pre-filter has shed `filtered` frames, reporting its link
+/// down, or faulting.
+struct SheddingNet {
+    filtered: u64,
+    fault: bool,
+}
+
+impl Net for SheddingNet {
+    fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+        LoopbackNet::new().device_facts()
+    }
+
+    fn service(&mut self, _rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
+        if self.fault {
+            return Err(DriverError::DeviceFault);
+        }
+        Ok(ServiceReport {
+            filtered: self.filtered,
+            link: LinkState::Down,
+            ..ServiceReport::default()
+        })
+    }
+}
+
+/// The server keeps the newest link and pre-filter count a service reported,
+/// through a fault after it: what a notify held since is offered with.
+#[test]
+fn the_server_keeps_the_newest_count_a_service_reported() {
+    let mut server = NetChannelServer::new(SheddingNet {
+        filtered: 7,
+        fault: false,
+    });
+    let geom = geometry();
+    let _ = server.attach(attach_params(geom), STACK);
+    let mut buffer = alloc::vec![0u8; geom.region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geom.region_len()).expect("aligned region");
+    assert_eq!(server.reported_filtered(), 0);
+    assert!(server.service(region).is_ok());
+    assert_eq!(
+        (server.reported_link(), server.reported_filtered()),
+        (LinkState::Down, 7)
+    );
+    server.net_mut().fault = true;
+    assert!(server.service(region).is_err());
+    assert_eq!(
+        server.reported_filtered(),
+        7,
+        "a fault reports nothing newer"
+    );
+}
+
 /// A device whose group filter is programmable, so the server's
 /// `SetMulticast` path can be driven end to end.
 struct FilterNet {
@@ -525,7 +576,22 @@ fn a_link_change_is_reported_even_when_no_frame_moved() {
     let outcome = drain.outcome();
     assert!(!outcome.moved);
     assert!(outcome.link_changed);
-    assert_eq!(outcome.link, LinkState::Down);
+}
+
+/// A drain begun from the link a `Service` reply has just carried reports a
+/// change it sees after it, so the driver can tell the stack, whose reply
+/// already went with the older link; one that sees none reports none.
+///
+/// Regression: the drain after a `Service` reply was read for its mask
+/// alone, so a link change it saw never reached the stack.
+#[test]
+fn a_drain_after_a_reply_reports_a_link_change_the_reply_missed() {
+    let mut steady = Drain::new(LinkState::Up, ROUNDS);
+    let _ = steady.observe(&linked(0, false, LinkState::Up));
+    assert!(!steady.outcome().link_changed);
+    let mut pulled = Drain::new(LinkState::Up, ROUNDS);
+    let _ = pulled.observe(&linked(0, false, LinkState::Down));
+    assert!(pulled.outcome().link_changed);
 }
 
 #[test]

@@ -7,7 +7,7 @@ use tairix_curses::{Event, Size, Window};
 use tairix_sound::{Encoding, SoundFormat, SoundInfo};
 
 use super::{draw, key, Key};
-use tairix_player::{Control, EntryId, Extent, List, Passes, Status, Transport};
+use tairix_player::{Control, EntryId, Extent, List, Passes, Span, Status, Transport};
 
 fn files() -> List {
     let paths: Vec<String> = ["intro.wav", "song.wav", "outro.au"]
@@ -52,6 +52,40 @@ fn rows(window: &Window) -> Vec<String> {
                 .to_string()
         })
         .collect()
+}
+
+/// Every key the interface sends crosses to the playback as itself, and a
+/// byte no key is sent as stands for nothing.
+#[test]
+fn every_key_sent_crosses_to_the_playback_as_itself() {
+    let keys = [
+        Event::Char(' '),
+        Event::Right,
+        Event::Left,
+        Event::Char('n'),
+        Event::Char('b'),
+        Event::Up,
+        Event::Down,
+        Event::Char('q'),
+        Event::Ctrl('z'),
+    ]
+    .map(|event| key(&event).expect("a key"));
+    for sent in keys {
+        let byte = sent.byte().expect("a command");
+        assert_eq!(Key::from_byte(byte), Some(sent));
+    }
+    assert_eq!(Key::from_byte(8), None);
+    assert_eq!(Key::from_byte(0xFE), None);
+}
+
+/// A control the interface has no command for is never sent as another.
+///
+/// Regression: one with no byte was sent as a suspend, which stops the
+/// process.
+#[test]
+fn a_control_with_no_command_is_never_sent_as_another() {
+    let unsent = Key::Control(Control::SeekTo(Span::ZERO));
+    assert_eq!(unsent.byte(), None);
 }
 
 #[test]

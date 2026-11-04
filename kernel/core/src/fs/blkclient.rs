@@ -302,8 +302,7 @@ impl BlkClient {
         // The task this operation runs as, for the reply's wake. Absent a
         // live scheduler hook (a host test of this path, where the server
         // runs on another thread) there is nothing to park on, so the wait
-        // degrades to a cooperative spin exactly as `SleepLock` does — never
-        // reachable as a steady state on a running kernel.
+        // spins — never reachable as a steady state on a running kernel.
         let task =
             wait_arch().and_then(|hook| hook.current_cpu().and_then(|cpu| hook.current_task(cpu)));
 
@@ -312,7 +311,7 @@ impl BlkClient {
         // deadline (absolute monotonic) turns a wedged device from an
         // infinite park into a deterministic `TimedOut` — the mechanism, not
         // a spin. Absent a live clock hook (a host test of this path) there
-        // is no deadline and the cooperative fallback below stands in.
+        // is no deadline.
         let poster = task.unwrap_or(0);
         let issued_ns = wait_arch().map_or(0, WaitQueueArch::now_ns);
         let deadline_abs = wait_arch().map_or(NO_DEADLINE, |_| {
@@ -353,9 +352,13 @@ impl BlkClient {
             }
         }
         let claimant = self.caps.process().0;
+        let now = || wait_arch().map_or(0, WaitQueueArch::now_ns);
         let outcome = loop {
-            let now = wait_arch().map_or(0, WaitQueueArch::now_ns);
-            match self.endpoint.take_reply(claimant, ticket, now, self.audit) {
+            let mark = self.endpoint.settle_mark();
+            match self
+                .endpoint
+                .take_reply(claimant, ticket, now(), self.audit)
+            {
                 ReplyOutcome::Ready(bytes) => break Ok(bytes),
                 // The device did not answer within its budget: fail closed so
                 // the filesystem path is never wedged behind a dead disk.
@@ -366,7 +369,7 @@ impl BlkClient {
                 ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Errno::NotFound),
                 ReplyOutcome::Pending => {
                     if task.is_none() || !park_calling_task() {
-                        core::hint::spin_loop();
+                        self.endpoint.await_settle(mark, || now() >= deadline_abs);
                     }
                 }
             }

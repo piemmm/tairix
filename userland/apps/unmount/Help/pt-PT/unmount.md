@@ -43,8 +43,11 @@ prescindiu fica registado no registo de auditoria. Num volume saudável,
 descartado quando uma confirmação limpa é possível.
 
 Uma imagem de disco ou uma partilha de rede que tenha montado pode ser
-desanexada por si; qualquer outro volume exige a autoridade de
-montagem (`CAP_FS_MOUNT`). O núcleo verifica-a e audita cada decisão.
+desanexada por si, e um disco amovível — uma pen USB, um cartão de
+memória — também, enquanto estiver a usar o próprio computador, mas
+apenas por uma desanexação simples, nunca com `--force`; qualquer
+outro volume exige a autoridade de montagem (`CAP_FS_MOUNT`). O núcleo
+verifica-a e audita cada decisão.
 Os volumes de arranque permanentes e as ligações de vista do sistema
 não são desanexáveis.
 

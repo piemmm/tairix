@@ -158,7 +158,11 @@ shows at once, and a storm repaints a window at most five times a second. A
 consumer holding more than `PENDING_CHANGES_MAX` changes collapses them to a
 rescan. A folder on a volume with no change table does not refresh by itself:
 its view's Refresh command reads it again, and any other refused arm is stated
-once on `stderr`.
+once on `stderr`. `WatchedListing::unwatched` answers every refusal,
+`NotImplemented` included, and each consumer decides which is worth saying:
+the file manager and the picker keep quiet about a namespace root, while the
+desktop says once that its folder is not followed and reads it again after a
+save it made there and whenever the mount table moves.
 
 ## Compared with inotify and FSEvents
 

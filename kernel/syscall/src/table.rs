@@ -3308,12 +3308,30 @@ pub trait SyscallHandlers {
     /// `request`/`request_len` name the caller's encoded
     /// `VolumeDetachRequest` (the volume's stable identity plus the mode
     /// byte). The dispatcher checks no capability: the owner of a network or
-    /// disk-image volume may detach it, so the implementation requires
+    /// disk-image volume may detach it, and the user at the seat a removable
+    /// device's volume with a plain detach, so the implementation requires
     /// [`CapabilityId::FS_MOUNT`] of any other caller once it knows the
     /// volume.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn volume_detach(
+        &self,
+        _caller: &CallerContext<'_>,
+        _request: u64,
+        _request_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Title a published volume: write the label its filesystem records.
+    ///
+    /// `request`/`request_len` name the caller's encoded
+    /// `VolumeRetitleRequest`. The dispatcher checks no capability: only the
+    /// principal a disk image's volume was attached for may retitle it, which
+    /// the implementation judges once it knows the volume.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn volume_retitle(
         &self,
         _caller: &CallerContext<'_>,
         _request: u64,
@@ -4790,6 +4808,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // (dispatcher-checked); args[1] is its exact length.
                 let request_len = decode_len(args.0[1])?;
                 self.handlers.volume_detach(caller, args.0[0], request_len)
+            }
+            SyscallNumber::VOLUME_RETITLE => {
+                let request_len = decode_len(args.0[1])?;
+                self.handlers.volume_retitle(caller, args.0[0], request_len)
             }
             SyscallNumber::VOLUME_READ => {
                 let len = decode_len(args.0[3])?;
@@ -6806,6 +6828,16 @@ mod tests {
             _request_len: usize,
         ) -> SyscallResult {
             self.record("volume_detach");
+            Ok(0)
+        }
+
+        fn volume_retitle(
+            &self,
+            _c: &CallerContext<'_>,
+            _request: u64,
+            _request_len: usize,
+        ) -> SyscallResult {
+            self.record("volume_retitle");
             Ok(0)
         }
 

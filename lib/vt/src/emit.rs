@@ -55,6 +55,7 @@ pub fn encode_into(op: &Op, out: &mut impl Extend<u8>) {
         }
         Op::EraseInDisplay(mode) => csi_value(out, mode.value(), control::ED),
         Op::EraseInLine(mode) => csi_value(out, mode.value(), control::EL),
+        Op::EraseSavedLines => csi_value(out, control::ERASE_SAVED_LINES, control::ED),
         Op::ScrollUp(n) => csi_count(out, *n, control::SU),
         Op::ScrollDown(n) => csi_count(out, *n, control::SD),
         Op::SetScrollRegion { top, bottom } => {

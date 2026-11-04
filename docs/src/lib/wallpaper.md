@@ -81,6 +81,7 @@ that key's own closed vocabulary:
 | `backdrop`  | `theme`, or six bare hex digits `rrggbb`          | `theme`                                       |
 | `icons`     | `leading` \| `trailing`                           | `leading`                                     |
 | `sort`      | `name` \| `kind` \| `size` \| `date`              | `name`                                        |
+| `grid`      | `true` \| `false` (the format engine also reads `on` \| `off`) | `false`                          |
 | `appearance`| `dark` \| `light`                                 | `light`                                       |
 | `contrast`  | `normal` \| `high` \| `monochrome`                | `normal`                                      |
 | `density`   | `compact` \| `normal` \| `comfortable`            | `normal`                                      |
@@ -342,7 +343,7 @@ every source pixel at 1:1 and so needs the native size.
 
 - `settings::{parse, render}` — the bounded, fail-closed, line-numbered parse
   and the canonical render.
-- `DesktopSettings{wallpaper, fit, backdrop, icons, sort}` and its `Default`
+- `DesktopSettings{wallpaper, fit, backdrop, icons, sort, align_to_grid}` and its `Default`
   — the document model.
 - `WallpaperChoice::{None, Image}`, `WallpaperPath::{new, as_str}`,
   `WallpaperPathError::{TooLong, Malformed}` — the validated wallpaper value.

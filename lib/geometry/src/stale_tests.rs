@@ -22,7 +22,7 @@ fn region(rects: &[Rect]) -> Region {
 /// `changed`, the update succeeding.
 fn refreshed(stale: &mut StaleFrames, index: usize, changed: &Region) -> Region {
     let mut seen = Region::new();
-    let updated: Result<(), ()> = stale.bring_up_to_date(index, changed, |refresh| {
+    let updated: Result<(), ()> = stale.bring_up_to_date(index, changed, (), |refresh| {
         seen.clone_from(refresh);
         Ok(())
     });
@@ -63,7 +63,8 @@ fn a_refused_update_leaves_the_frame_owing_everything_and_owes_nothing_on() {
     refreshed(&mut stale, 0, &nothing);
     refreshed(&mut stale, 1, &nothing);
     let changed = region(&[Rect::new(2, 2, 5, 5)]);
-    let refused: Result<(), &str> = stale.bring_up_to_date(0, &changed, |_| Err("refused"));
+    let refused: Result<(), &str> =
+        stale.bring_up_to_date(0, &changed, "no such frame", |_| Err("refused"));
     assert_eq!(refused, Err("refused"));
     assert_eq!(refreshed(&mut stale, 0, &nothing), changed);
     assert!(
@@ -96,14 +97,25 @@ fn a_reset_owes_every_frame_the_new_bounds() {
     assert_eq!(refreshed(&mut stale, 1, &nothing), Region::from(bigger));
 }
 
+/// A frame the ring does not have is refused rather than handed the picture:
+/// nothing drawn there would reach a frame the ring keeps current.
 #[test]
-fn a_frame_the_ring_does_not_have_is_handed_its_whole_bounds() {
+fn a_frame_the_ring_does_not_have_is_refused_and_owes_nothing_on() {
     let mut stale = StaleFrames::new(2, BOUNDS, 8);
     let nothing = Region::new();
     refreshed(&mut stale, 0, &nothing);
     refreshed(&mut stale, 1, &nothing);
     let changed = region(&[Rect::new(1, 1, 1, 1)]);
-    assert_eq!(refreshed(&mut stale, 2, &changed), Region::from(BOUNDS));
+    let mut handed = false;
+    let missing: Result<(), &str> = stale.bring_up_to_date(2, &changed, "no such frame", |_| {
+        handed = true;
+        Ok(())
+    });
+    assert_eq!(missing, Err("no such frame"));
+    assert!(
+        !handed,
+        "nothing is drawn into a frame the ring does not have"
+    );
     assert!(refreshed(&mut stale, 0, &nothing).is_empty());
     assert!(refreshed(&mut stale, 1, &nothing).is_empty());
 }
@@ -158,7 +170,7 @@ fn every_frame_brought_up_to_date_matches_the_picture() {
             let index = usize::try_from((draw >> 32) % 4).unwrap_or(0) % FRAMES;
             let frame = &mut frames[index];
             let copied: Result<(), ()> =
-                stale.bring_up_to_date(index, &Region::from(changed), |refresh| {
+                stale.bring_up_to_date(index, &Region::from(changed), (), |refresh| {
                     for rect in refresh.rects() {
                         for row in 0..side(rect.height) {
                             for column in 0..side(rect.width) {

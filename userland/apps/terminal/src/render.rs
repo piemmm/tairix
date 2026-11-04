@@ -2,9 +2,11 @@
 //!
 //! [`Screen`] owns the window-sized premultiplied-alpha surface the grid is
 //! drawn into and **keeps it between frames**. Each
-//! [`paint`](Screen::paint) compares the [`Grid`] against the cells the
-//! surface was last painted from, redraws only the block that differs, and
-//! returns that block as a surface rectangle — the damage the app presents.
+//! [`paint`](Screen::paint) compares what the [`Grid`]'s view shows — the
+//! live screen, or the scrollback it is scrolled back over — against the
+//! cells the surface was last painted from, redraws only the block that
+//! differs, and returns that block as a surface rectangle: the damage the
+//! app presents.
 //! A keystroke therefore costs the cell it wrote and the two the cursor
 //! moved between, not a whole-window render, copy, and recomposite.
 //!
@@ -118,15 +120,14 @@ impl Screen {
         self.stale = true;
     }
 
-    /// Bring the surface up to date with `grid` in `painted`'s colours, and
-    /// return the surface rectangle that changed ([`Rect::EMPTY`] when
-    /// nothing did).
+    /// Bring the surface up to date with what `grid`'s view shows, in
+    /// `painted`'s colours, and return the surface rectangle that changed
+    /// ([`Rect::EMPTY`] when nothing did). The cursor is drawn only where the
+    /// view shows its row.
     #[must_use]
     pub fn paint(&mut self, grid: &Grid, painted: &Painted, font: BitmapFont) -> Rect {
         let metrics = CellMetrics::of(font);
-        let cursor = grid
-            .cursor_visible()
-            .then(|| (grid.cursor_col(), grid.cursor_row()));
+        let cursor = grid.view_cursor().filter(|_| grid.cursor_visible());
         let whole = self.stale || self.cols != grid.cols() || self.rows != grid.rows();
         let block = if whole {
             CellBlock::covering(grid.cols(), grid.rows())
@@ -171,15 +172,15 @@ impl Screen {
         Rect::new(0, 0, self.surface.width(), self.surface.height())
     }
 
-    /// The block of cells whose painted pixels `grid` no longer agrees with:
-    /// every cell whose glyph or rendition differs, plus the cell the cursor
-    /// block left and the one it moved to.
+    /// The block of cells whose painted pixels `grid`'s view no longer agrees
+    /// with: every cell whose glyph or rendition differs, plus the cell the
+    /// cursor block left and the one it moved to.
     fn changed(&self, grid: &Grid, cursor: Option<(u16, u16)>) -> Option<CellBlock> {
         let mut block: Option<CellBlock> = None;
         for row in 0..self.rows {
             let base = usize::from(row) * usize::from(self.cols);
             for col in 0..self.cols {
-                if self.painted.get(base + usize::from(col)).copied() != grid.cell(col, row) {
+                if self.painted.get(base + usize::from(col)).copied() != grid.view_cell(col, row) {
                     CellBlock::grow(&mut block, col, row);
                 }
             }
@@ -212,7 +213,7 @@ impl Screen {
             for col in block.left..=block.right {
                 let index = usize::from(row) * usize::from(self.cols) + usize::from(col);
                 if let Some(slot) = self.painted.get_mut(index) {
-                    *slot = grid.cell(col, row).unwrap_or(Cell::BLANK);
+                    *slot = grid.view_cell(col, row).unwrap_or(Cell::BLANK);
                 }
             }
         }
@@ -338,13 +339,13 @@ impl CellBlock {
         let mut widened = self;
         for row in self.top..=self.bottom {
             if grid
-                .cell(self.left, row)
+                .view_cell(self.left, row)
                 .is_some_and(|cell| cell.ch == CONTINUATION)
             {
                 widened.left = widened.left.min(self.left.saturating_sub(1));
             }
             if grid
-                .cell(self.right, row)
+                .view_cell(self.right, row)
                 .is_some_and(|cell| char_width(cell.ch) == 2)
             {
                 widened.right = widened.right.max(self.right.saturating_add(1).min(last));
@@ -367,7 +368,7 @@ fn draw_cells(
     for row in block.top..=block.bottom {
         let mut col = block.left;
         while col <= block.right {
-            let Some(cell) = grid.cell(col, row) else {
+            let Some(cell) = grid.view_cell(col, row) else {
                 col += 1;
                 continue;
             };
@@ -414,7 +415,7 @@ fn draw_cursor(
         metrics.height,
         Color::from(painted.scheme.cursor),
     );
-    let ch = grid.cell(col, row).map_or(' ', |cell| cell.ch);
+    let ch = grid.view_cell(col, row).map_or(' ', |cell| cell.ch);
     // The cursor over a wide glyph's continuation cell shows covered space.
     let ch = if ch == CONTINUATION { ' ' } else { ch };
     draw_glyph(

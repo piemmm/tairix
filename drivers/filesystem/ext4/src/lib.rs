@@ -1972,6 +1972,9 @@ impl<B: Block> FilesystemSecurity for Ext4<B> {
 /// error.
 impl<B: Block> FilesystemAttrsProvider for Ext4<B> {}
 
+/// The superblock's volume name is not served.
+impl<B: Block> tairix_abi::driver::filesystem::FilesystemLabel for Ext4<B> {}
+
 impl<B: Block> FilesystemStats for Ext4<B> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
         let free_blocks = self.free_blocks_count();

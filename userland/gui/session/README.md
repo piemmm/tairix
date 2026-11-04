@@ -689,6 +689,11 @@ rest of its life (the engine clears the pick only once the conclusion is
   kernel wakes the session, and it sends what it owes; the member goes once
   the destination owes nothing. No capacity poll, and the desktop still
   never blocks on an app (`AGENTS.md` §2.23).
+- **Budget, not room.** A send refused `LimitExceeded` — the session's own
+  IPC budget spent on what other apps have yet to take — is held too, with
+  no room wake (this app's room is free, so one would fire at once) and no
+  hang evidence against the app; it goes with the next flush or ahead of the
+  next event offered to that app.
 - **Ordered.** A destination already owed something takes the next event
   unsent, so nothing overtakes what is queued. Queues are per
   `(destination, window)` and a flush serves an owner's windows

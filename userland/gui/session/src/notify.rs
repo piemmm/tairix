@@ -10,7 +10,6 @@ use alloc::vec::Vec;
 
 use tairix_abi::notify_ipc::NOTIFY_SOURCES_MAX;
 use tairix_abi::{AppIdentity, BundleId, Errno, Origin};
-use tairix_taskbar::system::SETTINGS_BUNDLE;
 use tairix_taskbar::Producer;
 
 /// The producer the kernel attests in `origin`.
@@ -27,13 +26,18 @@ pub fn producer_of(origin: &Origin) -> Result<Producer, Errno> {
     })
 }
 
-/// Whether `caller` is the desktop's own Settings application: the bundle the
-/// session knows it by, signed by the publisher the session itself runs under,
-/// so a bundle claiming the identifier under another key is not it.
+/// Whether `caller` is the desktop's own component `bundle` — Settings, the
+/// file manager: the bundle the session knows it by, signed by the publisher
+/// the session itself runs under, so a bundle claiming the identifier under
+/// another key is not it.
 #[must_use]
-pub fn is_settings_surface(caller: Option<&AppIdentity>, own: Option<&AppIdentity>) -> bool {
+pub fn is_own_component(
+    caller: Option<&AppIdentity>,
+    own: Option<&AppIdentity>,
+    bundle: &str,
+) -> bool {
     match (caller, own) {
-        (Some(caller), Some(own)) => caller.is_bundle(SETTINGS_BUNDLE, own.publisher()),
+        (Some(caller), Some(own)) => caller.is_bundle(bundle, own.publisher()),
         _ => false,
     }
 }
@@ -80,7 +84,7 @@ mod tests {
     use tairix_abi::origin::{CapabilitySummary, TrustDomain, ORIGIN_CONSOLE_NONE};
     use tairix_abi::{AppIdentity, BundleId, Errno, Origin, ProcId, PublisherId};
 
-    use super::{is_settings_surface, producer_of, NotifySources};
+    use super::{is_own_component, producer_of, NotifySources};
     use tairix_taskbar::system::SETTINGS_BUNDLE;
 
     fn app(id: &str, key: u8) -> AppIdentity {
@@ -114,19 +118,28 @@ mod tests {
     }
 
     #[test]
-    fn only_the_settings_bundle_under_the_desktops_own_publisher_is_the_surface() {
+    fn only_the_bundle_under_the_desktops_own_publisher_is_the_component() {
         let own = app("os.tairix.desktop", 1);
         let settings = app(SETTINGS_BUNDLE, 1);
-        assert!(is_settings_surface(Some(&settings), Some(&own)));
-        let impostor = app(SETTINGS_BUNDLE, 2);
-        assert!(!is_settings_surface(Some(&impostor), Some(&own)));
-        assert!(!is_settings_surface(
-            Some(&app("os.tairix.files", 1)),
-            Some(&own)
+        assert!(is_own_component(
+            Some(&settings),
+            Some(&own),
+            SETTINGS_BUNDLE
         ));
-        assert!(!is_settings_surface(None, Some(&own)));
+        let impostor = app(SETTINGS_BUNDLE, 2);
+        assert!(!is_own_component(
+            Some(&impostor),
+            Some(&own),
+            SETTINGS_BUNDLE
+        ));
+        assert!(!is_own_component(
+            Some(&app("os.tairix.files", 1)),
+            Some(&own),
+            SETTINGS_BUNDLE
+        ));
+        assert!(!is_own_component(None, Some(&own), SETTINGS_BUNDLE));
         // A session that knows no identity of its own trusts no caller.
-        assert!(!is_settings_surface(Some(&settings), None));
+        assert!(!is_own_component(Some(&settings), None, SETTINGS_BUNDLE));
     }
 
     #[test]
@@ -148,14 +161,23 @@ mod tests {
         assert_eq!(sources.as_slice().len(), NOTIFY_SOURCES_MAX);
     }
 
-    #[test]
-    fn the_settings_bundle_is_the_one_its_manifest_declares() {
-        let manifest = include_str!("../../../apps/settings/AppInfo.toml");
-        let declared = manifest
+    /// The bundle identifier `manifest` declares.
+    fn declared_id(manifest: &str) -> &str {
+        manifest
             .lines()
             .find_map(|line| line.strip_prefix("id = \""))
             .and_then(|rest| rest.strip_suffix('"'))
-            .expect("the manifest declares an id");
-        assert_eq!(declared, SETTINGS_BUNDLE);
+            .expect("the manifest declares an id")
+    }
+
+    /// Each component is trusted by the bundle identifier its own manifest
+    /// declares: Settings for the machine's tasks, the file manager for an
+    /// eject.
+    #[test]
+    fn each_component_is_the_bundle_its_manifest_declares() {
+        let settings = include_str!("../../../apps/settings/AppInfo.toml");
+        assert_eq!(declared_id(settings), SETTINGS_BUNDLE);
+        let files = include_str!("../../../apps/files/AppInfo.toml");
+        assert_eq!(declared_id(files), crate::systask::FILES_BUNDLE);
     }
 }

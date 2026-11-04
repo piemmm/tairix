@@ -45,8 +45,11 @@ Sur un volume sain, `--force` vide et détache toujours proprement ;
 rien n'est abandonné quand une validation propre est possible.
 
 Vous pouvez détacher une image disque ou un partage réseau que vous
-avez monté vous-même ; tout autre volume exige l'autorité de montage
-(`CAP_FS_MOUNT`). Le noyau la vérifie et audite chaque décision. Les
+avez monté vous-même, ainsi qu'un disque amovible — une clé USB, une
+carte mémoire — pendant que vous utilisez l'ordinateur lui-même,
+mais seulement par un détachement simple, jamais avec `--force` ;
+tout autre volume exige l'autorité de montage (`CAP_FS_MOUNT`). Le
+noyau la vérifie et audite chaque décision. Les
 volumes de démarrage permanents et les liaisons de vue du système ne
 se détachent pas.
 

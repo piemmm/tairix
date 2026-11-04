@@ -38,8 +38,9 @@ identifies a volume or which tree of a disc is mounted.
   middle for every block size the format allows, the Rigid Disk Block, and the
   checksum seal every AmigaDOS structure is written with, shared with
   `drivers/filesystem/affs`.
-- `Fat32Bpb`, `fat32_identity_from_boot` and the FAT32 directory-label
-  helpers, shared with `drivers/filesystem/fat32`.
+- `Fat32Bpb` — with the identity it derives and the window a label entry is
+  read from — and the FAT32 directory-label helpers, shared with
+  `drivers/filesystem/fat32`.
 - `fingerprint(identity)` — the lowercase Crockford-base32 display
   fingerprint of an identity; callers take the prefix they need.
 - `name` — the catalog-naming policy a volume is published in `/Storage`

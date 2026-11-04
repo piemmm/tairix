@@ -15,15 +15,14 @@ cancellare (un `TERM` sconosciuto degrada al profilo minimo) fa fallire
 il comando invece di stampare byte che il terminale mostrerebbe come
 caratteri spuri.
 
-Le console TAIRiX non conservano alcuna cronologia di scorrimento,
-quindi non c'è nulla da cancellare in quel senso: `-x` (l'opzione GNU
-che preserva la cronologia) è accettata per compatibilità con gli
-script e non cambia nulla.
+Dove il terminale lo consente, vengono cancellate anche le righe che
+conserva sopra lo schermo — la cronologia di scorrimento — così che
+nulla di ciò che era sullo schermo possa essere ritrovato scorrendo
+indietro.
 
 ## OPTIONS
 
-- `-x` — accettata per compatibilità GNU; una console TAIRiX non
-  conserva cronologia, l'output è identico con o senza.
+- `-x` — conservare la cronologia: cancellare solo lo schermo.
 - `-h, -?` — mostrare la guida breve di questo comando.
 
 ## EXAMPLES

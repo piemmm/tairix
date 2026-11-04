@@ -1,5 +1,5 @@
-//! The settings sheet: a panel the terminal shows in a popup window of its
-//! own above its screen, built from the shared Reactive Alloy controls
+//! The settings sheet: what the terminal's Settings window shows, a modeless
+//! dialog of its own, built from the shared Reactive Alloy controls
 //! (`plans/GUI-CONTROLS-DESIGN.md`).
 //!
 //! The sheet edits a copy of the [`Profile`] it opened on and never touches
@@ -27,11 +27,9 @@
 //! parts on the way; the keys a focused control's own `on_key` understands —
 //! arrows, Space/Enter, Page Up/Down, Home/End — drive that control. A key on a row scrolls the body the least that shows it, so
 //! every setting stays reachable from the keyboard however small the window
-//! is. Escape and the *Done* button dismiss the sheet, once the picker has
-//! no drag or typing of its own for Escape to take back; a primary press outside
-//! the panel also dismisses it, since the sheet is modal and nothing outside
-//! it is reachable while it is open. The wheel scrolls the body under the
-//! pointer and moves no focus.
+//! is. Escape and the *Done* button close the window, once the picker has
+//! no drag or typing of its own for Escape to take back. The wheel scrolls the
+//! body under the pointer and moves no focus.
 
 use alloc::format;
 use alloc::string::ToString;
@@ -46,13 +44,13 @@ use tairix_theme::{TextRole, Theme};
 
 use tairix_colour::Rgba;
 use tairix_controls::{
-    damage, Button, ButtonAction, ButtonContent, ColourPicker, ControlRole, Panel, PickerOutcome,
-    Radio, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, ScrollView, SelectorAction,
-    Slider, SliderAction, Tab, Tabs, TabsAction,
+    damage, Button, ButtonAction, ButtonContent, ColourPicker, ControlRole, PickerOutcome, Radio,
+    ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, ScrollView, SelectorAction, Slider,
+    SliderAction, Tab, Tabs, TabsAction,
 };
 
 use crate::effects::{EffectKey, FULL};
-use crate::profile::{Profile, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX};
+use crate::profile::{Profile, MAX_FONT_SIZE_PX, MAX_SCROLLBACK_LINES, MIN_FONT_SIZE_PX};
 use crate::scheme::Scheme;
 use crate::swatch;
 use tairix_controls::{SwatchAction, SwatchGrid, SwatchMark};
@@ -73,12 +71,14 @@ const LABEL_GAP_PX: u32 = 8;
 /// beneath it.
 const CAPTION_GAP_PX: u32 = 4;
 
-/// The largest logical width the sheet's panel grows to; a viewport smaller
-/// than this simply gives the panel the whole viewport instead.
-const MAX_PANEL_WIDTH_PX: u32 = 520;
+/// The Settings window's title.
+pub const SETTINGS_TITLE: &str = "Terminal Settings";
 
-/// The largest logical height the sheet's panel grows to.
-const MAX_PANEL_HEIGHT_PX: u32 = 420;
+/// The logical client width the Settings window opens at.
+const WINDOW_WIDTH_PX: u32 = 520;
+
+/// The logical client height the Settings window opens at.
+const WINDOW_HEIGHT_PX: u32 = 420;
 
 /// The one row a [`Settings`] sheet lays its scrollable body out from.
 ///
@@ -93,6 +93,8 @@ enum Focus {
     Scheme(usize),
     /// The text-size slider.
     TextSize,
+    /// The slider setting how many lines the scrollback keeps.
+    Scrollback,
     /// The custom-scheme swatch grid.
     Swatches,
     /// The colour picker editing the selected swatch well.
@@ -133,17 +135,17 @@ pub enum SheetOutcome {
     /// removes the user's opinions, re-reads the profile that then applies,
     /// and hands it back through [`Settings::adopt`].
     Restore,
-    /// The sheet asked to close.
+    /// The sheet asked for its window to close.
     Dismissed,
 }
 
 /// The settings sheet (module documentation above).
 pub struct Settings {
     profile: Profile,
-    panel: Panel,
     tabs: Tabs,
     scheme_radios: Vec<Radio>,
     text_size: Slider,
+    scrollback: Slider,
     swatches: SwatchGrid,
     picker: ColourPicker,
     effect_sliders: [Slider; EffectKey::COUNT],
@@ -283,6 +285,8 @@ impl Settings {
             MAX_FONT_SIZE_PX,
         ))
         .with_steps(font_size_step_permille(), font_size_step_permille() * 4);
+        let scrollback = Slider::new(scrollback_permille(profile.scrollback_lines))
+            .with_steps(SCROLLBACK_STEP_PERMILLE, SCROLLBACK_STEP_PERMILLE * 10);
 
         let swatches = swatch::grid_for(&profile.custom);
         let mut picker = ColourPicker::new(profile.custom.background.opaque());
@@ -292,10 +296,10 @@ impl Settings {
 
         let mut sheet = Self {
             profile,
-            panel: Panel::new("Terminal Settings"),
             tabs,
             scheme_radios,
             text_size,
+            scrollback,
             swatches,
             picker,
             effect_sliders,
@@ -332,11 +336,18 @@ impl Settings {
         &self.profile
     }
 
-    /// Draw the sheet over the terminal screen already in `surface`.
+    /// Draw the whole sheet into `viewport` of `surface`.
     pub fn render(&self, surface: &mut Surface, viewport: Rect, scale: Scale, theme: &Theme) {
         let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-        self.panel
-            .render(surface, panel_bounds(viewport, scale), scale, theme);
+        if let Some((x, y)) = viewport.surface_origin() {
+            surface.fill_rect(
+                x,
+                y,
+                viewport.width,
+                viewport.height,
+                Color::from(theme.palette().surface),
+            );
+        }
         let (Some(layout), model) = self.resolve(viewport, scale, theme, font) else {
             return;
         };
@@ -367,11 +378,10 @@ impl Settings {
 
     /// Route one pointer event; `viewport` is the whole window client rect.
     ///
-    /// The sheet is modal, so it claims every event a drawable panel can see.
+    /// The sheet is the whole window, so it claims every event it can see.
     /// [`SheetOutcome::Ignored`] means only that there is nothing for the
-    /// caller to do — a viewport too small for the panel to have a content
-    /// rectangle at all (a press still dismisses), or an event that left every
-    /// drawn field where it was.
+    /// caller to do — a viewport too small to hold any content, or an event
+    /// that left every drawn field where it was.
     ///
     /// That second case is the pointer resting or drifting inside one control:
     /// its controls report the pixels they redraw, and an event none of them
@@ -446,16 +456,6 @@ impl Settings {
         if let InputEvent::PointerMoved { to } = event {
             self.last_pointer = *to;
         }
-        let bounds = panel_bounds(viewport, style.scale);
-
-        // A primary press outside the whole panel dismisses the sheet: it is
-        // modal, so nothing outside it is reachable while it is open. This is
-        // tested before the panel's own geometry so a viewport too small to
-        // draw the sheet in can still be clicked out of.
-        if is_primary_press(event) && !bounds.contains(self.last_pointer) {
-            return SheetOutcome::Dismissed;
-        }
-
         let Some(layout) = self.layout(viewport, style.scale, style.theme, style.font) else {
             return SheetOutcome::Ignored;
         };
@@ -523,9 +523,8 @@ impl Settings {
             return outcome;
         }
 
-        // A press outside the panel's content but still inside the panel
-        // (the header, or a gap between bands) is claimed and otherwise
-        // inert: the sheet stays open with nothing else changed.
+        // A press in the pad or a gap between bands is claimed and otherwise
+        // inert.
         SheetOutcome::Changed
     }
 
@@ -705,6 +704,15 @@ const fn slid(action: SliderAction) -> (u16, SheetOutcome) {
 
 // --- Construction helpers --------------------------------------------------
 
+/// The permille step that moves the scrollback slider by a tenth of a
+/// percent of its range: ten lines.
+const SCROLLBACK_STEP_PERMILLE: u16 = 1;
+
+/// Where `lines` stands on the scrollback slider.
+fn scrollback_permille(lines: u16) -> u16 {
+    permille_from_bounded(lines, 0, MAX_SCROLLBACK_LINES)
+}
+
 /// The permille line step that moves the text-size slider by one logical
 /// pixel.
 fn font_size_step_permille() -> u16 {
@@ -766,6 +774,7 @@ impl Settings {
                 rows.push(Focus::Scheme(index));
             }
             rows.push(Focus::TextSize);
+            rows.push(Focus::Scrollback);
             rows.push(Focus::Swatches);
             rows.push(Focus::Picker);
         }
@@ -840,6 +849,7 @@ impl Settings {
             radio.set_focused(self.focus == Focus::Scheme(index));
         }
         self.text_size.set_focused(self.focus == Focus::TextSize);
+        self.scrollback.set_focused(self.focus == Focus::Scrollback);
         self.swatches.set_focused(self.focus == Focus::Swatches);
         self.picker.set_focused(self.focus == Focus::Picker);
         for (index, slider) in self.effect_sliders.iter_mut().enumerate() {
@@ -955,9 +965,8 @@ impl Settings {
     /// model the active tab's rows imply there — what drawing and both input
     /// paths read.
     ///
-    /// The layout is `None` for a viewport too small for the panel to have a
-    /// content rectangle at all: nothing is drawn, so nothing can be routed
-    /// into or reported against.
+    /// The layout is `None` for a viewport too small to hold any content:
+    /// nothing is drawn, so nothing can be routed into or reported against.
     fn resolve(
         &self,
         viewport: Rect,
@@ -965,8 +974,7 @@ impl Settings {
         theme: &Theme,
         font: BitmapFont,
     ) -> (Option<Layout>, ScrollModel) {
-        let bounds = panel_bounds(viewport, scale);
-        let content = self.panel.content_rect(bounds, scale, theme);
+        let content = content_rect(viewport, scale, theme);
         let (tabs, body, scrollbar, footer) = content.map_or((None, None, None, None), |content| {
             self.bands(content, scale, theme)
         });
@@ -1011,7 +1019,7 @@ impl Settings {
         layout
     }
 
-    /// The panel content split into the tab strip, the scrollable body, the
+    /// The content split into the tab strip, the scrollable body, the
     /// scrollbar, and the footer, in that top-to-bottom order.
     ///
     /// Each band claims what it needs, in order, and hands the remainder on;
@@ -1109,6 +1117,12 @@ impl Settings {
                 let text = format!("Text size {}px", self.profile.font_size_px);
                 draw_row_label(surface, label, theme, font, &text);
                 self.text_size.render(surface, control, scale, theme);
+            }
+            Focus::Scrollback => {
+                let (label, control) = split_row(rect, scale);
+                let text = format!("Scrollback {} lines", self.profile.scrollback_lines);
+                draw_row_label(surface, label, theme, font, &text);
+                self.scrollback.render(surface, control, scale, theme);
             }
             Focus::Swatches => self.render_swatches(surface, rect, scale, theme, font),
             Focus::Picker => {
@@ -1216,6 +1230,18 @@ impl Settings {
                 };
                 self.focus_on(row, layout, style, damage);
                 self.set_font_size_permille(permille, layout.rect_of(row), damage);
+                outcome
+            }
+            Focus::Scrollback => {
+                let acted = layout.in_body(damage, |drew| {
+                    self.scrollback
+                        .on_pointer(event, control, style.scale, style.theme, drew)
+                });
+                let Some((permille, outcome)) = acted.map(slid) else {
+                    return SheetOutcome::Ignored;
+                };
+                self.focus_on(row, layout, style, damage);
+                self.set_scrollback_permille(permille, layout.rect_of(row), damage);
                 outcome
             }
             Focus::Swatches => self.route_swatches_pointer(event, rect, layout, style, damage),
@@ -1362,6 +1388,15 @@ impl Settings {
                 }
                 None => SheetOutcome::Changed,
             },
+            Focus::Scrollback => match layout
+                .in_body(damage, |drew| self.scrollback.on_key(key, slider, drew))
+            {
+                Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
+                    self.set_scrollback_permille(permille, shown, damage);
+                    SheetOutcome::Settled
+                }
+                None => SheetOutcome::Changed,
+            },
             Focus::Swatches => {
                 let (_, grid) = swatch_caption_split(row, style.scale, style.font);
                 match layout.in_body(damage, |drew| self.swatches.on_key(key, grid, drew)) {
@@ -1442,6 +1477,16 @@ impl Settings {
             MIN_FONT_SIZE_PX,
             MAX_FONT_SIZE_PX,
         ));
+        damage.add(row);
+    }
+
+    /// Set the scrollback's limit from the slider's `permille`, the row's
+    /// label repainted with it as the text size's is.
+    fn set_scrollback_permille(&mut self, permille: u16, row: Rect, damage: &mut Region) {
+        self.profile.scrollback_lines = bounded_from_permille(permille, 0, MAX_SCROLLBACK_LINES);
+        self.profile.clamp();
+        self.scrollback
+            .set_value(scrollback_permille(self.profile.scrollback_lines));
         damage.add(row);
     }
 
@@ -1544,6 +1589,11 @@ impl Settings {
             ));
             damage.add(layout.rect_of(Focus::TextSize));
         }
+        if was.scrollback_lines != now.scrollback_lines {
+            self.scrollback
+                .set_value(scrollback_permille(now.scrollback_lines));
+            damage.add(layout.rect_of(Focus::Scrollback));
+        }
         // The editor's caption says whether the custom scheme is the one in
         // force, so a scheme change alone reaches that row too.
         if was.custom != now.custom || was.scheme != now.scheme {
@@ -1569,32 +1619,23 @@ impl Settings {
     }
 }
 
-/// The physical size the sheet wants, at `scale`.
+/// The physical client size the Settings window opens at, at `scale`.
 ///
-/// A caller that owns the surface the sheet is drawn into — the terminal,
-/// which gives each overlay its own popup window — asks for this and makes a
-/// surface that large, so the sheet opens at its full size however small the
-/// terminal window behind it happens to be. Drawing into a smaller surface
-/// still works (the sheet takes whatever room there is and its body scrolls),
-/// but the sheet is then cramped for no reason.
+/// A window the session shrinks still works: the sheet takes whatever room
+/// there is and its body scrolls.
 #[must_use]
 pub fn preferred_extent(scale: Scale) -> (u32, u32) {
     (
-        scale.scale_length(MAX_PANEL_WIDTH_PX),
-        scale.scale_length(MAX_PANEL_HEIGHT_PX),
+        scale.scale_length(WINDOW_WIDTH_PX),
+        scale.scale_length(WINDOW_HEIGHT_PX),
     )
 }
 
-/// The panel's own bounds within `viewport`: centred, grown up to
-/// [`MAX_PANEL_WIDTH_PX`]/[`MAX_PANEL_HEIGHT_PX`], and never larger than the
-/// viewport itself — so a small window simply gives the sheet the whole of it
-/// rather than an unreachable margin.
-fn panel_bounds(viewport: Rect, scale: Scale) -> Rect {
-    let width = scale.scale_length(MAX_PANEL_WIDTH_PX).min(viewport.width);
-    let height = scale.scale_length(MAX_PANEL_HEIGHT_PX).min(viewport.height);
-    let x = viewport.left() + to_i32((viewport.width - width) / 2);
-    let y = viewport.top() + to_i32((viewport.height - height) / 2);
-    Rect::new(x, y, width, height)
+/// Where the sheet's content lies in its window's client `viewport`: inset by
+/// the theme's control pad, `None` when nothing is left.
+fn content_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+    let content = viewport.inset(scale.scale_length(theme.metrics().control_inset).max(1));
+    (!content.is_empty()).then_some(content)
 }
 
 /// The *Restore defaults* and *Done* button rectangles within the footer

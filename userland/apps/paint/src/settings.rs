@@ -1095,13 +1095,22 @@ fn described(panes: &Arrangement) -> String {
         };
         let _ = write!(words, "{} {edge}", names.join(", "));
     }
+    let strip: Vec<&str> = panes
+        .in_strip()
+        .then_some(PaneKind::Palette.title())
+        .into_iter()
+        .collect();
     let floating: Vec<&str> = panes.floating().map(PaneKind::title).collect();
     let hidden: Vec<&str> = PaneKind::ALL
         .iter()
         .filter(|&&kind| !panes.shows(kind))
         .map(|kind| kind.title())
         .collect();
-    for (names, state) in [(floating, "floating"), (hidden, "hidden")] {
+    for (names, state) in [
+        (strip, "beneath the picture"),
+        (floating, "floating"),
+        (hidden, "hidden"),
+    ] {
         if names.is_empty() {
             continue;
         }

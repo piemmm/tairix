@@ -297,3 +297,17 @@ fn tab_walks_the_regions_and_escape_closes() {
     let closed = fixture.key(Key::Named(NamedKey::Escape), false);
     assert_eq!(closed.request, Some(AppRequest::Close));
 }
+
+#[test]
+fn the_panes_are_described_where_each_stands() {
+    let mut panes = Arrangement::default();
+    assert_eq!(
+        super::described(&panes),
+        "Tools on the left; Colour on the right; Palette beneath the picture; Adjustment hidden"
+    );
+    panes.float(PaneKind::Palette);
+    assert_eq!(
+        super::described(&panes),
+        "Tools on the left; Colour on the right; Palette floating; Adjustment hidden"
+    );
+}

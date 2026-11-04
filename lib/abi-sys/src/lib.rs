@@ -88,6 +88,7 @@ const NUM_FILE_MAP: u64 = SyscallNumber::FILE_MAP.as_u16() as u64;
 const NUM_FILE_UNMAP: u64 = SyscallNumber::FILE_UNMAP.as_u16() as u64;
 const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
 const NUM_VOLUME_DETACH: u64 = SyscallNumber::VOLUME_DETACH.as_u16() as u64;
+const NUM_VOLUME_RETITLE: u64 = SyscallNumber::VOLUME_RETITLE.as_u16() as u64;
 const NUM_VOLUME_READ: u64 = SyscallNumber::VOLUME_READ.as_u16() as u64;
 const NUM_VOLUME_WRITE: u64 = SyscallNumber::VOLUME_WRITE.as_u16() as u64;
 const NUM_VOLUME_CTL: u64 = SyscallNumber::VOLUME_CTL.as_u16() as u64;
@@ -1711,6 +1712,26 @@ pub extern "C" fn sys_volume_detach(request: *const u8, request_len: usize) -> i
     unsafe {
         ret_i32(raw_syscall(
             NUM_VOLUME_DETACH,
+            [request as u64, request_len as u64, 0, 0, 0, 0],
+        ))
+    }
+}
+
+/// `volume_retitle`: write the label a published volume's filesystem records
+/// (`SyscallNumber::VOLUME_RETITLE`). `request`/`request_len` name an
+/// encoded volume-retitle request frame: the volume's stable 16-byte
+/// identity, the title's length byte, then at most
+/// `TAIRIX_VOLUME_TITLE_MAX` bytes of UTF-8. Only the owner of a disk-image
+/// volume may retitle it. Returns a `TAIRIX_E_*` code.
+#[must_use]
+#[export_name = "tairix_sys_volume_retitle"]
+pub extern "C" fn sys_volume_retitle(request: *const u8, request_len: usize) -> i32 {
+    // SAFETY: see `sys_yield`. The kernel validates the `(request,
+    // request_len)` pair against the caller's address space before reading
+    // it; a bad pointer is refused, never dereferenced here.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_VOLUME_RETITLE,
             [request as u64, request_len as u64, 0, 0, 0, 0],
         ))
     }
@@ -4269,6 +4290,7 @@ mod tests {
         (NUM_FILE_UNMAP, "file_unmap", 2),
         (NUM_VOLUME_ATTACH, "volume_attach", 2),
         (NUM_VOLUME_DETACH, "volume_detach", 2),
+        (NUM_VOLUME_RETITLE, "volume_retitle", 2),
         (NUM_VOLUME_READ, "volume_read", 4),
         (NUM_VOLUME_WRITE, "volume_write", 4),
         (NUM_VOLUME_CTL, "volume_ctl", 5),

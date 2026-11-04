@@ -49,7 +49,7 @@ use crate::atlas;
 use crate::client::{self, FontClient};
 use crate::glyph_cache::CachedGlyph;
 use crate::measure::MeasuredText;
-use crate::shadow::{self, TextShadow};
+use crate::shadow::{self, KeptShadow, TextShadow};
 
 /// The mark that ends a line the text outgrew: HORIZONTAL ELLIPSIS.
 ///
@@ -827,6 +827,23 @@ impl BitmapFont {
         client::with_client(|client| {
             self.warm_run(client, pieces);
             shadow::draw_run_shadow(self, client, surface, at, pieces, shadow)
+        })
+    }
+
+    /// The shadow [`draw_run_shadow`](Self::draw_run_shadow) lays under
+    /// `pieces` from the pen at `at`, blurred whole and kept rather than
+    /// drawn, for text drawn the same way again and again; `None` for a
+    /// shadow that draws nothing or whose memory cannot be had.
+    #[must_use]
+    pub fn keep_run_shadow(
+        self,
+        at: (i32, i32),
+        pieces: &[&str],
+        shadow: TextShadow,
+    ) -> Option<KeptShadow> {
+        client::with_client(|client| {
+            self.warm_run(client, pieces);
+            shadow::keep_run_shadow(self, client, at, pieces, shadow)
         })
     }
 

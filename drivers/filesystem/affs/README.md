@@ -76,6 +76,11 @@ directory hash is computed with.
 * A hard link to a directory reads as a soft link to the directory's path
   within the volume, so the tree stays a tree.
 
+The volume's name is its title (`FilesystemLabel`), held to the same rules
+and never empty, since AmigaDOS addresses a volume by name. A retitle
+rewrites the root as any change does; its commit restamps the alteration
+date.
+
 ## Writing
 
 A change's first write opens its transaction: the root, its bitmap marked

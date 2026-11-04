@@ -12,7 +12,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::MountFlags;
 use tairix_abi::sysinfo::{
-    MountRecord, SysinfoQueryId, ViewBindingRecord, VolumeIoStatsRecord, VOLUME_ID_UNPUBLISHED,
+    MountRecord, SysinfoQueryId, ViewBindingRecord, VolumeIoStatsRecord, VolumeRemovalRecord,
+    VOLUME_ID_UNPUBLISHED,
 };
 use tairix_abi::Errno;
 
@@ -31,6 +32,10 @@ pub const VIEW_PAGE: u16 = tairix_abi::reply_page(ViewBindingRecord::WIRE_LEN);
 /// Number of [`VolumeIoStatsRecord`]s requested per page of the service
 /// counters, sized as [`MOUNT_PAGE`] is.
 pub const VOLUME_SERVICE_PAGE: u16 = tairix_abi::reply_page(VolumeIoStatsRecord::WIRE_LEN);
+
+/// Number of [`VolumeRemovalRecord`]s requested per page, sized as
+/// [`MOUNT_PAGE`] is.
+pub const REMOVAL_PAGE: u16 = tairix_abi::reply_page(VolumeRemovalRecord::WIRE_LEN);
 
 /// Page through the attached volumes and hand each decoded [`MountRecord`]
 /// to `sink`, in the order the service lists them.
@@ -107,6 +112,28 @@ pub fn for_each_view(
         ViewBindingRecord::WIRE_LEN,
         VIEW_PAGE,
         ViewBindingRecord::from_bytes,
+        sink,
+    )
+}
+
+/// Page through the device-backed volumes whose device most recently went
+/// away while they were attached, oldest first
+/// ([`SysinfoQueryId::VOLUME_REMOVALS`], ungated), and hand each to `sink`, on
+/// the terms of [`for_each_mount`].
+///
+/// # Errors
+///
+/// As [`for_each_mount`].
+pub fn for_each_volume_removal(
+    transport: &dyn Transport,
+    sink: impl FnMut(&VolumeRemovalRecord) -> Result<WalkStep, Errno>,
+) -> Result<(), ListError> {
+    walk_records(
+        transport,
+        SysinfoQueryId::VOLUME_REMOVALS,
+        VolumeRemovalRecord::WIRE_LEN,
+        REMOVAL_PAGE,
+        VolumeRemovalRecord::from_bytes,
         sink,
     )
 }
@@ -303,8 +330,9 @@ mod tests {
     use tairix_abi::blkio::{BlkDeviceName, BlkIoCounters, BlkMedium, BlkTransport};
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{
-        MountAvailability, MountRecord, MountVolumeState, PageRequest, SysinfoQueryId,
-        SysinfoRequestHeader, ViewBindingRecord, VolumeIoStatsRecord,
+        MountAvailability, MountRecord, MountVolumeState, PageRequest, RemovedWrites,
+        SysinfoQueryId, SysinfoRequestHeader, ViewBindingRecord, VolumeIoStatsRecord,
+        VolumeRemovalRecord,
     };
     use tairix_abi::Errno;
 
@@ -315,6 +343,7 @@ mod tests {
         records: Vec<MountRecord>,
         views: Vec<ViewBindingRecord>,
         services: Vec<VolumeIoStatsRecord>,
+        removals: Vec<VolumeRemovalRecord>,
         malformed: bool,
         seen: RefCell<Vec<SysinfoQueryId>>,
     }
@@ -325,6 +354,7 @@ mod tests {
                 records,
                 views: Vec::new(),
                 services: Vec::new(),
+                removals: Vec::new(),
                 malformed: false,
                 seen: RefCell::new(Vec::new()),
             }
@@ -375,6 +405,11 @@ mod tests {
                 }
                 SysinfoQueryId::VOLUME_IO_STATS => {
                     page_of(&self.services, &page, VolumeIoStatsRecord::WIRE_LEN, |r| {
+                        r.to_le_bytes().to_vec()
+                    })
+                }
+                SysinfoQueryId::VOLUME_REMOVALS => {
+                    page_of(&self.removals, &page, VolumeRemovalRecord::WIRE_LEN, |r| {
                         r.to_le_bytes().to_vec()
                     })
                 }
@@ -526,6 +561,28 @@ mod tests {
             alloc::vec![view(b"/", b"/", MountFlags::default(), 0)],
         );
         assert!(unpublished.volume_at(b"/x").is_none());
+    }
+
+    /// The removals are walked whole, oldest first, across pages, and a
+    /// reply that is not whole records is refused rather than half read.
+    #[test]
+    fn the_removals_walk_every_page_and_refuse_a_torn_reply() {
+        let kept = u64::from(super::REMOVAL_PAGE) + 2;
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.removals = (1..=kept)
+            .map(|sequence| {
+                VolumeRemovalRecord::new(sequence, [7; 16], RemovedWrites::None).expect("a removal")
+            })
+            .collect();
+        let mut walked = Vec::new();
+        super::for_each_volume_removal(&fixture, |removal| {
+            walked.push(removal.sequence());
+            Ok(WalkStep::Continue)
+        })
+        .expect("walked");
+        assert_eq!(walked, (1..=kept).collect::<Vec<_>>());
+        fixture.malformed = true;
+        assert!(super::for_each_volume_removal(&fixture, |_| Ok(WalkStep::Continue)).is_err());
     }
 
     #[test]

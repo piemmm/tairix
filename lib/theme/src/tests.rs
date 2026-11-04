@@ -1718,7 +1718,7 @@ fn sample_theme(id: ThemeId) -> Theme {
         },
         MotionTheme::new([
             90, 80, 60, 90, 180, 120, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900, 500, 140, 320,
-            1400,
+            1400, 200,
         ]),
         Density::Normal,
         Contrast::Normal,

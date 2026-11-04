@@ -207,6 +207,9 @@ pub struct Capabilities {
     pub cursor_addressing: bool,
     /// Whether the terminal supports erase-in-line and erase-in-display.
     pub erase: bool,
+    /// Whether the terminal can erase its saved lines — the scrollback —
+    /// with `E3` (`CSI 3 J`).
+    pub erase_saved_lines: bool,
     /// Whether the terminal supports a settable scroll region and scrolling.
     pub scroll_region: bool,
     /// Whether the terminal has an alternate screen buffer.
@@ -271,6 +274,9 @@ impl Capabilities {
                 ops.push(Op::EraseInLine(mode));
             }
         }
+        if self.erase_saved_lines {
+            ops.push(Op::EraseSavedLines);
+        }
         if self.scroll_region {
             ops.push(Op::SetScrollRegion { top: 1, bottom: 24 });
             ops.push(Op::ResetScrollRegion);
@@ -308,6 +314,7 @@ const DUMB: Capabilities = Capabilities {
     color: ColorDepth::None,
     cursor_addressing: false,
     erase: false,
+    erase_saved_lines: false,
     scroll_region: false,
     alt_screen: false,
     cursor_visibility: false,
@@ -329,6 +336,7 @@ const VT100: Capabilities = Capabilities {
     color: ColorDepth::None,
     cursor_addressing: true,
     erase: true,
+    erase_saved_lines: false,
     scroll_region: true,
     alt_screen: false,
     cursor_visibility: false,
@@ -349,6 +357,7 @@ const VT220: Capabilities = Capabilities {
     color: ColorDepth::None,
     cursor_addressing: true,
     erase: true,
+    erase_saved_lines: false,
     scroll_region: true,
     alt_screen: false,
     cursor_visibility: true,
@@ -376,6 +385,7 @@ const fn xterm_family(
         color,
         cursor_addressing: true,
         erase: true,
+        erase_saved_lines: true,
         scroll_region: true,
         alt_screen: true,
         cursor_visibility: true,

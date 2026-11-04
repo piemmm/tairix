@@ -329,6 +329,7 @@ fn the_identity_map_forwards_every_facet_method_it_does_not_replace() {
     conformance::assert_unrecorded_security_mapped(&mut mapped);
     conformance::assert_stats_forwards(&mut mapped);
     conformance::assert_attrs_forwards(&mut mapped);
+    conformance::assert_label_forwards(&mut mapped);
 }
 
 /// A format that records an owner for some nodes and not others — a UDF disc
@@ -376,6 +377,7 @@ fn others_are_shown_a_volume_only_by_the_mount_authority() {
         uid: 1000,
         gid: 100,
         caps: &nothing,
+        at_seat: false,
     };
     let private = Presented::asked_by(&caller, Presentation::Private).expect("anyone's own");
     assert_eq!(private, Presented::private(1000, GroupId(100)));
@@ -394,6 +396,7 @@ fn others_are_shown_a_volume_only_by_the_mount_authority() {
     let mount = Holding(Some(CapabilityId::FS_MOUNT));
     let holder = Principal {
         caps: &mount,
+        at_seat: false,
         ..caller
     };
     assert_eq!(

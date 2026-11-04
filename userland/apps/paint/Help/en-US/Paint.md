@@ -80,7 +80,10 @@ them. Dragging a band moves its pane within its side or to the other, the
 place it will land marked as it goes; let go away from both sides, or dragged
 out of the window, the pane floats in a small window of its own, moved by its
 band and kept above the picture, its mark closing it; dragged back over a
-side, it docks there again.
+side, it docks there again. The palette floats too: the button at the right
+end of its strip, or View ▸ Panes ▸ Float palette, moves it into a small
+window of its own, its colours set out in a grid; closing that window, or
+dragging it back to the bottom of the window, puts it back in the strip.
 
 The select tool marks out a rectangle, an ellipse, a freehand lasso, a
 polygon clicked corner by corner, or with the magic wand the pixels joined

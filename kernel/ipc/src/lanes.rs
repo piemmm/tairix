@@ -83,8 +83,10 @@ pub(crate) struct Lanes<K, L> {
 /// What [`Lanes::open`] found or made.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Opened {
-    /// The sender has a lane.
-    Ready,
+    /// The sender had a lane already.
+    Held,
+    /// The sender was given a spare or the fresh lane.
+    Made,
     /// Neither a spare nor a fresh lane was at hand: the caller makes one
     /// outside its lock and opens again.
     NeedsFresh,
@@ -177,7 +179,7 @@ impl<K: Copy + Eq + Hash, L: Lane> Lanes<K, L> {
     /// [`Errno::OutOfMemory`] when the index cannot grow; nothing is taken.
     pub(crate) fn open(&mut self, sender: K, fresh: &mut Option<L>) -> Result<Opened, Errno> {
         if self.entries.contains_key(&sender) {
-            return Ok(Opened::Ready);
+            return Ok(Opened::Held);
         }
         if self.spare.is_empty() && fresh.is_none() {
             return Ok(Opened::NeedsFresh);
@@ -191,7 +193,7 @@ impl<K: Copy + Eq + Hash, L: Lane> Lanes<K, L> {
         self.entries
             .try_insert(sender, Entry { lane, turn: None })
             .map_err(|_| Errno::OutOfMemory)?;
-        Ok(Opened::Ready)
+        Ok(Opened::Made)
     }
 
     fn link_mut(&mut self, sender: K) -> Option<&mut Link<K>> {
@@ -521,7 +523,10 @@ mod tests {
 
     fn open(lanes: &mut Lanes<u64, Count>, sender: u64) {
         let mut fresh = Some(Count::default());
-        assert_eq!(lanes.open(sender, &mut fresh), Ok(Opened::Ready));
+        assert!(matches!(
+            lanes.open(sender, &mut fresh),
+            Ok(Opened::Held | Opened::Made)
+        ));
     }
 
     fn served(lanes: &mut Lanes<u64, Count>, rounds: impl Fn(u64, usize) -> bool) -> Vec<u64> {
@@ -540,10 +545,10 @@ mod tests {
         let mut none = None;
         assert_eq!(lanes.open(7, &mut none), Ok(Opened::NeedsFresh));
         let mut fresh = Some(Count::default());
-        assert_eq!(lanes.open(7, &mut fresh), Ok(Opened::Ready));
+        assert_eq!(lanes.open(7, &mut fresh), Ok(Opened::Made));
         assert!(fresh.is_none(), "the fresh lane was taken");
         let mut another = Some(Count::default());
-        assert_eq!(lanes.open(7, &mut another), Ok(Opened::Ready));
+        assert_eq!(lanes.open(7, &mut another), Ok(Opened::Held));
         assert!(another.is_some(), "an existing lane takes nothing");
         assert_eq!(lanes.len(), 1);
         assert!(matches!(
@@ -553,7 +558,7 @@ mod tests {
         assert_eq!(lanes.spares(), 1);
         assert_eq!(
             lanes.open(9, &mut none),
-            Ok(Opened::Ready),
+            Ok(Opened::Made),
             "a spare needs no fresh"
         );
         assert_eq!(lanes.spares(), 0);

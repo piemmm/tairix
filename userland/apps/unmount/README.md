@@ -5,7 +5,8 @@ Stability tier: **experimental**.
 The `unmount` command app (`plans/DEVICES.md` D4b): `unmount NAME`
 resolves the volume mounted under `NAME` (its catalog name, a directory it is
 mounted on, or the file a disk image was mounted from, refused where two
-volumes could be meant or the listing keeps only its start) through the
+volumes could be meant or the listing keeps only its start; or its durable
+root, `id::<volume-id>`, which names that volume and no other) through the
 ungated `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries — whose records
 carry each mount's stable volume identity and
 availability — and asks the kernel's `volume_detach` path to take it
@@ -37,8 +38,9 @@ seams — host-tested against in-memory fixtures) and the freestanding
 `tairix_procinfo::IpcTransport`, the `volume_detach` syscall wrapper,
 and the `tairix_help::BundleHelp` short-help source over the inherited
 standard streams. The kernel is the policy point: the user who attached
-a disk image or a network share may detach it, every other volume needs
-`CAP_FS_MOUNT`, and every decision is audited kernel-side; the tool holds
+a disk image or a network share may detach it, the user at the machine's
+seat may plainly detach a removable device's volume, every other volume
+needs `CAP_FS_MOUNT`, and every decision is audited kernel-side; the tool holds
 no ambient authority. A name two users' disk images share (their file
 name) resolves to the caller's own, by the owner each mount record names.
 

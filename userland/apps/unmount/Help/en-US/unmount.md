@@ -39,7 +39,9 @@ still flushes and detaches cleanly; nothing is discarded when a
 clean commit is possible.
 
 A disk image or network share you mounted yourself is yours to
-detach; any other volume needs the mount authority (`CAP_FS_MOUNT`).
+detach, and a removable disk — a USB stick, a card — is yours to detach
+while you are using the computer itself, though only plainly, never with
+`--force`; any other volume needs the mount authority (`CAP_FS_MOUNT`).
 The kernel checks it and audits every decision. The permanent boot
 volumes and the system's view bindings are not detachable.
 

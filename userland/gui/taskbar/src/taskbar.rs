@@ -1263,7 +1263,10 @@ impl Taskbar {
         }
         let identity = app.identity();
         Some(MenuRequest {
-            subject: MenuSubject::App { owner: app.owner() },
+            subject: MenuSubject::App {
+                owner: app.owner(),
+                revision: app.revision(),
+            },
             model: menu::app_menu(&identity.name, app.menu(), identity),
             placement: self.menu_placement(anchor, scale),
         })

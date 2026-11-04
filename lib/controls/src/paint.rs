@@ -9,11 +9,12 @@
 //! rounds, insets, and thickens identically and a change to the recipe cannot
 //! silently diverge between two controls.
 
+use alloc::vec::Vec;
 use core::cell::Cell;
 use core::ops::Range;
 
 use tairix_colour::Rgba;
-use tairix_font::{BitmapFont, Cut, TextLine, TextShadow, ELLIPSIS};
+use tairix_font::{BitmapFont, Cut, KeptShadow, TextLine, TextShadow, ELLIPSIS};
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::{builtin_picture, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -733,6 +734,22 @@ impl TextBlock {
         self.lay_out(text, at, |run, pen| {
             paint_run(surface, self.font, run, pen, self.color, None);
         })
+    }
+
+    /// The shadow each line of `text` laid out from `(x, top)` down casts,
+    /// blurred once and kept: what [`paint`](Self::paint) lays down before
+    /// the ink. `None` for a block with no shadow, or one a line cannot keep.
+    pub(crate) fn kept_shadows(&self, text: &str, at: (u32, u32)) -> Option<Vec<KeptShadow>> {
+        let shadow = self.shadow?;
+        let mut kept = Vec::new();
+        let mut lost = false;
+        self.lay_out(text, at, |run, pen| {
+            match self.font.keep_run_shadow(pen, &run.pieces(), shadow) {
+                Some(line) => kept.push(line),
+                None => lost = true,
+            }
+        });
+        (!lost).then_some(kept)
     }
 
     /// Draw lines `skip..skip + take` of `text` from `(x, top)` down: the

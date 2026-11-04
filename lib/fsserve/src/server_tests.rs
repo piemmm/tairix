@@ -455,6 +455,28 @@ fn security_space_and_regions_cross_the_protocol() {
 }
 
 #[test]
+fn a_title_crosses_the_protocol_and_a_volume_keeping_none_refuses() {
+    use tairix_abi::driver::filesystem::VolumeTitle;
+    let host = ServedHost::new(Fixed);
+    let mut server = Server::new(TestFs::new(), &host).unwrap();
+    let label = Request::Label;
+    let answered = answer_of(&mut server, &label);
+    assert_eq!(result(&answered, &label), Err(DriverError::Unsupported));
+    server.filesystem().label = Some(VolumeTitle::EMPTY);
+    let answered = answer_of(&mut server, &label);
+    assert_eq!(
+        result(&answered, &label),
+        Ok(Answer::Label(VolumeTitle::EMPTY))
+    );
+    let title = VolumeTitle::new("Workbench").expect("a title");
+    let set = Request::SetLabel { title };
+    let answered = answer_of(&mut server, &set);
+    assert_eq!(result(&answered, &set), Ok(Answer::Done));
+    let answered = answer_of(&mut server, &label);
+    assert_eq!(result(&answered, &label), Ok(Answer::Label(title)));
+}
+
+#[test]
 fn every_reply_says_what_the_host_holds_and_a_publish_flushes() {
     let host = ServedHost::new(Fixed);
     let mut server = Server::new(TestFs::new(), &host).unwrap();

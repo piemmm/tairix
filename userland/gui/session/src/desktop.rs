@@ -1,26 +1,38 @@
-//! The desktop: the user's own `Desktop` folder shown as a column of icons
-//! down the screen edge their settings name (`plans/NEW-TASKBAR.md` T7,
+//! The desktop: the user's own `Desktop` folder shown as icons on the screen,
+//! each standing where the user put it (`plans/NEW-TASKBAR.md` T16,
 //! `plans/PINBOARD.md`).
 //!
 //! The desktop is a *directory view*, not a new kind of surface. It lists the
 //! user's `Desktop` folder through the same [`DirectorySource`] seam the
 //! trusted file picker uses, under the session's own identity; it orders the
 //! listing with the shared [`sort_entries`]; it classifies each child with the
-//! shared content-type registry; and it lays its tiles out with the shared
-//! [`GridView`], differing from the file manager's grid only in its
-//! [`GridFlow`] and [`GridFill`] — the desktop's column hugs the edge the
-//! user's arrangement names, grows a new column inward as it fills, and keeps
-//! a fixed pitch so an icon does not drift when the work area changes size.
-//! There is no second grid, no second sort, and no second classifier anywhere
-//! in this module.
+//! shared content-type registry; and its cells are the shared [`GridView`]'s,
+//! differing from the file manager's grid only in its [`GridFlow`] and
+//! [`GridFill`] — they run down from the edge the user's arrangement names and
+//! keep a fixed pitch, so a cell does not drift when the work area changes
+//! size. There is no second grid, no second sort, and no second classifier
+//! anywhere in this module.
+//!
+//! # Where an icon stands
+//!
+//! An icon the user put somewhere — carried across the desktop, dropped or
+//! saved onto it, or tidied — stands exactly there, over another if that is
+//! where it was put, and the session keeps the place in its private scope
+//! ([`Arrangement`]). Every other icon takes the next free cell in listing
+//! order and keeps it while the field stands; another field, order or
+//! arrangement flows them again, and nothing about them is stored. A place
+//! the field no longer holds whole is shown on the free cell nearest it and
+//! kept as it was. Each icon is a rectangle of its own, the one put down last
+//! on top, so a press, a hover and a repaint test them from the topmost down,
+//! and only the icons the field shows are ever walked.
 //!
 //! # The pinboard settings live here
 //!
 //! The desktop owns the user's [`DesktopSettings`] — the wallpaper and its
-//! fit, the backdrop colour, the icon arrangement, and the sort order — as the
-//! single copy inside the session: the shell reads them from the desktop
-//! rather than holding a second set that could drift from the one the icons
-//! are actually laid out by. An edit arrives through
+//! fit, the backdrop colour, the icon arrangement, the sort order and the
+//! grid — as the single copy inside the session: the shell reads them from
+//! the desktop rather than holding a second set that could drift from the one
+//! the icons are actually laid out by. An edit arrives through
 //! [`Desktop::apply_settings`], which reports exactly the work it implies, so
 //! changing the sort order does not decode a wallpaper and changing the
 //! wallpaper does not re-read the folder.
@@ -43,23 +55,30 @@
 //!
 //! # Following the folder
 //!
-//! The column follows its folder through a directory watch
+//! The icons follow their folder through a directory watch
 //! (`docs/src/filesystem/watch.md`): whatever program changes it, the
 //! embedder drains the report off the loop and hands the changed entries to
 //! [`Desktop::apply_changes`], which merges them in place and repaints only
-//! the cells they moved. The folder is read whole only at bring-up, when the
-//! watch asks for a rescan, after an action of the session's own, and on the
-//! user's Refresh.
+//! the icons they moved. A file renamed keeps its place and one deleted gives
+//! it up. The folder is read whole only at bring-up, when the watch asks for a
+//! rescan, after an action of the session's own, on the user's Refresh, and,
+//! where no watch follows it, as the mount table moves.
 //!
 //! The model holds no authority: it *names* what should happen
 //! ([`DesktopAction`]) and the embedder — which holds the spawn and
 //! filesystem capabilities — carries it out.
 
+use alloc::borrow::Cow;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
-use tairix_abi::Errno;
+use tairix_abi::window_ipc::DragItems;
+use tairix_abi::{Errno, FileId};
+use tairix_browse::media::Ending;
 use tairix_browse::render::{entry_parts, Tiles};
 use tairix_browse::{
     applications_for, entry_icon, merge_changes, resolve_occupancy, sort_entries, AppAssociation,
@@ -67,17 +86,21 @@ use tairix_browse::{
     Listing, NewEntry, Pictures, SortKey, SortMode,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
-use tairix_controls::IconTile;
-use tairix_geometry::{GridFill, Point, Rect, Region, Scale};
+use tairix_controls::{IconTile, LabelHalo};
+use tairix_geometry::{to_i32, GridFill, GridRun, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest, Landed};
 use tairix_proglib::{Catalog, EntryId};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_wallpaper::{DesktopSettings, IconFlow, IconSort};
-use tairix_wm::{ClickKind, DoubleClickTracker, Key, NamedKey, PointerButton};
+use tairix_wm::{past_drag_slop, ClickKind, DoubleClickTracker, Key, NamedKey, PointerButton};
 
+use crate::launcher::Kept;
 use crate::library::catalogued;
-use crate::pinboard::PinboardCommand;
+use crate::pinboard::{
+    Arrangement, ArrangementEdit, ArrangementFull, ArrangementMemory, PinboardCommand, Place,
+    PlaceKey, Placed, TidyOrder, MAX_PLACED, PLACE_UNITS,
+};
 
 /// The inset, in logical pixels at the reference density, between the work
 /// area's edges and the first icon.
@@ -87,8 +110,14 @@ use crate::pinboard::PinboardCommand;
 /// work area's top edge.
 pub const DESKTOP_MARGIN: u32 = 8;
 
-/// Where the desktop's icon grid rests: its anchored edge, always. The desktop
-/// does not scroll; its icons stay where the user arranged them.
+/// How long a drop or a save onto the desktop waits for its files once the
+/// program making them has been told where they go: long enough for it to
+/// make them. The file pressed is known by its name, a drop's others only by
+/// arriving meanwhile, so the wait is held to what making them takes.
+pub const LANDING_WAIT_NS: u64 = 10_000_000_000;
+
+/// Where the desktop's cells rest: their anchored edge, always. The desktop
+/// does not scroll.
 const DESKTOP_SCROLL: u64 = 0;
 
 /// What activating a desktop icon means, resolved by the model and carried
@@ -322,11 +351,11 @@ pub struct PinboardChange {
     pub clock: bool,
 }
 
-/// One icon the column shows, as the paint and the artwork landing see it.
+/// One icon the desktop shows, as the paint and the artwork landing see it.
 struct ShownIcon<'a> {
     index: usize,
     entry: &'a Entry,
-    /// The cell the tile draws strictly inside.
+    /// Where the tile draws, strictly inside.
     bounds: Rect,
     kind: IconKind,
     request: IconRequest<'a>,
@@ -334,21 +363,22 @@ struct ShownIcon<'a> {
     side: u32,
 }
 
-/// The outcome of one desktop command: whether it re-listed the folder, and
+/// The outcome of one desktop command: whether every icon may have moved, and
 /// what (if anything) the session must now do.
 ///
 /// What the gesture *changed on screen* is not here. Every gesture takes a
-/// [`Region`] sink and adds the icon cells it altered to it, so the embedder
-/// repaints those cells rather than the whole desktop layer: the desktop is
-/// the bottom layer, and marking all of it recomposites every window above it
-/// and throws away every frosted backdrop over it — a screenful of work to
-/// move one highlight.
+/// [`Region`] sink and adds the icons it altered to it, so the embedder
+/// repaints those rather than the whole desktop layer: the desktop is the
+/// bottom layer, and marking all of it recomposites every window above it and
+/// throws away every frosted backdrop over it — a screenful of work to move
+/// one highlight.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DesktopOutcome {
-    /// The command re-listed the folder on the spot and its contents had
-    /// changed, so the whole column moved. A re-list read elsewhere lands
-    /// through [`Desktop::resume`] instead.
-    pub relisted: bool,
+    /// The command moved the icons as a whole — it listed the folder again on
+    /// the spot and found it changed, or tidied every icon — so the whole
+    /// layer is repainted. A re-list read elsewhere lands through
+    /// [`Desktop::resume`] instead.
+    pub rearranged: bool,
     /// The action the gesture asks for, if any.
     pub action: Option<DesktopAction>,
 }
@@ -358,7 +388,7 @@ impl DesktopOutcome {
     #[must_use]
     pub const fn ignored() -> Self {
         Self {
-            relisted: false,
+            rearranged: false,
             action: None,
         }
     }
@@ -367,15 +397,173 @@ impl DesktopOutcome {
     #[must_use]
     pub const fn acting(action: DesktopAction) -> Self {
         Self {
-            relisted: false,
+            rearranged: false,
             action: Some(action),
         }
     }
 }
 
-/// The desktop's icon column: the listing, what the pointer and keyboard are
-/// doing to it, and the pure double-click engine it shares with the file
-/// manager.
+/// What a drag or a save over the bare desktop would leave there if it were
+/// let go: the names the first file may arrive under, how many files there
+/// are, and where each one shown was held from the press.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LandingOffer {
+    first: Vec<String>,
+    count: u32,
+    /// Where each picture shown stood from the press, the first item's first.
+    offsets: Vec<(i32, i32)>,
+}
+
+impl LandingOffer {
+    /// What a drag of `items` would leave.
+    #[must_use]
+    pub fn of(items: &DragItems) -> Self {
+        Self {
+            first: alloc::vec![items.first().as_str().to_string()],
+            count: items.count(),
+            offsets: items
+                .pictures()
+                .map(|picture| picture.from.unwrap_or((0, 0)))
+                .collect(),
+        }
+    }
+
+    /// What a save of the one file asked for as `name` leaves, which a volume
+    /// that keeps no file type makes under `finished` instead.
+    #[must_use]
+    pub fn saved(name: &str, finished: Option<&str>) -> Self {
+        let mut first = alloc::vec![name.to_string()];
+        first.extend(
+            finished
+                .filter(|finished| *finished != name)
+                .map(String::from),
+        );
+        Self {
+            first,
+            count: 1,
+            offsets: alloc::vec![(0, 0)],
+        }
+    }
+}
+
+/// Files a drop or a save onto the desktop is to leave where it was let go.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Landing {
+    /// The names the first file may arrive under, before its copy tells it
+    /// apart from a name already taken.
+    first: Vec<String>,
+    /// Where each lands, the first item's first; the others take the rest in
+    /// the order they arrive.
+    places: Vec<Place>,
+    /// Whether the first has arrived.
+    led: bool,
+    /// How many of the others are yet to arrive.
+    owed: u32,
+    /// How many of the others have arrived.
+    others: usize,
+    until_ns: u64,
+}
+
+/// Where one icon stands.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Spot {
+    /// Where the user put it.
+    Placed(Place),
+    /// The cell the flow gave it, in the field it was flowed in.
+    Flowed(usize),
+    /// Owed the next free cell, which the field may have none of.
+    Owed,
+}
+
+/// The press on an icon, carried for as long as it is held.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Carry {
+    index: usize,
+    /// Where the press began.
+    from: Point,
+    /// The press's offset from the tile's corner.
+    grab: (i32, i32),
+    /// Where the tile stands, once the press has travelled far enough to be a
+    /// drag.
+    at: Option<Point>,
+}
+
+/// An icon whose file left the listing, and where it stood.
+struct Leaving {
+    name: String,
+    id: FileId,
+    spot: Spot,
+}
+
+/// What the desktop knows of its folder's listing.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct Listed {
+    /// The entries are the folder as last read, not empty for want of a
+    /// listing.
+    read: bool,
+    /// A source that reads elsewhere still owes the listing the last
+    /// [`relist`](Desktop::relist) asked for.
+    owed: bool,
+}
+
+/// How far the record of where the user put their icons has come.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Record {
+    /// Not yet read from the store.
+    Unread,
+    /// Read; a place kept for a file not listed has yet to be followed.
+    Read,
+    /// Read, and every place kept for a file not listed followed.
+    Reconciled,
+}
+
+/// Where the icons stand in one field: the icon the flow stood on each cell,
+/// and those the user put somewhere, the one put down first first, each with
+/// the rectangle it is shown in.
+#[derive(Clone, Debug, Default)]
+struct Standing {
+    cells: Vec<Option<usize>>,
+    placed: Vec<(usize, Rect)>,
+}
+
+/// The halo each resting name was last drawn over, blurred once and kept for
+/// as long as the scale, the tile size and the theme it was blurred for stand.
+#[derive(Default)]
+struct Halos {
+    look: Option<(Scale, (u32, u32), Theme)>,
+    kept: BTreeMap<String, Arc<LabelHalo>>,
+}
+
+impl Halos {
+    /// Keep only the halos blurred at `scale` for a tile of `size` under
+    /// `theme`.
+    fn hold(&mut self, scale: Scale, size: (u32, u32), theme: &Theme) {
+        let current = self
+            .look
+            .as_ref()
+            .is_some_and(|(held, side, look)| *held == scale && *side == size && look == theme);
+        if !current {
+            self.kept.clear();
+            self.look = Some((scale, size, theme.clone()));
+        }
+    }
+
+    /// The halo `tile`, the icon named `name`, draws its name over: the one
+    /// kept, else one blurred now and kept; `None` where none can be blurred.
+    fn of(&mut self, name: &str, tile: &IconTile) -> Option<Arc<LabelHalo>> {
+        if let Some(kept) = self.kept.get(name) {
+            return Some(Arc::clone(kept));
+        }
+        let (scale, size, theme) = self.look.as_ref()?;
+        let halo = Arc::new(tile.label_halo(*size, *scale, theme)?);
+        self.kept.insert(name.to_string(), Arc::clone(&halo));
+        Some(halo)
+    }
+}
+
+/// The desktop's icons: the listing, where each stands, what the pointer and
+/// keyboard are doing to them, and the pure double-click engine it shares with
+/// the file manager.
 ///
 /// `S` is the injected [`DirectorySource`] — the live VFS listing under the
 /// session's own identity in production, an in-memory tree in tests.
@@ -388,6 +576,33 @@ pub struct Desktop<S: DirectorySource> {
     /// second copy that could drift.
     settings: DesktopSettings,
     entries: Vec<Entry>,
+    /// Where each entry's icon stands, by listing index.
+    spots: Vec<Spot>,
+    /// The icons the user put somewhere, by listing index, the one put down
+    /// first first.
+    stack: Vec<usize>,
+    /// The field the icons were last settled in, and where they stand there.
+    flowed_in: Option<GridView>,
+    standing: Standing,
+    /// Whether an icon may be owed a cell: one arrived, lost its place, or a
+    /// cell came free.
+    flow_owed: bool,
+    /// The halo each resting name was last drawn over, kept by the paint.
+    halos: Cell<Halos>,
+    /// Where the user put their icons, as the session's record last stood
+    /// with the changes made here since.
+    arrangement: Arrangement,
+    record: Record,
+    listed: Listed,
+    /// The changes made here to where the icons stand, for the session to
+    /// keep.
+    edits: Vec<ArrangementEdit>,
+    /// A refusal no gesture was there to state.
+    refused: Option<GestureRefusal>,
+    /// What a drag now over the bare desktop would leave there.
+    offer: Option<LandingOffer>,
+    landing: Option<Landing>,
+    carry: Option<Carry>,
     selected: Option<usize>,
     hovered: Option<usize>,
     /// The folder icon a carried drag would drop into, while its application
@@ -398,15 +613,14 @@ pub struct Desktop<S: DirectorySource> {
     revision: u64,
     focused: bool,
     clicks: DoubleClickTracker,
-    /// Whether a source that reads elsewhere still owes the listing the last
-    /// [`relist`](Self::relist) asked for.
-    listing_owed: bool,
 }
 
 impl<S: DirectorySource> Desktop<S> {
     /// A desktop over `source` showing the folder named by the root-first
     /// `folder` components, on the default pinboard settings. Nothing is
-    /// listed until [`relist`](Self::relist).
+    /// listed until [`relist`](Self::relist), and no icon has a place of its
+    /// own until the record of where they were put arrives
+    /// ([`adopt_arrangement`](Self::adopt_arrangement)).
     ///
     /// The settings an absent store document implies are the defaults, so a
     /// desktop is fully specified before the embedder has read anything; the
@@ -419,17 +633,30 @@ impl<S: DirectorySource> Desktop<S> {
             folder,
             settings: DesktopSettings::default(),
             entries: Vec::new(),
+            spots: Vec::new(),
+            stack: Vec::new(),
+            flowed_in: None,
+            standing: Standing::default(),
+            flow_owed: false,
+            halos: Cell::default(),
+            arrangement: Arrangement::default(),
+            record: Record::Unread,
+            listed: Listed::default(),
+            edits: Vec::new(),
+            refused: None,
+            offer: None,
+            landing: None,
+            carry: None,
             selected: None,
             hovered: None,
             drop_target: None,
             revision: 0,
             focused: false,
             clicks: DoubleClickTracker::new(),
-            listing_owed: false,
         }
     }
 
-    /// The entries currently shown, in the shared listing order.
+    /// The folder's entries, in the shared listing order.
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
@@ -512,7 +739,9 @@ impl<S: DirectorySource> Desktop<S> {
     /// is nothing to do. Otherwise the returned [`PinboardChange`] names the
     /// work the edit asks for, the layer's own repaint included, so the caller
     /// repaints, re-lays out or re-prepares the wallpaper only when the edit
-    /// actually asks for it. The desktop applies nothing beyond its own state.
+    /// actually asks for it. A new order or arrangement flows again every icon
+    /// the user did not put somewhere. The desktop applies nothing beyond its
+    /// own state.
     pub fn apply_settings(&mut self, settings: DesktopSettings) -> Option<PinboardChange> {
         if settings == self.settings {
             return None;
@@ -549,9 +778,12 @@ impl<S: DirectorySource> Desktop<S> {
         };
         self.settings = settings;
         if resorted {
-            let chosen = self.selected_name();
+            let held = self.held();
             sort_entries(&mut self.entries, sort_mode(self.settings.sort));
-            self.follow_name(chosen);
+            self.follow(held);
+        }
+        if relayout || resorted {
+            self.reflow(relayout);
         }
         Some(change)
     }
@@ -578,21 +810,22 @@ impl<S: DirectorySource> Desktop<S> {
     /// changed to `damage`.
     ///
     /// Only the selected icon wears the Focus Ring, so gaining or losing the
-    /// keyboard changes that one cell and nothing else — and with nothing
+    /// keyboard changes that one icon and nothing else — and with nothing
     /// selected it changes no pixel at all. This is the click that moves
     /// focus between the desktop and a window, which is exactly when the
     /// screen must *not* be repainted wholesale.
     pub fn set_focused(&mut self, focused: bool, layout: &GridView, damage: &mut Region) {
+        self.settle(layout);
         if self.focused == focused {
             return;
         }
         self.focused = focused;
-        Self::mark_cell(layout, self.selected, damage);
+        self.mark_icon(layout, self.selected, damage);
     }
 
     /// Ask `want` for every shown icon's picture at the side it is drawn at,
     /// drawing nothing: what tells the artwork producer which pictures are on
-    /// screen after a pass that repainted only some cells.
+    /// screen after a pass that repainted only some icons.
     pub fn want_shown_artwork(
         &self,
         layout: &GridView,
@@ -611,13 +844,13 @@ impl<S: DirectorySource> Desktop<S> {
         );
     }
 
-    /// Add to `damage` the cell of every shown icon whose picture the
-    /// `landed` decodes moved, with `layout`, `scale` and `theme` the ones the
-    /// column is painted at.
+    /// Add to `damage` every shown icon whose picture the `landed` decodes
+    /// moved, with `layout`, `scale` and `theme` the ones the icons are
+    /// painted at.
     ///
     /// A decode can only change the picture inside the tiles that draw through
     /// it, never the backdrop or another icon, so a batch that pictures none of
-    /// the column damages nothing.
+    /// them damages nothing.
     pub fn mark_artwork(
         &self,
         layout: &GridView,
@@ -642,26 +875,24 @@ impl<S: DirectorySource> Desktop<S> {
         );
     }
 
-    /// Add to `damage` the cell of every shown icon: all the text the layer
-    /// draws, since a name is drawn inside its own tile and nowhere else.
-    pub fn mark_text(&self, layout: &GridView, damage: &mut Region) {
-        for index in layout
-            .visible_range(DESKTOP_SCROLL)
-            .take_while(|&index| index < self.entries.len())
-        {
-            Self::mark_cell(layout, Some(index), damage);
+    /// Text drawn provisionally has landed: forget each name's halo, blurred
+    /// from what was drawn then, and add to `damage` every shown icon — all
+    /// the text the layer draws, since a name is drawn inside its own tile and
+    /// nowhere else.
+    pub fn text_landed(&self, layout: &GridView, damage: &mut Region) {
+        self.halos.set(Halos::default());
+        for (_, rect) in self.shown(layout).bottom_up() {
+            damage.add(rect);
         }
     }
 
-    /// Add the part of the cell the icon at `index` occupies that shows to
-    /// `damage`.
+    /// Add where the icon at `index` stands under `layout` to `damage`.
     ///
     /// The one place an icon's footprint is spelled: a tile draws strictly
-    /// inside the cell the shared grid gives it, so repainting that rectangle
-    /// is the whole of repainting the icon. An index the column does not
-    /// currently show has no cell and damages nothing.
-    fn mark_cell(layout: &GridView, index: Option<usize>, damage: &mut Region) {
-        if let Some(rect) = index.and_then(|index| shown_whole(layout, index)) {
+    /// inside its own rectangle, so repainting that rectangle is the whole of
+    /// repainting the icon. An icon the desktop does not show damages nothing.
+    fn mark_icon(&self, layout: &GridView, index: Option<usize>, damage: &mut Region) {
+        if let Some(rect) = index.and_then(|index| self.shown(layout).rect(index)) {
             damage.add(rect);
         }
     }
@@ -669,7 +900,8 @@ impl<S: DirectorySource> Desktop<S> {
     /// Note that the pointer is somewhere other than the desktop (over a
     /// window, the taskbar, or one of its popovers), clearing the hover.
     pub fn pointer_left(&mut self, layout: &GridView, damage: &mut Region) {
-        Self::mark_cell(layout, self.hovered.take(), damage);
+        let left = self.hovered.take();
+        self.mark_icon(layout, left, damage);
     }
 
     /// Ask for a fresh listing of the folder now: the caller knows the folder
@@ -678,12 +910,13 @@ impl<S: DirectorySource> Desktop<S> {
     /// set changed.
     ///
     /// A listing the source refuses leaves the desktop empty and selects
-    /// nothing rather than showing a stale or guessed folder.
+    /// nothing rather than showing a stale or guessed folder, and forgets no
+    /// place the user put an icon in.
     ///
     /// A source that reads the folder elsewhere answers "not yet", and this
     /// changes nothing at all — the icons already on screen stay there, and the
     /// caller hands the answer over with [`resume`](Self::resume) on the wake
-    /// that says the read finished. Blanking the column while a read is in
+    /// that says the read finished. Blanking the icons while a read is in
     /// flight would make every re-list flicker.
     pub fn relist(&mut self) -> bool {
         let listed = self.source.refresh(&self.folder);
@@ -698,7 +931,7 @@ impl<S: DirectorySource> Desktop<S> {
     /// nothing about the folder, and looking again on one would cost a
     /// directory read and a second wake per unrelated completion.
     pub fn resume(&mut self) -> bool {
-        if !self.listing_owed {
+        if !self.listed.owed {
             return false;
         }
         let listed = self.source.list(&self.folder);
@@ -706,13 +939,17 @@ impl<S: DirectorySource> Desktop<S> {
     }
 
     /// Show what the source answered, noting whether it still owes an answer.
+    ///
+    /// An icon still listed stands where it stood; one that arrived takes its
+    /// place as [`arrived`](Self::arrived) says.
     fn adopt_listing(&mut self, listed: Result<Listing, Errno>) -> bool {
-        self.listing_owed = matches!(listed, Ok(Listing::Pending));
-        let mut entries = match listed {
-            Ok(Listing::Ready(entries)) => entries,
+        self.listed.owed = matches!(listed, Ok(Listing::Pending));
+        let (mut entries, read) = match listed {
+            Ok(Listing::Ready(entries)) => (entries, true),
             Ok(Listing::Pending) => return false,
-            Err(_) => Vec::new(),
+            Err(_) => (Vec::new(), false),
         };
+        self.listed.read = read;
         sort_entries(&mut entries, sort_mode(self.settings.sort));
         if entries.len() == self.entries.len()
             && entries
@@ -720,94 +957,343 @@ impl<S: DirectorySource> Desktop<S> {
                 .zip(&self.entries)
                 .all(|(a, b)| a.same_listing(b))
         {
+            self.reconcile();
             return false;
         }
-        let chosen = self.selected_name();
-        self.entries = entries;
+        let held = self.held();
+        let was = core::mem::replace(&mut self.entries, entries);
+        let mut stood: BTreeMap<&str, (FileId, Spot)> = was
+            .iter()
+            .zip(&self.spots)
+            .map(|(entry, spot)| (entry.name(), (entry.id(), *spot)))
+            .collect();
+        let mut spots = Vec::with_capacity(self.entries.len());
+        let mut arrivals = Vec::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            if let Some((_, spot)) = stood.remove(entry.name()) {
+                spots.push(spot);
+            } else {
+                spots.push(Spot::Owed);
+                arrivals.push(index);
+            }
+        }
+        let leaving = stood
+            .into_iter()
+            .map(|(name, (id, spot))| Leaving {
+                name: name.to_string(),
+                id,
+                spot,
+            })
+            .collect();
+        self.spots = spots;
         self.revision = self.revision.wrapping_add(1);
-        self.follow_name(chosen);
+        self.follow(held);
+        self.arrived(&arrivals, leaving, read);
+        self.reconcile();
         true
     }
 
-    fn selected_name(&self) -> Option<String> {
-        self.selected
-            .and_then(|index| self.entries.get(index))
-            .map(|entry| entry.name().to_string())
+    /// The names of the icons the selection and a carried press are on, to
+    /// find them again once the listing is reordered or replaced.
+    fn held(&self) -> (Option<String>, Option<(String, Carry)>) {
+        let name = |index: usize| {
+            self.entries
+                .get(index)
+                .map(|entry| entry.name().to_string())
+        };
+        (
+            self.selected.and_then(name),
+            self.carry
+                .and_then(|carry| Some((name(carry.index)?, carry))),
+        )
     }
 
-    /// Put the selection back on the icon named `chosen` after the column was
-    /// reordered or replaced, so it never lands on a different icon under the
-    /// user's pointer. The hover and a half-made double-click go with the
-    /// order, since the cell under them may now show another icon.
-    fn follow_name(&mut self, chosen: Option<String>) {
-        self.selected = chosen.and_then(|name| {
-            self.entries
-                .iter()
-                .position(|entry| entry.name() == name.as_str())
+    /// Put the selection and a carried press back on the icons `held` names,
+    /// so neither lands on a different icon under the user's pointer. The
+    /// hover, the lit drop folder and a half-made double-click go with the
+    /// order, since what they were taken against has moved.
+    fn follow(&mut self, (chosen, carried): (Option<String>, Option<(String, Carry)>)) {
+        let find = |name: &str| self.entries.iter().position(|entry| entry.name() == name);
+        self.selected = chosen.and_then(|name| find(&name));
+        self.carry = carried.and_then(|(name, carry)| {
+            Some(Carry {
+                index: find(&name)?,
+                ..carry
+            })
         });
         self.hovered = None;
         self.drop_target = None;
         self.clicks.reset();
     }
 
-    /// Merge the entries the folder's watch reported into the column in
-    /// place, adding to `damage` each cell whose icon or highlight changed.
-    /// The selection stays on the icon it named and goes with one whose file
-    /// went, and a merge the memory could not be had for re-lists the folder
-    /// instead. Answers whether any icon moved.
+    /// Flow every icon the user did not put somewhere again, in the order and
+    /// from the edge the settings now name; `moved` says the field moved with
+    /// them, so they settle once it is next laid out.
+    fn reflow(&mut self, moved: bool) {
+        self.spots = alloc::vec![Spot::Owed; self.entries.len()];
+        if moved {
+            self.flowed_in = None;
+        }
+        self.resolve_places();
+    }
+
+    /// Merge the entries the folder's watch reported into the listing in
+    /// place, adding to `damage` each icon whose place or look changed. The
+    /// selection stays on the icon it named and goes with one whose file went,
+    /// a file renamed keeps where it stood, and a merge the memory could not
+    /// be had for re-lists the folder instead. Answers whether any icon moved.
     ///
     /// `layout` lays a desktop out as [`layout`](Self::layout) does, so the
-    /// cells are measured on both sides of the merge.
+    /// icons are measured on both sides of the merge.
     pub fn apply_changes(
         &mut self,
         changes: Vec<EntryChange>,
         layout: impl Fn(&Self) -> GridView,
         damage: &mut Region,
     ) -> bool {
-        self.marking(layout, damage, |desktop| {
-            let merged = merge_changes(
-                &mut desktop.entries,
-                changes,
-                sort_mode(desktop.settings.sort),
-            );
-            // Without the memory to merge them, the folder is read again.
-            let Some((placement, moved)) = merged else {
-                return desktop.relist();
-            };
-            if !moved {
-                return false;
-            }
-            desktop.revision = desktop.revision.wrapping_add(1);
-            desktop.selected = desktop.selected.and_then(|index| placement.place(index));
-            desktop.drop_target = desktop.drop_target.and_then(|index| placement.place(index));
-            // A hover is the pointer's cell, so it stays only while that cell
-            // still shows the icon it did.
-            desktop.hovered = desktop
-                .hovered
-                .filter(|&index| placement.place(index) == Some(index));
-            desktop.clicks.follow(|at| placement.place_subject(at));
-            true
-        })
+        self.marking(layout, damage, |desktop| desktop.merge(changes))
     }
 
-    /// [`relist`](Self::relist), adding to `damage` each cell whose icon or
-    /// highlight the new listing changed rather than answering for the whole
-    /// layer.
+    /// Merge `changes` into the listing, each icon keeping where it stood and
+    /// each arrival given its place, answering whether anything moved.
+    fn merge(&mut self, changes: Vec<EntryChange>) -> bool {
+        let leaving = self.leaving(&changes);
+        let merged = merge_changes(&mut self.entries, changes, sort_mode(self.settings.sort));
+        // Without the memory to merge them, the folder is read again.
+        let Some((placement, moved)) = merged else {
+            return self.relist();
+        };
+        if !moved {
+            return false;
+        }
+        let mut spots = alloc::vec![Spot::Owed; self.entries.len()];
+        let mut kept = alloc::vec![false; self.entries.len()];
+        for (before, spot) in self.spots.iter().enumerate() {
+            let Some(after) = placement.place(before) else {
+                continue;
+            };
+            if let (Some(slot), Some(seen)) = (spots.get_mut(after), kept.get_mut(after)) {
+                *slot = *spot;
+                *seen = true;
+            }
+        }
+        let arrivals: Vec<usize> = (0..kept.len())
+            .filter(|&index| kept.get(index) == Some(&false))
+            .collect();
+        self.spots = spots;
+        self.revision = self.revision.wrapping_add(1);
+        self.selected = self.selected.and_then(|index| placement.place(index));
+        self.drop_target = self.drop_target.and_then(|index| placement.place(index));
+        self.hovered = self.hovered.and_then(|index| placement.place(index));
+        self.carry = self.carry.and_then(|carry| {
+            Some(Carry {
+                index: placement.place(carry.index)?,
+                ..carry
+            })
+        });
+        self.clicks.follow(|at| placement.place_subject(at));
+        self.arrived(&arrivals, leaving, true);
+        true
+    }
+
+    /// The icons whose files the latest word of `changes` takes out of the
+    /// listing, with where each stood.
+    fn leaving(&self, changes: &[EntryChange]) -> Vec<Leaving> {
+        let mut gone: BTreeMap<&str, bool> = BTreeMap::new();
+        for change in changes {
+            match change {
+                EntryChange::Remove(name) => gone.insert(name.as_str(), true),
+                EntryChange::Upsert(entry) => gone.insert(entry.name(), false),
+            };
+        }
+        if !gone.values().any(|&going| going) {
+            return Vec::new();
+        }
+        self.entries
+            .iter()
+            .zip(&self.spots)
+            .filter(|(entry, _)| gone.get(entry.name()) == Some(&true))
+            .map(|(entry, spot)| Leaving {
+                name: entry.name().to_string(),
+                id: entry.id(),
+                spot: *spot,
+            })
+            .collect()
+    }
+
+    /// Give each icon at `arrivals` its place: a file renamed keeps where it
+    /// stood, one a drop or a save is waiting for stands where it was let go,
+    /// and one the record keeps a place for stands there. The place of a file
+    /// gone is forgotten where `forget` says the folder was read.
+    fn arrived(&mut self, arrivals: &[usize], mut leaving: Vec<Leaving>, forget: bool) {
+        let mut edits = Vec::new();
+        let mut set = Vec::new();
+        let mut order = self.arrangement.next_order();
+        for &index in arrivals {
+            let Some(entry) = self.entries.get(index) else {
+                continue;
+            };
+            let (name, id) = (entry.name().to_string(), entry.id());
+            let renamed = if id.is_none() {
+                None
+            } else {
+                leaving.iter().position(|gone| gone.id == id)
+            };
+            if let Some(at) = renamed {
+                let gone = leaving.swap_remove(at);
+                if let Spot::Placed(_) = gone.spot {
+                    let from = PlaceKey::of(&gone.name);
+                    edits.push(ArrangementEdit::Renamed { from, to: name, id });
+                } else if let Some(slot) = self.spots.get_mut(index) {
+                    *slot = gone.spot;
+                }
+            } else if let Some(at) = self.landed(&name) {
+                set.push((name, Some(Placed { id, at, order })));
+                order = order.saturating_add(1);
+            }
+        }
+        if forget {
+            for gone in leaving {
+                if let Spot::Placed(_) = gone.spot {
+                    set.push((gone.name, None));
+                }
+            }
+        }
+        if !set.is_empty() {
+            edits.push(ArrangementEdit::Set(set));
+        }
+        self.keep(edits);
+        self.resolve_places();
+    }
+
+    /// Make each of `edits` here, holding a refusal for the session to state,
+    /// since no gesture of the user's is there to state it.
+    fn keep(&mut self, edits: Vec<ArrangementEdit>) {
+        for edit in edits {
+            if self.record(edit).is_err() {
+                self.refused = Some(full_refusal());
+            }
+        }
+    }
+
+    /// The place a drop or a save waiting on its files gives the arrived file
+    /// named `name`, if one is waiting and the file is one of its own: the
+    /// first by a name it was offered under or one its copy told apart, the
+    /// others by arriving while any are owed.
+    fn landed(&mut self, name: &str) -> Option<Place> {
+        let landing = self.landing.as_mut()?;
+        let at = if !landing.led && landing.first.iter().any(|offered| copied_as(name, offered)) {
+            landing.led = true;
+            0
+        } else {
+            landing.owed = landing.owed.checked_sub(1)?;
+            landing.others = landing.others.saturating_add(1);
+            landing.others
+        };
+        let place = landing.places.get(at).copied();
+        if landing.led && landing.owed == 0 {
+            self.landing = None;
+        }
+        place
+    }
+
+    /// Make `edit` to the record here, for the session to keep.
+    fn record(&mut self, edit: ArrangementEdit) -> Result<(), ArrangementFull> {
+        if !self.arrangement.make(&edit)?.is_empty() {
+            self.edits.push(edit);
+        }
+        Ok(())
+    }
+
+    /// Stand each icon the record keeps a place for there, stacked in the
+    /// order they were put down, owe one whose place went the next free cell,
+    /// and settle them again in the field they were last settled in.
+    fn resolve_places(&mut self) {
+        let mut stack = Vec::new();
+        for (index, (spot, entry)) in self.spots.iter_mut().zip(&self.entries).enumerate() {
+            match self.arrangement.place_of(entry.name()) {
+                Some(placed) => {
+                    *spot = Spot::Placed(placed.at);
+                    stack.push((placed.order, index));
+                }
+                None if matches!(spot, Spot::Placed(_)) => *spot = Spot::Owed,
+                None => {}
+            }
+        }
+        // Two put down in one turn keep one stacking whatever the sort.
+        let name = |index: usize| self.entries.get(index).map(Entry::name);
+        stack.sort_unstable_by_key(|&(order, index)| (order, name(index)));
+        self.stack = stack.into_iter().map(|(_, index)| index).collect();
+        self.flow_owed = true;
+        self.revision = self.revision.wrapping_add(1);
+        if let Some(layout) = self.flowed_in {
+            self.settle(&layout);
+        }
+    }
+
+    /// Once the record has been read and the folder listed, follow each place
+    /// kept for a file no longer listed: one renamed while the desktop was not
+    /// looking keeps its place, and one gone is forgotten.
+    fn reconcile(&mut self) {
+        if self.record != Record::Read || !self.listed.read {
+            return;
+        }
+        self.record = Record::Reconciled;
+        let listed: BTreeSet<PlaceKey> = self
+            .entries
+            .iter()
+            .map(|entry| PlaceKey::of(entry.name()))
+            .collect();
+        let by_file: BTreeMap<FileId, usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.id().is_none())
+            .map(|(index, entry)| (entry.id(), index))
+            .collect();
+        let mut renamed = Vec::new();
+        let mut gone = Vec::new();
+        for (key, placed) in self.arrangement.places() {
+            if listed.contains(&key) {
+                continue;
+            }
+            let moved = by_file
+                .get(&placed.id)
+                .and_then(|&index| self.entries.get(index))
+                .filter(|entry| self.arrangement.place_of(entry.name()).is_none());
+            match moved {
+                Some(entry) => renamed.push(ArrangementEdit::Renamed {
+                    from: key,
+                    to: entry.name().to_string(),
+                    id: placed.id,
+                }),
+                None => gone.push(key),
+            }
+        }
+        if !gone.is_empty() {
+            renamed.push(ArrangementEdit::Forget(gone));
+        }
+        self.keep(renamed);
+        self.resolve_places();
+    }
+
+    /// [`relist`](Self::relist), adding to `damage` each icon whose place or
+    /// look the new listing changed rather than answering for the whole layer.
     pub fn relist_into(&mut self, layout: impl Fn(&Self) -> GridView, damage: &mut Region) -> bool {
         self.marking(layout, damage, Self::relist)
     }
 
-    /// [`resume`](Self::resume), adding to `damage` each cell whose icon or
-    /// highlight the landed listing changed.
+    /// [`resume`](Self::resume), adding to `damage` each icon whose place or
+    /// look the landed listing changed.
     ///
     /// A wake that owes the desktop no listing costs it nothing, rather than a
     /// snapshot of every shown icon to compare against.
     pub fn resume_into(&mut self, layout: impl Fn(&Self) -> GridView, damage: &mut Region) -> bool {
-        self.listing_owed && self.marking(layout, damage, Self::resume)
+        self.listed.owed && self.marking(layout, damage, Self::resume)
     }
 
     /// Latch every folder cue the shown icons now have an answer for, asking
-    /// about each shown folder not yet known, and add to `damage` each cell
+    /// about each shown folder not yet known, and add to `damage` each icon
     /// whose picture moved.
     ///
     /// Only the icons `layout` shows are asked about, so the cost is bounded
@@ -815,13 +1301,32 @@ impl<S: DirectorySource> Desktop<S> {
     /// answers "not yet" without reading, so the embedder resolves again when
     /// its batch lands.
     pub fn resolve_occupancy(&mut self, layout: &GridView, damage: &mut Region) {
-        resolve_occupancy(
-            &mut self.source,
-            &mut self.folder,
-            &mut self.entries,
-            layout.visible_range(DESKTOP_SCROLL),
-            |index| Self::mark_cell(layout, Some(index), damage),
-        );
+        self.settle(layout);
+        let mut rects: Vec<Option<Rect>> = alloc::vec![None; self.entries.len()];
+        for (index, rect) in self.shown(layout).bottom_up() {
+            if let Some(slot) = rects.get_mut(index) {
+                *slot = Some(rect);
+            }
+        }
+        // Asked a run of shown icons at a time, so one leaf buffer serves each.
+        let mut start = 0;
+        for run in rects.chunk_by(|a, b| a.is_some() == b.is_some()) {
+            let range = start..start + run.len();
+            start = range.end;
+            if run.first().is_some_and(Option::is_some) {
+                resolve_occupancy(
+                    &mut self.source,
+                    &mut self.folder,
+                    &mut self.entries,
+                    range,
+                    |moved| {
+                        if let Some(&Some(rect)) = rects.get(moved) {
+                            damage.add(rect);
+                        }
+                    },
+                );
+            }
+        }
     }
 
     /// Whether the folder's listing follows it, so a change the session made
@@ -831,10 +1336,294 @@ impl<S: DirectorySource> Desktop<S> {
         self.source.follows(&self.folder)
     }
 
-    /// Answer what `change` does to the desktop, adding to `damage` each cell
-    /// shown before or after it whose icon or highlight it changed: only the
-    /// cells the column shows are compared, so the cost is bounded by the
-    /// screen rather than by the folder.
+    /// Read the folder again where its listing does not follow it, adding to
+    /// `damage` each icon whose place or look the fresh listing changed: what
+    /// a change no watch reports needs. Answers whether any icon moved.
+    pub fn relist_unfollowed(
+        &mut self,
+        layout: impl Fn(&Self) -> GridView,
+        damage: &mut Region,
+    ) -> bool {
+        !self.follows() && self.relist_into(layout, damage)
+    }
+
+    /// Show a name the session made at absolute `path`: a folder it lies
+    /// within is read again unless its listing follows it, as
+    /// [`relist_unfollowed`](Self::relist_unfollowed) does. Answers whether
+    /// any icon moved.
+    pub fn show_made(
+        &mut self,
+        path: &str,
+        layout: impl Fn(&Self) -> GridView,
+        damage: &mut Region,
+    ) -> bool {
+        let within = tairix_browse::vfs::components_from_absolute_path(path)
+            .is_ok_and(|made| made.len() > self.folder.len() && made.starts_with(&self.folder));
+        within && self.relist_unfollowed(layout, damage)
+    }
+
+    /// Adopt `live` — where the user put their icons, as the store last
+    /// answered with the changes it has yet to confirm — adding to `damage`
+    /// each icon it moved. `read` says the store has been read, which is what
+    /// lets a place kept for a file no longer listed be followed or forgotten.
+    pub fn adopt_arrangement(
+        &mut self,
+        live: &Arrangement,
+        read: bool,
+        layout: &GridView,
+        damage: &mut Region,
+    ) {
+        let first_read = read && self.record == Record::Unread;
+        if *live == self.arrangement && !first_read {
+            return;
+        }
+        self.marking(
+            |_| *layout,
+            damage,
+            |desktop| {
+                desktop.arrangement.clone_from(live);
+                if first_read {
+                    desktop.record = Record::Read;
+                }
+                desktop.resolve_places();
+                desktop.reconcile();
+                true
+            },
+        );
+    }
+
+    /// The changes made here to where the icons stand since this was last
+    /// asked, for the session to keep.
+    pub fn take_arrangement_edits(&mut self) -> Vec<ArrangementEdit> {
+        core::mem::take(&mut self.edits)
+    }
+
+    /// Hand `memory` the changes made here, then adopt what it holds whenever
+    /// that moved, adding to `damage` each icon it moved, with `layout` laying
+    /// the desktop out as [`layout`](Self::layout) does. The changes go in
+    /// first, so a store answer collected meanwhile cannot undo one, and one
+    /// the record has no room for puts its icon back. Answers whether one had
+    /// no room.
+    pub fn keep_record(
+        &mut self,
+        memory: &mut ArrangementMemory,
+        layout: impl Fn(&Self) -> GridView,
+        damage: &mut Region,
+    ) -> bool {
+        let mut full = self.hand_edits(memory);
+        if memory.take_moved() || full {
+            let shown = layout(self);
+            self.adopt_arrangement(memory.live(), memory.is_read(), &shown, damage);
+            // What a first read let the desktop follow goes with them, and the
+            // desktop already shows every edit it handed in.
+            full |= self.hand_edits(memory);
+            memory.take_moved();
+            if full {
+                self.adopt_arrangement(memory.live(), memory.is_read(), &shown, damage);
+            }
+        }
+        full
+    }
+
+    /// Hand `memory` the changes made here, answering whether it had no room
+    /// for one.
+    fn hand_edits(&mut self, memory: &mut ArrangementMemory) -> bool {
+        let mut full = false;
+        for edit in self.take_arrangement_edits() {
+            full |= memory.apply(edit).is_err();
+        }
+        full
+    }
+
+    /// A refusal no gesture was there to state, since this was last asked.
+    pub fn take_refusal(&mut self) -> Option<GestureRefusal> {
+        self.refused.take()
+    }
+
+    /// Note what a drag or a save now over the bare desktop would leave
+    /// there, or that it is over somewhere else.
+    pub fn offer_landing(&mut self, offer: Option<LandingOffer>) {
+        self.offer = offer;
+    }
+
+    /// Wait until `until_ns` for the files the offer standing describes, let
+    /// go on the bare desktop at `at`: each picture's centre as far from `at`
+    /// as it was held from the press, on the nearest free cells where the
+    /// settings keep icons to the grid. Asked once the program making the
+    /// files has been told they land here, so a drop refused or concluded
+    /// elsewhere waits for nothing.
+    pub fn expect_offered(
+        &mut self,
+        at: Point,
+        layout: &GridView,
+        scale: Scale,
+        theme: &Theme,
+        until_ns: u64,
+    ) {
+        let Some(offer) = self.offer.take() else {
+            return;
+        };
+        self.settle(layout);
+        let Some(field) = Field::of(layout) else {
+            return;
+        };
+        let tile = Rect::new(0, 0, field.cell.0, field.cell.1);
+        let measured = Entry::file(offer.first.first().cloned().unwrap_or_default());
+        let held = entry_parts(
+            Tiles::Large,
+            (&measured, HiddenEndings::NONE),
+            tile,
+            scale,
+            theme,
+        )
+        .and_then(|parts| parts.picture)
+        .unwrap_or(tile)
+        .center();
+        let mut taken = if self.settings.align_to_grid {
+            field.taken(&self.standing, None)
+        } else {
+            None
+        };
+        // An application says where its pictures stood, and none stands
+        // farther from the drop than the field reaches.
+        let reach = (to_i32(field.area.width), to_i32(field.area.height));
+        let bounded = |offset: i32, most: i32| offset.max(-most).min(most);
+        let from = self.settings.icons;
+        let places = offer
+            .offsets
+            .iter()
+            .map(|&(dx, dy)| {
+                let (dx, dy) = (bounded(dx, reach.0), bounded(dy, reach.1));
+                let corner = field.shown_at(Point::new(
+                    at.x.saturating_add(dx).saturating_sub(held.x),
+                    at.y.saturating_add(dy).saturating_sub(held.y),
+                ));
+                let corner = taken
+                    .as_deref_mut()
+                    .and_then(|taken| field.claim_nearest(corner, taken))
+                    .unwrap_or(corner);
+                field.place_of(corner, from)
+            })
+            .collect();
+        self.landing = Some(Landing {
+            first: offer.first,
+            places,
+            led: false,
+            owed: offer.count.saturating_sub(1),
+            others: 0,
+            until_ns,
+        });
+    }
+
+    /// Stop waiting for the files of a drop or a save past its wait at
+    /// `now_ns`: one that appears later takes the next free cell.
+    pub fn expire_landing(&mut self, now_ns: u64) {
+        if self
+            .landing
+            .as_ref()
+            .is_some_and(|landing| now_ns >= landing.until_ns)
+        {
+            self.landing = None;
+        }
+    }
+
+    /// Stand the icons in `layout`'s field ([`Field::stand`]), each flowed
+    /// icon keeping its cell where this is the field it was flowed in, and let
+    /// go of the halo of every name the field no longer shows.
+    fn settle(&mut self, layout: &GridView) {
+        let same_field = self.flowed_in == Some(*layout);
+        if same_field && !self.flow_owed {
+            return;
+        }
+        let standing = match Field::of(layout) {
+            Some(field) => field.stand(&self.spots, &self.stack, same_field),
+            None => Some(Standing::default()),
+        };
+        if let Some(standing) = standing {
+            for spot in &mut self.spots {
+                if !matches!(spot, Spot::Placed(_)) {
+                    *spot = Spot::Owed;
+                }
+            }
+            for (cell, held) in standing.cells.iter().enumerate() {
+                if let Some(spot) = held.and_then(|index| self.spots.get_mut(index)) {
+                    *spot = Spot::Flowed(cell);
+                }
+            }
+            self.standing = standing;
+            self.flow_owed = false;
+        } else {
+            // Without the memory to stand them the icons are not shown until a
+            // later settle finds it, and a cell of another field is none here.
+            if !same_field {
+                for spot in &mut self.spots {
+                    if matches!(spot, Spot::Flowed(_)) {
+                        *spot = Spot::Owed;
+                    }
+                }
+            }
+            self.standing = Standing::default();
+            self.flow_owed = true;
+        }
+        let shown: BTreeSet<&str> = self
+            .standing
+            .cells
+            .iter()
+            .flatten()
+            .chain(self.standing.placed.iter().map(|(index, _)| index))
+            .filter_map(|&index| self.entries.get(index))
+            .map(Entry::name)
+            .collect();
+        self.halos
+            .get_mut()
+            .kept
+            .retain(|name, _| shown.contains(name.as_str()));
+        self.flowed_in = Some(*layout);
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// The icons as `layout` shows them: as they were settled there, or as
+    /// they would stand in a field they have yet to be settled in.
+    fn shown<'a>(&'a self, layout: &'a GridView) -> Shown<'a> {
+        let standing = if self.flowed_in == Some(*layout) {
+            Cow::Borrowed(&self.standing)
+        } else {
+            Cow::Owned(
+                Field::of(layout)
+                    .and_then(|field| field.stand(&self.spots, &self.stack, false))
+                    .unwrap_or_default(),
+            )
+        };
+        let carried = self.carry.and_then(|carry| {
+            let (tile, at) = (layout.cell_rect(0)?, carry.at?);
+            Some((carry.index, Rect::new(at.x, at.y, tile.width, tile.height)))
+        });
+        Shown {
+            standing,
+            grid: layout,
+            carried,
+        }
+    }
+
+    /// Where the icon at `index` stands under `layout`, for a test that asks.
+    #[cfg(test)]
+    pub(crate) fn bounds_for_test(&self, layout: &GridView, index: usize) -> Option<Rect> {
+        self.shown(layout).rect(index)
+    }
+
+    /// The halo kept for the name `name`, for a test that asks.
+    #[cfg(test)]
+    pub(crate) fn halo_for_test(&self, name: &str) -> Option<Arc<LabelHalo>> {
+        let halos = self.halos.take();
+        let kept = halos.kept.get(name).cloned();
+        self.halos.set(halos);
+        kept
+    }
+
+    /// Answer what `change` does to the desktop, adding to `damage` each icon
+    /// shown before or after it whose place or look it changed: only the icons
+    /// shown are compared, so the cost is bounded by the screen rather than by
+    /// the folder.
     fn marking(
         &mut self,
         layout: impl Fn(&Self) -> GridView,
@@ -842,38 +1631,56 @@ impl<S: DirectorySource> Desktop<S> {
         change: impl FnOnce(&mut Self) -> bool,
     ) -> bool {
         let before = layout(self);
-        let shown = before.visible_range(DESKTOP_SCROLL);
-        let was: Vec<(Entry, ControlState)> = shown
-            .clone()
-            .map_while(|index| {
+        self.settle(&before);
+        // Found again by name, since a change may move every index.
+        let mut was: Vec<(Rect, Entry, ControlState)> = self
+            .shown(&before)
+            .bottom_up()
+            .filter_map(|(index, rect)| {
                 let entry = self.entries.get(index)?;
-                Some((entry.clone(), self.icon_state(index)))
+                Some((rect, entry.clone(), self.icon_state(index)))
             })
             .collect();
+        was.sort_unstable_by(|a, b| a.1.name().cmp(b.1.name()));
         if !change(self) {
             return false;
         }
         let after = layout(self);
-        let end = shown.end.max(after.visible_range(DESKTOP_SCROLL).end);
-        for index in shown.start..end {
-            let old = was.get(index - shown.start);
-            let new = self
-                .entries
-                .get(index)
-                .map(|entry| (entry, self.icon_state(index)));
-            if old.map(|(entry, state)| (entry, *state)) != new {
-                let cell = shown_whole(&after, index).or_else(|| shown_whole(&before, index));
-                if let Some(rect) = cell {
-                    damage.add(rect);
+        self.settle(&after);
+        let mut seen = alloc::vec![false; was.len()];
+        let shown = self.shown(&after);
+        for (index, rect) in shown.bottom_up() {
+            let Some(entry) = self.entries.get(index) else {
+                continue;
+            };
+            let found = was
+                .binary_search_by(|(_, held, _)| held.name().cmp(entry.name()))
+                .ok()
+                .and_then(|at| Some((at, was.get(at)?)));
+            match found {
+                Some((at, (from, held, state))) => {
+                    if let Some(seen) = seen.get_mut(at) {
+                        *seen = true;
+                    }
+                    if (*from, held, *state) != (rect, entry, self.icon_state(index)) {
+                        damage.add(*from);
+                        damage.add(rect);
+                    }
                 }
+                None => damage.add(rect),
+            }
+        }
+        for ((from, _, _), seen) in was.iter().zip(seen) {
+            if !seen {
+                damage.add(*from);
             }
         }
         true
     }
 
-    /// The grid the desktop's icons are laid out in: the shared tile geometry
-    /// under the column flow the settings' arrangement names, inset from
-    /// `work_area` by [`DESKTOP_MARGIN`].
+    /// The cells the desktop's icons stand in: every whole cell of the shared
+    /// tile geometry the work area holds, inset by [`DESKTOP_MARGIN`] and
+    /// numbered down from the edge the settings' arrangement names.
     ///
     /// `work_area` is the screen with the taskbar's band removed, so an icon
     /// can never be drawn under the bar or hit-tested through it.
@@ -886,35 +1693,50 @@ impl<S: DirectorySource> Desktop<S> {
             work_area.width.saturating_sub(margin.saturating_mul(2)),
             work_area.height.saturating_sub(margin.saturating_mul(2)),
         );
+        let metrics = Tiles::Large.metrics(scale, theme);
         // The field is fixed, not resizable: keeping the pitch anchored to the
-        // edge the icons hug means an icon stays where the user last saw it
-        // whatever the work area's exact extent is, rather than drifting as the
-        // file manager's spreading grid deliberately does.
+        // edge the cells run from keeps a cell where the user last saw it
+        // whatever the work area's exact extent is.
+        let [down, across] = [
+            (viewport.height, metrics.cell_height),
+            (viewport.width, metrics.cell_width),
+        ]
+        .map(|(extent, cell)| {
+            GridRun::new(extent, cell, metrics.gap, GridFill::FixedPitch).count()
+        });
         GridView::new(
             viewport,
-            Tiles::Large.metrics(scale, theme),
+            metrics,
             0,
-            self.entries.len(),
+            down.saturating_mul(across),
             grid_flow(self.settings.icons),
             GridFill::FixedPitch,
         )
     }
 
-    /// Paint the visible icons that fall inside `area` into `surface` through
+    /// Paint the shown icons that fall inside `area` into `surface` through
     /// the shared icon tile, resolving each one's artwork from `artwork` at
     /// exactly the slot side the tile will draw it in.
     ///
-    /// Only the icons the column actually shows are painted and only their
-    /// artwork is asked for, so a folder with more icons than fit costs
-    /// nothing for the ones off screen. `area` narrows that again to the
-    /// rectangle being repainted, so moving a highlight costs the cells that
-    /// changed rather than every icon on screen — a tile draws strictly inside
-    /// its own cell, so a cell `area` misses has nothing in `area` to draw.
-    /// An application bundle on the desktop names itself in its request, so it
-    /// draws the icon it carries in its own `Resources/` rather than the
-    /// generic bundle picture. An icon whose artwork the lookup declines falls
-    /// back to the shared class glyph inside the tile, so a system with no
-    /// `/System/Graphics` still shows a meaningful desktop.
+    /// Only the icons the field shows are walked — the one on each cell and
+    /// each the user put somewhere — and only their artwork is asked for, so a
+    /// folder with more icons than fit costs no more than a screenful. `area`
+    /// narrows that again to the rectangle being repainted, so moving a
+    /// highlight costs the cells that changed rather than every icon on
+    /// screen — a tile draws strictly inside its own cell, so a cell `area`
+    /// misses has nothing in `area` to draw. An application bundle on the
+    /// desktop names itself in its request, so it draws the icon it carries in
+    /// its own `Resources/` rather than the generic bundle picture. An icon
+    /// whose artwork the lookup declines falls back to the shared class glyph
+    /// inside the tile, so a system with no `/System/Graphics` still shows a
+    /// meaningful desktop.
+    ///
+    /// `ground` is the flat colour the icons stand on, or `None` over a
+    /// picture: a resting name takes the ink that reads there, and a name on
+    /// a state's plate keeps the theme's. A resting name's halo over a picture
+    /// is blurred once and kept until its name, the scale, the theme or the
+    /// tile size moves, so a repaint lays it down rather than blurring it.
+    #[allow(clippy::too_many_arguments)] // The paint, the look it takes, and the ground under it.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -923,8 +1745,17 @@ impl<S: DirectorySource> Desktop<S> {
         theme: &Theme,
         artwork: &mut dyn IconArtwork,
         area: Rect,
+        ground: Option<tairix_raster::Color>,
     ) {
         let shadow = IconTile::shadow_cast(scale, theme);
+        let (ink, halo) = Self::resting_label(ground, scale);
+        let mut halos = self.halos.take();
+        if let (Some(_), Some(tile)) = (halo, layout.cell_rect(0)) {
+            halos.hold(scale, (tile.width, tile.height), theme);
+        } else {
+            // A name on a flat ground keeps no halo.
+            halos = Halos::default();
+        }
         self.visit_icons(
             layout,
             scale,
@@ -932,17 +1763,51 @@ impl<S: DirectorySource> Desktop<S> {
             |bounds| !bounds.intersection(&area).is_empty(),
             |icon| {
                 let state = self.icon_state(icon.index);
-                let tile = Tiles::Large.tile(icon.entry, state, icon.kind, HiddenEndings::NONE);
+                let mut tile = Tiles::Large.tile(icon.entry, state, icon.kind, HiddenEndings::NONE);
+                if state == ControlState::idle() {
+                    tile = tile.with_label_ink(ink);
+                    if let Some(halo) = halo {
+                        tile = tile.with_label_shadow(halo);
+                        if let Some(kept) = halos.of(icon.entry.name(), &tile) {
+                            tile = tile.with_label_halo(kept);
+                        }
+                    }
+                }
                 let art = artwork.shadowed(icon.request, icon.side, shadow);
                 tile.render(surface, icon.bounds, scale, theme, art);
             },
         );
+        self.halos.set(halos);
     }
 
-    /// Visit every shown icon whose cell `wanted` admits.
+    /// How a resting name is drawn on `ground`: near-white over a dark halo on
+    /// a picture, whose light under any one name the desktop cannot know, and
+    /// on a flat colour in whichever of near-white or near-black contrasts
+    /// more with it, which needs no halo.
+    fn resting_label(
+        ground: Option<tairix_raster::Color>,
+        scale: Scale,
+    ) -> (tairix_raster::Color, Option<tairix_font::TextShadow>) {
+        use tairix_colour::{Rgb, Xyz};
+        use tairix_raster::Color;
+        const LIGHT: Rgb = Rgb::new(0xf6, 0xf7, 0xf8);
+        const DARK: Rgb = Rgb::new(0x16, 0x18, 0x1a);
+        // The ground luminance the two inks contrast with equally under WCAG
+        // 2.1: a lighter ground takes the dark one.
+        const EVEN: f64 = 0.19;
+        let Some(flat) = ground else {
+            let halo = tairix_font::TextShadow::new(Color::rgba(0, 0, 0, 200), scale);
+            return (Color::from(LIGHT), Some(halo));
+        };
+        let lighter = Xyz::from_rgb(Rgb::new(flat.r, flat.g, flat.b)).y > EVEN;
+        (Color::from(if lighter { DARK } else { LIGHT }), None)
+    }
+
+    /// Visit every shown icon whose rectangle `wanted` admits, bottom first.
     ///
-    /// The paint and the artwork landing both walk the column here, so the
-    /// icons a landing repaints are exactly the ones the paint draws from it.
+    /// The paint and the artwork landing both walk the icons here, so the
+    /// icons a landing repaints are exactly the ones the paint draws from it,
+    /// and an icon standing over another is drawn after it.
     fn visit_icons(
         &self,
         layout: &GridView,
@@ -955,11 +1820,9 @@ impl<S: DirectorySource> Desktop<S> {
         // appends its leaf into this one buffer rather than allocating a path.
         let dir = tairix_browse::vfs::spell_absolute_path(&self.folder);
         let mut scratch = String::new();
-        for index in layout.visible_range(DESKTOP_SCROLL) {
+        let shown = self.shown(layout);
+        for (index, bounds) in shown.bottom_up().filter(|&(_, bounds)| wanted(bounds)) {
             let Some(entry) = self.entries.get(index) else {
-                break;
-            };
-            let Some(bounds) = shown_whole(layout, index).filter(|&bounds| wanted(bounds)) else {
                 continue;
             };
             let (kind, request) =
@@ -975,22 +1838,28 @@ impl<S: DirectorySource> Desktop<S> {
         }
     }
 
-    /// The icon whose tile's picture or name — not the ground around and
-    /// between them — covers screen position `at`, through the shared grid
-    /// hit-test.
+    /// The topmost icon whose tile's picture or name — not the ground around
+    /// and between them — covers screen position `at`.
     fn icon_at(&self, layout: &GridView, at: Point, scale: Scale, theme: &Theme) -> Option<usize> {
-        let index = layout.index_at(DESKTOP_SCROLL, at)?;
-        let cell = shown_whole(layout, index)?;
-        let entry = self.entries.get(index)?;
-        entry_parts(
-            Tiles::Large,
-            (entry, HiddenEndings::NONE),
-            cell,
-            scale,
-            theme,
-        )?
-        .contains(at)
-        .then_some(index)
+        let shown = self.shown(layout);
+        let hit = shown
+            .under(at)
+            .find(|&(index, rect)| {
+                let Some(entry) = self.entries.get(index) else {
+                    return false;
+                };
+                rect.contains(at)
+                    && entry_parts(
+                        Tiles::Large,
+                        (entry, HiddenEndings::NONE),
+                        rect,
+                        scale,
+                        theme,
+                    )
+                    .is_some_and(|parts| parts.contains(at))
+            })
+            .map(|(index, _)| index);
+        hit
     }
 
     /// The composed control state of the icon at `index`: selected, hovered,
@@ -1056,17 +1925,19 @@ impl<S: DirectorySource> Desktop<S> {
     }
 
     /// Light `icon` as where a carried drag would drop, or none, adding the
-    /// cells that changed to `damage`.
+    /// icons that changed to `damage`.
     pub fn set_drop_target(&mut self, icon: Option<usize>, layout: &GridView, damage: &mut Region) {
+        self.settle(layout);
         if self.drop_target != icon {
-            Self::mark_cell(layout, self.drop_target, damage);
-            Self::mark_cell(layout, icon, damage);
+            self.mark_icon(layout, self.drop_target, damage);
+            self.mark_icon(layout, icon, damage);
             self.drop_target = icon;
         }
     }
 
     /// Pointer motion to screen position `at`, which drives the hover
-    /// highlight.
+    /// highlight. An icon being carried takes the pointer's attention, so
+    /// nothing under it lights.
     pub fn pointer_moved(
         &mut self,
         at: Point,
@@ -1075,10 +1946,14 @@ impl<S: DirectorySource> Desktop<S> {
         theme: &Theme,
         damage: &mut Region,
     ) {
+        self.settle(layout);
+        if self.carry.is_some_and(|carry| carry.at.is_some()) {
+            return;
+        }
         let hovered = self.icon_at(layout, at, scale, theme);
         if self.hovered != hovered {
-            Self::mark_cell(layout, self.hovered, damage);
-            Self::mark_cell(layout, hovered, damage);
+            self.mark_icon(layout, self.hovered, damage);
+            self.mark_icon(layout, hovered, damage);
             self.hovered = hovered;
         }
     }
@@ -1086,9 +1961,10 @@ impl<S: DirectorySource> Desktop<S> {
     /// A primary press at screen position `at`, at monotonic time `now_ns`.
     ///
     /// A press on an icon selects it and arms the double-click engine, so a
-    /// second press on the same icon within the shared window activates it. A
-    /// press on empty desktop — the ground around an icon's picture and name
-    /// included — clears the selection.
+    /// second press on the same icon within the shared window activates it;
+    /// one that is not the second of a pair may go on to carry the icon
+    /// ([`follow_press`](Self::follow_press)). A press on empty desktop — the ground
+    /// around an icon's picture and name included — clears the selection.
     #[allow(clippy::too_many_arguments)] // The press, the field it lands on, and the round's report.
     pub fn press(
         &mut self,
@@ -1100,17 +1976,19 @@ impl<S: DirectorySource> Desktop<S> {
         apps: &[AppAssociation],
         damage: &mut Region,
     ) -> DesktopOutcome {
+        self.settle(layout);
+        self.carry = None;
         // Taking the keyboard puts the ring on whatever is selected, so the
-        // old selection's cell is repainted whether the press moves the
-        // selection or merely claims focus.
+        // old selection is repainted whether the press moves the selection or
+        // merely claims focus.
         self.focused = true;
-        Self::mark_cell(layout, self.selected, damage);
+        self.mark_icon(layout, self.selected, damage);
         let Some(index) = self.icon_at(layout, at, scale, theme) else {
             self.selected = None;
             return DesktopOutcome::ignored();
         };
         self.selected = Some(index);
-        Self::mark_cell(layout, self.selected, damage);
+        self.mark_icon(layout, self.selected, damage);
         let subject = u64::try_from(index).unwrap_or(u64::MAX);
         if self.clicks.register(
             now_ns,
@@ -1120,6 +1998,116 @@ impl<S: DirectorySource> Desktop<S> {
         ) == ClickKind::Double
         {
             return self.activate(index, apps);
+        }
+        let carry = self.shown(layout).rect(index).map(|rect| Carry {
+            index,
+            from: at,
+            grab: (
+                at.x.saturating_sub(rect.left()),
+                at.y.saturating_sub(rect.top()),
+            ),
+            at: None,
+        });
+        self.carry = carry;
+        DesktopOutcome::ignored()
+    }
+
+    /// Follow the press on an icon to `at`, the primary button still `held`
+    /// or let go: carried there while it is held, and put down there once it
+    /// is not. The seat applies a whole batch of input before any of it is
+    /// routed, so the release may come with motion this has yet to follow.
+    pub fn follow_press(
+        &mut self,
+        at: Point,
+        held: bool,
+        layout: &GridView,
+        scale: Scale,
+        damage: &mut Region,
+    ) -> DesktopOutcome {
+        if self.carry.is_none() {
+            return DesktopOutcome::ignored();
+        }
+        self.carry_to(at, layout, scale, damage);
+        if held {
+            return DesktopOutcome::ignored();
+        }
+        self.put_down(layout, damage)
+    }
+
+    /// The pointer moved to `at` while the press on an icon is held: once it
+    /// has travelled past the drag slop the icon is carried with it, in memory
+    /// alone, adding the ground it left and the ground it covers to `damage`.
+    fn carry_to(&mut self, at: Point, layout: &GridView, scale: Scale, damage: &mut Region) {
+        self.settle(layout);
+        let Some(mut carry) = self.carry else {
+            return;
+        };
+        if carry.at.is_none() && !past_drag_slop(carry.from, at, scale) {
+            return;
+        }
+        let Some(field) = Field::of(layout) else {
+            return;
+        };
+        let corner = field.shown_at(Point::new(
+            at.x.saturating_sub(carry.grab.0),
+            at.y.saturating_sub(carry.grab.1),
+        ));
+        if carry.at == Some(corner) {
+            return;
+        }
+        self.mark_icon(layout, Some(carry.index), damage);
+        let left = self.hovered.take();
+        self.mark_icon(layout, left, damage);
+        carry.at = Some(corner);
+        self.carry = Some(carry);
+        self.clicks.reset();
+        self.mark_icon(layout, Some(carry.index), damage);
+    }
+
+    /// The press on an icon ended. One that never travelled was a click; one
+    /// that did puts the icon down where it was carried — on the nearest free
+    /// cell, where the settings keep icons to the grid — over every other, and
+    /// the record keeps it there. Adds to `damage` every icon that moved, an
+    /// icon the field had no room for taking the cell it left among them.
+    fn put_down(&mut self, layout: &GridView, damage: &mut Region) -> DesktopOutcome {
+        let Some(carry) = self.carry else {
+            return DesktopOutcome::ignored();
+        };
+        self.settle(layout);
+        let field = Field::of(layout);
+        let (Some(corner), Some(field), Some(entry)) =
+            (carry.at, field, self.entries.get(carry.index))
+        else {
+            self.carry = None;
+            return DesktopOutcome::ignored();
+        };
+        let settled = if self.settings.align_to_grid {
+            field
+                .taken(&self.standing, Some(carry.index))
+                .and_then(|mut taken| field.claim_nearest(corner, &mut taken))
+                .unwrap_or(corner)
+        } else {
+            corner
+        };
+        let placed = Placed {
+            id: entry.id(),
+            at: field.place_of(settled, self.settings.icons),
+            order: self.arrangement.next_order(),
+        };
+        let set = alloc::vec![(entry.name().to_string(), Some(placed))];
+        let mut refused = false;
+        self.marking(
+            |_| *layout,
+            damage,
+            |desktop| {
+                desktop.carry = None;
+                refused = desktop.record(ArrangementEdit::Set(set)).is_err();
+                desktop.resolve_places();
+                true
+            },
+        );
+        if refused {
+            return DesktopOutcome::acting(DesktopAction::Refuse(full_refusal()));
         }
         DesktopOutcome::ignored()
     }
@@ -1146,27 +2134,35 @@ impl<S: DirectorySource> Desktop<S> {
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
+        self.settle(layout);
         let on_icon = self.icon_at(layout, at, scale, theme);
         if let Some(index) = on_icon {
             if self.selected != Some(index) {
-                Self::mark_cell(layout, self.selected, damage);
+                self.mark_icon(layout, self.selected, damage);
                 self.selected = Some(index);
-                Self::mark_cell(layout, self.selected, damage);
+                self.mark_icon(layout, self.selected, damage);
             }
         }
         on_icon.is_some()
     }
 
-    /// Resolve one pinboard menu `command` against the desktop's own state.
+    /// Resolve one pinboard menu `command` against the desktop's own state,
+    /// its icons laid out in `layout`.
     ///
     /// This is the single translation from a named command to a
     /// [`DesktopAction`]: `Open` resolves through the very same activation the
     /// double-click path uses, a sort or arrangement row names the settings the
     /// embedder is to adopt (never applying them behind its back), a new folder
     /// is named through the shared new-directory naming over the listing on
-    /// screen, and `Refresh` re-lists here and now. A command that asks for
-    /// what is already in force changes nothing.
-    pub fn command(&mut self, command: PinboardCommand, apps: &[AppAssociation]) -> DesktopOutcome {
+    /// screen, `Tidy Up` lays every icon out on the grid and keeps each there,
+    /// and `Refresh` re-lists here and now. A command that asks for what is
+    /// already in force changes nothing.
+    pub fn command(
+        &mut self,
+        command: PinboardCommand,
+        layout: &GridView,
+        apps: &[AppAssociation],
+    ) -> DesktopOutcome {
         match command {
             PinboardCommand::Open => self.activate_selection(apps),
             PinboardCommand::NewFolder => DesktopOutcome::acting(DesktopAction::CreateFolder {
@@ -1174,8 +2170,9 @@ impl<S: DirectorySource> Desktop<S> {
             }),
             PinboardCommand::SortBy(sort) => self.edit(SettingsEdit::Sort(sort)),
             PinboardCommand::ArrangeFrom(icons) => self.edit(SettingsEdit::Icons(icons)),
+            PinboardCommand::TidyUp(order) => self.tidy_up(order, layout),
             PinboardCommand::Refresh => DesktopOutcome {
-                relisted: self.relist(),
+                rearranged: self.relist(),
                 action: None,
             },
             PinboardCommand::OpenDesktopFolder => {
@@ -1189,6 +2186,47 @@ impl<S: DirectorySource> Desktop<S> {
         }
     }
 
+    /// Lay every icon out on `layout`'s cells in `order`, from the corner the
+    /// arrangement names, and keep each where it now stands: one change to the
+    /// record for the whole desktop. An icon past the cells, or past what the
+    /// record keeps, gives up its place and flows after the others, onto a
+    /// cell the tidy left free or off the field where none is.
+    fn tidy_up(&mut self, order: TidyOrder, layout: &GridView) -> DesktopOutcome {
+        self.settle(layout);
+        let Some(field) = Field::of(layout) else {
+            return DesktopOutcome::ignored();
+        };
+        let mut ordered = self.entries.clone();
+        sort_entries(&mut ordered, sort_mode(order.sort()));
+        let room = field.cells.min(MAX_PLACED);
+        let (from, first) = (self.settings.icons, self.arrangement.next_order());
+        let set = ordered
+            .iter()
+            .enumerate()
+            .map(|(cell, entry)| {
+                let turn = u32::try_from(cell).unwrap_or(u32::MAX);
+                let at = field
+                    .grid
+                    .cell_rect(cell)
+                    .filter(|_| cell < room)
+                    .map(|rect| Placed {
+                        id: entry.id(),
+                        at: field.place_of(rect.origin, from),
+                        order: first.saturating_add(turn),
+                    });
+                (entry.name().to_string(), at)
+            })
+            .collect();
+        if self.record(ArrangementEdit::Set(set)).is_err() {
+            return DesktopOutcome::acting(DesktopAction::Refuse(full_refusal()));
+        }
+        self.reflow(false);
+        DesktopOutcome {
+            rearranged: true,
+            action: None,
+        }
+    }
+
     /// Name `edit` for the embedder to make, or change nothing when the
     /// settings in force already say it.
     fn edit(&self, edit: SettingsEdit) -> DesktopOutcome {
@@ -1198,8 +2236,9 @@ impl<S: DirectorySource> Desktop<S> {
         DesktopOutcome::acting(DesktopAction::EditSettings(edit))
     }
 
-    /// A key while the desktop holds the keyboard: the arrows move the
-    /// selection, `Enter` activates it, and `Escape` clears it.
+    /// A key while the desktop holds the keyboard: an arrow moves the
+    /// selection to the nearest icon that way, `Enter` activates it, and
+    /// `Escape` clears it.
     ///
     /// A key the desktop has no meaning for changes nothing. Releases are
     /// ignored: every desktop key acts on the press.
@@ -1214,43 +2253,45 @@ impl<S: DirectorySource> Desktop<S> {
         if !pressed || !self.focused {
             return DesktopOutcome::ignored();
         }
+        self.settle(layout);
         match key {
             Key::Named(NamedKey::Enter) => self.activate_selection(apps),
             Key::Named(NamedKey::Escape) => {
-                Self::mark_cell(layout, self.selected.take(), damage);
+                let cleared = self.selected.take();
+                self.mark_icon(layout, cleared, damage);
                 DesktopOutcome::ignored()
             }
-            Key::Named(named) => match Step::for_key(named, self.settings.icons) {
-                Some(step) => self.move_selection(step, layout, damage),
+            Key::Named(named) => match toward(named) {
+                Some(toward) => self.move_selection(toward, layout, damage),
                 None => DesktopOutcome::ignored(),
             },
             Key::Char(_) => DesktopOutcome::ignored(),
         }
     }
 
-    /// Move the selection one `step` along the listing, clamped to its ends.
-    /// With nothing selected the first arrow selects the first icon, so the
-    /// keyboard always has somewhere to start.
+    /// Move the selection to the nearest icon `toward` the selected one. With
+    /// nothing selected, or the selection not shown, the first arrow selects
+    /// the first icon shown, so the keyboard always has somewhere to start;
+    /// with no icon that way, nothing moves.
     fn move_selection(
         &mut self,
-        step: Step,
+        toward: (i64, i64),
         layout: &GridView,
         damage: &mut Region,
     ) -> DesktopOutcome {
-        if self.entries.is_empty() {
-            return DesktopOutcome::ignored();
-        }
-        let last = self.entries.len().saturating_sub(1);
-        let next = match self.selected {
-            None => 0,
-            Some(current) => step.applied(current, layout.cells_per_line()).min(last),
+        let next = {
+            let shown = self.shown(layout);
+            match self.selected.and_then(|at| Some((at, shown.rect(at)?))) {
+                None => shown.bottom_up().map(|(index, _)| index).min(),
+                Some(from) => nearest_toward(&shown, from, toward),
+            }
         };
-        if self.selected == Some(next) {
+        let Some(next) = next.filter(|&next| self.selected != Some(next)) else {
             return DesktopOutcome::ignored();
-        }
-        Self::mark_cell(layout, self.selected, damage);
+        };
+        self.mark_icon(layout, self.selected, damage);
         self.selected = Some(next);
-        Self::mark_cell(layout, self.selected, damage);
+        self.mark_icon(layout, self.selected, damage);
         DesktopOutcome::ignored()
     }
 
@@ -1362,56 +2403,51 @@ impl<S: DirectorySource> Desktop<S> {
     }
 }
 
-/// One arrow-key move over the icon column.
-///
-/// The desktop's icons flow *down* a column before wrapping, so up/down is one
-/// icon while right/left is one whole column — and "one column" is however
-/// many icons the live grid fits, never a number this module guesses.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Step {
-    /// One icon further down the listing.
-    NextIcon,
-    /// One icon back up the listing.
-    PreviousIcon,
-    /// One whole column later in the listing.
-    NextColumn,
-    /// One whole column earlier in the listing.
-    PreviousColumn,
+/// The way an arrow key moves the selection on the screen, or `None` for a
+/// key that is not an arrow.
+const fn toward(key: NamedKey) -> Option<(i64, i64)> {
+    match key {
+        NamedKey::Left => Some((-1, 0)),
+        NamedKey::Right => Some((1, 0)),
+        NamedKey::Up => Some((0, -1)),
+        NamedKey::Down => Some((0, 1)),
+        _ => None,
+    }
 }
 
-impl Step {
-    /// The step an arrow key asks for under the `flow` the icons are arranged
-    /// in, or `None` when the key means nothing to the desktop.
-    ///
-    /// Which horizontal arrow runs *later* into the listing is a property of
-    /// the arrangement, not a constant: columns grow rightward from the
-    /// leading edge and leftward from the trailing one, so the mapping is read
-    /// off the live arrangement. Otherwise one of the two arrangements would
-    /// move the selection the opposite way to the icons the user can see.
-    const fn for_key(key: NamedKey, flow: IconFlow) -> Option<Self> {
-        let rightward_is_later = matches!(flow, IconFlow::Leading);
-        match key {
-            NamedKey::Down => Some(Self::NextIcon),
-            NamedKey::Up => Some(Self::PreviousIcon),
-            NamedKey::Right if rightward_is_later => Some(Self::NextColumn),
-            NamedKey::Right => Some(Self::PreviousColumn),
-            NamedKey::Left if rightward_is_later => Some(Self::PreviousColumn),
-            NamedKey::Left => Some(Self::NextColumn),
-            _ => None,
-        }
-    }
-
-    /// This step applied to the icon at `current` in a column holding
-    /// `per_column` icons, saturating at the start of the listing.
-    fn applied(self, current: usize, per_column: usize) -> usize {
-        let column = per_column.max(1);
-        match self {
-            Self::NextIcon => current.saturating_add(1),
-            Self::PreviousIcon => current.saturating_sub(1),
-            Self::NextColumn => current.saturating_add(column),
-            Self::PreviousColumn => current.saturating_sub(column),
-        }
-    }
+/// The icon nearest the one at `from`, which stands at `bounds`, in the
+/// direction `toward`: the shortest way there, an icon off to the side
+/// counting its sideways distance twice so the selection keeps to its row or
+/// column. Icons standing exactly on one another are met first, in the order
+/// they are drawn — upward for an arrow right or down, downward for one left
+/// or up — so every one of a stack is reached.
+fn nearest_toward(
+    shown: &Shown<'_>,
+    (from, bounds): (usize, Rect),
+    (dx, dy): (i64, i64),
+) -> Option<usize> {
+    let origin = bounds.center();
+    let rank = shown.bottom_up().position(|(index, _)| index == from)?;
+    let upward = dx + dy > 0;
+    shown
+        .bottom_up()
+        .enumerate()
+        .filter(|&(_, (index, _))| index != from)
+        .filter_map(|(at, (index, rect))| {
+            let centre = rect.center();
+            let x = i64::from(centre.x) - i64::from(origin.x);
+            let y = i64::from(centre.y) - i64::from(origin.y);
+            let along = x * dx + y * dy;
+            let aside = (x * dy - y * dx).abs();
+            let (ahead, gap) = if along == 0 && aside == 0 {
+                ((at > rank) == upward, at.abs_diff(rank))
+            } else {
+                (along > 0, 0)
+            };
+            ahead.then_some((along + 2 * aside, gap, index))
+        })
+        .min()
+        .map(|(_, _, index)| index)
 }
 
 /// The shared grid flow the settings' icon arrangement names.
@@ -1470,14 +2506,344 @@ fn bundle_label(name: &str) -> String {
         .to_string()
 }
 
-/// Where the icon at `index` shows on screen, when the field shows it whole.
-///
-/// The desktop never scrolls, so a column its edge would cut could never be
-/// brought into view: it is left out, like a tile a line cannot hold, rather
-/// than drawn cut.
-fn shown_whole(layout: &GridView, index: usize) -> Option<Rect> {
-    let cell = layout.cell_rect(index)?;
-    layout
-        .shown_rect(DESKTOP_SCROLL, index)
-        .filter(|shown| shown.width == cell.width && shown.height == cell.height)
+/// The refusal of a place the record has no room left to keep.
+fn full_refusal() -> GestureRefusal {
+    GestureRefusal::new(
+        "The desktop cannot keep that icon where it was put",
+        format!("It keeps where at most {MAX_PLACED} icons stand, and that many are kept already."),
+    )
+}
+
+/// Whether a file arriving as `arrived` is the one offered as `offered`: the
+/// name itself, the name told apart from one already taken by what follows
+/// its stem (`Report 2.txt`, `Report (2).txt`), or the name finished with a
+/// file type by a volume that keeps none.
+fn copied_as(arrived: &str, offered: &str) -> bool {
+    let (made, asked) = (Ending::of(arrived), Ending::of(offered));
+    let from_stem = made
+        .stem
+        .strip_prefix(asked.stem)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '));
+    from_stem
+        && made.extension == asked.extension
+        && (made.filetype == asked.filetype || asked.filetype.is_none())
+}
+
+/// `units` of a pitch `pitch` pixels long, in pixels, to the nearest.
+fn pixels_of(units: u32, pitch: u32) -> i32 {
+    let pixels =
+        (u64::from(units) * u64::from(pitch) + u64::from(PLACE_UNITS / 2)) / u64::from(PLACE_UNITS);
+    i32::try_from(pixels).unwrap_or(i32::MAX)
+}
+
+/// `pixels` along a pitch `pitch` pixels long, in place units, to the nearest.
+fn units_of(pixels: i32, pitch: u32) -> u32 {
+    let pixels = u64::try_from(pixels).unwrap_or(0);
+    let pitch = u64::from(pitch.max(1));
+    let units = (pixels * u64::from(PLACE_UNITS) + pitch / 2) / pitch;
+    u32::try_from(units).unwrap_or(u32::MAX)
+}
+
+/// The icons as one layout shows them.
+struct Shown<'a> {
+    standing: Cow<'a, Standing>,
+    grid: &'a GridView,
+    /// The icon a press carries, and where its tile now stands.
+    carried: Option<(usize, Rect)>,
+}
+
+impl Shown<'_> {
+    /// Where the icon at `index` stands, if it is shown.
+    fn rect(&self, index: usize) -> Option<Rect> {
+        self.bottom_up()
+            .find(|&(shown, _)| shown == index)
+            .map(|(_, rect)| rect)
+    }
+
+    /// Whether the icon at `index` is the one carried, which stands apart.
+    fn lifted(&self, index: usize) -> bool {
+        self.carried.is_some_and(|(carried, _)| carried == index)
+    }
+
+    /// The icons the flow stood, cell by cell, the one carried aside.
+    fn flowed(&self) -> impl DoubleEndedIterator<Item = (usize, Rect)> + '_ {
+        self.standing
+            .cells
+            .iter()
+            .enumerate()
+            .filter_map(move |(cell, held)| {
+                let index = held.filter(|&index| !self.lifted(index))?;
+                Some((index, self.grid.cell_rect(cell)?))
+            })
+    }
+
+    /// The icons the user put somewhere, the one put down first first, the one
+    /// carried aside.
+    fn placed(&self) -> impl DoubleEndedIterator<Item = (usize, Rect)> + '_ {
+        self.standing
+            .placed
+            .iter()
+            .copied()
+            .filter(move |&(index, _)| !self.lifted(index))
+    }
+
+    /// Every icon in the order it is drawn: those the flow stood, then those
+    /// the user put somewhere in the order they were put down, then the one
+    /// carried.
+    fn bottom_up(&self) -> impl DoubleEndedIterator<Item = (usize, Rect)> + '_ {
+        self.flowed().chain(self.placed()).chain(self.carried)
+    }
+
+    /// The icons that may cover `at`, the topmost first: the one carried, those
+    /// the user put somewhere, and the one the flow stood on the cell there, so
+    /// a hit costs the icons placed and no more.
+    fn under(&self, at: Point) -> impl Iterator<Item = (usize, Rect)> + '_ {
+        let flowed = self.grid.index_at(DESKTOP_SCROLL, at).and_then(|cell| {
+            let index = self
+                .standing
+                .cells
+                .get(cell)?
+                .filter(|&index| !self.lifted(index))?;
+            Some((index, self.grid.cell_rect(cell)?))
+        });
+        self.carried
+            .into_iter()
+            .chain(self.placed().rev())
+            .chain(flowed)
+    }
+}
+
+/// The cells a desktop layout holds and the pitch between them: what an icon's
+/// place is measured in.
+struct Field<'a> {
+    grid: &'a GridView,
+    /// Where the cells are shown, which every icon is kept wholly inside.
+    area: Rect,
+    /// A tile's width and height.
+    cell: (u32, u32),
+    /// The distance from one cell to the next, across and down.
+    pitch: (u32, u32),
+    /// How many cells the field holds.
+    cells: usize,
+}
+
+impl<'a> Field<'a> {
+    /// The field `grid` lays out, or `None` when it holds no cell at all.
+    fn of(grid: &'a GridView) -> Option<Self> {
+        let first = grid.cell_rect(0)?;
+        let per_line = grid.cells_per_line();
+        let down = grid
+            .cell_rect(1)
+            .filter(|_| per_line > 1)
+            .map_or(first.height, |next| next.top().abs_diff(first.top()));
+        let across = grid
+            .cell_rect(per_line)
+            .map_or(first.width, |next| next.left().abs_diff(first.left()));
+        Some(Self {
+            grid,
+            area: grid.tile_area(),
+            cell: (first.width, first.height),
+            pitch: (across.max(1), down.max(1)),
+            cells: per_line.saturating_mul(grid.lines_total()),
+        })
+    }
+
+    /// The corner a tile with its corner at `corner` takes once it is shown
+    /// wholly on the field.
+    fn shown_at(&self, corner: Point) -> Point {
+        Rect::new(corner.x, corner.y, self.cell.0, self.cell.1)
+            .clamped_onto(self.area)
+            .origin
+    }
+
+    /// Where the tile standing at `place` would be, whether or not the field
+    /// holds it whole.
+    fn wanted(&self, place: Place) -> Rect {
+        let across = pixels_of(place.across, self.pitch.0);
+        let left = match place.from {
+            IconFlow::Leading => self.area.left().saturating_add(across),
+            IconFlow::Trailing => self
+                .area
+                .right()
+                .saturating_sub(across)
+                .saturating_sub_unsigned(self.cell.0),
+        };
+        Rect::new(
+            left,
+            self.area
+                .top()
+                .saturating_add(pixels_of(place.down, self.pitch.1)),
+            self.cell.0,
+            self.cell.1,
+        )
+    }
+
+    /// Whether the field holds `rect` whole.
+    fn holds(&self, rect: Rect) -> bool {
+        self.area.intersection(&rect) == rect
+    }
+
+    /// The place a tile with its corner at `corner` is kept at once it is
+    /// shown wholly on the field, measured across from the edge `from` names.
+    fn place_of(&self, corner: Point, from: IconFlow) -> Place {
+        let shown = Rect::new(corner.x, corner.y, self.cell.0, self.cell.1).clamped_onto(self.area);
+        let across = match from {
+            IconFlow::Leading => shown.left().saturating_sub(self.area.left()),
+            IconFlow::Trailing => self.area.right().saturating_sub(shown.right()),
+        };
+        Place {
+            across: units_of(across, self.pitch.0),
+            down: units_of(shown.top().saturating_sub(self.area.top()), self.pitch.1),
+            from,
+        }
+    }
+
+    /// The cells a tile at `rect` reaches into: each holds one of its corners.
+    fn cells_of(&self, rect: Rect) -> impl Iterator<Item = usize> + '_ {
+        let (right, bottom) = (
+            rect.right().saturating_sub(1),
+            rect.bottom().saturating_sub(1),
+        );
+        [
+            (rect.left(), rect.top()),
+            (right, rect.top()),
+            (rect.left(), bottom),
+            (right, bottom),
+        ]
+        .into_iter()
+        .filter_map(move |(x, y)| self.grid.index_at(DESKTOP_SCROLL, Point::new(x, y)))
+    }
+
+    /// Mark every cell a tile at `rect` reaches into as taken.
+    fn reach(&self, rect: Rect, taken: &mut [bool]) {
+        for cell in self.cells_of(rect) {
+            if let Some(held) = taken.get_mut(cell) {
+                *held = true;
+            }
+        }
+    }
+
+    /// Which cells `standing` already holds, by an icon the flow stood there
+    /// or by a placed tile reaching into one, the icon at `aside` apart;
+    /// `None` without the memory to say.
+    fn taken(&self, standing: &Standing, aside: Option<usize>) -> Option<Vec<bool>> {
+        let mut taken = tairix_util::fallible::filled(self.cells, false)?;
+        for (held, on) in taken.iter_mut().zip(&standing.cells) {
+            *held = on.is_some_and(|index| Some(index) != aside);
+        }
+        for &(index, rect) in &standing.placed {
+            if Some(index) != aside {
+                self.reach(rect, &mut taken);
+            }
+        }
+        Some(taken)
+    }
+
+    /// The cell nearest a tile with its corner at `corner`: the nearest free
+    /// one, else, unless `free` insists, the nearest of all.
+    fn nearest(&self, corner: Point, taken: &[bool], free: bool) -> Option<usize> {
+        let distance = |cell: usize| {
+            let origin = self.grid.cell_rect(cell)?.origin;
+            let x = u64::from(origin.x.abs_diff(corner.x));
+            let y = u64::from(origin.y.abs_diff(corner.y));
+            // The square of a difference of two `i32`s fits; only the sum of
+            // two can run past the range.
+            Some(((x * x).saturating_add(y * y), cell))
+        };
+        let among = |only_free: bool| {
+            (0..self.cells)
+                .filter(|&cell| !only_free || taken.get(cell) == Some(&false))
+                .filter_map(distance)
+                .min()
+        };
+        match among(true) {
+            Some((_, cell)) => Some(cell),
+            None if free => None,
+            None => among(false).map(|(_, cell)| cell),
+        }
+    }
+
+    /// Take the free cell nearest a tile with its corner at `corner`, else the
+    /// nearest of all, answering its corner.
+    fn claim_nearest(&self, corner: Point, taken: &mut [bool]) -> Option<Point> {
+        let cell = self.nearest(corner, taken, false)?;
+        if let Some(held) = taken.get_mut(cell) {
+            *held = true;
+        }
+        Some(self.grid.cell_rect(cell)?.origin)
+    }
+
+    /// Where `spots` stand in this field: each icon the user put somewhere
+    /// where it was put, in the order `stack` puts them down — on the free
+    /// cell nearest there where the field no longer holds it whole, and off
+    /// the field with none free; then, where `kept` says this is the field the
+    /// flow stood them in, each flowed icon on its own cell; then the rest, in
+    /// listing order, on the free cells left until they run out. `None`
+    /// without the memory to say.
+    fn stand(&self, spots: &[Spot], stack: &[usize], kept: bool) -> Option<Standing> {
+        let mut taken = tairix_util::fallible::filled(self.cells, false)?;
+        let mut cells = tairix_util::fallible::filled(self.cells, None)?;
+        let mut placed: Vec<(usize, Option<Rect>)> = Vec::new();
+        placed.try_reserve_exact(stack.len()).ok()?;
+        let mut moved = Vec::new();
+        for &index in stack {
+            let Some(&Spot::Placed(place)) = spots.get(index) else {
+                continue;
+            };
+            let wanted = self.wanted(place);
+            if self.holds(wanted) {
+                self.reach(wanted, &mut taken);
+                placed.push((index, Some(wanted)));
+            } else {
+                moved.push((placed.len(), self.shown_at(wanted.origin)));
+                placed.push((index, None));
+            }
+        }
+        if kept {
+            for (index, spot) in spots.iter().enumerate() {
+                if let Spot::Flowed(cell) = *spot {
+                    if let (Some(held), Some(on)) = (taken.get_mut(cell), cells.get_mut(cell)) {
+                        *held = true;
+                        *on = Some(index);
+                    }
+                }
+            }
+        }
+        for (at, corner) in moved {
+            let Some(cell) = self.nearest(corner, &taken, true) else {
+                continue;
+            };
+            if let Some(held) = taken.get_mut(cell) {
+                *held = true;
+            }
+            if let Some(slot) = placed.get_mut(at) {
+                slot.1 = self.grid.cell_rect(cell);
+            }
+        }
+        let mut next = 0;
+        for (index, spot) in spots.iter().enumerate() {
+            let owed = match spot {
+                Spot::Placed(_) => false,
+                Spot::Flowed(_) => !kept,
+                Spot::Owed => true,
+            };
+            if !owed {
+                continue;
+            }
+            while taken.get(next) == Some(&true) {
+                next += 1;
+            }
+            let (Some(held), Some(on)) = (taken.get_mut(next), cells.get_mut(next)) else {
+                break;
+            };
+            *held = true;
+            *on = Some(index);
+            next += 1;
+        }
+        let placed = placed
+            .into_iter()
+            .filter_map(|(index, rect)| Some((index, rect?)))
+            .collect();
+        Some(Standing { cells, placed })
+    }
 }

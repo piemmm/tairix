@@ -67,6 +67,8 @@ pub fn mounted(label: &str, target: &str, medium: Option<BlkMedium>) -> Volume {
         medium,
         facts: VolumeFacts {
             filesystem: String::new(),
+            title: String::new(),
+            class: tairix_abi::sysinfo::VolumeClass::Local,
             free: None,
             availability: MountAvailability::Available,
             owner: None,

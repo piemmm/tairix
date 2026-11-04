@@ -39,7 +39,7 @@
 /* Canonical query-registry encoding constants (the hashable registry image). */
 #define TAIRIX_SYSINFO_QUERY_NAME_MAX 20u
 #define TAIRIX_SYSINFO_QUERY_RECORD_LEN 26u
-#define TAIRIX_SYSINFO_ENCODED_QUERY_TABLE_LEN 1404u
+#define TAIRIX_SYSINFO_ENCODED_QUERY_TABLE_LEN 1430u
 #define TAIRIX_SYSINFO_LOAD_FIXED_SHIFT 11u
 
 /* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */
@@ -97,6 +97,7 @@
 #define TAIRIX_SYSINFO_QUERY_NET_ROUTES ((uint16_t)51u)
 #define TAIRIX_SYSINFO_QUERY_VIEW_LIST ((uint16_t)52u)
 #define TAIRIX_SYSINFO_QUERY_PLATFORM_COMPATIBLE ((uint16_t)53u)
+#define TAIRIX_SYSINFO_QUERY_VOLUME_REMOVALS ((uint16_t)54u)
 
 /* Process lifecycle state carried in a process record (uint8_t). */
 #define TAIRIX_PROCESS_STATE_RUNNABLE ((uint8_t)0u)
@@ -118,6 +119,7 @@
 #define TAIRIX_MOUNT_SOURCE_MAX 64u
 #define TAIRIX_MOUNT_TARGET_MAX 64u
 #define TAIRIX_MOUNT_FSTYPE_MAX 16u
+#define TAIRIX_VOLUME_TITLE_MAX 252u
 #define TAIRIX_VOLUME_ID_LEN 16u
 #define TAIRIX_MEMORY_CLASS_COUNT 6u
 /* Mount availability carried in a mount record (uint8_t). */
@@ -133,6 +135,13 @@
 #define TAIRIX_VOLUME_CLASS_LOCAL ((uint8_t)0u)
 #define TAIRIX_VOLUME_CLASS_NETWORK ((uint8_t)1u)
 #define TAIRIX_VOLUME_CLASS_IMAGE ((uint8_t)2u)
+#define TAIRIX_VOLUME_CLASS_REMOVABLE ((uint8_t)3u)
+/* What became of a removed volume's unwritten writes (uint8_t). */
+#define TAIRIX_REMOVED_WRITES_NONE ((uint8_t)0u)
+#define TAIRIX_REMOVED_WRITES_HELD ((uint8_t)1u)
+#define TAIRIX_REMOVED_WRITES_LOST ((uint8_t)2u)
+/* The most recent volume removals the kernel keeps. */
+#define TAIRIX_VOLUME_REMOVALS_KEPT 32u
 /* The bytes of a tairix_blk_medium_t. A fact nothing established is
    TAIRIX_BLK_FACT_UNKNOWN with TAIRIX_BLK_EVIDENCE_NONE; a device that
    declared nothing has TAIRIX_BLK_TRANSPORT_UNDECLARED. */
@@ -200,8 +209,9 @@
 #define TAIRIX_UPTIME_WIRE_LEN 24u
 #define TAIRIX_LOAD_AVERAGE_WIRE_LEN 24u
 #define TAIRIX_SYSTEM_IDENTITY_WIRE_LEN 88u
-#define TAIRIX_MOUNT_RECORD_WIRE_LEN 232u
+#define TAIRIX_MOUNT_RECORD_WIRE_LEN 488u
 #define TAIRIX_VIEW_BINDING_RECORD_WIRE_LEN 160u
+#define TAIRIX_VOLUME_REMOVAL_RECORD_WIRE_LEN 32u
 #define TAIRIX_RESOURCE_LIMIT_RECORD_WIRE_LEN 32u
 #define TAIRIX_USER_DIRECTORY_RECORD_WIRE_LEN 44u
 #define TAIRIX_GROUP_DIRECTORY_RECORD_WIRE_LEN 40u
@@ -341,9 +351,10 @@ typedef struct tairix_blk_medium {
 * source or usage, else 0; `withheld` is 1 on the record so listed, whose
 * empty source and all-zero usage are then unknown rather than absent;
 * `source_cut` is 1 when the source is only the first bytes of a longer
-* name, cut between characters to fit.
-* The inline source/target/fstype buffers are valid for their respective
-* *_len byte counts. */
+* name, cut between characters to fit. `title` is the volume's own
+* label: empty where its filesystem records none, and on a withheld record.
+* The inline source/target/fstype/title buffers are valid for their
+* respective *_len byte counts. */
 typedef struct tairix_mount_record {
     uint32_t flags;
     uint8_t source_len;
@@ -361,6 +372,8 @@ typedef struct tairix_mount_record {
     uint8_t source[TAIRIX_MOUNT_SOURCE_MAX];
     uint8_t target[TAIRIX_MOUNT_TARGET_MAX];
     uint8_t fstype[TAIRIX_MOUNT_FSTYPE_MAX];
+    uint8_t title_len;
+    uint8_t title[TAIRIX_VOLUME_TITLE_MAX];
 } tairix_mount_record_t;
 
 /* One view binding: a view path (`target`), the path within an attached
@@ -387,6 +400,18 @@ typedef struct tairix_view_binding_record {
     uint8_t target[TAIRIX_MOUNT_TARGET_MAX];
     uint8_t subtree[TAIRIX_MOUNT_TARGET_MAX];
 } tairix_view_binding_record_t;
+
+/* One device-backed volume whose device went away while it was attached,
+* rather than being detached first: its place among the removals since
+* boot, from 1; the volume's identity, the key of the
+* tairix_mount_record_t it had; and what became of the writes it had not
+* given its device (TAIRIX_REMOVED_WRITES_*). */
+typedef struct tairix_volume_removal_record {
+    uint64_t sequence;
+    uint8_t volume_id[TAIRIX_VOLUME_ID_LEN];
+    uint8_t writes;
+    uint8_t reserved[7];
+} tairix_volume_removal_record_t;
 
 /* One row of the RESOURCE_LIMITS response: a resource's effective soft/hard
 * bound (a tairix_resource_limit_t) and the caller's current live usage of it.

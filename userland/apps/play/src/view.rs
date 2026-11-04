@@ -36,6 +36,47 @@ pub enum Key {
     Suspend,
 }
 
+/// The controls a key may send the playback, each as the byte that is its
+/// place here.
+const SENT: [Control; 8] = [
+    Control::TogglePause,
+    Control::Forward,
+    Control::Back,
+    Control::Next,
+    Control::Previous,
+    Control::Louder,
+    Control::Quieter,
+    Control::Stop,
+];
+
+/// The byte a suspend is sent as.
+const SUSPEND: u8 = 0xFF;
+
+impl Key {
+    /// The byte the interface sends the playback for this key, or `None` for a
+    /// control it has no command for, which is never sent as another.
+    #[must_use]
+    pub fn byte(self) -> Option<u8> {
+        match self {
+            Self::Suspend => Some(SUSPEND),
+            Self::Control(control) => SENT
+                .iter()
+                .position(|sent| *sent == control)
+                .and_then(|at| u8::try_from(at).ok()),
+        }
+    }
+
+    /// The key a byte from the interface stands for, or `None` for one no
+    /// key is sent as.
+    #[must_use]
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        if byte == SUSPEND {
+            return Some(Self::Suspend);
+        }
+        SENT.get(usize::from(byte)).copied().map(Self::Control)
+    }
+}
+
 /// What `event` asks, if anything.
 #[must_use]
 pub fn key(event: &Event) -> Option<Key> {

@@ -1961,6 +1961,14 @@ impl ChainRow {
         }
     }
 
+    /// This row answering only as its field commits: choosing it opens the
+    /// field, for a row whose whole purpose is the field.
+    #[must_use]
+    pub const fn opened_for_its_field(mut self) -> Self {
+        self.id = None;
+        self
+    }
+
     /// This row's drawn form, for an owner that has to set something on it
     /// after the model was built — the artwork a picture-bearing row's
     /// icon resolves to.
@@ -2231,12 +2239,19 @@ fn wire_row(
             // A declared field *is* the row's child, and the model forbids a
             // row holding both, so the two cases cannot overlap.
             let mut row = match item.entry {
-                Some(entry) => ChainRow::entry(
-                    (item.id, entry.id),
-                    (entry.initial, entry.selected.range()),
-                    item.symbol,
-                    built,
-                ),
+                Some(entry) => {
+                    let row = ChainRow::entry(
+                        (item.id, entry.id),
+                        (entry.initial, entry.selected.range()),
+                        item.symbol,
+                        built,
+                    );
+                    if entry.opens_on_choose {
+                        row.opened_for_its_field()
+                    } else {
+                        row
+                    }
+                }
                 None if opens_children => {
                     ChainRow::item(item.id, item.symbol, built).opening_a_plate()
                 }

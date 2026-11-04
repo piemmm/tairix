@@ -149,9 +149,11 @@ delegated only to the caller that started it; its notifications go to the
 port that caller's attested pid names, bounded by its queued slots
 (`IsoLayout::notify_capacity`), and each names the stream by a number its node
 advances with every stream it starts, so a late notice of an ended stream
-cannot pass for its successor's; and it ends — telling its class driver why
-when the port still allows — with its device, a controller reset, a halt, or
-a notification refused. The event ring grows to four page segments where the
+cannot pass for its successor's. A notice the port refuses for room, budget
+or memory is held, with those after it, until its room wake or a timed retry,
+so its class driver hears of every slot and of the stream's end — with its
+device, a controller reset or a halt; a stream whose port is gone, or refuses
+it for good, ends. The event ring grows to four page segments where the
 controller takes them. All of it is host-tested against the register-level
 mock's isochronous endpoint model; the end-to-end vertical is SND7's.
 
@@ -222,9 +224,9 @@ short once, with its reason on standard error and fd 3, and the exit status
 says so. Playback runs on its own loop; the curses interface is a thread that
 paints from the status at most every 50 ms and only while the process holds
 its terminal, so a backgrounded `play` keeps playing and Ctrl-Z pauses, stops
-and resumes on the same frame. A notification dropped from a full mailbox is
-recovered by reading the stream's state back (`NotifyDrain`), the under-run
-totals are the service's own count for each stream, and a wait or watch that
+and resumes on the same frame. A notification the mailbox has no room for is
+held by the service until the player drains, the under-run totals are the
+service's own count for each stream, and a wait or watch that
 fails ends playback with its reason rather than spinning. The engine is
 host-tested over the real decoder; the `play` verticals on all three QEMU
 targets plant the shared signal as a file and assert the capture holds

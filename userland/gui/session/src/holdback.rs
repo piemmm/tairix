@@ -3,7 +3,11 @@
 //!
 //! An app's event mailbox is a bounded kernel resource
 //! ([`tairix_window::EVENT_MAILBOX_CAPACITY`]), so a send into it can be
-//! refused with [`Errno::WouldBlock`] whenever the owner is merely slow.
+//! refused with [`Errno::WouldBlock`] whenever the owner is merely slow, and
+//! with [`Errno::LimitExceeded`] while the session's own IPC budget is spent
+//! on what other apps have yet to take; the kernel wakes the destination's
+//! room member for either. Nothing wakes for kernel memory, so what a send
+//! refused [`Errno::OutOfMemory`] is held for a flush the embedder times.
 //! Dropping the refused event is right for a *delta* — the next pointer
 //! sample supersedes the one before it — and wrong for everything else: a
 //! `Resized` the app never sees leaves it laying out at a size the
@@ -88,6 +92,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
 use tairix_abi::input::PointerButtonCode;
+use tairix_abi::ipc::SendRefusal;
 use tairix_abi::touch::PinchPhase;
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_abi::Errno;
@@ -108,39 +113,80 @@ pub const HOLD_BACK_CAPACITY: usize = 64;
 pub enum Delivery {
     /// It went straight to the destination.
     Sent,
-    /// The destination is behind, so the event is owed. Its caller still
-    /// has an undeliverable event on its hands, which is the evidence a
-    /// responsiveness verdict rests on.
+    /// The destination is behind, so the event is owed on its room wake. Its
+    /// caller still has an undeliverable event on its hands, which is the
+    /// evidence a responsiveness verdict rests on.
     Owed {
         /// `true` when this is the first thing owed to the destination, so
         /// the caller must arm its room wake; a destination already owing
         /// something is already watched.
         watch: bool,
     },
+    /// The session's own IPC budget is spent on what other apps have yet to
+    /// take, so the event is owed on the destination's room wake — which the
+    /// kernel raises when the budget frees — though the destination is not
+    /// behind, and nothing counts against it.
+    OverBudget {
+        /// `true` when this is the first thing owed to the destination, so
+        /// the caller must arm its room wake.
+        watch: bool,
+    },
+    /// The kernel had no memory for the send, so the event is owed until a
+    /// flush the caller times: no wake reports memory freeing, and the
+    /// destination is not behind.
+    Starved,
+}
+
+/// What a destination's debt waits for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Wait {
+    /// Its mailbox to drain, which its room wake reports.
+    Room,
+    /// The session's own budget to free, which its room wake reports too.
+    Budget,
+    /// Kernel memory, which nothing reports: a flush the caller times.
+    Memory,
+}
+
+impl Wait {
+    /// What `refusal` waits for, or `None` for one no wait lifts.
+    const fn of(refusal: SendRefusal) -> Option<Self> {
+        match refusal {
+            SendRefusal::Full => Some(Self::Room),
+            SendRefusal::Budget => Some(Self::Budget),
+            SendRefusal::Memory => Some(Self::Memory),
+            SendRefusal::Gone | SendRefusal::Final(_) => None,
+        }
+    }
 }
 
 /// What one destination's flush concluded.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Flush {
-    /// Everything owed went out; the destination's room wake is no longer
-    /// needed.
+    /// Everything owed went out.
     Settled,
-    /// The mailbox filled again; the rest stays owed and the wake stands.
-    Blocked,
+    /// A send was refused; the rest stays owed, waiting for what refused it.
+    Waits(Wait),
     /// The send proved the destination gone; everything owed to it was
     /// discarded.
     Gone,
 }
 
-/// The destinations a flush finished with, so the caller can drop the wakes
-/// it armed and tear down the clients it lost.
+/// What a flush leaves the caller to do: the room wakes it needs no more or
+/// needs again, and the clients it lost.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Flushed {
-    /// Destinations that owe nothing more.
+    /// Destinations whose room wake is needed no more: they owe nothing, or
+    /// what they owe waits on kernel memory rather than their room.
     pub settled: Vec<u64>,
+    /// Destinations whose room wake is needed again: what they owe waited on
+    /// kernel memory and now waits on their room.
+    pub watch: Vec<u64>,
     /// Destinations whose owner is gone. Their windows go with them; their
     /// wake is dropped like a settled one's.
     pub gone: Vec<u64>,
+    /// Events a destination refused for good, which were given up on.
+    pub dropped: usize,
 }
 
 /// What the session owes each `(destination mailbox, window)` pair, the
@@ -148,6 +194,8 @@ pub struct Flushed {
 #[derive(Debug, Default)]
 pub struct HoldBack {
     owed: BTreeMap<(u64, Option<u64>), VecDeque<WindowEvent>>,
+    /// What each destination owed something waits for.
+    waits: BTreeMap<u64, Wait>,
 }
 
 impl HoldBack {
@@ -156,6 +204,7 @@ impl HoldBack {
     pub const fn new() -> Self {
         Self {
             owed: BTreeMap::new(),
+            waits: BTreeMap::new(),
         }
     }
 
@@ -164,31 +213,37 @@ impl HoldBack {
     ///
     /// A destination already owed something takes this event unsent:
     /// sending it now would put it ahead of what is queued, and the app
-    /// must see its events in the order they happened.
+    /// must see its events in the order they happened. `send` carries an
+    /// event to the destination it names.
     ///
     /// # Errors
     ///
-    /// Any refusal that is not [`Errno::WouldBlock`]: the destination is
-    /// gone, or the send is one waiting cannot fix, so holding the event
-    /// would strand it.
+    /// Any refusal no wait lifts — not [`Errno::WouldBlock`], the
+    /// destination's mailbox full, [`Errno::LimitExceeded`], the session's own
+    /// budget spent, or [`Errno::OutOfMemory`], the kernel's memory short: the
+    /// destination is gone, or the send is one it will never take, so holding
+    /// the event would strand it.
     pub fn deliver<F>(
         &mut self,
         endpoint: u64,
         event: &WindowEvent,
-        send: F,
+        mut send: F,
     ) -> Result<Delivery, Errno>
     where
-        F: FnOnce(&WindowEvent) -> Result<(), Errno>,
+        F: FnMut(u64, &WindowEvent) -> Result<(), Errno>,
     {
         if !self.owes(endpoint) {
-            match send(event) {
-                Ok(()) => return Ok(Delivery::Sent),
-                Err(Errno::WouldBlock) => {}
-                Err(error) => return Err(error),
-            }
+            let Err(refused) = send(endpoint, event) else {
+                return Ok(Delivery::Sent);
+            };
+            let wait = Wait::of(SendRefusal::of(refused)).ok_or(refused)?;
+            self.waits.insert(endpoint, wait);
         }
-        Ok(Delivery::Owed {
-            watch: self.hold(endpoint, *event),
+        let watch = self.hold(endpoint, *event);
+        Ok(match self.waits.get(&endpoint) {
+            Some(Wait::Budget) => Delivery::OverBudget { watch },
+            Some(Wait::Memory) => Delivery::Starved,
+            Some(Wait::Room) | None => Delivery::Owed { watch },
         })
     }
 
@@ -242,6 +297,7 @@ impl HoldBack {
     /// events have nowhere to land. Returns `true` when something was
     /// discarded, so the caller knows a wake is armed and must be dropped.
     pub fn forget(&mut self, endpoint: u64) -> bool {
+        self.waits.remove(&endpoint);
         let windows: Vec<Option<u64>> = self.windows_of(endpoint).collect();
         for window_id in &windows {
             self.owed.remove(&(endpoint, *window_id));
@@ -250,35 +306,59 @@ impl HoldBack {
     }
 
     /// Offer everything owed to `send`, destination by destination, and
-    /// report which destinations finished.
+    /// report what the caller must do about each one's room wake.
     ///
     /// Each pass over a destination offers one event per window, so no
     /// window's backlog starves another's. A destination stops at its first
-    /// [`Errno::WouldBlock`] — the mailbox filled again — and keeps the
-    /// rest owed. An [`Errno::NotFound`] is the owner proving itself gone
-    /// and discards the lot. Any other refusal is one the destination
-    /// cannot recover from by waiting, so that single event is dropped and
-    /// the rest go on; nothing is ever re-offered in a loop.
+    /// [`Errno::WouldBlock`] or [`Errno::LimitExceeded`] — its mailbox filled
+    /// again, or the session's budget ran out, both its room wake's to report —
+    /// or [`Errno::OutOfMemory`], which no wake reports, and keeps the rest
+    /// owed. An [`Errno::NotFound`] is the owner proving itself gone and
+    /// discards the lot. Any other refusal is one the destination cannot
+    /// recover from by waiting, so that single event is given up on, counted,
+    /// and the rest go on; nothing is ever re-offered in a loop.
     pub fn flush<F>(&mut self, mut send: F) -> Flushed
     where
         F: FnMut(u64, &WindowEvent) -> Result<(), Errno>,
     {
         let mut report = Flushed::default();
         for endpoint in self.endpoints() {
-            match self.flush_one(endpoint, &mut send) {
-                Flush::Settled => report.settled.push(endpoint),
+            let flushed = self.flush_one(endpoint, &mut send, &mut report.dropped);
+            let watched = self.waits.remove(&endpoint) != Some(Wait::Memory);
+            match flushed {
+                Flush::Settled => {
+                    if watched {
+                        report.settled.push(endpoint);
+                    }
+                }
+                Flush::Waits(wait) => {
+                    let watching = wait != Wait::Memory;
+                    if watched && !watching {
+                        report.settled.push(endpoint);
+                    } else if watching && !watched {
+                        report.watch.push(endpoint);
+                    }
+                    self.waits.insert(endpoint, wait);
+                }
                 Flush::Gone => {
                     self.forget(endpoint);
                     report.gone.push(endpoint);
                 }
-                Flush::Blocked => {}
             }
         }
         report
     }
 
-    /// Drain one destination, round-robin across its windows.
-    fn flush_one<F>(&mut self, endpoint: u64, send: &mut F) -> Flush
+    /// Whether anything owed waits on kernel memory, so the caller owes a
+    /// timed flush.
+    #[must_use]
+    pub fn starved(&self) -> bool {
+        self.waits.values().any(|&wait| wait == Wait::Memory)
+    }
+
+    /// Drain one destination, round-robin across its windows, counting in
+    /// `dropped` what it refused for good.
+    fn flush_one<F>(&mut self, endpoint: u64, send: &mut F, dropped: &mut usize) -> Flush
     where
         F: FnMut(u64, &WindowEvent) -> Result<(), Errno>,
     {
@@ -295,13 +375,17 @@ impl HoldBack {
                 let Some(event) = queue.front() else {
                     continue;
                 };
-                match send(endpoint, event) {
-                    Err(Errno::WouldBlock) => return Flush::Blocked,
-                    Err(Errno::NotFound) => return Flush::Gone,
-                    // Sent, or refused for something waiting cannot fix:
-                    // either way this event is answered for and the drain
-                    // moves on, so a flush never re-offers one for ever.
-                    Ok(()) | Err(_) => {}
+                if let Err(refused) = send(endpoint, event) {
+                    let refusal = SendRefusal::of(refused);
+                    if let Some(wait) = Wait::of(refusal) {
+                        return Flush::Waits(wait);
+                    }
+                    if refusal == SendRefusal::Gone {
+                        return Flush::Gone;
+                    }
+                    // Answered for either way, so a flush never re-offers it
+                    // for ever.
+                    *dropped = dropped.saturating_add(1);
                 }
                 queue.pop_front();
                 served = true;

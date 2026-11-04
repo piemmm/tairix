@@ -583,7 +583,8 @@ reach the running `netstack` process. Done:
   carrying that endpoint, and runs a wait-set loop over `{call endpoint,
   device IRQ}` driving the pure `NetChannelServer`. On an RX IRQ it
   `ack_interrupt`s and `ipc_send`s one `NetChannelNotify` to the stack's
-  notify port; never busy-polls. Depends only on `lib/*` (the `virtio_kbd` ↔
+  notify port, held and offered again when the port refuses it for room,
+  budget or memory; never busy-polls. Depends only on `lib/*` (the `virtio_kbd` ↔
   `lib/virtio_input` layering precedent — the `Net` device logic lives in
   `lib/virtio_net`, not `drivers/*`).
 - **`VirtioNet::service` is a non-blocking doorbell**: it drains what is ready
@@ -970,9 +971,13 @@ the whole is too large for one change and each leaves the tree working.
   - Stream delivery is back-pressured end to end. A socket owing its client
     an event is listed and posted at the top of each loop pass; received
     bytes leave the `Tcb` only once their post lands (`Tcb::peek` /
-    `consume`), so a full client port shuts the window on the peer rather
-    than losing acknowledged bytes, and the service parks on `PortRoom` for
-    the ports still owed. A `Send` the buffer takes only part of owes one
+    `consume`), so a full client port, or the stack's own spent IPC budget,
+    shuts the window on the peer rather than losing acknowledged bytes, and
+    the service parks on `PortRoom`, which the kernel wakes for either, for
+    the ports still owed; a post the kernel had no memory for is offered
+    again after `tairix_rt::IPC_MEMORY_RETRY_NS`, and a datagram a port
+    refuses is dropped, as UDP allows, but counted and reported
+    (`DELIVERIES_LOST`). A `Send` the buffer takes only part of owes one
     `Room` once half the buffer is free; a listener's ready connections share
     one `Accepted`.
   - `lib/rt::net`: `stream_socket`/`stream_send`/`stream_recv` client
@@ -2419,11 +2424,12 @@ per batch for nothing.
 
 - The interrupt path drives `net.service(rings)` itself, so frames are in
   the shared ring **before** the notify is sent.
-- `NetChannelNotify` carries what the driver already knows — the live
-  `link`, a `back_pressure` flag, and the device's cumulative `filtered`
-  count. Without the link there, a change on an idle interface would go
+- `NetChannelNotify` carries what the driver already knows — a
+  `link_changed` flag, a `back_pressure` flag, and the device's cumulative
+  `filtered` count. Without the flag, a change on an idle interface would go
   unseen until some unrelated transmit provoked a doorbell, and a bond
-  failover keys on exactly that report. Without the count there, its only
+  failover keys on exactly that report; the link itself rides only the
+  `Service` reply the flag asks for, ordered with the stack's own calls. Without the count there, its only
   reader would be a doorbell this very optimisation removes.
 - `Netstack::service_interface` takes a `ServiceHint` and rings the
   doorbell only when the device has work this side created (anything in

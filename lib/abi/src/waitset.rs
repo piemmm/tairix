@@ -227,13 +227,22 @@ pub enum WaitSourceKind {
     /// send to both refuse with the same oracle-free `NotFound` the other
     /// kinds use.
     ///
-    /// Ready when a send would **not** be refused for want of room: the
-    /// mailbox is below capacity, the port is gone (the sender must learn
-    /// that rather than park on a destination that can never drain), or the
-    /// caller no longer holds the send authority (its send now fails on the
-    /// capability, so parking for room would be waiting on the wrong thing —
-    /// and a member that is unconditionally ready tells an unauthorised
-    /// caller nothing about the mailbox). Readiness is a non-consuming,
+    /// Ready when a send of the port's largest message would be admitted: the
+    /// caller's lane at the port is below the port's per-sender depth, and
+    /// all it holds against its `ipc-queue-bytes` limit, wherever it is held,
+    /// leaves room for that message and any lane the send opens or grows; the
+    /// caller holds nothing against that limit, so no release could make more
+    /// room and its send answers instead; the port is gone (the sender must
+    /// learn that rather than park on a
+    /// destination that can never drain); or the caller no longer holds the
+    /// send authority (its send now fails on the capability, so parking for
+    /// room would be waiting on the wrong thing — and a member that is
+    /// unconditionally ready tells an unauthorised caller nothing about the
+    /// mailbox). A receive at the port wakes a full lane, and any release of
+    /// what the caller holds — one of its messages received at any port, one
+    /// of its calls collected, withdrawn or timed out, a teardown — wakes one
+    /// short of budget, so a sender refused `LimitExceeded` parks here as one
+    /// refused `WouldBlock` does. Readiness is a non-consuming,
     /// level-triggered peek: the woken sender's own
     /// [`IPC_SEND`](crate::SyscallNumber::IPC_SEND) consumes the room, so a
     /// mailbox with room to spare reports again on the next wait.

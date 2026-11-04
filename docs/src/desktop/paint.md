@@ -20,7 +20,11 @@ palette picture's own palette, or the desktop's colours where it has none, and
 the clear ink of its mask. A row longer than the window shows scrolls sideways
 by the wheel or by a bar beneath it, shown only then, and keeps the well of the
 ink last chosen, primary or secondary, in view. A well is chosen by a press
-and release on it; one pressed and let go elsewhere is not.
+and release on it — the primary button's for the primary ink, the middle
+button's for the secondary; one pressed and let go elsewhere is not. A square
+button at the strip's right end, as tall as its inside, floats the palette in
+a tool window of its own, and View ▸ Panes ▸ *Float palette* floats it or
+docks it again.
 
 Each pane is headed by a mini title band naming it, with a roll-up control
 that folds it to its band and a close mark that hides it; View ▸ Panes shows a
@@ -40,11 +44,17 @@ under the pointer held where the press held its band, and the press goes on
 moving it; let go in the window, it opens where it was dropped, its band where
 the pane's would have been. Its close
 mark hides the pane; moved back over a dock, the landing gap is marked and let
-go there it docks again. A floating pane is laid out at its own size in a
+go there it docks again. The palette docks only in its strip: its tool window
+sets the wells out as near a square as its entries make, at least four across,
+every well at its fullest and the clear ink after them, and never scrolls; its
+close mark, a refused tool window, or a move let go over the window's foot
+between the docks, marked along it as the window passes, docks it in its strip
+again, so it is never lost. A floating pane is laid out at its own size in a
 rectangle of the window's drawing beside the window (`Layout::floating`), so
 it is drawn and hit-tested by the same code as a docked one, and its lists
 open within its own window. A pane floating in the arrangement the settings
-name opens under the top band at the edge of its home side. The window shows the
+name opens under the top band at the edge of its home side, the palette
+against the canvas's lower right corner. The window shows the
 picture at any zoom from 1/16 to 64, kept in 4096ths of actual size
 (`viewport::Zoom`), every rung of the ladder (`viewport::ZOOMS`) exactly. Ctrl
 and the wheel step it a rung for each detent's worth of turn, a fine wheel's
@@ -61,8 +71,9 @@ it starts so it crosses the same pixels at every zoom, as lines, dashes, dots
 or crossings in its colour and opacity, and left out where a cell would be
 under four screen pixels. The palette
 strip holds the picture's palette — the desktop's sixteen colours and the clear
-ink for a truecolour picture — in as few rows as hold every well at least 14
-pixels across, each up to 24; the status band says where the pointer is and the
+ink for a truecolour picture — in one row of wells at least 14 pixels across,
+each up to 24, beside the button that floats it; the status band says where the
+pointer is and the
 colour the layers show there, what was last said, the picture's size, depth
 and, of several layers, which is painted on, which sprite shows, and the zoom.
 The window is never narrower than the view's commands beside the widest
@@ -216,7 +227,8 @@ A histogram is a reading of the picture, so moving from one adjustment that
 reads it to another keeps it, and one being read when the adjustment moves
 lands on the next.
 
-The window has no menu bar. A secondary press anywhere opens its menu — Cut,
+The window has no menu bar. A secondary press anywhere in it, or in one of its
+tool windows, opens its menu — Cut,
 Copy, Paste, Select all and Deselect, then File, Edit, Image, Layers, Colours,
 Adjust, Pages for a TIFF's pages, View and Tools, each a submenu — drawn by the
 desktop like every application's ([menus](menus.md)). A sprite window adds
@@ -254,10 +266,11 @@ palette picture's picker is withheld while a worker has the picture, and so is
 the picker for the mask's clear ink, which is the mask and no colour.
 
 Tab walks the keyboard from the picture through the bar's settings, the palette
-strip, the Colour pane's buttons and choices, its picker and its recent
-colours, and the Adjustment pane's settings, and back to the picture; Shift+Tab walks the other
-way, and a part with nothing that can act is passed. In the palette the arrows
-walk the wells. Escape gives the keyboard back to the picture once a field has
+— in its strip or floating — the Colour pane's buttons and choices, its picker
+and its recent colours, and the Adjustment pane's settings, and back to the
+picture; Shift+Tab walks the other way, and a part with nothing that can act is
+passed. In the palette the arrows walk the wells, Up and Down a row at a time
+in a floating palette's grid. Escape gives the keyboard back to the picture once a field has
 nothing to take back. While a field has the keyboard it takes every key it can
 use, so a letter typed there is never a tool's shortcut; a chord it has no use
 for — Ctrl+S, Ctrl+Z — is the window's, and what the field holds is settled
@@ -286,8 +299,10 @@ name with no ending opens again.
 
 A sprite file — read as one, typed &FF9 by its volume, or made as one by New
 picture or as the untitled window when the settings make new pictures sprite
-files — opens as a small window of its sprites, as RISC OS Paint shows one:
-each sprite's thumbnail, at the shape its mode gives its pixels, over its name,
+files — opens as a small window of its sprites, as RISC OS Paint shows one,
+and no picture window shows before it: a window opened for a document stays off
+the screen while it is read in ([TextEdit](textedit.md#documents-and-authority)).
+It shows each sprite's thumbnail, at the shape its mode gives its pixels, over its name,
 in a grid that reflows to the window's width and scrolls down. A thumbnail is
 drawn on a worker from the sprite as it stands and drawn again when the sprite
 or the window's scale changes; until it lands the sprite shows the picture
@@ -341,8 +356,11 @@ pixels alone outside a sprite; a density the format cannot state; a sprite's
 name and mode outside a sprite area. An OpenRaster file holds each layer whole
 on the canvas, with the layers' composite and a thumbnail no larger than 256
 pixels on a side. The settings are the document's (`SaveSettings`), seeded from
-how its file was written, and the picker that follows holds the name to the
-chosen format's endings. A save works out its losses before the file is
+how its file was written, and the picker that follows opens on the chosen
+format, holds the name to it and types the file it makes as it, so that save
+and every one after it writes the format the file says. A sprite file is offered with
+no extension, typed by its volume where that records file types and named
+`,ff9` where it does not. A save works out its losses before the file is
 touched, so a refusal leaves it whole.
 
 A sprite with no palette of its own shows the desktop's colours, never a PC

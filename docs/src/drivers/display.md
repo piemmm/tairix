@@ -57,9 +57,13 @@ is read until the device latches the new one at its next frame start, which
 `service_events` reports. The display service posts the latch to the
 configuration's event port as `DisplayEvent::Presented { seq }`; a present
 before it is refused `Busy`, by the client without a call and by the service
-if one arrives. A driver whose pipe stops completes a queued present at once,
-and one the hardware never latched completes after a bounded deadline,
-recorded.
+if one arrives. A latch the port refuses for room, or for the service's own
+IPC budget, is owed and posted on the port's room wake, and one the kernel
+had no memory for after `IPC_MEMORY_RETRY_NS`; only the latest is owed, since
+a present latching answers for every one before it, and one refused for good
+is given up and recorded by its running total. A driver whose pipe stops
+completes a queued present at once, and one the hardware never latched
+completes after a bounded deadline, recorded.
 
 ### The present right follows the live seat lease
 

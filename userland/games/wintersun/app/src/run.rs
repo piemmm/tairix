@@ -932,7 +932,7 @@ mod program {
             WindowEvent::CloseRequested { .. } => return true,
             WindowEvent::ContentReleased { .. } => session.window.release_frames(),
             WindowEvent::RedrawRequested { .. } => session.redraw_asked = true,
-            WindowEvent::AppBarMenu { item } => match BarCommand::from_item(item) {
+            WindowEvent::AppBarMenu { item, .. } => match BarCommand::from_item(item) {
                 Some(BarCommand::Settings) => open_settings(session),
                 Some(BarCommand::Quit) => return true,
                 None => {}

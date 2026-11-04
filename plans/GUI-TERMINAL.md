@@ -4,10 +4,10 @@ Binding under `AGENTS.md`. This plan owns everything about `terminal.app` as a
 *graphical* program: how large it opens, that it is **one process with many
 windows** and what that costs, its icon-bar presence, the user profile behind
 it, the window menu it asks the desktop for, the settings sheet, the colour
-schemes, and the
-screen effects. The emulator itself — the VT parser, the grid, the pty seam —
-belongs to `plans/APPWIN.md` AW4, `plans/PTY.md`, and `plans/CURSES.md`;
-nothing here restates them.
+schemes, the screen effects, and the scrollback a window scrolls back over and
+reflows on a resize (§16). The rest of the emulator — the VT parser, the grid's
+screen semantics, the pty seam — belongs to `plans/APPWIN.md` AW4,
+`plans/PTY.md`, and `plans/CURSES.md`; nothing here restates them.
 
 | # | Item | Status |
 |---|---|---|
@@ -21,13 +21,17 @@ nothing here restates them.
 | T6 | The settings sheet (§6) | done |
 | T7 | Compositor backdrop blur (§7) | done |
 | T8 | The window fills its frame (§8) | done |
-| T9 | The settings sheet is its own surface (§9) | done |
+| T9 | The Settings window is a modeless dialog of its own (§9) | done |
 | T10 | Command output reaches the screen (§10) | done |
 | T11 | Screen semantics (§11) | done |
 | T12 | A repaint costs what changed (§12) | done |
 | T13 | A closed window's shell is reaped (§13) | done |
 | T14 | One process, many windows (§14) | done |
 | T15 | Its icon-bar presence (§15) | done |
+| T16 | The scrollback, its reflow on a resize, and the view back over it (§16) | done |
+| T16.1 | Reaching the scrollback: the wheel, `Shift PageUp` / `PageDown` / `Home` / `End`, typing returning to the screen, *Clear scrollback*, shedding under memory pressure (§16) | done |
+| T16.2 | A scroller over the screen showing where the view is (§16) | planned |
+| T16.3 | The user's scrollback line limit, 500 by default, in the profile and the Settings window (§16) | done |
 
 Read alongside: `plans/GUI-CONTROLS-DESIGN.md` (the Reactive Alloy control
 language every surface here is built from), `plans/APPWIN.md` (the window
@@ -299,9 +303,10 @@ accept no typeface from the app.
 
 ## 6. The settings sheet
 
-`userland/apps/terminal/src/settings.rs` — a modal sheet composed from the
-shared Reactive Alloy controls (`Panel`, `Tabs`, `Slider`, `Radio`, `Button`,
-`SwatchGrid`, `ColourPicker`), on its own popup surface.
+`userland/apps/terminal/src/settings.rs` — the Settings window's content
+(§9), composed from the shared Reactive Alloy controls (`Tabs`, `Slider`,
+`Radio`, `Button`, `SwatchGrid`, `ColourPicker`) on the window's own opaque
+ground, inset by the theme's control pad.
 
 - **Appearance**: the scheme chooser, the text-size slider, and the custom
   scheme's editor — a `SwatchGrid` of the twenty editable colours and a
@@ -326,9 +331,9 @@ shared Reactive Alloy controls (`Panel`, `Tabs`, `Slider`, `Radio`, `Button`,
 Every edit clamps through `Profile::clamp`, so the sheet can never produce an
 invalid profile. The program applies only the settings an edit changed
 (`Publication::edit`, over the profile's `Live` per-key bridge), so
-a sheet whose copy has fallen behind — another window's, or one open while the
-menu changed the size — cannot put stale values back, and every open sheet
-follows the live profile (`Settings::adopt`), reporting the rows that moved and
+a sheet whose copy has fallen behind — open while the menu changed the size —
+cannot put stale values back, and the sheet follows the live profile
+(`Settings::adopt`), reporting the rows that moved and
 leaving a drag, the selected well and the focus where they are. A change
 re-derives the colours and the face, re-applies the backdrop blur, reshapes the
 grid (the pty follows), and writes the document once it settles.
@@ -391,22 +396,27 @@ gone.
 
 ---
 
-## 9. The settings sheet is its own surface
+## 9. The Settings window
 
-The settings sheet is a **popup window**, not pixels drawn inside the
-terminal's own surface, so shrinking the terminal no longer clips it: it opens
-at its own preferred size. The window menu is not a popup at all — it is the
-desktop's chain (§5).
+Settings is a **modeless dialog** (`WindowPane::open_dialog`,
+`DialogModality::Modeless`), titled `SETTINGS_TITLE` by the window manager's
+frame, never pixels drawn inside a terminal window. The terminal windows go on
+taking input while it is up.
 
-`WindowRequest::CreatePopup` is the protocol addition — an undecorated,
-parent-anchored, app-positioned surface any app may open (offsets are relative
-to the parent's client origin, because an app is never told its own window's
-screen position; the session resolves and clamps the absolute placement).
-A popup counts against the same per-client window budget as any other window,
-is never listed on the taskbar, is kept directly above its parent every frame,
-and is torn down with its parent. A refused popup is reported on `stderr` and
-simply not shown — never a crash, and never a fallback to a clipped in-window
-draw.
+- **One for the app.** It is a dialog of the terminal window it was opened
+  from; *Settings…* from any window while it is open brings it forward
+  (`activate_window`) rather than opening a second.
+- **It closes with its owner.** The window it is a dialog of closes it first,
+  whatever closes that window.
+- **Closing settles.** *Done*, `Escape` and the close control all close it,
+  and however it closes — those, its owner closing, or *Quit* — it settles
+  whatever it last showed, so an edit is written even when the user closes
+  the window on it or leaves a typed colour unentered.
+- **Sized by the sheet.** It opens at `preferred_extent`, capped by the screen;
+  a scale change refits it to the new extent and a refit by the session is
+  adopted, and a size the picture or the session cannot take keeps the current
+  one, which the body scrolls within.
+- A refused open is reported on `stderr` and nothing is shown.
 
 ---
 
@@ -449,7 +459,8 @@ altering one screen's semantics fails the other's test too. What it guarantees:
   body.
 - The script also pins the rubout at the right edge, erase-to-end-of-line from
   the owed wrap, tab stops, wide-glyph wrap-whole, scroll-region confinement,
-  cursor clamping, the alternate screen, and save/restore.
+  cursor clamping, the alternate screen, save/restore, and that erasing the
+  saved lines (`CSI 3 J`) leaves the screen as it is.
 
 ---
 
@@ -459,7 +470,7 @@ altering one screen's semantics fails the other's test too. What it guarantees:
 drawn into and **keeps it, and the cells it was painted from, between
 frames**. `Screen::paint` compares the live `Grid` against that snapshot,
 redraws only the block of cells that differs, and returns it as the surface
-rectangle to present. One `write_frame` — shared with the popup path —
+rectangle to present. `WindowPane::present` — the Settings window's path too —
 copies just that rectangle into the shared frame region, and that rectangle
 is the `DamageRect` the window channel carries, so the session converts and
 the compositor recomposites the same few cells.
@@ -500,14 +511,10 @@ grid. The tight direction is pinned separately, or the suite would pass by
 reporting everything: a keystroke reports exactly two cells, a cursor reveal
 exactly one, and an unchanged grid reports nothing and presents nothing.
 
-**The sheet's own picture is retained the same way** (`sheet::SheetScreen`).
-The popup was re-derived from nothing per pointer sample: a sheet-sized
-surface allocated afresh, every tab, row, label and swatch re-rendered, and the
-whole popup presented. So a drag of the transparency or blur slider cost the
-whole sheet several dozen times a second, on top of the whole-window
-recomposite those two fields legitimately ask the compositor for, and the knob
-lagged the pointer. `SheetScreen::paint` clips the render to what was reported
-and answers that rectangle for `write_frame` and the present; `invalidate`
+**The sheet's own picture is retained the same way** (`sheet::SheetScreen`),
+so a slider drag costs what its controls report rather than the whole sheet
+per pointer sample. `SheetScreen::paint` clips the render to what was reported
+and answers that rectangle for the present to carry; `invalidate`
 covers the sheet for a change no control could have reported — a re-theme, a
 new scale, or a frame region the session took back, which holds none of the
 pixels a partial present would leave standing. A profile adopted from the store
@@ -554,10 +561,6 @@ Nothing in the other sections. Recognised later work, none of it blocking:
   scan-out engine runs: hardware layers place and blend finished pictures.
   Moving them off the CPU is a compute pipeline over `lib/gpu`
   (`plans/GPU.md` GP3/GP4), with the passes here as its conformance oracle.
-- **Scrollback.** The emulator keeps none and reports no mouse input to the
-  program, so the wheel over the screen has nothing to move — a correct,
-  complete answer today, but a scrollback buffer would give the wheel and a
-  scrollbar something to do.
 - **Selection and clipboard.** There is no system clipboard yet; when one
   exists the terminal gains select/copy/paste and the model gains its rows.
 - **A profile per window.** Today one document serves every terminal window,
@@ -579,7 +582,8 @@ leaves no zombie behind.
 A terminal window is not an application: the application is the emulator, and
 each window is one hosted shell. `terminal.app` is therefore **one process
 with a `Vec` of windows**, each carrying its own pseudo-terminal, shell child,
-screen model, retained picture, `Look`, and overlay, over **one** wait-set
+screen model, retained picture, and `Look` — and the one Settings window —
+over **one** wait-set
 that carries one event mailbox for the whole process plus that window's own
 shell-output and child members. Opening another window costs a pty, a spawn, a
 frame region, and two wait-set members; it costs no second process, no second
@@ -591,10 +595,10 @@ closing ends it.
 Three things make it work:
 
 - **Every event is demuxed on the window id it carries.** The one mailbox
-  serves every window and every window's popup, so the drain resolves which
-  window (or which window's overlay) an event belongs to before routing it.
-  An id neither names is a window that has just closed and the event has
-  nowhere to land — dropped, never guessed at.
+  serves every terminal window and the Settings window, so the drain resolves
+  which window an event belongs to before routing it. An id none names is a
+  window that has just closed and the event has nowhere to land — dropped,
+  never guessed at.
 - **The mailbox is read through the shared stream, not a drain of its own.**
   The loop dispatches its own wakes — a shell stream and a child per window, a
   settings worker, a pressure wake, an animation deadline — so it owns the
@@ -648,3 +652,83 @@ the emulator, not for any one window:
   declaration the desktop refuses says so on `stderr` and carries on with no
   slot of its own; its windows are still reachable through the slot the
   session derives from them.
+
+---
+
+## 16. The scrollback and its reflow
+
+`Grid` (`userland/apps/terminal/src/grid.rs`) keeps the lines that leave the
+top of the main screen, and a resize rejoins the lines the screen wrapped
+rather than cutting them at the new edge.
+
+- **What enters it.** A line scrolled off a scroll region whose top is the
+  screen's top, by a line feed or `SU`, on the main screen only — the
+  alternate screen keeps none — and the rows `ED 2` erases, down to the last
+  one written, so a cleared screen can be scrolled back to. `CSI 3 J`
+  (`Op::EraseSavedLines`) forgets it all.
+- **How a line is held.** Its cells — a line that ends on its row trimmed of
+  the trailing cells that paint only the default background, a wrapped one
+  whole but for the blank a wide glyph left — and whether it continues. Every
+  line's cells share one ring and its extent another, so holding a line
+  allocates nothing once the rings have grown.
+- **Its bounds.** The user's limit in lines of output (the profile's
+  `scrollback.lines`, 500 unless the Settings window's *Scrollback* slider sets
+  another from none to 10,000), a line wrapped across rows counting once; and,
+  so one endless line cannot take more, the cells the lines cover — each row
+  charged a cell per column it covers, a wide glyph's two whether or not its
+  continuation is held — held to a widest screen's worth for each line of the
+  limit. Neither count moves with the width a line is laid out at, so narrowing
+  a window never costs history the limit keeps. The limit is all working set to
+  the reclaim model, its worst case in memory read through `shrink_target` at
+  the pressure band in force, so it is all kept short of severe pressure and
+  none of it at severe or critical, and every line pushed while that band
+  stands is held to it (`shed_for`); a lowered limit lets the oldest go at once
+  (`set_scrollback_limit`). The rings grow no further than the bound, the oldest
+  line gives way first and a band that takes lines gives their memory back,
+  and a line the bound or memory cannot hold is dropped — never the screen.
+- **How a row ends.** `Hard`, `Wrapped`, or `Padded` (wrapped, its last cell
+  the blank a wide glyph left). The auto-wrap sets it only when its line feed
+  reaches a fresh row; it travels with its row on every scroll, and an erase
+  through the row's end, or a clear, ends the line there. An erase or a scroll
+  that takes a row's start — `ED`, `EL`, `SD`, or a region scrolled below the
+  screen's top — ends the line that continued into it, the row above's or the
+  scrollback's newest, so later text is never glued onto it.
+- **Reflow.** A resize of the main screen lays its rows out again at the new
+  size: lines rejoined by their row ends and split at the new width, a wide
+  glyph wrapping whole, the cursor keeping its place in its line, past its last
+  glyph and with an owed wrap included. The screen then ends at the last row in
+  use — the cursor's, the last written, or the last of an erased screen, which
+  counts whole once `ED 2` has run — when there is enough above it, taking rows
+  back from the scrollback as it grows and giving them up as it shrinks, the
+  oldest held lines giving way to the bound as they arrive; otherwise its
+  content stays at the top. The cursor always stays on screen. A height-only
+  change leaves the held lines where they are, so it costs the screen, not the
+  scrollback; a width change also lays them out again in place in the ring.
+  The alternate screen is clipped and the main screen beneath it reflowed.
+  Everything the layout needs — the rings' room, never past the bound — is
+  had before anything moves, so memory that cannot be had refuses the resize
+  and changes nothing.
+- **Resizing.** A `Resized` re-maps the window's frame region at once and asks
+  the screen for the grid it now holds (`Terminal::resize`); the window is
+  painted once the drain is applied, and that paint gives the screen its size
+  (`Terminal::settle`), so a burst of samples costs one reflow and only a new
+  width lays the scrollback out. The pty is told a size only once the screen
+  has taken it; a size the screen refuses is reported and the old one kept.
+- **The view.** An offset back from the live screen (`scroll_view`, clamped;
+  `view_to_bottom`). Output arriving while it is scrolled back leaves it on
+  the lines it shows, and the eviction of its top line moves it on. It is
+  pinned to the live screen while the alternate screen is shown, and a resize
+  returns it there. `render::Screen` paints through it (`view_cell`,
+  `view_cursor`), so the cell diff scopes a scroll's repaint like any other
+  change and the cursor is drawn only where the view shows its row. *Clear
+  screen* erases as `ED 2` does and returns the view to the live screen.
+- **Reaching it (T16.1).** The wheel moves the view `WHEEL_LINES` a detent,
+  carrying what a turn leaves short of a line (`Terminal::scroll_wheel`);
+  Shift with Page Up, Page Down, Home and End moves it a screen less a line,
+  to the oldest line and back (`Terminal::view_key`), and never reaches the
+  shell — while the alternate screen, which keeps none, is up, the program
+  showing it is sent them; a key the shell is sent returns the view to the
+  live screen first. A drain's burst of turns and chords is painted once.
+  *Clear scrollback* has a row and no chord, since it cannot be undone. A
+  memory-pressure wake holds it to the new band (`shed_for`).
+- **Remains (T16.2).** A scroller over the screen showing where the view is.

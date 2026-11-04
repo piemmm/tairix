@@ -144,6 +144,9 @@ pub struct Declaration {
     /// The menu a secondary press opens. Empty means the application offers
     /// none, which the bar honours by opening nothing.
     pub menu: AppMenu,
+    /// The application's own number for this declaration, never interpreted:
+    /// handed back with every answer its menu gives.
+    pub revision: u32,
 }
 
 /// What one bundle's signed manifest attests to the icon bar, decoded by the
@@ -420,6 +423,7 @@ impl AppBarService {
             Declaration {
                 click: bar.click,
                 menu: bar.menu,
+                revision: bar.revision,
             },
         );
         self.remember(owner);
@@ -618,7 +622,9 @@ impl AppBarService {
                     }
                 }
                 if let Some(declared) = self.declared.get(&group.owner) {
-                    slot = slot.with_declaration(declared.menu, declared.click);
+                    slot = slot
+                        .with_declaration(declared.menu, declared.click)
+                        .with_revision(declared.revision);
                 }
                 slot
             })

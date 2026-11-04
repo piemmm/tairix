@@ -1824,8 +1824,8 @@ parent, which any app can open for any transient overlay
   the screen with the one shared `tairix_geometry::Rect::clamped_onto`
   rule the taskbar's menus already use (`AGENTS.md` §2.2). A negative or
   over-large offset is therefore a legitimate request — an overlay bigger
-  than its owner's window (the terminal's settings sheet over a tiny
-  window) still opens whole and on screen.
+  than its owner's window (the file manager's *Open With* chooser over a
+  narrow window) still opens whole and on screen.
 - **Owner-validated, and on the same budget.** The engine refuses a kernel
   caller, requires that `parent_window_id` is a live window the
   **kernel-attested** caller owns (a foreign or unknown parent answers
@@ -1881,10 +1881,10 @@ parent, which any app can open for any transient overlay
   popup's own viewport. One event mailbox serves both windows; the app
   demultiplexes on `WindowEvent::window_id`.
 
-The first consumer is the graphical terminal, whose settings sheet is a popup
-(`plans/GUI-TERMINAL.md` §9). Its window menu is not: a menu is the desktop's
-one chain, opened through `OpenMenu` rather than drawn by the application
-([Menus](menus.md)).
+The file manager's *Open With* chooser is a popup. A window menu is not: a
+menu is the desktop's one chain, opened through `OpenMenu` rather than drawn
+by the application ([Menus](menus.md)), and a settings window is a dialog
+(the terminal's, `plans/GUI-TERMINAL.md` §9).
 
 - **One level only.** A transient hangs from a top-level window of the
   caller's own: a popup or a tool window named as a parent, or a layer
@@ -2231,8 +2231,10 @@ outlive the state that placed it.
 
 The same service answers the desktop's *own* menus, which hand it a model built
 in process rather than one decoded from the wire; both resolve through one seat
-rule, so a menu cannot take the grab from the lock screen or the trusted picker
-by arriving from either direction. Nothing on this channel says a plate has been
+rule, so a menu cannot take the grab from the lock screen or a system-modal
+prompt by arriving from either direction, nor an application's from the trusted
+picker while it has the keyboard. The picker holds only its own requester, so
+the desktop's menus open over it. Nothing on this channel says a plate has been
 *drawn* — the reply is only the acceptance — so the session announces that
 itself, once per open, after the frame carrying the chain reached the display.
 
@@ -2340,16 +2342,16 @@ A pick has a purpose. `PickPurpose::Open` chooses an existing file,
 delegated as the requester is handed any document: read-write where its
 signed manifest edits documents and the user may write the file, read-only
 otherwise, and `FilePicked` says which. `PickPurpose::Save { suggested,
-endings }` chooses where a document goes, in the **Save panel**
+formats }` chooses where a document goes, in the **Save panel**
 (`plans/SAVE-DIALOG.md`): a dialog of the requesting window holding the
 document's picture on a plate, its name — `suggested`, the stem selected so
 typing keeps the ending — *Where* (the folder it goes in) and, when the
-requester writes more than one ending, *Format*, labelled down one edge, a
+requester writes in formats, *Format*, labelled down one edge, a
 status line under them for progress and refusals, and *Show Folders*, *Cancel*
 and *Save* in the band along the foot. *Where* and *Format* open session menus
 (`ChainOwner::Picker`, taken down with the pick when the window it is for
 goes): *Where* the folder shown, the user's own places and the last save's
-folder; *Format* each ending by its type's name. *Show Folders* opens the
+folder; *Format* each format by its type's name. *Show Folders* opens the
 shared `lib/browse` listing above the panel — half an open's height, or what
 the work area leaves — growing the dialog upward so the panel stays where it
 was, and adds *New Folder*, which names a folder in the name field (*Save*
@@ -2362,11 +2364,19 @@ while it holds the keyboard; `Enter` or `Space` presses the button or opens
 the menu the keyboard is on; in the listing `Up` and `Down` move the
 selection, `Enter` goes into a folder or takes a file's name, and `Backspace`
 climbs; and `Ctrl+Shift+N` names a new folder while the folders show.
-`endings` (`SaveEndings`: at most eight, each a `.` or `,` and up to seven
-ASCII letters or digits, matched without regard to case) are what the requester
-can write: a name ending otherwise is refused in the field, and one with no
-ending at all takes the first, so a name the save would refuse never becomes an
-empty file; none holds the name to nothing. A name no entry shows is created
+`formats` (`SaveFormats`: at most eight, each a RISC OS file type or none and
+at most four extensions of a `.` and up to eight ASCII letters or digits,
+matched without regard to case, no two sharing a type or an extension, and the
+one the document is in) are what the requester can write, the panel opening on
+the current one. A name is held to the chosen format: one ending as it is kept
+as typed, one ending as another type is refused in the field, and one with no
+ending takes the format's first extension or, for a format named by its file
+type alone, is left for its folder to finish — the file is typed by its volume
+where that records file types, and its name takes `,xxx` where it does not.
+The session types the file on its file worker before any requester holds it,
+and a type it cannot record refuses the save, so the requester tells the format
+chosen from the file it is handed; no formats hold the name to nothing. A name
+no entry shows is created
 exclusively, a name that already names a file is replaced only after the user
 answers the question the picker puts in an alert of its own, a name naming a
 folder goes into it, a name a folder or a link already holds where no listing
@@ -2377,8 +2387,8 @@ up until that open is answered, so a refused save is stated where the user made
 it.
 
 The panel's picture is the document itself: a press on it carried past the
-drag slop is a **save drag** on the seat's one drag carrier, its plate showing
-the picture and the name. Dropped on the desktop, the document is saved into
+drag slop is a **save drag** on the seat's one drag carrier, shown as the
+document's large tile, held where the press held the picture. Dropped on the desktop, the document is saved into
 the folder there — a folder icon's or the `Desktop` folder — and dropped on an
 application's window, into the folder that application names in answer to the
 save offer below; anywhere else it saves nothing. Either way the save is the
@@ -2392,11 +2402,19 @@ The channel also carries **drag-and-drop** of a file onto an application's
 icon-bar slot. `WindowRequest::BeginDrag { window_id, items }` hands the
 session the drag the user began on a file, and is honoured only while the
 press that began it is still held in that window — a drag is that press
-carried on, so it cannot begin anywhere else. Only the file's *name*, the
-filetype its volume records and the count cross: the session matches them
-against each slot's declared types as the pointer
-passes, lighting a slot that takes it, and the dragging application keeps the
-file. The drag concludes with one `WindowEvent::DragEnded { window_id, site }`;
+carried on, so it cannot begin anywhere else. Only what the drag shows and
+what a slot matches cross (`DragItems`): the pressed item's *name*, how many
+bytes of its ending the listing hides, the filetype its volume records, the
+count, and for each of the first `DRAG_SHOWN_MAX` (4) items its class picture
+(an `IconAsset`, the asset id a menu row also names a picture by) and where
+that picture's centre stood in the window from the press, or nowhere. The
+session matches the name and filetype against each slot's declared types as
+the pointer passes, lighting a slot that takes it, shows the items as their
+listing does — one as its tile, several as a stack gathering from where they
+stood (`docs/src/desktop/session.md`) — and the dragging application keeps the
+file. The decoder takes exactly one picture for each item shown, a place only
+where its flag says there is one, and a hidden ending only as a whole tail of
+the name, never all of it. The drag concludes with one `WindowEvent::DragEnded { window_id, site }`;
 dropped on a taker (`DropSite::Application`), `TakeDropTarget` yields that
 application's entry binary
 and whether it edits its documents, and the dragging application opens the
@@ -2483,9 +2501,9 @@ counts is when a click *began*, so one pressed before the arm answers nothing
 however late it is let go. The session hands an alert the raw press, motion,
 release and cancel, so a button lights under the pointer and a press carried
 off it chooses nothing. As it
-comes down it hands the keyboard to the holder behind it — an alert or an
-owner-modal dialog holding the same window — else that window, else the window
-it took it from. Buttons that do not
+comes down it hands the keyboard to the holder behind it — an alert, an
+owner-modal dialog or a pick holding the same window — else that window, else
+the window it took it from. Buttons that do not
 fit across wrap to a row above; every spec offers one button that destroys
 nothing. The keyboard
 starts on the default button, else the cancel one, else the first that destroys

@@ -278,7 +278,7 @@ fn window_owner_wide(index: usize) -> ProcId {
 }
 
 /// An icon-bar declaration offering *Quit*, answering a click as given.
-fn app_bar(click: AppBarClick) -> AppBar {
+pub(crate) fn app_bar(click: AppBarClick) -> AppBar {
     let mut menu = AppMenu::EMPTY;
     menu.push(AppMenuRow::Item(AppMenuItem::new(
         AppMenuItemId::new(1).expect("non-zero"),
@@ -290,6 +290,7 @@ fn app_bar(click: AppBarClick) -> AppBar {
         event_endpoint: 4,
         click,
         menu,
+        revision: 0,
     }
 }
 
@@ -330,7 +331,7 @@ impl ArtworkResolver for Deferring {
 
 /// Install a deferring desk as `shell`'s artwork resolver, so a paint records
 /// every decode it asks for and the test decides which of them land.
-fn deferred_artwork(shell: &mut DesktopShell) -> Rc<RefCell<ArtworkDesk>> {
+pub(crate) fn deferred_artwork(shell: &mut DesktopShell) -> Rc<RefCell<ArtworkDesk>> {
     let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
     shell.set_artwork_resolver(alloc::boxed::Box::new(Deferring(Rc::clone(&desk))));
     desk
@@ -338,7 +339,7 @@ fn deferred_artwork(shell: &mut DesktopShell) -> Rc<RefCell<ArtworkDesk>> {
 
 /// Answer every decode `desk` was asked for that `wanted` admits, each as
 /// refused, and hand back the batch that landed.
-fn land(desk: &RefCell<ArtworkDesk>, wanted: impl Fn(&ArtworkJob) -> bool) -> Landed {
+pub(crate) fn land(desk: &RefCell<ArtworkDesk>, wanted: impl Fn(&ArtworkJob) -> bool) -> Landed {
     let mut desk = desk.borrow_mut();
     while let Some(job) = desk.next_job() {
         if wanted(&job) {
@@ -4448,10 +4449,11 @@ fn aw3_click_through_produces_the_staged_outcomes() {
 // --- The trusted file picker (plans/APPWIN.md AW5, CU6) -----------------
 
 use crate::picker::{
-    OwnPick, PickAccess, PickEnd, PickStep, PickerSlot, Requester, SessionPicker, PICKER_ORIGIN,
+    OwnPick, PickAccess, PickEnd, PickStep, PickerSlot, Requester, SessionPicker, Typing,
+    PICKER_ORIGIN,
 };
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
-use tairix_abi::window_ipc::{DocumentName, PickPurpose, SaveEndings};
+use tairix_abi::window_ipc::{DocumentName, PickPurpose, SaveFormat, SaveFormats};
 use tairix_browse::render::listing_top;
 use tairix_browse::ViewMode;
 use tairix_browse::{DirectorySource, Entry, Listing, WatchUpdate};
@@ -4637,15 +4639,45 @@ const OPEN: PickPurpose = PickPurpose::Open;
 
 /// A pick choosing where to save, offering `name`, under any name.
 fn save_as(name: &str) -> PickPurpose {
-    save_held(name, SaveEndings::ANY)
+    save_held(name, &SaveFormats::ANY)
 }
 
-/// A pick choosing where to save, offering `name`, held to `endings`.
-fn save_held(name: &str, endings: SaveEndings) -> PickPurpose {
+/// A pick choosing where to save, offering `name`, in `formats`.
+fn save_held(name: &str, formats: &SaveFormats) -> PickPurpose {
     PickPurpose::Save {
         suggested: DocumentName::new(name).expect("a valid name"),
-        endings,
+        formats: *formats,
     }
+}
+
+/// A format of RISC OS file type `filetype`, or of none, named by
+/// `extensions`.
+fn save_format(filetype: Option<u16>, extensions: &[&str]) -> SaveFormat {
+    let mut format = SaveFormat::new(filetype.and_then(tairix_abi::fs::Filetype::new));
+    for extension in extensions {
+        format.push_extension(extension).expect("an extension");
+    }
+    format
+}
+
+/// `formats` offered in order, the one at `current` the document's.
+fn offering(formats: &[SaveFormat], current: usize) -> SaveFormats {
+    let mut offered = SaveFormats::ANY;
+    for (at, format) in formats.iter().enumerate() {
+        offered.push(*format, at == current).expect("a format");
+    }
+    offered
+}
+
+/// A picture offered as a PNG or a JPEG, the PNG current.
+fn png_or_jpeg() -> SaveFormats {
+    offering(
+        &[
+            save_format(Some(0xB60), &[".png"]),
+            save_format(Some(0xC85), &[".jpg"]),
+        ],
+        0,
+    )
 }
 
 /// How far below the picker window's top its listing's first row begins.
@@ -4921,7 +4953,7 @@ fn picker_keys_navigate_and_choose_the_selected_file() {
         "nothing more is asked while it is answered"
     );
     assert_eq!(
-        picker.opened(serial, Ok(()), &mut shell, &mut comp),
+        picker.opened(serial, (Ok(()), None), &mut shell, &mut comp),
         Some(PickEnd::Chosen {
             for_window: 7,
             name: String::from("notes.txt"),
@@ -4948,7 +4980,12 @@ fn a_refused_open_ends_the_pick_and_a_late_answer_is_not_the_picks() {
     picker.handle_key(&down, &mut shell, &mut comp);
     let (serial, _, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
     assert_eq!(
-        picker.opened(serial, Err(Errno::PermissionDenied), &mut shell, &mut comp),
+        picker.opened(
+            serial,
+            (Err(Errno::PermissionDenied), None),
+            &mut shell,
+            &mut comp
+        ),
         Some(PickEnd::Refused { for_window: 7 })
     );
     assert_eq!(picker.wm_id(), None);
@@ -4971,7 +5008,10 @@ fn a_refused_open_ends_the_pick_and_a_late_answer_is_not_the_picks() {
         Some(PickStep::Cancelled { for_window: 9 }),
         "the user may still walk away while the open is answered"
     );
-    assert_eq!(picker.opened(serial, Ok(()), &mut shell, &mut comp), None);
+    assert_eq!(
+        picker.opened(serial, (Ok(()), None), &mut shell, &mut comp),
+        None
+    );
 }
 
 /// The session picks a sound's file for itself through the same picker: the
@@ -5152,7 +5192,7 @@ fn a_folder_pick_chooses_the_folder_shown() {
         "with a file selected, the folder shown is chosen"
     );
     assert_eq!(
-        picker.opened(serial, Ok(()), &mut shell, &mut comp),
+        picker.opened(serial, (Ok(()), None), &mut shell, &mut comp),
         Some(PickEnd::Chosen {
             for_window: 7,
             name: String::from("Docs"),
@@ -5184,7 +5224,12 @@ fn a_refused_folder_keeps_the_picker_up_and_a_file_row_chooses_nothing() {
     let (serial, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
     assert_eq!(path, "/", "the root is a folder too");
     assert_eq!(
-        picker.opened(serial, Err(Errno::PermissionDenied), &mut shell, &mut comp),
+        picker.opened(
+            serial,
+            (Err(Errno::PermissionDenied), None),
+            &mut shell,
+            &mut comp
+        ),
         None
     );
     assert!(picker.wm_id().is_some(), "the picker stays up to say why");
@@ -5950,27 +5995,24 @@ fn the_picker_draws_its_pictures_through_the_sessions_artwork() {
     );
 }
 
-/// *Format* offers each ending the requester writes, and choosing one puts
+/// *Format* offers each format the requester writes, and choosing one puts
 /// the name in it, keeping the stem.
 #[test]
 fn a_format_chosen_from_its_menu_renames_the_document() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
         SessionPicker::new(TreeSource::fixture);
-    let mut endings = SaveEndings::ANY;
-    endings.push('.', "png").expect("an extension");
-    endings.push('.', "jpg").expect("an extension");
     picker
         .begin(
             (7, None),
-            &save_held("Holiday.png", endings),
+            &save_held("Holiday.png", &png_or_jpeg()),
             &mut shell,
             &mut comp,
         )
         .expect("accepted");
     let Some(PickStep::Menu { model, .. }) = press_panel(
         &mut picker,
-        |layout| layout.format_box.expect("two endings"),
+        |layout| layout.format_box.expect("two formats"),
         &mut shell,
         &mut comp,
     ) else {
@@ -6004,7 +6046,7 @@ fn a_save_starts_where_the_last_one_went() {
     let (serial, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
     assert_eq!(path, "/Docs/fresh.txt");
     assert!(picker
-        .opened(serial, Ok(()), &mut shell, &mut comp)
+        .opened(serial, (Ok(()), None), &mut shell, &mut comp)
         .is_some());
 
     picker
@@ -6013,7 +6055,7 @@ fn a_save_starts_where_the_last_one_went() {
     let (serial, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
     assert_eq!(path, "/Docs/next.txt", "where the last save went");
     assert!(picker
-        .opened(serial, Ok(()), &mut shell, &mut comp)
+        .opened(serial, (Ok(()), None), &mut shell, &mut comp)
         .is_some());
 
     picker
@@ -6127,7 +6169,12 @@ fn a_save_dropped_in_a_folder_creates_its_file_there() {
         ("/Users/ann/Desktop/Report.txt", PickAccess::Create)
     );
     assert_eq!(
-        picker.opened(serial, Err(Errno::AlreadyExists), &mut shell, &mut comp),
+        picker.opened(
+            serial,
+            (Err(Errno::AlreadyExists), None),
+            &mut shell,
+            &mut comp
+        ),
         None
     );
     assert!(
@@ -6143,7 +6190,7 @@ fn a_save_dropped_in_a_folder_creates_its_file_there() {
         ("/Users/ann/Desktop/Report.txt", PickAccess::Replace)
     );
     assert_eq!(
-        picker.opened(serial, Ok(()), &mut shell, &mut comp),
+        picker.opened(serial, (Ok(()), None), &mut shell, &mut comp),
         Some(PickEnd::Chosen {
             for_window: 7,
             name: String::from("Report.txt"),
@@ -6162,14 +6209,19 @@ fn a_name_held_by_a_folder_or_a_link_is_refused_not_replaced() {
         let into = crate::drag::SaveDrop::Folder(String::from("/Docs"));
         let (serial, ..) = asked(picker.save_dropped(into, &mut shell, &mut comp));
         assert_eq!(
-            picker.opened(serial, Err(taken), &mut shell, &mut comp),
+            picker.opened(serial, (Err(taken), None), &mut shell, &mut comp),
             None
         );
         assert_eq!(picker.question_wm(), None, "{taken:?} is not asked about");
         let (_, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
         assert_eq!(path, "/Report.txt", "the panel saves again");
         assert_eq!(
-            picker.opened(serial + 1, Err(Errno::NoSpace), &mut shell, &mut comp),
+            picker.opened(
+                serial + 1,
+                (Err(Errno::NoSpace), None),
+                &mut shell,
+                &mut comp
+            ),
             None
         );
     }
@@ -6215,7 +6267,7 @@ fn a_save_dropped_on_a_window_waits_for_its_folder() {
     );
     assert_eq!(picker.take_owed_step(), None, "owed once");
     assert!(picker
-        .opened(serial, Ok(()), &mut shell, &mut comp)
+        .opened(serial, (Ok(()), None), &mut shell, &mut comp)
         .is_some());
 
     let mut picker = begin_save("Report.txt", &mut shell, &mut comp);
@@ -6319,13 +6371,10 @@ fn the_keyboard_reaches_every_save_control() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
         SessionPicker::new(TreeSource::fixture);
-    let mut endings = SaveEndings::ANY;
-    endings.push('.', "png").expect("an extension");
-    endings.push('.', "jpg").expect("an extension");
     picker
         .begin(
             (7, None),
-            &save_held("Holiday.png", endings),
+            &save_held("Holiday.png", &png_or_jpeg()),
             &mut shell,
             &mut comp,
         )
@@ -6417,7 +6466,7 @@ fn a_new_folder_is_named_made_and_saved_into() {
     let (serial, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
     assert_eq!(path, "/Report.txt");
     assert_eq!(
-        picker.opened(serial, Err(Errno::NoSpace), &mut shell, &mut comp),
+        picker.opened(serial, (Err(Errno::NoSpace), None), &mut shell, &mut comp),
         None
     );
 
@@ -6653,7 +6702,7 @@ fn a_save_offers_its_name_and_creates_the_file() {
         "a save is handed nothing to read"
     );
     assert_eq!(
-        picker.opened(serial, Ok(()), &mut shell, &mut comp),
+        picker.opened(serial, (Ok(()), None), &mut shell, &mut comp),
         Some(PickEnd::Chosen {
             for_window: 7,
             name: String::from("notes.txt"),
@@ -6662,34 +6711,33 @@ fn a_save_offers_its_name_and_creates_the_file() {
     assert_eq!(picker.wm_id(), None);
 }
 
-/// A save held to the endings its requester writes refuses another ending
-/// before any file is made, and gives a name with none the first.
+/// A save in the requester's format refuses a name ending as another type
+/// before any file is made, and gives a name with none the format's
+/// extension; a name offered ending as another type is offered without it.
 #[test]
 fn a_save_holds_the_name_to_what_the_requester_writes() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
         SessionPicker::new(TreeSource::fixture);
-    let mut endings = SaveEndings::ANY;
-    endings.push('.', "png").expect("an extension");
-    endings.push(',', "b60").expect("a RISC OS file type");
+    let png = offering(&[save_format(Some(0xB60), &[".png"])], 0);
     picker
         .begin(
             (7, None),
-            &save_held("picture.bmp", endings),
+            &save_held("picture.bmp", &png),
             &mut shell,
             &mut comp,
         )
         .expect("accepted");
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let end = pressed(KeyValue::Named(NamedKeyCode::End));
+    assert_eq!(picker.handle_key(&end, &mut shell, &mut comp), None);
+    type_into(&mut picker, ".bmp", &mut shell, &mut comp);
     assert_eq!(
         picker.handle_key(&enter, &mut shell, &mut comp),
         None,
-        "an ending the requester cannot write makes no file"
+        "an ending of another type makes no file"
     );
     assert!(picker.wm_id().is_some(), "the save stays up to say why");
-
-    let end = pressed(KeyValue::Named(NamedKeyCode::End));
-    assert_eq!(picker.handle_key(&end, &mut shell, &mut comp), None);
     let backspace = pressed(KeyValue::Named(NamedKeyCode::Backspace));
     for _ in 0..".bmp".len() {
         picker.handle_key(&backspace, &mut shell, &mut comp);
@@ -6698,24 +6746,22 @@ fn a_save_holds_the_name_to_what_the_requester_writes() {
     assert_eq!(
         (path.as_str(), access),
         ("/picture.png", PickAccess::Create),
-        "a name with no ending takes the first"
+        "offered without the bitmap's ending, and given the format's"
     );
 }
 
-/// A name already ending as the requester asks is taken as typed, whatever
-/// its case.
+/// A name already ending as the requester's format is taken as typed,
+/// whatever its case, its own file type after a comma among the endings.
 #[test]
 fn a_save_takes_a_name_ending_as_asked_as_typed() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
         SessionPicker::new(TreeSource::fixture);
-    let mut endings = SaveEndings::ANY;
-    endings.push('.', "png").expect("an extension");
-    endings.push(',', "b60").expect("a RISC OS file type");
+    let png = offering(&[save_format(Some(0xB60), &[".png"])], 0);
     picker
         .begin(
             (7, None),
-            &save_held("Logo,B60", endings),
+            &save_held("Logo,B60", &png),
             &mut shell,
             &mut comp,
         )
@@ -6725,23 +6771,17 @@ fn a_save_takes_a_name_ending_as_asked_as_typed() {
     assert_eq!(path, "/Logo,B60");
 }
 
-/// A save held to endings still goes into a folder named, its name ending in
-/// none of them, and a name whose comma starts no file type takes the first
-/// ending rather than being refused.
+/// A save in a format named by an extension still goes into a folder named,
+/// and a name whose comma starts no file type takes the extension rather than
+/// being refused.
 #[test]
 fn a_save_held_to_endings_goes_into_a_folder_named() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
         SessionPicker::new(TreeSource::fixture);
-    let mut endings = SaveEndings::ANY;
-    endings.push('.', "png").expect("an extension");
+    let png = offering(&[save_format(Some(0xB60), &[".png"])], 0);
     picker
-        .begin(
-            (7, None),
-            &save_held("Docs", endings),
-            &mut shell,
-            &mut comp,
-        )
+        .begin((7, None), &save_held("Docs", &png), &mut shell, &mut comp)
         .expect("accepted");
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     assert_eq!(
@@ -6759,6 +6799,80 @@ fn a_save_held_to_endings_goes_into_a_folder_named() {
         (path.as_str(), access),
         ("/Docs/Smith, J.png", PickAccess::Create)
     );
+}
+
+/// A sprite file is named by its file type alone: the save opens on the
+/// document's format whatever its name ends in, asks for the name bare, and
+/// leaves the folder to type it — recorded where the volume records types,
+/// `,ff9` where not — whether or not its name was taken.
+#[test]
+fn a_sprite_file_is_saved_bare_for_its_folder_to_type() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    let formats = offering(
+        &[
+            save_format(Some(0xB60), &[".png"]),
+            save_format(Some(0xFF9), &[]),
+        ],
+        1,
+    );
+    picker
+        .begin(
+            (7, None),
+            &save_held("photo.png", &formats),
+            &mut shell,
+            &mut comp,
+        )
+        .expect("accepted");
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let Some(PickStep::Open {
+        path,
+        access,
+        typing,
+        ..
+    }) = picker.handle_key(&enter, &mut shell, &mut comp)
+    else {
+        panic!("the save is asked for");
+    };
+    assert_eq!(
+        (path.as_str(), access),
+        ("/photo", PickAccess::Create),
+        "the PNG's ending is left off a sprite file"
+    );
+    assert_eq!(
+        typing,
+        Typing {
+            filetype: tairix_abi::fs::Filetype::new(0xFF9),
+            bare: true,
+        }
+    );
+}
+
+/// A bare name takes its type's `,xxx` only where the volume records no file
+/// type; an exact one is made as it is; one too long once typed is refused.
+#[test]
+fn a_bare_name_is_finished_by_its_folder() {
+    let typing = Typing {
+        filetype: tairix_abi::fs::Filetype::new(0xFF9),
+        bare: true,
+    };
+    assert_eq!(typing.leaf("Sprites", true).as_deref(), Some("Sprites"));
+    assert_eq!(
+        typing.leaf("Sprites", false).as_deref(),
+        Some("Sprites,ff9")
+    );
+    assert_eq!(
+        typing.exact().leaf("Sprites", false).as_deref(),
+        Some("Sprites")
+    );
+    assert_eq!(
+        Typing::default().leaf("notes", false).as_deref(),
+        Some("notes")
+    );
+    let long = "s".repeat(tairix_abi::FS_NAME_MAX - 2);
+    assert!(typing.leaf(&long, true).is_some());
+    assert_eq!(typing.leaf(&long, false), None, "too long once typed");
 }
 
 /// A name that already names a file is replaced only once the user says so;
@@ -6925,7 +7039,12 @@ fn a_name_taken_after_the_folder_changed_is_not_asked_about() {
     );
     picker.resume(&mut shell, &mut comp);
     assert_eq!(
-        picker.opened(serial, Err(Errno::AlreadyExists), &mut shell, &mut comp),
+        picker.opened(
+            serial,
+            (Err(Errno::AlreadyExists), None),
+            &mut shell,
+            &mut comp
+        ),
         None
     );
     let (_, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
@@ -6951,7 +7070,12 @@ fn a_refused_save_stays_up() {
     let (serial, _, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
     assert_eq!(access, PickAccess::Create);
     assert_eq!(
-        picker.opened(serial, Err(Errno::AlreadyExists), &mut shell, &mut comp),
+        picker.opened(
+            serial,
+            (Err(Errno::AlreadyExists), None),
+            &mut shell,
+            &mut comp
+        ),
         None
     );
     assert!(picker.question_wm().is_some(), "the user is asked instead");
@@ -6960,7 +7084,12 @@ fn a_refused_save_stays_up() {
     let (serial, _, access) = asked(on_question(&mut picker, &enter, &mut shell, &mut comp));
     assert_eq!(access, PickAccess::Replace);
     assert_eq!(
-        picker.opened(serial, Err(Errno::PermissionDenied), &mut shell, &mut comp),
+        picker.opened(
+            serial,
+            (Err(Errno::PermissionDenied), None),
+            &mut shell,
+            &mut comp
+        ),
         None
     );
     assert!(picker.wm_id().is_some(), "and told why it was not saved");
@@ -7656,6 +7785,7 @@ fn a_declaration_holds_a_slot_with_no_windows_and_leaves_on_withdrawal() {
                 event_endpoint: 9,
                 click: AppBarClick::Raise,
                 menu,
+                revision: 1,
             },
         )
         .expect("re-declared");
@@ -7663,6 +7793,7 @@ fn a_declaration_holds_a_slot_with_no_windows_and_leaves_on_withdrawal() {
     let declared = service.declaration(owner).expect("held");
     assert_eq!(declared.click, AppBarClick::Raise);
     assert_eq!(declared.menu.len(), 1);
+    assert_eq!(declared.revision, 1, "recorded with the declaration");
 
     // The window engine proved the process gone: the slot goes with it.
     service.withdraw(owner);
@@ -8289,7 +8420,10 @@ fn secondary_press_over_an_app_slot_opens_the_menu_it_declared() {
     };
     assert_eq!(
         request.subject,
-        tairix_taskbar::MenuSubject::App { owner: terminal },
+        tairix_taskbar::MenuSubject::App {
+            owner: terminal,
+            revision: 0,
+        },
         "the menu names the slot's own application"
     );
 
@@ -8300,6 +8434,49 @@ fn secondary_press_over_an_app_slot_opens_the_menu_it_declared() {
         Some(TaskbarResponse::AppMenuChosen {
             owner: terminal,
             item: AppMenuItemId::new(1).expect("non-zero"),
+            revision: 0,
+        })
+    );
+}
+
+/// A row chosen from an icon-bar menu after its application re-declared is
+/// answered with the revision of the declaration the menu was opened from:
+/// the service records each declaration's revision and the slot it derives
+/// carries it into the menu.
+#[test]
+fn a_bar_menu_row_answers_the_revision_its_menu_was_opened_from() {
+    let owner = window_owner(1);
+    let mut service = AppBarService::new();
+    let mut declare = |revision| {
+        service
+            .declare(
+                owner,
+                &AppBar {
+                    revision,
+                    ..app_bar(AppBarClick::Open)
+                },
+            )
+            .expect("declared");
+        let strip = service.strip(&[], |_| None, &BundleIndex::new());
+        with_artwork(|resolver, cache| service.slots(&strip, (resolver, cache, 24)))
+    };
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.set_apps(&mut comp, declare(1));
+    let at = app_slot_point(&shell, 0);
+    shell.handle(moved(at.x, at.y), &mut comp, 0);
+    let ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(request)) =
+        shell.handle(SECONDARY_PRESS, &mut comp, 0)
+    else {
+        panic!("a secondary press on a slot asked for no menu");
+    };
+    shell.set_apps(&mut comp, declare(2));
+    assert_eq!(
+        choose_bar_menu_row(&mut shell, &mut comp, request, "Quit"),
+        Some(TaskbarResponse::AppMenuChosen {
+            owner,
+            item: AppMenuItemId::new(1).expect("non-zero"),
+            revision: 1,
         })
     );
 }
@@ -9243,7 +9420,7 @@ struct RefusalCount(core::sync::atomic::AtomicUsize);
 
 impl tairix_log::Sink for RefusalCount {
     fn write_event(&self, event: &tairix_log::Event<'_>) {
-        if event.id == crate::SETTINGS_REQUEST_REFUSED {
+        if event.id == crate::COMPONENT_REQUEST_REFUSED {
             self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -16456,6 +16633,10 @@ fn no_application_menu_opens_under_a_carried_drag() {
                 tairix_abi::window_ipc::DocumentName::new("notes.txt").expect("a valid name"),
                 1,
                 true,
+                [tairix_abi::window_ipc::DragPicture {
+                    icon: tairix_abi::window_ipc::IconAsset::new("text").expect("a valid id"),
+                    from: None,
+                }],
             )
             .expect("one file"),
         )
@@ -18082,7 +18263,7 @@ fn set_time() -> Request {
         requester: "Date & Time".to_string(),
         bundle: None,
         purpose: crate::systask::SET_TIME_PURPOSE.to_string(),
-        window: None,
+        asker: None,
     }
 }
 
@@ -18190,7 +18371,11 @@ fn the_seat_is_held_by_the_lock_the_picker_and_any_prompt() {
                 confirm: &ConfirmPrompt,
                 elevate: &AuthorisePrompt,
                 resolution: &crate::ResolutionPrompt| {
-        crate::seat_held(lock, picker, (confirm, elevate, resolution))
+        crate::seat_held(
+            lock,
+            (picker, picker.wm_id()),
+            (confirm, elevate, resolution),
+        )
     };
     assert!(!held(&lock, &picker, &confirm, &elevate, &resolution));
 
@@ -18213,15 +18398,111 @@ fn the_seat_is_held_by_the_lock_the_picker_and_any_prompt() {
     let _ = elevate.abandon(&mut comp);
     assert!(!held(&lock, &picker, &confirm, &elevate, &resolution));
 
-    picker
+    let shown = picker
         .begin((7, None), &OPEN, &mut shell, &mut comp)
         .expect("accepted");
+    assert_eq!(shown, picker.wm_id());
     assert!(held(&lock, &picker, &confirm, &elevate, &resolution));
+    assert!(
+        !crate::seat_held(&lock, (&picker, None), (&confirm, &elevate, &resolution)),
+        "a picker the user has left holds nothing"
+    );
+    assert!(
+        crate::trusted_up(&lock, &picker, (&confirm, &elevate, &resolution)),
+        "but it still shows a file choice nothing may stand over"
+    );
     picker.abort_for(7, &mut shell, &mut comp);
     assert!(!held(&lock, &picker, &confirm, &elevate, &resolution));
+    assert!(!crate::trusted_up(
+        &lock,
+        &picker,
+        (&confirm, &elevate, &resolution)
+    ));
 
     assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     assert!(held(&lock, &picker, &confirm, &elevate, &resolution));
+    assert!(crate::trusted_up(
+        &lock,
+        &picker,
+        (&confirm, &elevate, &resolution)
+    ));
+}
+
+/// The trusted picker holds only the window that asked for its pick: while it
+/// has the keyboard no application may take the seat from it, but a press on
+/// the bar opens the bar's menu over it, which takes the keyboard while it is
+/// up and leaves it with the picker as it closes. A prompt holding the whole
+/// seat refuses the bar too.
+///
+/// Regression: the bar's menus were refused while the picker had the
+/// keyboard, until the user first clicked into another window.
+#[test]
+fn a_press_on_the_bar_opens_its_menu_over_a_picker_with_the_keyboard() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+    let lock = ScreenLock::new();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    let confirm = ConfirmPrompt::new();
+    let mut elevate = AuthorisePrompt::new();
+    let mut elevator = ScriptedElevator::default();
+    let resolution = crate::ResolutionPrompt::new();
+    let shown = picker
+        .begin((7, None), &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
+    assert_eq!(
+        shell.router().focused(),
+        shown,
+        "the picker has the keyboard"
+    );
+    assert!(crate::seat_held(
+        &lock,
+        (&picker, shell.router().focused()),
+        (&confirm, &elevate, &resolution)
+    ));
+    let modal = crate::seat_modal(&lock, (&confirm, &elevate, &resolution));
+    assert!(!modal, "only the lock or a prompt holds the whole seat");
+
+    let clock = rect_centre(shell.session().taskbar().layout(comp.scale()).clock);
+    shell.handle(moved(clock.x, clock.y), &mut comp, 0);
+    let ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(request)) =
+        shell.handle(SECONDARY_PRESS, &mut comp, 0)
+    else {
+        panic!("a secondary press on the clock asked for no menu");
+    };
+    let theme = shell.session().floating_theme().clone();
+    let geom = chain_geometry_over(&comp, &theme);
+    let open = |menu: &mut MenuChain, seat_modal: bool| {
+        crate::menu::open_desktop_menu(
+            menu,
+            ChainOwner::Bar(request.subject.clone()),
+            request.model.clone(),
+            request.placement,
+            seat_modal,
+            &geom,
+        )
+    };
+    let mut menu = MenuChain::new();
+    assert_eq!(
+        open(&mut menu, modal),
+        Ok(()),
+        "the bar's menu opens over it"
+    );
+    let escape = key_press(Key::Named(NamedKey::Escape));
+    assert_eq!(menu.handle(&escape, clock, &geom, 0), ChainAction::Closed);
+    assert_eq!(
+        shell.router().focused(),
+        shown,
+        "and leaves the keyboard with it"
+    );
+
+    assert!(elevate.ask(set_time(), &mut elevator, &shell, &mut comp));
+    let modal = crate::seat_modal(&lock, (&confirm, &elevate, &resolution));
+    assert_eq!(
+        open(&mut menu, modal),
+        Err(crate::menu::DesktopMenuRefused::Seat(MenuRefusal::SeatBusy)),
+        "a prompt holding the whole seat refuses the bar too"
+    );
 }
 
 #[test]
@@ -18573,7 +18854,8 @@ fn abandoning_the_prompt_concludes_it_unanswered() {
 
 /// The system task Settings asks for its window 12, as the bridge maps it.
 fn settings_task(task: &tairix_abi::window_ipc::SystemTask) -> Request {
-    crate::systask::request_for(task, 12).expect("a well-formed task")
+    crate::systask::request_for(task, tairix_window::AuthoriseFor::Window(12))
+        .expect("a well-formed task")
 }
 
 /// What a request asked for an application window ends with is owed to that
@@ -18611,7 +18893,7 @@ fn a_task_asked_for_a_window_is_owed_to_it_once_with_its_capture() {
     assert_eq!(
         prompt.take_concluded(),
         [crate::elevate::Concluded {
-            window_id: 12,
+            asker: tairix_window::AuthoriseFor::Window(12),
             outcome: AuthorisedOutcome::Captured {
                 exit_code: 0,
                 len: u32::try_from(printed.len()).expect("short"),
@@ -18629,7 +18911,7 @@ fn a_cancelled_or_abandoned_task_is_owed_as_declined() {
     use tairix_abi::window_ipc::{AuthorisedOutcome, SystemTask};
     let (mut shell, mut comp) = headless_desktop();
     let declined = [crate::elevate::Concluded {
-        window_id: 12,
+        asker: tairix_window::AuthoriseFor::Window(12),
         outcome: AuthorisedOutcome::Declined,
         output: Vec::new(),
     }];
@@ -18664,9 +18946,9 @@ fn a_closing_window_takes_its_own_question_down() {
     let (mut prompt, _elevator) = listed(request, own_only(), &mut shell, &mut comp);
     let (scrim, sheet) = (prompt.scrim_id(), prompt.wm_id());
 
-    prompt.abort_for(13, &mut comp);
+    prompt.abort_for(tairix_window::AuthoriseFor::Window(13), &mut comp);
     assert!(prompt.is_up(), "another window's closing is not this one's");
-    prompt.abort_for(12, &mut comp);
+    prompt.abort_for(tairix_window::AuthoriseFor::Window(12), &mut comp);
     assert!(!prompt.is_up());
     for window in [scrim, sheet].into_iter().flatten() {
         assert!(
@@ -18674,6 +18956,58 @@ fn a_closing_window_takes_its_own_question_down() {
             "everything it showed is gone"
         );
     }
+    assert!(prompt.take_concluded().is_empty(), "nobody is left to tell");
+}
+
+/// An eject the file manager's icon-bar slot asked for is owed to that slot,
+/// and comes down unanswered when the application goes; another
+/// application's going leaves it up.
+#[test]
+fn a_slots_question_is_owed_to_it_and_goes_with_its_application() {
+    use tairix_abi::window_ipc::{AuthorisedOutcome, SystemTask};
+    use tairix_window::AuthoriseFor;
+    let (mut shell, mut comp) = headless_desktop();
+    let slot = AuthoriseFor::Slot(tairix_abi::ProcId::from_raw([4; 16]));
+    let eject = SystemTask::Eject(
+        tairix_abi::elevate::ElevateWords::new(&[
+            "id::07070707-0707-0707-0707-070707070707/",
+            "usb1",
+        ])
+        .expect("within bounds"),
+    );
+    let request = crate::systask::request_for(&eject, slot).expect("well formed");
+    assert_eq!(request.requester, crate::config::FILES_LABEL);
+
+    let (mut prompt, mut elevator) = listed(request.clone(), own_only(), &mut shell, &mut comp);
+    let _ = press_key(
+        &mut prompt,
+        Key::Named(NamedKey::Escape),
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    assert_eq!(
+        prompt.take_concluded(),
+        [crate::elevate::Concluded {
+            asker: slot,
+            outcome: AuthorisedOutcome::Declined,
+            output: Vec::new(),
+        }]
+    );
+
+    let (mut prompt, _elevator) = listed(request, own_only(), &mut shell, &mut comp);
+    prompt.abort_for(
+        AuthoriseFor::Slot(tairix_abi::ProcId::from_raw([5; 16])),
+        &mut comp,
+    );
+    assert!(
+        prompt.is_up(),
+        "another application's going is not this one's"
+    );
+    prompt.abort_for(AuthoriseFor::Window(4), &mut comp);
+    assert!(prompt.is_up(), "a window is not the slot");
+    prompt.abort_for(slot, &mut comp);
+    assert!(!prompt.is_up());
     assert!(prompt.take_concluded().is_empty(), "nobody is left to tell");
 }
 

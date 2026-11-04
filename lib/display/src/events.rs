@@ -37,8 +37,9 @@ pub const EVENTS_FAILED: EventId = EventId(15_004);
 /// deadline.
 pub const LATCH_OVERDUE: EventId = EventId(15_005);
 
-/// A latch could not be posted to its presenter's port; its `error` field is
-/// the kernel's refusal.
+/// Latches presenters' ports refused for good were given up on: its `total`
+/// field is how many, recorded each time it doubles, and its `error` field
+/// the latest refusal.
 pub const LATCH_UNDELIVERED: EventId = EventId(15_006);
 
 const _: () = {

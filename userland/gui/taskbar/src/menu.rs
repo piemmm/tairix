@@ -71,6 +71,10 @@ pub enum MenuSubject {
     App {
         /// The process that declared the menu.
         owner: ProcId,
+        /// The application's own number for the declaration the plate is
+        /// built from, handed back with every answer so a re-declaration
+        /// while the menu is open cannot change what a chosen row means.
+        revision: u32,
     },
     /// The context menu on this program-library entry's row.
     Entry {
@@ -95,14 +99,35 @@ impl MenuSubject {
     #[must_use]
     pub(crate) fn chosen(&self, item: AppMenuItemId) -> Option<TaskbarResponse> {
         match self {
-            Self::App { owner } => Some(TaskbarResponse::AppMenuChosen {
+            Self::App { owner, revision } => Some(TaskbarResponse::AppMenuChosen {
                 owner: *owner,
                 item,
+                revision: *revision,
             }),
             Self::Entry { entry } => Some(EntryRow::at(item.index())?.response(entry)),
             Self::System => system::response_at(item.index()),
             Self::Clock => clock_menu::response_at(item.index()),
             Self::Network => network_menu::response_at(item.index()),
+        }
+    }
+
+    /// What committing the quick-entry field of row `item` with `text` asks
+    /// the embedder for: only an application's own menu declares such a
+    /// field, so any other answers `None` (fail closed).
+    #[must_use]
+    pub fn entered(
+        &self,
+        item: AppMenuItemId,
+        text: alloc::string::String,
+    ) -> Option<TaskbarResponse> {
+        match self {
+            Self::App { owner, revision } => Some(TaskbarResponse::AppMenuEntered {
+                owner: *owner,
+                item,
+                revision: *revision,
+                text,
+            }),
+            Self::Entry { .. } | Self::System | Self::Clock | Self::Network => None,
         }
     }
 

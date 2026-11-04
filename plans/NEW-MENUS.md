@@ -242,10 +242,11 @@ and `Enter` **commits**, ending the chain with the field's own id. Its band
 titles it and does not drag it, because a child of a row is placed by the chain
 against that row, exactly as the information panel is.
 
-The declaring row supplies only the id, the initial text and the bytes of it
+The declaring row supplies only the id, the initial text, the bytes of it
 the field opens with selected (`AppMenuEntrySelection`, refused off the text's
 character boundaries) — a rename's stem, so typing replaces the name and keeps
-its ending; the committed text is the desktop's answer, held for the owning
+its ending — and whether choosing the row opens the field instead of answering
+(`opened_by_choosing`, a flag the wire refuses on a row with no field); the committed text is the desktop's answer, held for the owning
 window and pulled once (`TakeMenuText`) because an event frame is far narrower
 than a name. Each key reaches the field with the modifiers the seat reported, so
 Shift extends a selection, and cut, copy and paste go through the desktop's
@@ -376,8 +377,9 @@ an ordered bounded list of `Item(AppMenuItem)`, `Separator`,
 non-zero item ids unique within a menu, a decoder held to the **same**
 shape rule as the builder, and both fuzzed in `lib/abi/tests/fuzz_decode.rs`.
 It is carried by the caller-scoped `WindowRequest::SetAppBar` and answered by
-the application-scoped `WindowEvent::AppBarMenu { item }`. The service reuses
-this model verbatim; a second menu model would be the duplication §2.2
+the application-scoped `WindowEvent::AppBarMenu { item, revision }`, the
+revision naming the declaration the open menu was copied from. The service
+reuses this model verbatim; a second menu model would be the duplication §2.2
 forbids.
 
 **Built and kept:** the info panel as a `FactList` of the bundle's signed
@@ -749,8 +751,9 @@ the engine holds it to; a chosen row of a **bar** chain is read back by the bar
 itself (`Taskbar::menu_chosen`, over the same table the plate was built from)
 into the very `TaskbarResponse` a click on the bar produces, and routed where
 those are. So the application-scoped `AppBarMenu` relay is untouched: the App
-subject answers `AppMenuChosen { app, item }` and `route_outcome` relays the id
-to the declaring process exactly as before. The subject travels **inside** the
+subject (`MenuSubject::App { owner, revision }`) answers
+`AppMenuChosen { owner, item, revision }` and `route_outcome` relays the id and
+the revision to the declaring process. The subject travels **inside** the
 owner rather than beside it, so a chain the next open displaces cannot have its
 answer read against the next chain's subject.
 
@@ -932,8 +935,8 @@ rather than pushing and swallowing a refusal.
 ### M8 — artwork on a row (landed)
 
 A chooseable row may name a class picture by asset id
-(`AppMenuItem::with_icon_asset`, an `AppMenuAsset` of at most
-`APP_MENU_ASSET_MAX` bytes): the public name an icon master is shipped under
+(`AppMenuItem::with_icon_asset`, an `IconAsset` of at most
+`ICON_ASSET_MAX` bytes): the public name an icon master is shipped under
 (`folder`, `disk-usb`). The session resolves it through its artwork cache at
 the row's icon side, the raster, vector and built-in tiers every surface draws
 through, so an application names a picture and can never name a file. An

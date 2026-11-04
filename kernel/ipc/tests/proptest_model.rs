@@ -45,7 +45,7 @@ use proptest::test_runner::TestCaseError;
 use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
 use tairix_abi::{CapabilityId, Errno, ProcId, PROC_ID_LEN, RLIMIT_INFINITY};
 use tairix_caps::CapabilitySet;
-use tairix_kernel_ipc::{EndpointId, Port};
+use tairix_kernel_ipc::{EndpointId, Port, Room};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
 use tairix_log::{set_max_level, Event, Level, Sink};
 
@@ -288,8 +288,10 @@ fn port_lifecycle_tracks_reference_model() {
                 prop_assert_eq!(port.is_closed(), model.closed);
                 for sender in 0..INSTANCES {
                     prop_assert!(model.depth_of(sender) <= DEPTH);
+                    let probe = task_with(0x100 + u64::from(sender), &CapabilitySet::empty())
+                        .with_proc_id(instance(sender));
                     prop_assert_eq!(
-                        port.has_room_for(instance(sender)),
+                        port.room_for(&probe, u64::MAX) == Room::Free,
                         model.depth_of(sender) < DEPTH,
                         "the room a sender waits on is exactly what send decides"
                     );

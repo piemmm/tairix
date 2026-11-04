@@ -75,3 +75,7 @@ pub const TENANCY_REFUSED: EventId = EventId(30_035);
 /// plays less — so its streams hold their positions as lost and the endpoint
 /// is released for the next stream to configure afresh.
 pub const ENDPOINT_CHANGED: EventId = EventId(30_036);
+
+/// Client wakes their mailboxes refused for good were given up on: the
+/// running total, recorded each time it doubles.
+pub const WAKES_GIVEN_UP: EventId = EventId(30_037);

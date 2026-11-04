@@ -8,8 +8,8 @@ use alloc::vec::Vec;
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuSymbol as S};
 use tairix_colour::Rgba;
 use tairix_controls::{
-    wheel_steps, Keystroke, PickerOutcome, ScrollAction, ScrollModel, SwatchAction, SwatchMark,
-    ToolActivation, ToolbarOutcome,
+    wheel_steps, ButtonAction, Keystroke, PickerOutcome, ScrollAction, ScrollModel, SwatchAction,
+    SwatchMark, ToolActivation, ToolbarOutcome,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton};
@@ -145,7 +145,12 @@ impl View {
             button: PointerButton::Secondary,
         } = event
         {
-            if layout.window().contains(self.pointer) {
+            let over = layout.window().contains(self.pointer)
+                || layout
+                    .floating()
+                    .iter()
+                    .any(|slot| slot.frame.contains(self.pointer));
+            if over {
                 // The menu takes the pointer, so the release that would have
                 // ended the drag never comes here.
                 self.end_gesture(layout, damage);
@@ -280,6 +285,11 @@ impl View {
             self.scroll_palette(offset, layout, damage);
             return Some(Outcome::none());
         }
+        if let Some(ButtonAction::Activated) =
+            self.pop_out.on_pointer(event, layout.pop_out(), damage)
+        {
+            return Some(self.act(Action::FloatPalette, layout, damage));
+        }
         if let Some(ScrollAction::ScrollTo { offset }) =
             self.vertical
                 .on_pointer(event, layout.vertical_bar(), scale, theme, damage)
@@ -344,8 +354,8 @@ impl View {
         outcome
     }
 
-    /// The pointer on the palette strip: a well chosen by the primary button
-    /// is the primary ink, and one pressed with the middle button the
+    /// The pointer on the palette's wells: a well pressed and let go on with
+    /// the primary button is the primary ink, and with the middle button the
     /// secondary.
     fn palette_pointer(
         &mut self,
@@ -354,25 +364,35 @@ impl View {
         damage: &mut Region,
     ) -> Option<Outcome> {
         let inside = layout.wells_view().contains(self.pointer);
+        let bounds = self.swatch_bounds(layout);
+        let under = self
+            .swatches
+            .well_at(bounds, self.pointer)
+            .filter(|_| inside);
+        match event {
+            InputEvent::PointerPressed {
+                button: PointerButton::Middle,
+            } => {
+                self.middle_well = under;
+                return under.map(|_| Outcome::none());
+            }
+            InputEvent::PointerReleased {
+                button: PointerButton::Middle,
+            } => {
+                let pressed = self.middle_well.take()?;
+                if under == Some(pressed) {
+                    self.choose_well(SwatchMark::Secondary, pressed, layout, damage);
+                }
+                return Some(Outcome::none());
+            }
+            InputEvent::PointerCancelled => self.middle_well = None,
+            _ => {}
+        }
         // Wells scrolled out of the strip still lie under the pointer, so a
         // press beside it is none of theirs; a release or a move reaches them
         // wherever it lands, so one pressed and let go elsewhere is let go.
         if !inside && matches!(event, InputEvent::PointerPressed { .. }) {
             return None;
-        }
-        let bounds = self.swatch_bounds(layout);
-        if inside
-            && matches!(
-                event,
-                InputEvent::PointerPressed {
-                    button: PointerButton::Middle
-                }
-            )
-        {
-            if let Some(index) = self.swatches.well_at(bounds, self.pointer) {
-                self.choose_well(SwatchMark::Secondary, index, layout, damage);
-                return Some(Outcome::none());
-            }
         }
         match self
             .swatches
@@ -386,7 +406,7 @@ impl View {
         }
     }
 
-    /// The row of wells where each now lies, scrolled along the strip.
+    /// The wells where each now lies, scrolled along the strip.
     pub(crate) fn swatch_bounds(&self, layout: &Layout) -> Rect {
         let offset = self.palette_bar.model().range().offset();
         let swatches = layout.swatches();
@@ -401,7 +421,7 @@ impl View {
     }
 
     /// Scroll the row of wells to `offset` along the strip.
-    fn scroll_palette(&mut self, offset: u64, layout: &Layout, damage: &mut Region) {
+    pub(super) fn scroll_palette(&mut self, offset: u64, layout: &Layout, damage: &mut Region) {
         let range = self.palette_bar.model().range().with_offset(offset);
         self.palette_bar.set_model(ScrollModel::in_pixels(
             range,
@@ -471,7 +491,7 @@ impl View {
         layout: &Layout,
         damage: &mut Region,
     ) {
-        self.mark_wells();
+        self.remark_wells(layout, damage);
         let ink = match changed {
             SwatchMark::Primary => self.primary,
             SwatchMark::Secondary => self.secondary,
@@ -481,8 +501,31 @@ impl View {
         }
         self.sync_picker();
         damage.add(layout.wells());
-        damage.add(layout.wells_view());
         damage.add(layout.picker());
+    }
+
+    /// Put the palette's marks on the wells the inks now are, reporting the
+    /// wells a mark, or the focus ring that follows the primary, left or
+    /// reached.
+    fn remark_wells(&mut self, layout: &Layout, damage: &mut Region) {
+        let marks = |view: &Self| {
+            let primary = view.swatches.selected();
+            let ring = primary
+                .or(Some(0))
+                .filter(|_| view.swatches.state().focus.focused);
+            [primary, view.swatches.secondary(), ring]
+        };
+        let before = marks(self);
+        self.mark_wells();
+        let (bounds, shown) = (self.swatch_bounds(layout), layout.wells_view());
+        let cell = |well| {
+            self.swatches
+                .cell_rect(bounds, well)
+                .map(|rect| rect.intersection(&shown))
+        };
+        for (was, now) in before.into_iter().zip(marks(self)) {
+            tairix_controls::damage::move_mark(was, now, cell, damage);
+        }
     }
 
     /// The pointer on the colour dock: a press on a well makes it the one the
@@ -742,9 +785,8 @@ impl View {
                 if settled {
                     self.remember_colour(colour, layout, damage);
                 }
-                self.mark_wells();
+                self.remark_wells(layout, damage);
                 damage.add(layout.wells());
-                damage.add(layout.wells_view());
             }
             (Kind::Indexed { .. }, Ink::Index(entry)) => {
                 self.edit_entry(entry, colour, settled, layout, damage);
@@ -2825,9 +2867,9 @@ impl View {
         }
     }
 
-    /// A key for the palette strip: the arrows walk its wells, each the
-    /// primary ink as the mark reaches it. `None` where the key is the
-    /// window's.
+    /// A key for the palette: the arrows walk its wells — Up and Down a row
+    /// of a floating palette's grid — each the primary ink as the mark
+    /// reaches it. `None` where the key is the window's.
     fn palette_key(
         &mut self,
         stroke: Keystroke,
@@ -3189,6 +3231,7 @@ impl View {
             }
             Action::Pane(kind) => return self.toggle_pane(kind, layout, damage),
             Action::ResetPanes => return self.reset_panes(layout, damage),
+            Action::FloatPalette => return self.float_palette(),
             Action::ResetColours => self.reset_colours(layout, damage),
             Action::PickColour => self.toggle_colour_pick(layout, damage),
             Action::SpriteFile => return Outcome::asking(Request::Own(Own::ShowSpriteFile)),
@@ -3587,6 +3630,14 @@ impl View {
                     panes,
                 );
             }
+            menu.mark(
+                Action::FloatPalette,
+                S::Float,
+                "Float palette",
+                "",
+                self.panes.floats(crate::pane::PaneKind::Palette),
+                panes,
+            );
             menu.separator(panes);
             menu.item(
                 Action::ResetPanes,

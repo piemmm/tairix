@@ -1,12 +1,17 @@
 //! Host tests for the seat's drag carrier.
 
-use tairix_abi::window_ipc::{BundleRunPath, DocumentName, DragItems, DropOperation, DropTarget};
+use tairix_abi::window_ipc::{
+    BundleRunPath, DocumentName, DragItems, DragPicture, DropOperation, DropTarget, IconAsset,
+};
 use tairix_abi::Errno;
+use tairix_browse::render::Tiles;
+use tairix_geometry::Rect;
 use tairix_theme::CursorKind;
 use tairix_window::DragConclusion;
 use tairix_wm::{Compositor, InputEvent, Point, WindowId};
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::drag::{
     DragEnd, DragStep, DragSurface, DropRefusal, ItemsEnd, ItemsReport, OfferEnd, OwedReport,
@@ -43,15 +48,38 @@ fn editor() -> DropTarget {
     }
 }
 
+/// A picture of the class `asset`, its item's picture centred `from` the press.
+fn picture(asset: &str, from: Option<(i32, i32)>) -> DragPicture {
+    DragPicture {
+        icon: IconAsset::new(asset).expect("a valid asset id"),
+        from,
+    }
+}
+
 /// One openable file named `name`.
 fn file(name: &str) -> DragItems {
-    DragItems::new(DocumentName::new(name).expect("a valid name"), 1, true).expect("one file")
+    DragItems::new(
+        DocumentName::new(name).expect("a valid name"),
+        1,
+        true,
+        [picture("text", None)],
+    )
+    .expect("one file")
 }
 
 /// Several items.
 fn several() -> DragItems {
-    DragItems::new(DocumentName::new("a.txt").expect("a valid name"), 3, false)
-        .expect("three items")
+    DragItems::new(
+        DocumentName::new("a.txt").expect("a valid name"),
+        3,
+        false,
+        [
+            picture("text", Some((0, 0))),
+            picture("folder", Some((90, 0))),
+            picture("image-png", None),
+        ],
+    )
+    .expect("three items")
 }
 
 const RELEASE: InputEvent = InputEvent::PointerReleased {
@@ -87,10 +115,10 @@ fn desktop(folder: &str, icon: Option<usize>) -> DragSurface {
     }
 }
 
-/// The plate follows and never takes the pointer, and a slot that takes the
-/// file is where a release drops it.
+/// What is carried follows and never takes the pointer, and a slot that takes
+/// the file is where a release drops it.
 #[test]
-fn the_plate_follows_and_a_slot_that_takes_the_file_is_dropped_on() {
+fn what_is_carried_follows_and_a_slot_that_takes_the_file_is_dropped_on() {
     let (mut shell, mut comp, window) = pressed();
     shell
         .begin_drag(&mut comp, 7, window, file("notes.txt"))
@@ -112,10 +140,18 @@ fn the_plate_follows_and_a_slot_that_takes_the_file_is_dropped_on() {
             answer: Some(SlotAnswer::Opens(alloc::boxed::Box::new(editor()))),
         },
     );
+    shell.settle(&mut comp);
+    let carried: Vec<WindowId> = shell.drag_windows().collect();
+    assert!(
+        carried.iter().any(|window| comp
+            .window(*window)
+            .is_some_and(|shown| shown.bounds().contains(slot))),
+        "the tile came with the pointer"
+    );
     assert_eq!(
         comp.window_at(probe),
         beneath,
-        "the plate beside the pointer never becomes what is under it"
+        "what is carried never becomes what is under the pointer"
     );
     assert_eq!(shell.take_drag_report(), None, "a slot is not reported");
     assert_eq!(
@@ -126,6 +162,123 @@ fn the_plate_follows_and_a_slot_that_takes_the_file_is_dropped_on() {
             refused: None,
         }))
     );
+}
+
+/// One item is carried as its listed tile, held under the pointer, and
+/// several as a stack of their pictures, a window each; ending the drag takes
+/// every one down.
+#[test]
+fn one_item_is_carried_as_its_tile_and_several_as_a_stack() {
+    let (mut shell, mut comp, window) = pressed();
+    shell
+        .begin_drag(&mut comp, 7, window, file("notes.txt"))
+        .expect("carried");
+    let one: Vec<WindowId> = shell.drag_windows().collect();
+    assert_eq!(one.len(), 1);
+    let metrics = Tiles::Large.metrics(comp.scale(), shell.session().active_theme());
+    let shown = comp.window(one[0]).expect("shown").bounds();
+    assert_eq!(
+        (shown.width, shown.height),
+        (metrics.cell_width, metrics.cell_height),
+        "a listed tile's size"
+    );
+    assert!(
+        shown.contains(shell.router().pointer()),
+        "held under the pointer"
+    );
+    let _ = shell.end_drag(&mut comp, false);
+    assert!(comp.window(one[0]).is_none());
+
+    let (mut shell, mut comp, window) = pressed();
+    shell
+        .begin_drag(&mut comp, 7, window, several())
+        .expect("carried");
+    let stack: Vec<WindowId> = shell.drag_windows().collect();
+    assert_eq!(stack.len(), 3, "a card for each item shown");
+    for card in &stack {
+        let shown = comp.window(*card).expect("shown").bounds();
+        assert!(
+            shown.width < metrics.cell_width,
+            "smaller than a listed tile"
+        );
+    }
+    let _ = shell.end_drag(&mut comp, false);
+    assert!(stack.iter().all(|card| comp.window(*card).is_none()));
+}
+
+/// Artwork landing repaints the cards whose picture it moved, and no other
+/// part of what is carried.
+///
+/// Regression: every landing painted every card afresh.
+#[test]
+fn a_landing_repaints_only_the_cards_whose_picture_it_moved() {
+    let (mut shell, mut comp, window) = pressed();
+    let desk = crate::tests::deferred_artwork(&mut shell);
+    shell
+        .begin_drag(&mut comp, 7, window, several())
+        .expect("carried");
+    let cards: Vec<Rect> = shell
+        .drag_windows()
+        .filter_map(|card| comp.window(card).map(tairix_wm::Window::bounds))
+        .collect();
+    assert_eq!(cards.len(), 3);
+    let _ = comp.composite();
+    let nothing = desk.borrow_mut().take_landed();
+    shell.present_icon_artwork(&mut comp, &nothing);
+    assert!(
+        !comp.has_damage(),
+        "a landing that moves nothing paints nothing"
+    );
+    let folder = crate::tests::land(&desk, |job| {
+        matches!(
+            job.key,
+            tairix_icon::ArtworkKey::Raster(tairix_icon::IconKind::Folder)
+                | tairix_icon::ArtworkKey::Vector(tairix_icon::IconKind::Folder)
+        )
+    });
+    shell.present_icon_artwork(&mut comp, &folder);
+    let damage = comp.composite();
+    let painted = |card: &Rect| {
+        damage
+            .rects()
+            .iter()
+            .any(|rect| !rect.intersection(card).is_empty())
+    };
+    assert!(painted(&cards[1]), "the folder's card is painted afresh");
+    assert!(
+        !painted(&cards[0]) && !painted(&cards[2]),
+        "the others keep their pixels"
+    );
+}
+
+/// A theme switched under a drag lays what is carried out afresh in the new
+/// theme, still under the pointer.
+///
+/// Regression: the carried plate kept the look it was first drawn in.
+#[test]
+fn a_theme_switched_under_a_drag_lays_it_out_afresh() {
+    let (mut shell, mut comp, window) = pressed();
+    shell
+        .begin_drag(&mut comp, 7, window, file("notes.txt"))
+        .expect("carried");
+    let before: Vec<WindowId> = shell.drag_windows().collect();
+    let dark = shell.session().active_theme().name() == tairix_theme::Theme::dark().name();
+    let next = if dark {
+        tairix_theme::ThemeId::LIGHT
+    } else {
+        tairix_theme::ThemeId::DARK
+    };
+    shell
+        .session_mut()
+        .set_theme(next)
+        .expect("a built-in theme");
+    assert!(shell.sync_theme(&mut comp));
+    let after: Vec<WindowId> = shell.drag_windows().collect();
+    assert_eq!(after.len(), 1);
+    assert_ne!(after, before, "drawn afresh");
+    assert!(before.iter().all(|window| comp.window(*window).is_none()));
+    let shown = comp.window(after[0]).expect("shown").bounds();
+    assert!(shown.contains(shell.router().pointer()));
 }
 
 /// Another button ends the drag with nothing dropped, and a window closing
@@ -587,9 +740,10 @@ fn a_refused_drop_names_what_hides_in_the_item_and_the_application() {
         DocumentName::new("a\u{202e}b.txt").expect("a name"),
         1,
         true,
+        [picture("text", None)],
     )
     .expect("items");
-    assert_eq!(super::plate_text(&items), "a\u{fffd}b.txt");
+    assert_eq!(super::item_label(&items), "a\u{fffd}b.txt");
 }
 
 /// A window of another application takes a drop as its slot does: the file is
@@ -687,6 +841,7 @@ fn report_doc() -> SavedDocument {
     SavedDocument {
         name: String::from("Report.txt"),
         icon: tairix_icon::IconKind::File,
+        grab: super::PictureGrab::CENTRE,
     }
 }
 
@@ -698,6 +853,57 @@ fn saving() -> (DesktopShell, Compositor) {
         .begin_save_drag(&mut comp, (panel, 7), report_doc())
         .expect("carried");
     (shell, comp)
+}
+
+/// A save is carried as the document's listed tile — its name cut as a
+/// listing cuts it, its picture through the artwork tier — held where the
+/// press held the panel's picture.
+///
+/// Regression: the save's plate drew its picture as a tinted glyph beside a
+/// name cut at its end, losing the extension.
+#[test]
+fn a_save_is_carried_as_the_documents_tile_held_where_it_was_pressed() {
+    let (mut shell, mut comp, panel) = pressed();
+    let grab = super::PictureGrab {
+        offset: (8, -6),
+        side: 32,
+    };
+    let document = SavedDocument {
+        grab,
+        ..report_doc()
+    };
+    shell
+        .begin_save_drag(&mut comp, (panel, 7), document)
+        .expect("carried");
+    let shown: Vec<WindowId> = shell.drag_windows().collect();
+    assert_eq!(shown.len(), 1);
+    let theme = shell.session().active_theme();
+    let metrics = Tiles::Large.metrics(comp.scale(), theme);
+    let tile = comp.window(shown[0]).expect("shown").bounds();
+    assert_eq!(
+        (tile.width, tile.height),
+        (metrics.cell_width, metrics.cell_height)
+    );
+    let pointer = shell.router().pointer();
+    let picture = Tiles::Large
+        .layout()
+        .parts(
+            Rect::new(0, 0, tile.width, tile.height),
+            comp.scale(),
+            theme,
+            "Report.txt",
+            tairix_browse::render::name_cut("Report.txt"),
+        )
+        .and_then(|parts| parts.picture)
+        .expect("a picture");
+    let centre = Point::new(
+        tile.left() + picture.left() + tairix_geometry::to_i32(picture.width / 2),
+        tile.top() + picture.top() + tairix_geometry::to_i32(picture.height / 2),
+    );
+    assert!(
+        pointer.x > centre.x && pointer.y < centre.y,
+        "held right of and above its centre, as the panel's picture was"
+    );
 }
 
 fn offer_at(window_id: u64, x: u32, y: u32) -> DragSurface {

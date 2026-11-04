@@ -19,7 +19,7 @@ standard error unless `-q`.
 | Module | What it is |
 |---|---|
 | `command` | The command line. |
-| `engine` | The playback engine; files, the stream and the decoder's worker are seams, so it is host-tested over the real decoder in-process. |
+| `owed` | The commands the interface holds while the playback's mailbox refuses them. |
 | `report` | The `stdinfo` records on fd 3 and the lines on standard error. |
 | `view` | The interface, drawn from the status alone. |
 | `run` | The `Run` binary: the playback loop, the interface thread, the live seams. |

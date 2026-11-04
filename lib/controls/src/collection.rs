@@ -26,10 +26,11 @@
 //! into a plain disabled look (spec §13).
 
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_colour::Rgba;
-use tairix_font::{BitmapFont, Cut, FontWeight, TextShadow};
+use tairix_font::{BitmapFont, Cut, FontWeight, KeptShadow, TextShadow};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{builtin_picture, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -2078,16 +2079,9 @@ impl Card {
         let palette = theme.palette();
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         if let Some(count) = self.count {
-            let buf = itoa(count);
-            let text: &str = &buf;
-            let pill_h = font
-                .glyph_height()
-                .saturating_add(pad)
-                .min(ih.saturating_sub(pad));
-            let pill_w = font
-                .text_width(text)
-                .saturating_add(pad)
-                .min(iw.saturating_sub(rail_w).saturating_sub(pad));
+            let (text, pill_w, pill_h) = count_pill(count, font, pad);
+            let pill_h = pill_h.min(ih.saturating_sub(pad));
+            let pill_w = pill_w.min(iw.saturating_sub(rail_w).saturating_sub(pad));
             if pill_w > 0 && pill_h > 0 && content_right > content_left.saturating_add(pill_w) {
                 let px = content_right.saturating_sub(pill_w);
                 let py = iy.saturating_add(pad);
@@ -2097,7 +2091,7 @@ impl Card {
                     Color::from(palette.accent),
                     Color::from(palette.on_accent),
                     font,
-                    text,
+                    &text,
                 );
                 return px.saturating_sub(pad);
             }
@@ -2269,10 +2263,13 @@ pub struct IconTile {
     state: ControlState,
     selection_fade: Option<u8>,
     label_shadow: Option<TextShadow>,
+    label_halo: Option<Arc<LabelHalo>>,
+    label_ink: Option<Color>,
     name_cut: Cut,
     casts_shadow: bool,
     name_withheld: bool,
     live: bool,
+    count: Option<u32>,
     layout: TileLayout,
 }
 
@@ -2287,12 +2284,23 @@ impl IconTile {
             state: ControlState::idle(),
             selection_fade: None,
             label_shadow: None,
+            label_halo: None,
+            label_ink: None,
             name_cut: Cut::End,
             casts_shadow: false,
             name_withheld: false,
             live: false,
+            count: None,
             layout: TileLayout::new(1),
         }
+    }
+
+    /// This tile wearing `count` in a pill at its picture's top trailing
+    /// corner: how many items a stack it fronts stands for.
+    #[must_use]
+    pub fn with_count(mut self, count: u32) -> Self {
+        self.count = Some(count);
+        self
     }
 
     /// This tile marking its item as live — a program that is running — with
@@ -2360,6 +2368,48 @@ impl IconTile {
     #[must_use]
     pub fn with_label_shadow(mut self, shadow: TextShadow) -> Self {
         self.label_shadow = Some(shadow);
+        self
+    }
+
+    /// The shadow this tile's name casts in a tile of `size` at `scale` under
+    /// `theme`, blurred once for an owner drawing the name again and again to
+    /// keep and hand back through [`with_label_halo`](Self::with_label_halo);
+    /// `None` for a tile that sets no label shadow or draws no name, or one
+    /// whose shadow's memory cannot be had.
+    #[must_use]
+    pub fn label_halo(&self, size: (u32, u32), scale: Scale, theme: &Theme) -> Option<LabelHalo> {
+        if self.name_withheld {
+            return None;
+        }
+        let font = name_font(theme, scale);
+        let band = self
+            .layout
+            .label_band(Rect::new(0, 0, size.0, size.1), scale, theme, font)?;
+        self.label_block(band, font, self.label_color(theme))
+            .kept_shadows(&self.label, (band.left, band.top))
+            .map(LabelHalo)
+    }
+
+    /// This tile with its name's shadow already blurred as `halo`, which
+    /// [`label_halo`](Self::label_halo) made for a tile of this one's size:
+    /// laid down where the name stands rather than blurred again.
+    #[must_use]
+    pub fn with_label_halo(mut self, halo: Arc<LabelHalo>) -> Self {
+        self.label_halo = Some(halo);
+        self
+    }
+
+    /// This tile with its name drawn in `ink` instead of the theme's
+    /// foreground, and the built-in glyph and live mark that wear the name's
+    /// ink with it.
+    ///
+    /// For an owner whose resting tiles stand on ground the theme does not
+    /// know — a desktop's names over a wallpaper — so only the owner can say
+    /// what reads there. A tile on a state's plate keeps the theme's ink by
+    /// its owner setting none.
+    #[must_use]
+    pub fn with_label_ink(mut self, ink: Color) -> Self {
+        self.label_ink = Some(ink);
         self
     }
 
@@ -2447,6 +2497,7 @@ impl IconTile {
                     paint_frame(surface, at, frame, scale, theme);
                 }
             }
+            self.paint_count(surface, slot, scale, theme, font);
             if self.live {
                 let below = parts
                     .and_then(|parts| parts.picture)
@@ -2457,8 +2508,12 @@ impl IconTile {
                 paint_live_mark(surface, slot, below, scale, theme, ink);
             }
         }
+        // A name's shadow reaches past its ink, so the name is held to the
+        // bounds like everything else the tile draws.
         if !self.name_withheld {
-            self.paint_label(surface, bounds, scale, theme, font, ink);
+            surface.with_clip(x, y, w, h, |surface| {
+                self.paint_label(surface, bounds, scale, theme, font, ink);
+            });
         }
         let corner = parts
             .and_then(|parts| parts.picture.or(parts.name))
@@ -2643,6 +2698,24 @@ impl IconTile {
         let Some(band) = self.layout.label_band(bounds, scale, theme, font) else {
             return;
         };
+        let block = self.label_block(band, font, color);
+        let at = (band.left, band.top);
+        if let Some(halo) = &self.label_halo {
+            for line in &halo.0 {
+                line.draw(surface, (bounds.left(), bounds.top()));
+            }
+            TextBlock {
+                shadow: None,
+                ..block
+            }
+            .paint(surface, &self.label, at);
+        } else {
+            block.paint(surface, &self.label, at);
+        }
+    }
+
+    /// The block this tile's name is laid out in within `band`, inked `color`.
+    fn label_block(&self, band: LabelBand, font: BitmapFont, color: Color) -> TextBlock {
         TextBlock {
             font,
             width: band.right.saturating_sub(band.left),
@@ -2652,7 +2725,6 @@ impl IconTile {
             shadow: self.label_shadow,
             cut: self.name_cut,
         }
-        .paint(surface, &self.label, (band.left, band.top));
     }
 
     /// Paint the Signal Bead of an authority or recovery state in the tile's
@@ -2679,6 +2751,38 @@ impl IconTile {
         paint_bead(surface, bx, y.saturating_add(pad), size, color, shape);
     }
 
+    /// Paint the count pill over the top trailing corner of the picture slot
+    /// `(x, y, side)`, within the slot's breadth.
+    fn paint_count(
+        &self,
+        surface: &mut Surface,
+        (x, y, side): (u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) {
+        let Some(count) = self.count else {
+            return;
+        };
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let (text, width, height) = count_pill(count, font, pad);
+        let width = width.min(side);
+        let palette = theme.palette();
+        paint_count_badge(
+            surface,
+            (
+                x.saturating_add(side).saturating_sub(width),
+                y,
+                width,
+                height,
+            ),
+            Color::from(palette.accent),
+            Color::from(palette.on_accent),
+            font,
+            &text,
+        );
+    }
+
     /// Whether the tile is selected (a mixed selection counts, as it does for
     /// every other collection control).
     fn is_selected(&self) -> bool {
@@ -2703,9 +2807,10 @@ impl IconTile {
         self.is_selected() && self.state.pointer != PointerState::Pressed
     }
 
-    /// The colour the tile's label and built-in glyph take: the shared surface
-    /// foreground for the tile's disposition, or the on-accent foreground on
-    /// the one mark that is an opaque accent plate.
+    /// The colour the tile's label and built-in glyph take: the owner's ink
+    /// where it stated one, else the shared surface foreground for the tile's
+    /// disposition, or the on-accent foreground on the one mark that is an
+    /// opaque accent plate.
     ///
     /// The ordinary selection fill is half-opaque, so it tints what lies behind
     /// it rather than replacing it: the theme's own foreground keeps its
@@ -2713,6 +2818,9 @@ impl IconTile {
     /// ink would leave a light theme's name at barely twice the contrast of the
     /// pale orange under it.
     fn label_color(&self, theme: &Theme) -> Color {
+        if let Some(ink) = self.label_ink {
+            return ink;
+        }
         if heavy_contrast(theme) && self.wears_selection_mark() {
             return Color::from(theme.palette().on_accent);
         }
@@ -3140,6 +3248,12 @@ fn name_font(theme: &Theme, scale: Scale) -> BitmapFont {
     role_font(theme, scale, TextRole::ItemLabel)
 }
 
+/// The shadow an [`IconTile`]'s name casts, blurred once
+/// ([`IconTile::label_halo`]) for its owner to keep and hand back to every
+/// paint ([`IconTile::with_label_halo`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LabelHalo(Vec<KeptShadow>);
+
 /// The band an [`IconTile`] draws its name in.
 #[derive(Copy, Clone)]
 struct LabelBand {
@@ -3225,6 +3339,14 @@ fn paint_selection_fill(
         theme,
         base.with_alpha(div255(u32::from(base.a) * u32::from(fade))),
     );
+}
+
+/// The pill `count` is drawn in, set in `font` with `pad` about its digits:
+/// the digits and the pill's width and height.
+fn count_pill(count: u32, font: BitmapFont, pad: u32) -> (String, u32, u32) {
+    let text = itoa(count);
+    let width = font.text_width(&text).saturating_add(pad);
+    (text, width, font.glyph_height().saturating_add(pad))
 }
 
 /// Render a `u32` as decimal into a small stack buffer, `no_std`-friendly.

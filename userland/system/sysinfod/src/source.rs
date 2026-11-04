@@ -26,7 +26,7 @@ use tairix_abi::sysinfo::{
     MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, PlatformCompatible,
     ProcessRecord, RamzipStats, ResourceLimitRecord, SeatRecord, SelfAccountRecord, SystemIdentity,
     Uptime, UserDirectoryRecord, ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord,
-    VolumeIoStatsRecord,
+    VolumeIoStatsRecord, VolumeRemovalRecord,
 };
 use tairix_abi::time::Duration64;
 use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin, ProcId};
@@ -177,6 +177,12 @@ pub trait SysinfoSource {
     /// scoped by [`crate::serve`] to what the caller may see, and paged on the
     /// same terms.
     fn view_records(&self, caller: &Caller) -> Result<Vec<ViewBindingRecord>, Errno>;
+
+    /// Return the device-backed volumes whose device most recently went away
+    /// while they were attached, oldest first, whole: ungated, since each was
+    /// listed by [`mount_records`](Self::mount_records) to everyone, and
+    /// paged on the same terms.
+    fn volume_removals(&self, caller: &Caller) -> Result<Vec<VolumeRemovalRecord>, Errno>;
 
     /// Return `caller`'s effective resource limits and current live usage,
     /// one record per [`LimitKind`] in discriminant order. The query is self-scoped — the answer describes the caller's

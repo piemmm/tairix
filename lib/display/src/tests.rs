@@ -19,6 +19,7 @@ use tairix_abi::driver::display::{
     DamageRect, Display, DisplayFormat, DisplayMemory, DisplayMode, DisplayPower, HardwareCursor,
     OutputMode, Presented, RefreshRate, Serviced,
 };
+use tairix_abi::ipc::IPC_MEMORY_RETRY_NS;
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::seat::{DisplayLease, ReleaseSurface};
 use tairix_abi::time::MonotonicClock;
@@ -492,6 +493,10 @@ impl Rig {
             .serviced(Serviced { latched: true }, &mut self.delivery)
     }
 
+    fn redeliver(&mut self) -> Latch {
+        self.server.redeliver(&mut self.delivery)
+    }
+
     fn lease_moved(&mut self, lease: DisplayLease) {
         self.server.lease_moved(&mut self.display, lease);
     }
@@ -826,6 +831,133 @@ fn a_latch_its_port_refuses_still_releases_the_presenter() {
     rig.delivery.refuse_post = Some(Errno::NoSpace);
     assert_eq!(rig.latch(), Latch::Undelivered(Errno::NoSpace));
     assert!(rig.present(frames[1], &[full()]).is_ok());
+}
+
+/// A latch the kernel had no memory for arms no room member, which would
+/// report room at once for a post refused again, and is posted once its
+/// retry falls due. Regression: it was recorded undelivered and dropped.
+#[test]
+fn a_latch_the_kernel_had_no_memory_for_is_posted_once_its_retry_falls_due() {
+    let mut rig = Rig::new();
+    rig.display.queues = true;
+    let frames = rig.frames();
+    let queued = rig.present(frames[0], &[full()]).expect("queued");
+    rig.delivery.refuse_post = Some(Errno::OutOfMemory);
+    assert_eq!(rig.latch(), Latch::Owed);
+    assert_eq!(rig.server.room_port(), None);
+    assert!(rig.server.deadline_ns().is_some(), "the retry is timed");
+    rig.delivery.refuse_post = None;
+    assert_eq!(
+        rig.server.expire(&mut rig.display, &mut rig.delivery),
+        Latch::Idle,
+        "not yet due"
+    );
+    assert!(rig.delivery.posts.is_empty());
+    rig.clock.advance(IPC_MEMORY_RETRY_NS);
+    assert_eq!(
+        rig.server.expire(&mut rig.display, &mut rig.delivery),
+        Latch::Posted
+    );
+    assert_eq!(
+        rig.delivery.posts,
+        vec![(PORT, DisplayEvent::Presented { seq: queued.seq })]
+    );
+    assert_eq!(rig.server.deadline_ns(), None);
+    assert_eq!(rig.display.abandoned, 0, "it had latched");
+}
+
+/// A latch refused for good is given up once, never posted again, and
+/// counted, the count recorded each time it doubles.
+#[test]
+fn a_latch_refused_for_good_is_given_up_once_and_counted() {
+    let mut rig = Rig::new();
+    rig.display.queues = true;
+    let frames = rig.frames();
+    rig.delivery.refuse_post = Some(Errno::NoSpace);
+    let mut totals = Vec::new();
+    for present in 0..4 {
+        assert!(rig.present(frames[present % 2], &[full()]).is_ok());
+        assert_eq!(rig.latch(), Latch::Undelivered(Errno::NoSpace));
+        assert_eq!(rig.server.room_port(), None);
+        assert_eq!(rig.server.deadline_ns(), None, "nothing is owed");
+        if let Some((total, refusal)) = rig.server.undelivered_to_report() {
+            assert_eq!(refusal, Errno::NoSpace);
+            totals.push(total);
+        }
+    }
+    assert_eq!(rig.redeliver(), Latch::Idle, "nor offered again");
+    assert!(rig.delivery.posts.is_empty());
+    assert_eq!(totals, [1, 2, 4], "a record each time the count doubles");
+}
+
+/// A latch to a port gone with its presenter is dropped: nobody waits on it,
+/// so nothing is owed, posted again or recorded. Regression: it was recorded
+/// as a latch the presenter could not be told.
+#[test]
+fn a_latch_to_a_port_gone_with_its_presenter_is_dropped_unrecorded() {
+    let mut rig = Rig::new();
+    rig.display.queues = true;
+    let frames = rig.frames();
+    assert!(rig.present(frames[0], &[full()]).is_ok());
+    rig.delivery.refuse_post = Some(Errno::NotFound);
+    assert_eq!(rig.latch(), Latch::Gone);
+    assert_eq!(rig.server.room_port(), None);
+    assert_eq!(rig.server.deadline_ns(), None);
+    assert_eq!(rig.server.undelivered_to_report(), None);
+    assert_eq!(rig.redeliver(), Latch::Idle);
+}
+
+/// At most one latch is owed: a later one answers for every present before
+/// it, so it takes the place of one still owed.
+#[test]
+fn a_later_latch_takes_the_place_of_one_still_owed() {
+    let mut rig = Rig::new();
+    rig.display.queues = true;
+    let frames = rig.frames();
+    assert!(rig.present(frames[0], &[full()]).is_ok());
+    rig.delivery.refuse_post = Some(Errno::WouldBlock);
+    assert_eq!(rig.latch(), Latch::Owed);
+    let later = rig.present(frames[1], &[full()]).expect("queued");
+    assert_eq!(rig.latch(), Latch::Owed);
+    rig.delivery.refuse_post = None;
+    assert_eq!(rig.redeliver(), Latch::Posted);
+    assert_eq!(
+        rig.delivery.posts,
+        vec![(PORT, DisplayEvent::Presented { seq: later.seq })]
+    );
+    assert_eq!(rig.redeliver(), Latch::Idle, "nothing more is owed");
+}
+
+/// A present released at its deadline is overdue however its latch fares; an
+/// owed latch whose port's room cannot be watched is posted on the retry
+/// instead, and one owed to a presenter whose lease ended is owed no more.
+#[test]
+fn an_owed_latch_is_posted_on_the_retry_when_its_room_cannot_be_watched() {
+    let mut rig = Rig::new();
+    rig.display.queues = true;
+    let frames = rig.frames();
+    assert!(rig.present(frames[0], &[full()]).is_ok());
+    rig.delivery.refuse_post = Some(Errno::WouldBlock);
+    rig.clock.advance(PRESENT_LATCH_DEADLINE_NS);
+    assert_eq!(
+        rig.server.expire(&mut rig.display, &mut rig.delivery),
+        Latch::Overdue
+    );
+    assert_eq!(rig.server.room_port(), Some(PORT));
+    rig.server.room_unwatched();
+    assert_eq!(rig.server.room_port(), None);
+    rig.delivery.refuse_post = None;
+    rig.clock.advance(IPC_MEMORY_RETRY_NS);
+    assert_eq!(
+        rig.server.expire(&mut rig.display, &mut rig.delivery),
+        Latch::Posted
+    );
+    assert!(rig.present(frames[1], &[full()]).is_ok());
+    rig.delivery.refuse_post = Some(Errno::WouldBlock);
+    assert_eq!(rig.latch(), Latch::Owed);
+    rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
+    assert_eq!(rig.server.room_port(), None);
+    assert_eq!(rig.redeliver(), Latch::Idle);
 }
 
 #[test]
@@ -1376,6 +1508,33 @@ fn a_remote_display_waits_for_a_queued_frames_latch() {
     let event = rig.borrow().delivery.posts[0].1;
     assert!(remote.latched(event));
     assert!(remote.present(&[1u8; FRAME_LEN], &[full()]).is_ok());
+}
+
+/// A latch its presenter's port refused for room, or for the service's own
+/// IPC budget, is owed and posted on the port's room wake, so its presenter
+/// presents again. Regression: the latch was recorded undelivered and
+/// dropped, and its presenter waited for it for ever.
+#[test]
+fn a_latch_refused_for_room_or_budget_reaches_its_presenter_on_the_room_wake() {
+    for refused in [Errno::WouldBlock, Errno::LimitExceeded] {
+        let mut rig = Rig::new();
+        rig.display.queues = true;
+        let (rig, mut remote) = remote(rig);
+        remote
+            .present(&[0u8; FRAME_LEN], &[full()])
+            .expect("queued");
+        rig.borrow_mut().delivery.refuse_post = Some(refused);
+        assert_eq!(rig.borrow_mut().latch(), Latch::Owed, "{refused:?}");
+        assert_eq!(rig.borrow().server.room_port(), Some(PORT), "{refused:?}");
+        assert_eq!(rig.borrow().server.deadline_ns(), None, "{refused:?}");
+        assert!(!remote.ready(), "{refused:?}");
+        rig.borrow_mut().delivery.refuse_post = None;
+        assert_eq!(rig.borrow_mut().redeliver(), Latch::Posted, "{refused:?}");
+        assert_eq!(rig.borrow().server.room_port(), None, "{refused:?}");
+        let event = rig.borrow().delivery.posts[0].1;
+        assert!(remote.latched(event), "{refused:?}");
+        assert!(remote.present(&[1u8; FRAME_LEN], &[full()]).is_ok());
+    }
 }
 
 #[test]

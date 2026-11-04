@@ -27,10 +27,11 @@ use tairix_abi::window_ipc::WINDOW_ENDPOINT;
 use tairix_rt::shm::SharedRegion;
 #[cfg(any(test, freestanding))]
 use {
+    crate::client::{WindowClient, WindowTransport},
     tairix_abi::driver::display::DamageList,
     tairix_abi::Errno,
     tairix_display::winframe::{self, damage_in},
-    tairix_display::{add_damage, SERIAL},
+    tairix_display::{add_damage, stale_frames, SERIAL},
     tairix_geometry::{Rect, Region, StaleFrames},
     tairix_raster::Surface,
 };
@@ -143,6 +144,65 @@ pub fn region_bytes(mode: &DisplayMode, frame_count: u32) -> Option<usize> {
         .checked_mul(usize::try_from(frame_count).ok()?)
 }
 
+/// Frames in a window's shared region: the one the session may still be
+/// reading, and the one the app draws its next present into.
+pub const FRAME_COUNT: u32 = 2;
+
+/// What an application keeps of its window's frames between presents: the
+/// frame the next present is drawn into, and what each lacks of the picture.
+#[cfg(any(test, freestanding))]
+pub(crate) struct FrameRing {
+    stale: StaleFrames,
+    back: usize,
+    /// The change a present carries, held so a present allocates none.
+    changed: Region,
+}
+
+#[cfg(any(test, freestanding))]
+impl FrameRing {
+    /// The ring of a fresh region shaped as `mode`.
+    pub(crate) fn new(mode: &DisplayMode) -> Self {
+        Self {
+            stale: stale_frames(FRAME_COUNT as usize, mode),
+            back: 0,
+            changed: Region::new(),
+        }
+    }
+
+    /// Every frame lacks all of a fresh region shaped as `mode`, and the
+    /// first is drawn next.
+    pub(crate) fn reset(&mut self, mode: &DisplayMode) {
+        self.stale
+            .reset(Rect::new(0, 0, mode.width_px, mode.height_px));
+        self.back = 0;
+    }
+
+    /// Present `damage` as window `window`'s next frame, which `draw` brings
+    /// up to date given its index in the region and the ring's record.
+    ///
+    /// The session reads the frame a present names until a later present
+    /// replaces it, so the window's previous present is answered before the
+    /// other frame is drawn.
+    ///
+    /// # Errors
+    ///
+    /// `draw`'s refusal, and the session's refusal of the present.
+    pub(crate) fn present<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        window: u64,
+        damage: DamageList,
+        draw: impl FnOnce(usize, (&mut StaleFrames, &mut Region)) -> Result<(), Errno>,
+    ) -> Result<(), Errno> {
+        client.await_present(window);
+        draw(self.back, (&mut self.stale, &mut self.changed))?;
+        let index = u32::try_from(self.back).map_err(|_| Errno::OutOfRange)?;
+        client.present(window, index, damage)?;
+        self.back = (self.back + 1) % FRAME_COUNT as usize;
+        Ok(())
+    }
+}
+
 /// Bring frame `index` of `pixels`, a region of frames shaped as `mode`, up to
 /// date from `surface` for a present of `damage`: everything the frame lacks,
 /// as `stale` records it, and `damage`, encoded from `surface`. `changed` is
@@ -172,7 +232,7 @@ pub(crate) fn draw_frame(
         damage.rects(),
         Rect::new(0, 0, mode.width_px, mode.height_px),
     );
-    stale.bring_up_to_date(index, changed, |refresh| {
+    stale.bring_up_to_date(index, changed, Errno::OutOfRange, |refresh| {
         for rect in refresh.rects() {
             if let Some(rect) = damage_in(mode, *rect) {
                 winframe::encode(surface, frame, mode, rect, &SERIAL)?;

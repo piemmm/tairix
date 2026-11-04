@@ -22,8 +22,12 @@ unreadable directory is refused, never guessed at.
 The desktop starts the file manager with the session and keeps it on the
 icon bar, and it never quits: its slot's menu lists your own places and
 whatever is mounted, and choosing one opens a window there; *Network* and
-*Settings…* come last. A click on the slot opens one where the settings
-choose. Asking for a folder that already has a window brings that window to
+*Settings…* come last. A volume you can eject — a USB stick, card or other
+removable disk, or a disk image or share you mounted — opens a submenu
+holding *Eject*, and a disk image of yours that has a title holds *Title*
+too: it opens a field holding the disk's title, ready to change, and
+pressing `Return` writes the new one to the disk. A click on the slot
+opens one where the settings choose. Asking for a folder that already has a window brings that window to
 the front rather than opening another. The menu has no *Quit* row — the file
 manager is part of the desktop, closing its windows simply puts it away, and
 should it ever stop, the desktop starts it again.
@@ -109,9 +113,14 @@ any more it is unmounted again, so `/Storage` holds only what is in use; if
 something else is still using it — a document from it open in another
 application, say — it stays, and is tried again once that may have let go.
 The settings can keep what you open mounted instead, until you eject it or
-your login session ends. *Eject* takes off a volume you mounted, from its
-icon or from its row in the places rail, whose own right-click menu holds
-*Open* and *Eject*; your windows on it move to `/Storage` first. A volume
+your login session ends. *Eject* takes off a volume you mounted, or a
+removable disk while you are using the computer itself, from its icon, from
+its row in the places rail, whose own right-click menu holds *Open* and
+*Eject*, or from the icon-bar slot's menu; your windows on it move to
+`/Storage` first. A removable disk with a file on it still open is not
+ejected, and says so. When you may not eject a removable disk — you are not
+the person at the computer — the desktop asks for an administrator's name
+and password, and ejects it on their say. A volume
 that went away — its disk removed, or its server lost — before all you wrote
 to it was saved leaves the rail but keeps its icon in `/Storage`, and what
 was not saved is lost; *Eject* on that icon asks before letting it go.

@@ -64,6 +64,7 @@ pub struct AppSlot {
     windows: Vec<TaskId>,
     menu: AppMenu,
     click: AppBarClick,
+    revision: u32,
     identity: AppIdentity,
     owner: ProcId,
 }
@@ -88,6 +89,7 @@ impl AppSlot {
             // Nothing declared: the session raises the window this slot was
             // derived from, and an application with none is asked nothing.
             click: AppBarClick::Raise,
+            revision: 0,
             owner,
         }
     }
@@ -118,6 +120,14 @@ impl AppSlot {
     pub fn with_declaration(mut self, menu: AppMenu, click: AppBarClick) -> Self {
         self.menu = menu;
         self.click = click;
+        self
+    }
+
+    /// This slot with the application's own `revision` of its declaration,
+    /// which every answer its menu gives carries back.
+    #[must_use]
+    pub fn with_revision(mut self, revision: u32) -> Self {
+        self.revision = revision;
         self
     }
 
@@ -164,6 +174,12 @@ impl AppSlot {
     #[must_use]
     pub fn click(&self) -> AppBarClick {
         self.click
+    }
+
+    /// The application's own revision of the declaration this slot carries.
+    #[must_use]
+    pub fn revision(&self) -> u32 {
+        self.revision
     }
 
     /// The identity the application's information panel states.

@@ -15,15 +15,14 @@ puede borrar (un `TERM` desconocido degrada al perfil mínimo) hace que
 la orden falle en lugar de imprimir bytes que el terminal mostraría
 como caracteres extraños.
 
-Las consolas de TAIRiX no conservan historial de desplazamiento, así
-que no hay nada que borrar en ese sentido: `-x` (la opción GNU que
-preserva el historial) se acepta por compatibilidad con scripts y no
-cambia nada.
+Si el terminal lo permite, también se borran las líneas que conserva
+por encima de la pantalla —el historial de desplazamiento—, de modo que
+nada de lo que había en la pantalla puede volver a verse desplazándose
+hacia atrás.
 
 ## OPTIONS
 
-- `-x` — aceptada por compatibilidad con GNU; una consola TAIRiX no
-  conserva historial, la salida es idéntica con o sin ella.
+- `-x` — conservar el historial: borrar solo la pantalla.
 - `-h, -?` — mostrar la ayuda breve de esta orden.
 
 ## EXAMPLES

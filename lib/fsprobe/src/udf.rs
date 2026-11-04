@@ -66,6 +66,18 @@ pub const DESCRIPTOR_LEN: usize = 512;
 /// Where a Logical Volume Descriptor's partition map table begins.
 pub const LVD_MAPS_AT: usize = 440;
 
+/// Bytes of a logical volume identifier (a 128-byte dstring).
+pub const LOGICAL_ID_LEN: usize = 128;
+
+/// Where a Logical Volume Descriptor records the logical volume identifier.
+pub const LVD_LOGICAL_ID: core::ops::Range<usize> = 84..84 + LOGICAL_ID_LEN;
+
+/// Bytes of a volume identifier (a 32-byte dstring).
+pub const VOLUME_ID_LEN: usize = 32;
+
+/// Where a Primary Volume Descriptor records the volume identifier.
+pub const PVD_VOLUME_ID: core::ops::Range<usize> = 24..24 + VOLUME_ID_LEN;
+
 /// Byte offset, from a session's start, where the volume recognition
 /// sequence begins: past the system area.
 pub const VRS_START: u64 = SYSTEM_AREA_LEN;
@@ -449,9 +461,17 @@ impl Volume {
         let mut out = [0u8; LABEL_MAX];
         let mut len = cs0_label(dstring(&self.logical.identifier), &mut out);
         if len == 0 {
-            len = cs0_label(dstring(&self.pvd[24..56]), &mut out);
+            len = cs0_label(dstring(&self.pvd[PVD_VOLUME_ID]), &mut out);
         }
         (out, len)
+    }
+
+    /// The volume as a retitle leaves it that recorded `logical` as its
+    /// logical volume identifier and `volume` as its volume identifier: read
+    /// as the probe reads it again, with no read.
+    pub fn retitle(&mut self, logical: &[u8; LOGICAL_ID_LEN], volume: &[u8; VOLUME_ID_LEN]) {
+        self.logical.identifier = *logical;
+        self.pvd[PVD_VOLUME_ID].copy_from_slice(volume);
     }
 
     /// The bytes the volume spans from the device's start: to the end of its
@@ -755,7 +775,7 @@ fn parse_lvd(sector: &[u8]) -> Result<Option<LogicalVolume>, DriverError> {
     let (Some(file_set), Some(integrity), Some(identifier)) = (
         LongAd::at(sector, 248),
         ExtentAd::at(sector, 432),
-        sector.get(84..212).and_then(|id| id.try_into().ok()),
+        sector.get(LVD_LOGICAL_ID).and_then(|id| id.try_into().ok()),
     ) else {
         return Ok(None);
     };

@@ -8,19 +8,24 @@
 //! may have consumed the very wake an elapsed period raised, and a period left
 //! unserviced stalls its stream for good once nothing else is queued behind
 //! it.
+//!
+//! A notification the mixer's port refuses for want of room, budget or memory
+//! is held, folded where its kind allows, and offered again when the serve
+//! loop reports room or its pause has run, so the interrupt path never waits
+//! on the mixer and nothing a wait would deliver is dropped.
 
 use tairix_abi::driver::audio::{Audio, AudioInterrupt, MAX_DEVICE_ENDPOINTS};
 use tairix_abi::driver::audio_channel::{
     AttachParams, AudioChannelNotify, AudioChannelRequest, AUDIO_CHANNEL_MAX_REQUEST,
 };
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
+use tairix_abi::waitset::WaitSetOp;
 use tairix_abi::{Errno, ProcId};
+use tairix_inline::ArrayVec;
 
+use crate::owed::{self, Owed, PORTS};
+use crate::server::ENDPOINT_SLOTS;
 use crate::AudioChannelServer;
-
-/// Endpoint slots the dispatcher holds a mapping for: the ABI's own endpoint
-/// ceiling, so a device cannot present one it could not serve.
-const ENDPOINT_SLOTS: usize = MAX_DEVICE_ENDPOINTS as usize;
 
 /// A shared PCM region the mixer granted, as this process mapped it.
 pub trait MappedRegion {
@@ -58,9 +63,13 @@ pub trait ChannelIo {
     /// Give a mapping back.
     fn unmap(&mut self, region: Self::Region);
 
-    /// Send `frame` to the notify port `port`. A send that fails costs a late
-    /// mixer wake, which the next period recovers.
-    fn notify(&mut self, port: u64, frame: &[u8]);
+    /// Send `frame` to the notify port `port`.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal of the send, which the dispatcher reads for what
+    /// would lift it.
+    fn notify(&mut self, port: u64, frame: &[u8]) -> Result<(), Errno>;
 
     /// Record that a granted region of `mapped` bytes is short of the
     /// `expected` bytes the agreed ring of `ring_frames` frames needs.
@@ -82,12 +91,16 @@ impl<R: MappedRegion> Attached<R> {
     }
 }
 
-/// The pure server, the regions it services, and the I/O around them.
+/// The pure server, the regions it services, what the mixer is owed, and the
+/// I/O around them.
 pub struct Dispatcher<A: Audio, I: ChannelIo> {
     server: AudioChannelServer<A>,
     io: I,
     regions: [Option<Attached<I::Region>>; ENDPOINT_SLOTS],
     request: [u8; AUDIO_CHANNEL_MAX_REQUEST],
+    owed: Owed,
+    /// The ports whose room member the serve loop has armed.
+    armed: ArrayVec<u64, PORTS>,
 }
 
 impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
@@ -102,6 +115,8 @@ impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
             io,
             regions: [const { None }; ENDPOINT_SLOTS],
             request: [0; AUDIO_CHANNEL_MAX_REQUEST],
+            owed: Owed::default(),
+            armed: ArrayVec::new(),
         }
     }
 
@@ -141,6 +156,69 @@ impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
         }
     }
 
+    /// Room came in a port a held notification waits on, or the pause for
+    /// what the kernel had no memory for ran: offer what is held.
+    pub fn on_room(&mut self) {
+        let Self {
+            server, io, owed, ..
+        } = self;
+        owed.flush(
+            |held| destination(server, held),
+            |port, held| io.notify(port, &held.encode()),
+        );
+    }
+
+    /// Keep a room member armed, through `member`, on exactly the ports a
+    /// held notification waits on room in — `member` adds or deletes the one
+    /// for a port, answering whether it took — and answer whether every one
+    /// is armed: one that cannot be has nothing to report its room, so what
+    /// it is owed waits on the pause instead. Called before every wait, since
+    /// room is level-triggered and a member left on a port owed nothing would
+    /// wake the loop for ever.
+    pub fn watch(&mut self, member: &mut dyn FnMut(WaitSetOp, u64) -> bool) -> bool {
+        let Self {
+            server,
+            owed,
+            armed,
+            ..
+        } = self;
+        let server = &*server;
+        let to = |held: &AudioChannelNotify| destination(server, held);
+        armed.retain(|port| {
+            let wanted = owed.waits_on_room(*port, to);
+            if !wanted {
+                member(WaitSetOp::Del, *port);
+            }
+            wanted
+        });
+        let mut every = true;
+        for port in owed.rooms(&to) {
+            if armed.contains(&port) {
+                continue;
+            }
+            if !armed.is_full() && member(WaitSetOp::Add, port) {
+                let _ = armed.try_push(port);
+            } else {
+                every = false;
+            }
+        }
+        every
+    }
+
+    /// Whether a held notification waits on kernel memory, which nothing
+    /// reports: the serve loop then owes [`Self::on_room`] once a pause has
+    /// run.
+    #[must_use]
+    pub fn starved(&self) -> bool {
+        self.owed.starved()
+    }
+
+    /// How many notifications were refused for good and given up on, once
+    /// that total has doubled since it was last taken.
+    pub fn given_up(&mut self) -> Option<u64> {
+        self.owed.given_up()
+    }
+
     /// Move a period for `endpoint` if its boundary passed, and send what its
     /// causes name.
     fn report_endpoint(&mut self, causes: AudioInterrupt, endpoint: u16) {
@@ -150,13 +228,11 @@ impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
             self.service_loss(endpoint);
         }
         if AudioInterrupt::names(causes.jack_changed, endpoint) {
-            let watch = self.server.watch_endpoint();
-            if let (Some(port), Ok(facts)) = (watch, self.server.audio().endpoint_facts(endpoint)) {
-                let changed = AudioChannelNotify::JackChanged {
+            if let Ok(facts) = self.server.audio().endpoint_facts(endpoint) {
+                self.tell(AudioChannelNotify::JackChanged {
                     endpoint,
                     jack: facts.jack,
-                };
-                self.io.notify(port, &changed.encode());
+                });
             }
         }
     }
@@ -170,28 +246,22 @@ impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
         match self.server.service(endpoint, attached.ring()) {
             Ok(serviced) => {
                 let position = serviced.report.position;
-                self.notify(
+                self.tell(AudioChannelNotify::PeriodElapsed {
                     endpoint,
-                    AudioChannelNotify::PeriodElapsed {
+                    position,
+                    sampled_at: serviced.report.sampled_at,
+                });
+                if serviced.lost_frames != 0 {
+                    self.tell(AudioChannelNotify::Xrun {
                         endpoint,
                         position,
-                        sampled_at: serviced.report.sampled_at,
-                    },
-                );
-                if serviced.lost_frames != 0 {
-                    self.notify(
-                        endpoint,
-                        AudioChannelNotify::Xrun {
-                            endpoint,
-                            position,
-                            lost_frames: serviced.lost_frames,
-                        },
-                    );
+                        lost_frames: serviced.lost_frames,
+                    });
                 }
                 // The mixer handed these frames over long before they were
                 // heard, so only this side can say when the last one was.
                 if !serviced.report.running {
-                    self.notify(endpoint, AudioChannelNotify::Drained { endpoint, position });
+                    self.tell(AudioChannelNotify::Drained { endpoint, position });
                 }
             }
             Err(err) => self.fault(endpoint, err),
@@ -205,14 +275,11 @@ impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
             return;
         };
         match self.server.service(endpoint, attached.ring()) {
-            Ok(serviced) if serviced.lost_frames != 0 => self.notify(
+            Ok(serviced) if serviced.lost_frames != 0 => self.tell(AudioChannelNotify::Xrun {
                 endpoint,
-                AudioChannelNotify::Xrun {
-                    endpoint,
-                    position: serviced.report.position,
-                    lost_frames: serviced.lost_frames,
-                },
-            ),
+                position: serviced.report.position,
+                lost_frames: serviced.lost_frames,
+            }),
             Ok(_) => {}
             Err(err) => self.fault(endpoint, err),
         }
@@ -225,14 +292,20 @@ impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
         self.notify_fault(endpoint, err);
     }
 
-    fn notify(&mut self, endpoint: u16, what: AudioChannelNotify) {
-        if let Some(port) = self.server.notify_endpoint(endpoint) {
-            self.io.notify(port, &what.encode());
-        }
+    /// Tell the mixer `what`, now or once its port can take it.
+    fn tell(&mut self, what: AudioChannelNotify) {
+        let Self {
+            server, io, owed, ..
+        } = self;
+        owed.tell(
+            what,
+            |held| destination(server, held),
+            |port, held| io.notify(port, &held.encode()),
+        );
     }
 
     fn notify_fault(&mut self, endpoint: u16, reason: Errno) {
-        self.notify(endpoint, AudioChannelNotify::Faulted { endpoint, reason });
+        self.tell(AudioChannelNotify::Faulted { endpoint, reason });
     }
 
     /// Receive one call, drive the pure server, and answer it. A decode
@@ -378,6 +451,16 @@ impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
         });
         let _ = self.server.audio_mut().set_event_interrupts(true);
         status
+    }
+}
+
+/// Where `what` goes: a connector's change to the watch, anything else to its
+/// endpoint's attachment, and nowhere once the mixer has let that go.
+fn destination<A: Audio>(server: &AudioChannelServer<A>, what: &AudioChannelNotify) -> Option<u64> {
+    if matches!(what, AudioChannelNotify::JackChanged { .. }) {
+        server.watch_endpoint()
+    } else {
+        server.notify_endpoint(owed::endpoint(what))
     }
 }
 

@@ -24,8 +24,14 @@ rifiutata, mai indovinata.
 Il desktop avvia il gestore di file insieme alla sessione e lo tiene sulla
 barra delle icone, e questo non esce mai: il menu della sua posizione elenca
 i vostri luoghi e tutto ciò che è montato, e sceglierne uno vi apre una
-finestra; *Rete* e *Impostazioni…* sono le ultime voci. Un clic sulla
-posizione ne apre una nella cartella scelta nelle impostazioni. Chiedere una
+finestra; *Rete* e *Impostazioni…* sono le ultime voci. Un volume che potete
+espellere — una chiavetta USB, una scheda di memoria o un altro disco
+rimovibile, oppure un'immagine disco o una condivisione che avete montato —
+apre un sottomenu che contiene *Espelli*, e quello di un'immagine disco
+vostra che ha un titolo contiene anche *Titolo*: questa voce apre un campo
+con il titolo del disco, pronto da modificare, e premere `Return` scrive il
+nuovo sul disco. Un clic sulla posizione ne apre una nella cartella scelta
+nelle impostazioni. Chiedere una
 cartella che ha già una finestra porta quella finestra in primo piano anziché
 aprirne un'altra. Il menu non ha la voce *Esci*: il gestore di file fa parte
 del desktop, chiuderne le finestre semplicemente lo mette via e, se mai
@@ -120,9 +126,15 @@ applicazione — resta montato, e lo smontaggio viene ritentato non appena
 quello potrebbe averlo rilasciato. Le impostazioni possono invece tenere
 montato ciò che aprite, finché non lo espellete o non
 termina la vostra sessione di accesso. *Espelli* toglie un volume che
-avete montato, dalla sua icona o dalla sua riga nella barra dei luoghi, il
-cui menu contestuale contiene *Apri* ed *Espelli*; le vostre finestre su
-di esso passano prima a `/Storage`. Un volume sparito — rimosso il suo
+avete montato, o un disco rimovibile mentre state usando il computer stesso,
+dalla sua icona, dalla sua riga nella barra dei luoghi, il cui menu
+contestuale contiene *Apri* ed *Espelli*, o dal menu della posizione sulla
+barra delle icone; le vostre finestre su di esso passano prima a `/Storage`.
+Un disco rimovibile su cui è ancora aperto un file non viene espulso, e
+viene spiegato perché. Quando non avete il permesso di espellere un disco
+rimovibile — non siete voi la persona davanti al computer — il desktop
+chiede il nome e la password di un amministratore, e lo espelle con il suo
+consenso. Un volume sparito — rimosso il suo
 disco, o perso il suo server — prima che fosse salvato tutto ciò che
 avevate scritto su di esso viene tolto dalla barra ma conserva la sua
 icona in `/Storage`, e ciò che non era stato salvato va perso; *Espelli*

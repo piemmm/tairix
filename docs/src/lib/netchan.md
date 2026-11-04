@@ -96,12 +96,25 @@ the bare-metal targets a driver binary is built for. It:
    level condition that is still true while frames are undrained), then
    acknowledges, then harvests the rings into the shared region itself under
    `Drain`, and wakes the stack with a single notify. The notify carries what
-   the driver already knows — the live link, whether a source is still masked,
-   and the device's cumulative pre-filter count — so a pure receive costs the
-   stack no `Service` call at all. That last field is not a convenience: a
+   the driver already knows — whether the link changed, whether a source is
+   still masked, and the device's cumulative pre-filter count — so a pure
+   receive costs the stack no `Service` call at all. The link itself travels
+   only on a `Service` reply: a notify saying it changed makes the stack
+   doorbell for it, so a notify that waited in the port can never set an older
+   link over the one a newer reply reported. A drain after a `Service` reply,
+   which the reply's link predates, notifies a change it sees the same way. That last field is not a convenience: a
    receive-only interface rings no doorbell, so without it the operator's
    `stats:net/<iface>/rx.filtered` would sit frozen at whatever the last
-   transmit happened to observe.
+   transmit happened to observe. A notify the stack's port refuses is held
+   rather than dropped (`Notifier`), since it is the only report of a
+   receive and of a masked source. One refused for room or for the driver's
+   own IPC budget is offered again on the port's room wake, a member armed
+   only while one is owed; one the kernel had no memory for, after
+   `IPC_MEMORY_RETRY_NS`; and one refused for good is counted and recorded
+   (event 29182). A notify rung while one is owed folds into it, keeping any
+   link-change or back-pressure claim, and a held notify goes out with the
+   device's newest count; an attach or a detach forgets it. The stack keeps the
+   largest count it has seen, so one read out of order cannot take it back.
 
 ## Fail closed
 
@@ -124,7 +137,12 @@ once a stack has attached, every request but `Facts` and `Attach` refused to
 another instance. `Drain` is driven directly over synthetic reports: the re-arm
 look-once-more, a frame landing in that window, a full ring, a fault, a
 link change with no frame moved, the pre-filter count reaching the notify,
-and an exhausted round budget stopping masked *and* asking for release. The process loop is exercised live by the two-process QEMU verticals
+and an exhausted round budget stopping masked *and* asking for release.
+`Notifier` is driven directly too: a notify refused for room or budget posted
+on the room wake, one refused for memory posted once its retry falls due with
+no room member armed, one refused for good counted and never offered again,
+one to a port that is gone dropped unrecorded, notifies folding into the one
+owed, and a refused room watch falling back to the timed retry. The process loop is exercised live by the two-process QEMU verticals
 (`netstack_autoload_qemu_*`, `netstack_dhcp_qemu_*`,
 `netstack_dhcp6_qemu_*`), which drive the real stack against the real server
 across a process boundary.

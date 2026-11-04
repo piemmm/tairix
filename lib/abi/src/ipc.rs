@@ -21,12 +21,204 @@ pub const IPC_MESSAGE_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 /// The deepest per-sender bound a port or call endpoint may be created with:
 /// the most messages one sender may have queued at a port, or calls one caller
 /// may have waiting on the server — posted or in service — at a call endpoint.
+/// It is also how many uncollected answers at one call endpoint refuse a
+/// caller's posts there until it holds fewer: the calls it posted below that
+/// may all be answered, taking it up to its depth past it.
 ///
 /// Each sender pays for its own queued traffic and no sender's traffic counts
 /// against another's, so this is a containment bound on one sender's lane —
-/// what a sender's own lane is searched for is at most this deep — and fixed
-/// here rather than taken on trust from the creating task.
+/// a lane holds fewer than twice this many items, so searching one is
+/// bounded however large the sender's budget — and fixed here rather than
+/// taken on trust from the creating task.
 pub const IPC_SENDER_DEPTH_MAX: usize = 256;
+
+/// How long a sender holding a payload the kernel refused
+/// [`OutOfMemory`](Errno::OutOfMemory) waits before offering it again.
+///
+/// No event marks kernel memory freeing, so such a sender retries on a
+/// one-shot timer of this length rather than parking on a wake that never
+/// comes or spinning on the refusal: a starved kernel is asked at most a
+/// hundred times a second, and what the sender holds is late by less than a
+/// frame.
+pub const IPC_MEMORY_RETRY_NS: u64 = 10_000_000;
+
+/// What a refused message send leaves a sender holding a payload its receiver
+/// must not lose to do: the one reading of the kernel's refusals.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SendRefusal {
+    /// The sender's lane at the destination is full: the destination's
+    /// [`PortRoom`](crate::WaitSourceKind::PortRoom) member reports a receive
+    /// freeing it.
+    Full,
+    /// The sender's own `ipc-queue-bytes` budget is spent: the destination's
+    /// `PortRoom` member reports it freeing too.
+    Budget,
+    /// The kernel had no memory for it, and nothing reports memory freeing:
+    /// the sender offers it again after [`IPC_MEMORY_RETRY_NS`].
+    Memory,
+    /// The destination is gone, and nothing is lost with it.
+    Gone,
+    /// A refusal no wait lifts: the payload is given up, and the loss stated.
+    Final(Errno),
+}
+
+impl SendRefusal {
+    /// What `errno`, a send's refusal, leaves the sender to do.
+    #[must_use]
+    pub const fn of(errno: Errno) -> Self {
+        match errno {
+            Errno::WouldBlock => Self::Full,
+            Errno::LimitExceeded => Self::Budget,
+            Errno::OutOfMemory => Self::Memory,
+            Errno::NotFound => Self::Gone,
+            errno => Self::Final(errno),
+        }
+    }
+
+    /// What the refused payload waits for, or `None` when no wait lifts the
+    /// refusal and the payload is answered for: its destination gone, or the
+    /// refusal final.
+    #[must_use]
+    pub const fn wait(self) -> Option<SendWait> {
+        match self {
+            Self::Full | Self::Budget => Some(SendWait::Room),
+            Self::Memory => Some(SendWait::Memory),
+            Self::Gone | Self::Final(_) => None,
+        }
+    }
+}
+
+/// What a send of a payload its receiver must not lose came to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Sent {
+    /// The destination took it.
+    Taken,
+    /// Refused for what this waits on: the payload stays held.
+    Waits(SendWait),
+    /// The destination is gone, and nothing is lost with it.
+    Gone,
+    /// Refused for good: the payload is given up, and the loss stated.
+    Refused(Errno),
+}
+
+impl Sent {
+    /// What `sent`, a send's result, came to.
+    #[must_use]
+    pub const fn of(sent: Result<(), Errno>) -> Self {
+        let Err(errno) = sent else {
+            return Self::Taken;
+        };
+        let refusal = SendRefusal::of(errno);
+        match refusal.wait() {
+            Some(wait) => Self::Waits(wait),
+            None if matches!(refusal, SendRefusal::Gone) => Self::Gone,
+            None => Self::Refused(errno),
+        }
+    }
+}
+
+/// What a payload a send refused waits for before it is offered again.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SendWait {
+    /// The destination's `PortRoom` member: a receive there, or the sender's
+    /// own budget freeing.
+    Room,
+    /// Kernel memory, which nothing reports freeing: a pause of
+    /// [`IPC_MEMORY_RETRY_NS`].
+    Memory,
+}
+
+/// When a payload held for a refused send is offered again: on the
+/// destination's room wake, or once a pause has run.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Reoffer {
+    /// When the destination's `PortRoom` member reports room.
+    OnRoom,
+    /// Once the pause ending at this monotonic instant has run: one for
+    /// kernel memory, or for room whose member could not be armed.
+    After(u64),
+}
+
+impl Reoffer {
+    /// When a payload that waits for `wait` from `now_ns` is offered again.
+    #[must_use]
+    pub const fn of(wait: SendWait, now_ns: u64) -> Self {
+        match wait {
+            SendWait::Room => Self::OnRoom,
+            SendWait::Memory => Self::pause(now_ns),
+        }
+    }
+
+    /// Once a pause of [`IPC_MEMORY_RETRY_NS`] from `now_ns` has run.
+    #[must_use]
+    pub const fn pause(now_ns: u64) -> Self {
+        Self::After(now_ns.saturating_add(IPC_MEMORY_RETRY_NS))
+    }
+
+    /// When the pause runs out, if this waits on one.
+    #[must_use]
+    pub const fn deadline(self) -> Option<u64> {
+        match self {
+            Self::OnRoom => None,
+            Self::After(at_ns) => Some(at_ns),
+        }
+    }
+}
+
+/// The one pause a loop runs for the payloads it holds that the kernel had no
+/// memory for, which nothing reports freeing: they are offered again each time
+/// a pause of [`IPC_MEMORY_RETRY_NS`] runs out, for as long as any is held.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct MemoryPause {
+    ends_ns: Option<u64>,
+}
+
+impl MemoryPause {
+    /// No pause running.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { ends_ns: None }
+    }
+
+    /// Whether the pause running has run out by the instant `now_ns` reads,
+    /// read only while one runs; one that has is over.
+    pub fn ran_out(&mut self, now_ns: impl FnOnce() -> u64) -> bool {
+        let out = self.ends_ns.is_some_and(|ends| now_ns() >= ends);
+        if out {
+            self.ends_ns = None;
+        }
+        out
+    }
+
+    /// Keep a pause running while `held` — one beginning at the instant
+    /// `now_ns` reads where none runs — and none once nothing is.
+    pub fn keep(&mut self, held: bool, now_ns: impl FnOnce() -> u64) {
+        if !held {
+            self.stop();
+        } else if self.ends_ns.is_none() {
+            self.ends_ns = Some(now_ns().saturating_add(IPC_MEMORY_RETRY_NS));
+        }
+    }
+
+    /// End the pause: nothing it was run for is held.
+    pub fn stop(&mut self) {
+        self.ends_ns = None;
+    }
+
+    /// When the pause runs out, if one runs.
+    #[must_use]
+    pub const fn ends(&self) -> Option<u64> {
+        self.ends_ns
+    }
+
+    /// `timeout_ns`, a park's timeout, cut to what is left of the pause at the
+    /// instant `now_ns` reads, read only while one runs.
+    pub fn bound(&self, timeout_ns: u64, now_ns: impl FnOnce() -> u64) -> u64 {
+        self.ends_ns.map_or(timeout_ns, |ends| {
+            timeout_ns.min(ends.saturating_sub(now_ns()))
+        })
+    }
+}
 
 /// Whether `id` is a **reserved well-known** call-endpoint id: the fixed
 /// rendezvous each system service publishes, named in the body below, the
@@ -466,10 +658,95 @@ impl core::fmt::Debug for PortName {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_reserved_endpoint, is_seat_scoped_endpoint, IpcMessageHeader, PortName,
-        IPC_MESSAGE_HEADER_MAGIC, IPC_MESSAGE_MAX_PAYLOAD_LEN, PORT_NAME_MAX_LEN,
+        is_reserved_endpoint, is_seat_scoped_endpoint, IpcMessageHeader, MemoryPause, PortName,
+        Reoffer, SendRefusal, SendWait, Sent, IPC_MEMORY_RETRY_NS, IPC_MESSAGE_HEADER_MAGIC,
+        IPC_MESSAGE_MAX_PAYLOAD_LEN, PORT_NAME_MAX_LEN,
     };
     use crate::{Errno, ABI_VERSION_CURRENT_U16};
+
+    /// Back-pressure and the sender's own budget wait on the destination's
+    /// room, kernel memory on a timer, a gone destination loses nothing, and
+    /// every other refusal is final.
+    #[test]
+    fn a_refused_send_is_read_once_for_what_it_waits_on() {
+        assert_eq!(SendRefusal::of(Errno::WouldBlock), SendRefusal::Full);
+        assert_eq!(SendRefusal::of(Errno::LimitExceeded), SendRefusal::Budget);
+        assert_eq!(SendRefusal::of(Errno::OutOfMemory), SendRefusal::Memory);
+        assert_eq!(SendRefusal::of(Errno::NotFound), SendRefusal::Gone);
+        for errno in [
+            Errno::MessageTooLarge,
+            Errno::PermissionDenied,
+            Errno::BadAddress,
+        ] {
+            assert_eq!(SendRefusal::of(errno), SendRefusal::Final(errno));
+            assert_eq!(SendRefusal::of(errno).wait(), None);
+        }
+        assert_eq!(SendRefusal::Full.wait(), Some(SendWait::Room));
+        assert_eq!(SendRefusal::Budget.wait(), Some(SendWait::Room));
+        assert_eq!(SendRefusal::Memory.wait(), Some(SendWait::Memory));
+        assert_eq!(SendRefusal::Gone.wait(), None);
+    }
+
+    /// A send's whole outcome: taken, held for what refused it, its
+    /// destination gone, or refused for good.
+    #[test]
+    fn a_sends_outcome_is_read_once_whole() {
+        assert_eq!(Sent::of(Ok(())), Sent::Taken);
+        assert_eq!(
+            Sent::of(Err(Errno::WouldBlock)),
+            Sent::Waits(SendWait::Room)
+        );
+        assert_eq!(
+            Sent::of(Err(Errno::LimitExceeded)),
+            Sent::Waits(SendWait::Room)
+        );
+        assert_eq!(
+            Sent::of(Err(Errno::OutOfMemory)),
+            Sent::Waits(SendWait::Memory)
+        );
+        assert_eq!(Sent::of(Err(Errno::NotFound)), Sent::Gone);
+        assert_eq!(
+            Sent::of(Err(Errno::PermissionDenied)),
+            Sent::Refused(Errno::PermissionDenied)
+        );
+    }
+
+    /// Room is offered on its wake and memory after a pause from when the
+    /// refusal was met, which saturates rather than wraps.
+    #[test]
+    fn a_held_payload_is_offered_on_room_or_once_its_pause_has_run() {
+        assert_eq!(Reoffer::of(SendWait::Room, 5), Reoffer::OnRoom);
+        assert_eq!(Reoffer::OnRoom.deadline(), None);
+        let pause = Reoffer::of(SendWait::Memory, 5);
+        assert_eq!(pause, Reoffer::pause(5));
+        assert_eq!(pause.deadline(), Some(5 + IPC_MEMORY_RETRY_NS));
+        assert_eq!(Reoffer::pause(u64::MAX).deadline(), Some(u64::MAX));
+    }
+
+    /// A pause begins when something is first held, keeps its end while it
+    /// stays held, runs out once, bounds a park by what is left of it, and
+    /// reads the clock only while one runs.
+    #[test]
+    fn a_memory_pause_runs_while_something_is_held_and_runs_out_once() {
+        let mut pause = MemoryPause::new();
+        assert!(!pause.ran_out(|| panic!("no pause, no clock read")));
+        assert_eq!(pause.bound(7, || panic!("no pause, no clock read")), 7);
+        pause.keep(true, || 100);
+        pause.keep(true, || panic!("a running pause keeps its end"));
+        let ends = 100 + IPC_MEMORY_RETRY_NS;
+        assert_eq!(pause.ends(), Some(ends));
+        assert_eq!(pause.bound(u64::MAX, || ends - 3), 3);
+        assert_eq!(pause.bound(1, || ends - 3), 1, "a sooner timeout stands");
+        assert!(!pause.ran_out(|| ends - 1));
+        assert!(pause.ran_out(|| ends));
+        assert!(!pause.ran_out(|| panic!("over")), "it runs out once");
+        pause.keep(true, || 200);
+        pause.keep(false, || panic!("ending reads no clock"));
+        assert_eq!(pause.ends(), None);
+        pause.keep(true, || 300);
+        pause.stop();
+        assert_eq!(pause.ends(), None);
+    }
 
     #[test]
     fn reserved_endpoints_cover_every_well_known_id() {

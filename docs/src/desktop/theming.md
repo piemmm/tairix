@@ -363,6 +363,10 @@ bundles, under a stable `ThemeId`:
     once it rests: slower than it grew, so the eye can follow it home.
   - `WindowActivate` (`115` ms) is a window's shadow easing between its lifted
     and resting heights as the focus moves to or from its family.
+  - `DragGather` (`220` ms) is what a drag of several items carries gathering
+    under the pointer: each item's picture flying from where it stood into the
+    stack; each card behind the front then follows the pointer's path a sixth
+    of it after the one in front.
   - A theme in reduced motion reports **every** duration as `0`, which a
     consumer reads as "change it now". That is the whole reduced-motion path:
     the state still changes visibly, through contrast and shape, and no

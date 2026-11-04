@@ -20,6 +20,7 @@ use tairix_abi::sysinfo::{
     NetInterfaceRatesRequest, PageRequest, PlatformCompatible, ProcessRecord, ReclaimClassRecord,
     ResourceLimitRecord, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
     ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+    VolumeRemovalRecord,
 };
 use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -366,6 +367,10 @@ fn inventory_list(
                     .map(|views| views_shown(views, caller))
             },
             ViewBindingRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::VOLUME_REMOVALS => page.of(
+            || source.volume_removals(caller),
+            VolumeRemovalRecord::to_le_bytes,
         ),
         SysinfoQueryId::SEAT_LIST => page.of(|| source.seats(caller), SeatRecord::to_le_bytes),
         SysinfoQueryId::USER_DIRECTORY => page.of(
@@ -914,7 +919,8 @@ mod tests {
     };
     use tairix_abi::sysinfo::{
         DmaFaultSignal, DmaGroupRecord, DmaNodeRecord, DmaOwnerState, DmaTables, DmaUnitFamily,
-        DmaUnitRecord, DmaUnitState, NetInterfaceRatesRequest, VolumeClass, MOUNT_NO_OWNER,
+        DmaUnitRecord, DmaUnitState, NetInterfaceRatesRequest, RemovedWrites, VolumeClass,
+        VolumeRemovalRecord, MOUNT_NO_OWNER,
     };
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::MEMORY_CLASS_COUNT;
@@ -1359,6 +1365,15 @@ mod tests {
             _caller: &Caller,
         ) -> Result<alloc::vec::Vec<ViewBindingRecord>, Errno> {
             Ok(self.views.clone())
+        }
+        fn volume_removals(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<VolumeRemovalRecord>, Errno> {
+            Ok(alloc::vec![
+                VolumeRemovalRecord::new(5, [0x55; 16], RemovedWrites::None)?,
+                VolumeRemovalRecord::new(6, [0x66; 16], RemovedWrites::Lost)?,
+            ])
         }
         fn cpu_times(&self, _caller: &Caller) -> Result<alloc::vec::Vec<CpuTimeRecord>, Errno> {
             Ok(alloc::vec![
@@ -2419,6 +2434,37 @@ mod tests {
         assert_eq!(
             serve_once(&source, &caller(&caps), &sink, &req, &mut tiny),
             Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn volume_removals_need_no_capability_and_page() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[]);
+        let sink = RecordingSink::new();
+        let page = |offset| PageRequest {
+            offset,
+            limit: 10,
+            flags: 0,
+            walk: PageRequest::FRESH,
+        };
+        let req = request_bytes(SysinfoQueryId::VOLUME_REMOVALS, &page(0).to_le_bytes());
+        let mut resp = [0u8; 1024];
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, 2 * VolumeRemovalRecord::WIRE_LEN);
+        let first = VolumeRemovalRecord::from_bytes(&resp[..VolumeRemovalRecord::WIRE_LEN])
+            .expect("a removal");
+        assert_eq!((first.sequence(), first.volume_id()), (5, [0x55; 16]));
+        let second = VolumeRemovalRecord::from_bytes(
+            &resp[VolumeRemovalRecord::WIRE_LEN..2 * VolumeRemovalRecord::WIRE_LEN],
+        )
+        .expect("a removal");
+        assert_eq!(second.writes(), RemovedWrites::Lost);
+        assert!(sink.events.borrow().as_slice().is_empty(), "not audited");
+        let req_end = request_bytes(SysinfoQueryId::VOLUME_REMOVALS, &page(2).to_le_bytes());
+        assert_eq!(
+            serve_once(&source, &caller(&caps), &sink, &req_end, &mut resp),
+            Ok(0)
         );
     }
 

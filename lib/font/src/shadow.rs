@@ -103,7 +103,42 @@ pub(crate) fn draw_run_shadow(
     pieces: &[&str],
     shadow: TextShadow,
 ) -> i32 {
-    let (x, y) = at;
+    let (pen, mask) = softened(font, client, at, pieces, shadow, Some(&*surface));
+    if let Some(mask) = mask {
+        mask.draw(surface, (0, 0), shadow.color);
+    }
+    pen
+}
+
+/// The shadow [`draw_run_shadow`] lays under the run `pieces` make from the
+/// pen at `at`, blurred whole and kept rather than drawn; `None` for one that
+/// draws nothing or whose memory cannot be had. The run is already warmed.
+pub(crate) fn keep_run_shadow(
+    font: BitmapFont,
+    client: &mut impl FontClient,
+    at: (i32, i32),
+    pieces: &[&str],
+    shadow: TextShadow,
+) -> Option<KeptShadow> {
+    let (_, mask) = softened(font, client, at, pieces, shadow, None);
+    Some(KeptShadow {
+        mask: mask?,
+        color: shadow.color,
+    })
+}
+
+/// The pen the ink of the run `pieces` make, drawn by `font` from the pen at
+/// `at`, ends at, and its shadow's mask laid and softened — cut to what
+/// `surface` admits where there is one — or no mask where the shadow draws
+/// nothing or its memory cannot be had.
+fn softened(
+    font: BitmapFont,
+    client: &mut impl FontClient,
+    (x, y): (i32, i32),
+    pieces: &[&str],
+    shadow: TextShadow,
+    surface: Option<&Surface>,
+) -> (i32, Option<ShadowMask>) {
     let walk = |client: &mut _, visit: &mut dyn FnMut(i32, &CachedGlyph)| {
         pieces.iter().fold(x, |pen, piece| {
             font.walk_on(client, pen, piece, &mut *visit)
@@ -112,15 +147,15 @@ pub(crate) fn draw_run_shadow(
     let mut ink = Ink::default();
     let pen = walk(client, &mut |left, glyph| ink.include(left, glyph));
     if shadow.color.a == 0 {
-        return pen;
+        return (pen, None);
     }
     let Some(mut mask) = ShadowMask::for_run(&ink, y, shadow, surface) else {
-        return pen;
+        return (pen, None);
     };
     walk(client, &mut |left, glyph| mask.add(left, glyph));
     mask.soften(shadow);
-    mask.draw(surface, shadow);
-    pen
+    mask.spread();
+    (pen, Some(mask))
 }
 
 /// The columns a run's glyph bitmaps span, and the tallest of them.
@@ -146,6 +181,7 @@ impl Ink {
 }
 
 /// A run's coverage laid into one block, which is blurred into its shadow.
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ShadowMask {
     /// The block's top-left in the paint's coordinates, the drop applied.
     x: i64,
@@ -158,25 +194,28 @@ struct ShadowMask {
 }
 
 impl ShadowMask {
-    /// The block `ink`'s shadow needs on `surface`, or `None` when none of it
-    /// lands there or its memory cannot be had.
+    /// The block `ink`'s shadow needs, or `None` when none of it lands on
+    /// `surface` or its memory cannot be had.
     ///
     /// It is the run's footprint — the ink grown by the blur's reach, dropped
-    /// — cut to what the surface admits and grown back by the reach where it
-    /// was cut. Every pixel that is drawn therefore averages exactly the
-    /// coverage it would with nothing cut, and the block is never larger than
-    /// the surface by more than the reach on each side, however long the run.
-    fn for_run(ink: &Ink, top: i32, shadow: TextShadow, surface: &Surface) -> Option<Self> {
+    /// — cut, where there is a surface, to what it admits and grown back by
+    /// the reach where it was cut. Every pixel that is drawn therefore
+    /// averages exactly the coverage it would with nothing cut, and the block
+    /// is never larger than the surface by more than the reach on each side,
+    /// however long the run.
+    fn for_run(ink: &Ink, top: i32, shadow: TextShadow, surface: Option<&Surface>) -> Option<Self> {
         let columns = ink.columns.clone()?;
         let reach = i64::from(shadow.reach());
         let top = i64::from(top) + i64::from(shadow.drop);
-        let across = columns.start - reach..columns.end + reach;
-        let down = top - reach..top + i64::from(ink.height) + reach;
-        let (x, w) = placed(&across)?;
-        let (y, h) = placed(&down)?;
-        let (seen_across, seen_down) = surface.admitted(x, y, w, h)?;
-        let across = grown(&seen_across, reach, &across);
-        let down = grown(&seen_down, reach, &down);
+        let mut across = columns.start - reach..columns.end + reach;
+        let mut down = top - reach..top + i64::from(ink.height) + reach;
+        if let Some(surface) = surface {
+            let (x, w) = placed(&across)?;
+            let (y, h) = placed(&down)?;
+            let (seen_across, seen_down) = surface.admitted(x, y, w, h)?;
+            across = grown(&seen_across, reach, &across);
+            down = grown(&seen_down, reach, &down);
+        }
         let width = u32::try_from(across.end - across.start).ok()?;
         let height = u32::try_from(down.end - down.start).ok()?;
         let count = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
@@ -246,29 +285,48 @@ impl ShadowMask {
         soften_coverage(&mut self.levels, width, height, radius, &mut aux);
     }
 
-    /// Composite the block onto `surface` in the shadow's colour, each blurred
-    /// level amplified by [`SPREAD`] and saturating at the colour's own alpha.
-    fn draw(mut self, surface: &mut Surface, shadow: TextShadow) {
-        let (Ok(x), Ok(y)) = (i32::try_from(self.x), i32::try_from(self.y)) else {
-            return;
-        };
+    /// Amplify each blurred level by [`SPREAD`], saturating at full coverage,
+    /// so the shadow draws saturating at its colour's own alpha.
+    fn spread(&mut self) {
         for level in &mut self.levels {
             *level =
                 u8::try_from(u32::from(*level).saturating_mul(SPREAD).min(255)).unwrap_or(u8::MAX);
         }
+    }
+
+    /// Composite the block, moved `by` from where it was laid, onto `surface`
+    /// in `color`.
+    fn draw(&self, surface: &mut Surface, (dx, dy): (i32, i32), color: Color) {
+        let (Ok(x), Ok(y)) = (
+            i32::try_from(self.x.saturating_add(i64::from(dx))),
+            i32::try_from(self.y.saturating_add(i64::from(dy))),
+        ) else {
+            return;
+        };
         let coverage = Coverage {
             width: self.width,
             height: self.height,
             levels: &self.levels,
         };
-        draw_coverage(
-            surface,
-            x,
-            y,
-            coverage,
-            self.width,
-            shadow.color.premultiply(),
-        );
+        draw_coverage(surface, x, y, coverage, self.width, color.premultiply());
+    }
+}
+
+/// A run's shadow blurred once and kept, for text drawn the same way again
+/// and again — a desktop's names over a picture — so each paint lays it down
+/// rather than blurring it again.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeptShadow {
+    mask: ShadowMask,
+    color: Color,
+}
+
+impl KeptShadow {
+    /// Lay the shadow down on `surface` as its run's would be, drawn `by` from
+    /// where the run was laid out: the very pixels
+    /// [`BitmapFont::draw_run_shadow`] draws there.
+    pub fn draw(&self, surface: &mut Surface, by: (i32, i32)) {
+        self.mask.draw(surface, by, self.color);
     }
 }
 

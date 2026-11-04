@@ -84,7 +84,7 @@ use tairix_abi::driver::filesystem::NodeKind;
 use tairix_abi::driver::DriverEnding;
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{HwResource, HwResourceKind, NodeEndpointBlock};
-use tairix_abi::input::{KeyInput, PointerInput, TimedPointer, POINTER_EDGE_UNTIMED};
+use tairix_abi::input::{KeyInput, PointerInput, POINTER_EDGE_UNTIMED};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::sysinfo::{
@@ -92,7 +92,7 @@ use tairix_abi::sysinfo::{
     CrashFaultClass, CrashNamedReg, CrashRecord, DmaGroupRecord, DmaNodeRecord, DmaUnitRecord,
     GroupDirectoryRecord, IrqRecord, MountRecord, ProcessRecord, SeatRecord, UserDirectoryRecord,
     ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
-    CRASH_MAX_FRAMES,
+    VolumeRemovalRecord, CRASH_MAX_FRAMES,
 };
 #[cfg(feature = "watchdog-diagnostics")]
 use tairix_abi::time::NANOS_PER_MILLI;
@@ -116,7 +116,7 @@ use tairix_caps::CapabilitySet;
 use tairix_collections::RangeError;
 use tairix_kernel_ipc::{
     CallEndpoint, CallEndpointLimits, CallTicket, EndpointId, PortRegistry, RecvCall, ReplyOutcome,
-    RoomWake,
+    Room, RoomWake,
 };
 use tairix_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
@@ -129,7 +129,7 @@ use tairix_kernel_mem::{
 use tairix_kernel_sched_api::{Priority, TaskId as SchedTaskId};
 use tairix_kernel_sec::{
     CapTable, GroupId, HeldExit, LevelChange, Placement, ProcName, ProcessId, TaskCapabilities,
-    TaskId as SecTaskId, UserId,
+    TaskId as SecTaskId, UserId, ROOT_SESSION,
 };
 use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use tairix_log::{Event, EventId, Field, Level, Sink};
@@ -175,7 +175,7 @@ use crate::procsignal::{ProcessSignal, NULL_PROCESS_SIGNAL};
 use crate::procwait::{ChildPeek, ProcessWait, NULL_PROCESS_WAIT};
 use crate::random::{reserve_errno, RandomReserve};
 use crate::rlimit::{authorize_set, LimitSet};
-use crate::seat::{SeatRegistry, NULL_SEAT_REGISTRY};
+use crate::seat::{InputKind, SeatRegistry, NULL_SEAT_REGISTRY};
 use crate::spawn::{
     admit_errno, may_spawn_any_mode, placement_errno, AdmitError, ImageBuildCtx, ProgramRegistry,
     SpawnMode, EMPTY_PROGRAM_REGISTRY,
@@ -1079,6 +1079,11 @@ impl DmaReleaseCause {
     }
 }
 
+/// Threads a level change collects per hold of the thread table's read lock:
+/// the granule that keeps the change allocation-free, not a bound on the
+/// threads it reaches.
+const LEVEL_BATCH: usize = 32;
+
 impl<'a, A> KernelSyscallHandlers<'a, A>
 where
     A: KernelArch + 'static,
@@ -1348,7 +1353,9 @@ where
     /// rather than failing: the server answering one of them makes room, as
     /// does one timing out or being withdrawn, and each wakes the threads
     /// waiting as that process. Its own uncollected answers never hold room, so
-    /// the wait is on the server and never on the caller itself.
+    /// the wait is on the server and never on the caller itself. A thread no
+    /// scheduler parks waits on the endpoint's settle count, which each of
+    /// those moves, rather than look again.
     fn post_blocking(
         &self,
         ep: &CallEndpoint,
@@ -1371,17 +1378,31 @@ where
             Err(Errno::WouldBlock) => {}
             posted => return posted,
         }
-        // Recorded before the retry, so a call retiring between the retry and
-        // the park still finds this task to wake.
         let process = caller.caps.process().0;
-        ep.watch_room(sched_task, process)?;
         crate::waitq::CALL_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         let posted = loop {
-            match post() {
-                Err(Errno::WouldBlock) => {}
-                posted => break posted,
+            // Read before the look, so a call settling after it ends a wait no
+            // scheduler parks.
+            let mark = ep.settle_mark();
+            // Recorded before every look rather than once: a wake takes the
+            // record of every thread waiting as this process, so one a sibling
+            // beat to the room is named by the next only if it records again.
+            let recorded = ep.watch_room(sched_task, process);
+            // A post charges, copies and audits, so only a lane with room is
+            // posted to.
+            if ep.has_room_for(process) {
+                match post() {
+                    Err(Errno::WouldBlock) => {}
+                    posted => break posted,
+                }
             }
-            park_current_task(self.arch);
+            // Never parked where nothing would wake it.
+            if let Err(err) = recorded {
+                break Err(err);
+            }
+            if !park_current_task(self.arch) {
+                ep.await_settle(mark, || crate::procsignal::kill_pending(sched_task));
+            }
             // A doomed waiter never re-parks: the kill lands at the syscall
             // boundary.
             if crate::procsignal::kill_pending(sched_task) {
@@ -1408,6 +1429,10 @@ where
         if matches!(outcome, ReplyOutcome::TimedOut) {
             wake_call_room(&ep.room_wake_for(claimant));
         }
+        // Either way the call gave back what it held of the process's budget.
+        if matches!(outcome, ReplyOutcome::Ready(_) | ReplyOutcome::TimedOut) {
+            crate::waitq::budget_released(ProcessId(claimant));
+        }
         match outcome {
             ReplyOutcome::Ready(bytes) => {
                 // Refuse to truncate: the reply was claimed and the ticket
@@ -1417,13 +1442,8 @@ where
                 if bytes.len() > reply_cap {
                     return Err(Errno::BufferTooSmall);
                 }
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_out(space, physmap, VirtAddr::new(reply), &bytes)
-                }) {
-                    Some(Ok(())) => Ok(bytes.len() as u64),
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    None => Err(Errno::BadAddress),
-                }
+                self.copy_out_user(caller, reply, &bytes)
+                    .map(|()| bytes.len() as u64)
             }
             // Non-ready outcomes are the non-blocking signals the client event
             // loop acts on: retry (still pending), fail closed on a timeout
@@ -1438,41 +1458,51 @@ where
     /// Make `apply` to `process`'s level under `change` and bring each of the
     /// process's threads to the level it then runs at.
     ///
-    /// Made inside the thread table's read lock, after the room for the
-    /// threads is taken and before they are collected: a thread registering
-    /// holds the write lock and takes the level it finds, so it joins either
-    /// before the collection or already at the outcome. The threads are then
-    /// re-weighted with no table lock held, `change` keeping every other
-    /// change of this process out until they are.
+    /// Made before any thread is collected: a thread registering holds the
+    /// thread table's write lock and takes the level it finds, so one that
+    /// joined before the change is still there to collect and one that joins
+    /// after is already at the outcome. The threads are collected a batch at
+    /// a time under the read lock, in ascending order, and re-weighted with
+    /// no table lock held, `change` keeping every other change of this
+    /// process out until they are. Nothing here allocates, so no change is
+    /// left unapplied.
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfMemory`] when the room for the threads cannot be taken,
-    /// the level then left unchanged, and [`Errno::NotFound`] when the
-    /// scheduler knows none of the process's threads: it is being torn down,
-    /// and no level changed for anything that runs.
+    /// [`Errno::NotFound`] when the scheduler knows none of the process's
+    /// threads: it is being torn down, and no level changed for anything that
+    /// runs.
     fn apply_level(
         &self,
         process: ProcessId,
         change: &LevelChange<'_>,
         apply: impl FnOnce(&LevelChange<'_>),
     ) -> SyscallResult {
-        let threads = {
-            let table = self.caps.read();
-            let mut threads = Vec::new();
-            threads
-                .try_reserve_exact(table.thread_count(process))
-                .map_err(|_| Errno::OutOfMemory)?;
-            apply(change);
-            threads.extend(table.threads_of(process));
-            threads
-        };
+        apply(change);
         let level = priority_of_level(change.effective());
-        // A thread exiting meanwhile needs no level.
-        let applied = threads
-            .iter()
-            .filter(|thread| self.sched.set_priority(thread.0, level).is_ok())
-            .count();
+        let mut applied = 0;
+        let mut after: Option<SecTaskId> = None;
+        loop {
+            let mut batch = tairix_inline::ArrayVec::<SecTaskId, LEVEL_BATCH>::new();
+            let mut more = false;
+            let table = self.caps.read();
+            for thread in table.threads_of_after(process, after) {
+                if batch.try_push(thread).is_err() {
+                    more = true;
+                    break;
+                }
+            }
+            drop(table);
+            // A thread exiting meanwhile needs no level.
+            applied += batch
+                .iter()
+                .filter(|thread| self.sched.set_priority(thread.0, level).is_ok())
+                .count();
+            if !more {
+                break;
+            }
+            after = batch.last().copied();
+        }
         if applied == 0 {
             return Err(Errno::NotFound);
         }
@@ -1488,8 +1518,7 @@ where
         };
         let change = level.change();
         let held = self.seat_registry.holds_live_lease(SeatOwner(process.0));
-        // A process whose threads cannot be listed keeps the level they run
-        // at; the next transition of its leases applies it again.
+        // Refused only for a process none of whose threads still runs.
         let _ = self.apply_level(process, &change, |change| change.hold_display(held));
     }
 
@@ -1673,17 +1702,11 @@ where
         // fails closed, so a faulting call leaves no half-told mapping
         // behind and never widens authority.
         let len_bytes = (len as u64).to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(len_out), &len_bytes)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => {
+        match self.copy_out_user(caller, len_out, &len_bytes) {
+            Ok(()) => {}
+            Err(err) => {
                 self.release_shared_mapping(caller.process(), base_va);
-                return Err(copy_fault_errno(err));
-            }
-            None => {
-                self.release_shared_mapping(caller.process(), base_va);
-                return Err(Errno::BadAddress);
+                return Err(err);
             }
         }
         Ok(base_va)
@@ -2729,7 +2752,7 @@ where
     /// event carries only the input kind (`kind=key` / `kind=pointer` /
     /// `kind=touch`), never event content, count, or timing, and fires at
     /// most once per kind over the kernel's lifetime.
-    fn witness_first_delivery(&self, kind: crate::seat::DeliveredInputKind) {
+    fn witness_first_delivery(&self, kind: InputKind) {
         if self.seat_registry.note_first_delivery(kind) {
             crate::audit::emit(
                 self.audit,
@@ -2859,46 +2882,39 @@ where
         );
     }
 
-    /// Copy `dst.len()` bytes in from the caller's user buffer at `uaddr`,
-    /// resolving demand-paged file-mapping and demand-grown stack misses
-    /// on the way — the one fault-aware `copy_in` every syscall handler
-    /// that stages a user buffer uses.
+    /// Run `copy`, user copies over the caller's address space moving `len`
+    /// bytes in `buffers` separate buffers, backing each not-resident page it
+    /// meets as a hardware fault would and running it again — the one
+    /// fault-aware copy every syscall handler that reaches user memory uses.
     ///
-    /// A syscall buffer inside an untouched `file_map` region has no
-    /// resident page yet, so the plain copy walk reports the miss as
-    /// [`UaccessError::NotMapped`] with the failing page's base. This
-    /// helper offers exactly that page to the shared miss resolver — the
-    /// same resolvers, in the same order, the hardware fault path uses — and
-    /// retries the copy
-    /// against the re-frozen snapshot, so `write(fd, mapped, n)` works
-    /// without pre-touching the mapping and a syscall buffer on a
-    /// not-yet-grown stack page is backed exactly as a hardware fault
-    /// would back it. The registry read guard is released
-    /// before each resolution (the resolver re-freezes through the write
-    /// lock), and the retry budget is one resolution per touched page
-    /// plus the unaligned head, so a hostile or shrinking mapping can
-    /// never spin: an unresolvable miss, an exhausted budget, or any
-    /// other copy fault fails closed with the same stable
-    /// [`Errno::BadAddress`] the plain path reports.
+    /// A page the process reserved but has not touched, one an untouched
+    /// `file_map` region covers, one on a not-yet-grown stack, and one the
+    /// compressed tier parked are all valid memory with no resident frame, so
+    /// the plain copy walk reports [`UaccessError::NotMapped`] with the
+    /// failing page's base. That page is offered to the shared miss resolver —
+    /// the same resolvers, in the same order, the hardware fault path uses —
+    /// with the registry read guard released (the resolver re-freezes through
+    /// the write lock), and `copy` runs again whole, so it must be safe to
+    /// repeat. The retries are bounded by one resolution per touched page
+    /// plus each buffer's unaligned ends, so a hostile or shrinking mapping
+    /// can never spin.
     ///
     /// # Errors
     ///
-    /// [`Errno::BadAddress`] when the caller has no registered address
-    /// space, the range is invalid, or a miss cannot be resolved.
-    pub fn copy_in_user(
+    /// [`Errno::BadAddress`] when the caller has no registered address space,
+    /// a miss cannot be resolved, or the budget runs out; any other copy fault
+    /// as [`copy_fault_errno`] maps it.
+    fn copy_user<R>(
         &self,
         caller: &CallerContext<'_>,
-        uaddr: u64,
-        dst: &mut [u8],
-    ) -> Result<(), Errno> {
-        let mut budget = dst.len() / PAGE_SIZE + 2;
+        (len, buffers): (usize, usize),
+        mut copy: impl FnMut(&dyn UserAddressSpace, &dyn PhysMap) -> Result<R, UaccessError>,
+    ) -> Result<R, Errno> {
+        let mut budget = len / PAGE_SIZE + 2 * buffers;
         loop {
-            let outcome = self.with_caller_aspace(caller, |space, physmap| {
-                copy_in(space, physmap, VirtAddr::new(uaddr), dst)
-            });
-            match outcome {
+            match self.with_caller_aspace(caller, &mut copy) {
                 None => return Err(Errno::BadAddress),
-                Some(Ok(())) => return Ok(()),
+                Some(Ok(done)) => return Ok(done),
                 Some(Err(UaccessError::NotMapped { va })) if budget > 0 => {
                     budget -= 1;
                     if !self.resolve_user_miss(caller, va) {
@@ -2910,43 +2926,128 @@ where
         }
     }
 
-    /// Copy `src` out to the caller's user buffer at `uaddr`, resolving a
-    /// not-resident destination page on the way — the write counterpart of
-    /// [`Self::copy_in_user`].
-    ///
-    /// A kernel-initiated write to a page the process has not touched (or that
-    /// the compressed tier parked) must back the page exactly as a hardware
-    /// store fault would, or the write is silently lost. The one consumer that
-    /// cannot tolerate that is the thread-exit clear-on-exit word
-    /// (`plans/THREADS.md` decision 5): a joiner blocked on that word would
-    /// wait forever if the store were dropped.
+    /// Copy `dst.len()` bytes in from the caller's user buffer at `uaddr`,
+    /// backing each page not yet resident as a hardware fault would, so
+    /// `write(fd, mapped, n)` works without pre-touching the mapping.
     ///
     /// # Errors
     ///
-    /// As [`Self::copy_in_user`].
+    /// [`Errno::BadAddress`] when the caller has no registered address space,
+    /// or a page of the buffer is not the caller's to read and cannot be
+    /// backed.
+    pub fn copy_in_user(
+        &self,
+        caller: &CallerContext<'_>,
+        uaddr: u64,
+        dst: &mut [u8],
+    ) -> Result<(), Errno> {
+        self.copy_user(caller, (dst.len(), 1), |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(uaddr), dst)
+        })
+    }
+
+    /// Copy `src` out to the caller's user buffer at `uaddr` — the write
+    /// counterpart of [`Self::copy_in_user`].
+    ///
+    /// A kernel-initiated write to a page the process has not touched must
+    /// back the page exactly as a hardware store fault would, or the write is
+    /// refused though the buffer is valid, and what it carried — a call's
+    /// answer, bytes taken from a pipe — is lost with it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BadAddress`] when the caller has no registered address space,
+    /// or a page of the buffer is not the caller's to write and cannot be
+    /// backed.
     pub fn copy_out_user(
         &self,
         caller: &CallerContext<'_>,
         uaddr: u64,
         src: &[u8],
     ) -> Result<(), Errno> {
-        let mut budget = src.len() / PAGE_SIZE + 2;
-        loop {
-            let outcome = self.with_caller_aspace(caller, |space, physmap| {
-                copy_out(space, physmap, VirtAddr::new(uaddr), src)
-            });
-            match outcome {
-                None => return Err(Errno::BadAddress),
-                Some(Ok(())) => return Ok(()),
-                Some(Err(UaccessError::NotMapped { va })) if budget > 0 => {
-                    budget -= 1;
-                    if !self.resolve_user_miss(caller, va) {
-                        return Err(Errno::BadAddress);
-                    }
-                }
-                Some(Err(err)) => return Err(copy_fault_errno(err)),
+        self.copy_user(caller, (src.len(), 1), |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(uaddr), src)
+        })
+    }
+
+    /// Draw `len` CSPRNG bytes into the caller's buffer at `buf` a staging
+    /// chunk at a time — a fixed kernel buffer, never a per-call heap
+    /// allocation whose failure path could OOM — each drawn under the
+    /// reserve's write guard and copied out once it is released, so a page
+    /// the caller has yet to touch is backed without holding every other draw
+    /// up. The staging is wiped on every exit, so the kernel copy of the
+    /// output never lingers.
+    fn draw_random_to_user(
+        &self,
+        caller: &CallerContext<'_>,
+        buf: u64,
+        len: usize,
+        non_blocking: bool,
+    ) -> SyscallResult {
+        let mut staging = [0u8; RANDOM_STAGE_CHUNK];
+        let mut offset = 0usize;
+        let served = loop {
+            if offset == len {
+                break Ok(offset as u64);
             }
+            let take = core::cmp::min(staging.len(), len - offset);
+            let chunk = &mut staging[..take];
+            if let Err(e) = self.rng.write().draw(chunk, non_blocking) {
+                break Err(reserve_errno(e));
+            }
+            // The destination is the caller pointer advanced by the bytes
+            // already delivered; one that overflows the address space fails
+            // closed rather than wrapping.
+            let Some(addr) = buf.checked_add(offset as u64) else {
+                break Err(Errno::BadAddress);
+            };
+            if let Err(err) = self.copy_out_user(caller, addr, chunk) {
+                break Err(err);
+            }
+            offset += take;
+        };
+        staging.zeroize();
+        served
+    }
+
+    /// Take one `kind` record off seat `seat`'s channel for the caller and
+    /// copy it to `buf`, answering its length, or `0` when the channel is
+    /// empty — a valid short read the owner waits out on its `SeatInput`
+    /// member.
+    ///
+    /// A record leaves its channel only by reaching the reader: one the copy
+    /// refuses goes back where it was, so a keystroke is never lost to a
+    /// buffer the kernel could not write. The dispatcher has checked
+    /// `CAP_INPUT_READ`; the registry gates the take on the seat's live lease.
+    fn read_input(
+        &self,
+        caller: &CallerContext<'_>,
+        seat: u64,
+        buf: u64,
+        len: usize,
+        kind: InputKind,
+    ) -> SyscallResult {
+        let wire_len = kind.wire_len();
+        if len < wire_len {
+            return Err(Errno::BufferTooSmall);
         }
+        // A key or touch record can carry what was typed, so the staging copy
+        // is wiped on every exit.
+        let mut staged = [0u8; InputKind::WIDEST];
+        let record = &mut staged[..wire_len];
+        let read = match self
+            .seat_registry
+            .read(seat, seat_owner(caller), kind, record)
+        {
+            Ok(Some(lease)) => self
+                .copy_out_user(caller, buf, record)
+                .map(|()| wire_len as u64)
+                .inspect_err(|_| self.seat_registry.restore(seat, lease, kind, record)),
+            Ok(None) => Ok(0),
+            Err(err) => Err(err),
+        };
+        staged.zeroize();
+        read
     }
 
     /// Resolve `fd` to its advisory-lock owner and the node it is bound to.
@@ -4471,9 +4572,7 @@ where
         // and fail typed). A sender parked for room in one of those mailboxes
         // learns its destination is gone rather than wait for a drain that
         // can never come; no other waiter is disturbed.
-        self.ipc
-            .write()
-            .teardown_owned_by(process.0, self.audit, |woken| wake_port_room(&woken));
+        teardown_ports_owned_by(self.ipc, process.0, self.audit);
         // A driver's function stops mastering here, and a translated driver's
         // device loses every carve at once, so the releases below free its
         // DMA memory rather than quarantine it.
@@ -4538,13 +4637,16 @@ where
     /// resource was torn down (or never owned) simply is not ready, and the
     /// woken owner's own drain (recv / reap / read / take), never the wait,
     /// consumes the event. `mounts` is the mount table's epoch, which only a
-    /// `DirWatch` member resolves against.
+    /// `DirWatch` member resolves against, and `queue_limit` the caller's
+    /// `ipc-queue-bytes` soft limit, which only a `PortRoom` member judges
+    /// room by; a scan reads each once for all its members.
     fn waitset_member_state(
         &self,
         caller: &CallerContext<'_>,
         m: &crate::waitset::Member,
         now: u64,
         mounts: u64,
+        queue_limit: u64,
     ) -> crate::fswatch::MemberState {
         let sched_task = caller.task_id.0;
         let ready = match m.kind {
@@ -4661,22 +4763,31 @@ where
                         .generation()
                         .is_ok_and(|generation| generation != m.observed)
             }
-            // A send from the caller would not be refused *for want of room*
-            // in its own lane — the only room its sends can ever lack.
-            // A vanished port and a caller that no longer holds the send
-            // authority both report ready rather than parking a sender on a
-            // destination it can never reach: the woken sender's own send
-            // fails closed and it acts on that. Reporting ready
-            // unconditionally in the unauthorised case also means a caller
-            // that may not send learns nothing about the mailbox. The room
-            // itself is a non-consuming peek — `ipc_send` takes the slot.
+            // A send of the port's largest message from the caller would be
+            // admitted: a free slot in its own lane, and its whole budget,
+            // wherever it is held, room for that message and any lane the
+            // send opens or grows. Ready too where waiting could never end —
+            // the port gone, or the send authority lost — so the woken sender's
+            // own send fails closed and it acts on that; an unauthorised caller
+            // so learns nothing about the mailbox. A peek: `ipc_send` takes the
+            // slot.
             WaitSourceKind::PortRoom => {
-                self.ipc.read().lookup(EndpointId(m.id)).is_none_or(|port| {
-                    !port
-                        .required_send_caps()
-                        .is_subset_of(caller.caps.effective())
-                        || port.has_room_for(caller.caps.proc_id())
-                })
+                let ipc = self.ipc.read();
+                let room = ipc.lookup(EndpointId(m.id)).map_or(Room::Free, |port| {
+                    let caps = port.required_send_caps();
+                    if caps.is_subset_of(caller.caps.effective()) {
+                        port.room_for(caller.caps, queue_limit)
+                    } else {
+                        Room::Free
+                    }
+                });
+                match room {
+                    Room::Free => true,
+                    Room::Full => false,
+                    // Only a release of what the caller holds frees it, which
+                    // the wait hears on the budget queue.
+                    Room::OverBudget => return crate::fswatch::MemberState::OverBudget,
+                }
             }
             // The terminal changed hands since this member last looked — an
             // edge on its ownership generation, consumed when reported. A
@@ -5183,35 +5294,9 @@ where
         match backing {
             // The discard source reads as an immediately-empty stream.
             ResourceBacking::Null => Ok(0),
-            ResourceBacking::Random => {
-                let outcome = self.with_caller_aspace(caller, |space, physmap| {
-                    let mut reserve = self.rng.write();
-                    let mut staging = [0u8; RANDOM_STAGE_CHUNK];
-                    let mut offset = 0usize;
-                    while offset < len {
-                        let take = core::cmp::min(staging.len(), len - offset);
-                        let chunk = &mut staging[..take];
-                        // A resource read blocks through a required reseed (the
-                        // blocking draw), matching a steady random source.
-                        if let Err(e) = reserve.draw(chunk, false) {
-                            staging.zeroize();
-                            return Err(reserve_errno(e));
-                        }
-                        let Some(addr) = buf.checked_add(offset as u64) else {
-                            staging.zeroize();
-                            return Err(Errno::BadAddress);
-                        };
-                        if let Err(e) = copy_out(space, physmap, VirtAddr::new(addr), chunk) {
-                            staging.zeroize();
-                            return Err(copy_fault_errno(e));
-                        }
-                        offset += take;
-                    }
-                    staging.zeroize();
-                    Ok(offset as u64)
-                });
-                outcome.unwrap_or(Err(Errno::BadAddress))
-            }
+            // A resource read blocks through a required reseed (the blocking
+            // draw), matching a steady random source.
+            ResourceBacking::Random => self.draw_random_to_user(caller, buf, len, false),
         }
     }
 
@@ -5304,13 +5389,9 @@ where
                     // proceed. Wake before the copy-out so the producer
                     // overlaps with the consumer's copy.
                     waits.wake_progress();
-                    break match self.with_caller_aspace(caller, |space, physmap| {
-                        copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
-                    }) {
-                        Some(Ok(())) => Ok(n as u64),
-                        Some(Err(err)) => Err(copy_fault_errno(err)),
-                        None => Err(Errno::BadAddress),
-                    };
+                    break self
+                        .copy_out_user(caller, buf, &data[..n])
+                        .map(|()| n as u64);
                 }
                 StreamReadStep::Eof => break Ok(0),
                 StreamReadStep::Refused(err) => break Err(err),
@@ -5664,26 +5745,15 @@ where
         )?;
         // `n <= len` by the service contract; copy exactly what was read out
         // through the validated boundary.
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
-        }) {
-            Some(Ok(())) => {
-                pos.advance(entry, n as u64);
-                // Credit the *calling* task with the bytes the VFS actually
-                // moved, not the length it asked for — the delegated arm
-                // routes through this same function as the grantor's
-                // identity, but `caller` is always the task that issued the
-                // syscall, so a delegation never attributes its bytes to the
-                // grantor.
-                caller.caps.record_bytes_read(n as u64);
-                Ok(n as u64)
-            }
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            // A caller with no registered address space (a kernel task, or
-            // one withdrawn on `exit`) fails closed with the same
-            // `BadAddress` an actual fault produces.
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, buf, &data[..n])?;
+        pos.advance(entry, n as u64);
+        // Credit the *calling* task with the bytes the VFS actually moved, not
+        // the length it asked for — the delegated arm routes through this same
+        // function as the grantor's identity, but `caller` is always the task
+        // that issued the syscall, so a delegation never attributes its bytes
+        // to the grantor.
+        caller.caps.record_bytes_read(n as u64);
+        Ok(n as u64)
     }
 
     /// Move bytes *to* the descriptor `entry` from the caller's buffer —
@@ -6443,6 +6513,33 @@ fn hosted_console_mode(width: u32, height: u32) -> Result<DisplayMode, Errno> {
         format: DisplayFormat::Bgra8888,
     })
 }
+/// Why a message the receive peeked was left queued.
+enum Undelivered {
+    /// Refused for good this time: answered to the receiver as this.
+    Refused(Errno),
+    /// The caller's buffer reaches the page at this address, reserved but not
+    /// yet resident: backed, and the receive runs again.
+    Missing(u64),
+}
+
+impl Undelivered {
+    /// What `err`, a refused copy, leaves the message waiting for.
+    fn of(err: UaccessError) -> Self {
+        match err {
+            UaccessError::NotMapped { va } => Self::Missing(va),
+            err => Self::Refused(copy_fault_errno(err)),
+        }
+    }
+
+    /// What the receiver is told: every fault is the one `BadAddress`, so a
+    /// faulting pointer cannot be used as a memory-layout oracle.
+    fn errno(self) -> Errno {
+        match self {
+            Self::Refused(errno) => errno,
+            Self::Missing(_) => Errno::BadAddress,
+        }
+    }
+}
 
 /// Collapse every [`UaccessError`] onto the single stable
 /// [`Errno::BadAddress`] (the TAIRiX `EFAULT`).
@@ -6467,12 +6564,30 @@ struct MadeChannel {
     channel: crate::fs::ServeChannel,
 }
 
+/// Whether `caller` runs in the login session holding the primary seat, as
+/// the ordinary account that session belongs to: the user at the machine, not
+/// a remote login or a session switched away from.
+fn at_seat(seats: &SeatRegistry, table: &CapTable, caller: &CallerContext<'_>) -> bool {
+    let Some(owner) = seats.owner(tairix_abi::seat::SEAT_PRIMARY) else {
+        return false;
+    };
+    table
+        .caps_of_process(ProcessId(owner.0))
+        .is_some_and(|holder| {
+            holder.owner().0 >= tairix_users::FIRST_USER_UID
+                && holder.login_session() != ROOT_SESSION
+                && holder.owner() == caller.caps.owner()
+                && holder.login_session() == caller.caps.login_session()
+        })
+}
+
 /// The kernel-attested facts a volume decision about `caller` is made on.
 fn principal<'a>(caller: &CallerContext<'a>) -> crate::fs::Principal<'a> {
     crate::fs::Principal {
         uid: caller.caps.owner().0,
         gid: caller.caps.primary_gid().0,
         caps: caller.caps.effective(),
+        at_seat: false,
     }
 }
 
@@ -6546,6 +6661,25 @@ fn wake_port_room(woken: &RoomWake<ProcId>) {
     }
 }
 
+/// Tear down every port `owner` bound, a port at a time, waking the senders
+/// parked for room at each once the registry is released — waking takes
+/// scheduler locks, which never nest inside it — and then every thread
+/// waiting for budget, which the ports' messages held.
+fn teardown_ports_owned_by(ipc: &RwLock<PortRegistry>, owner: u64, audit: &(dyn Sink + Sync)) {
+    let mut after = None;
+    loop {
+        let torn = ipc.write().teardown_next_owned_by(owner, after, audit);
+        let Some((port, woken)) = torn else {
+            break;
+        };
+        after = Some(port);
+        wake_port_room(&woken);
+    }
+    if after.is_some() {
+        crate::waitq::budget_released_everywhere();
+    }
+}
+
 /// Wake the callers' threads parked in a blocking call for room, by the same
 /// rule as [`wake_port_room`].
 fn wake_call_room(woken: &RoomWake<u64>) {
@@ -6555,10 +6689,12 @@ fn wake_call_room(woken: &RoomWake<u64>) {
 }
 
 /// Withdraw `claimant`'s call `ticket`, waking whoever the withdrawal
-/// concerns: a thread awaiting it, and those waiting for the room it held.
+/// concerns: a thread awaiting it, those waiting for the room it held, and
+/// those waiting for the budget it held.
 fn withdraw(ep: &CallEndpoint, claimant: u64, ticket: CallTicket) {
     if let Some(woken) = ep.cancel_one(claimant, ticket) {
         crate::waitq::call_woken(&woken);
+        crate::waitq::budget_released(ProcessId(claimant));
     }
 }
 
@@ -6795,96 +6931,117 @@ where
         len: usize,
         sender_out: u64,
     ) -> SyscallResult {
-        // resolve the destination endpoint against the live
-        // named-port registry. An endpoint that is not currently bound
-        // fails closed with `NotFound`; the dispatcher's standard
-        // pipeline audits the rejection.
-        let ipc = self.ipc.read();
-        let Some(port) = ipc.lookup(EndpointId(endpoint)) else {
-            return Err(Errno::NotFound);
-        };
+        // A page of either buffer the caller has yet to touch is backed and the
+        // receive run again, as `copy_user` runs a copy, the message staying
+        // queued in between.
+        let mut budget = len / PAGE_SIZE + 2 + tairix_abi::ORIGIN_WIRE_LEN / PAGE_SIZE + 2;
+        loop {
+            // resolve the destination endpoint against the live
+            // named-port registry. An endpoint that is not currently bound
+            // fails closed with `NotFound`; the dispatcher's standard
+            // pipeline audits the rejection.
+            let ipc = self.ipc.read();
+            let Some(port) = ipc.lookup(EndpointId(endpoint)) else {
+                return Err(Errno::NotFound);
+            };
 
-        // Gate the receiver against the port's required receive
-        // capabilities *and* its recorded owner *before* any message is
-        // observed or dequeued — the same handler-side gate `call_recv`
-        // applies to a call endpoint. `Port::create` proves only that the
-        // *binder* held these capabilities; without the per-receive check
-        // any task that could name the endpoint id could drain another
-        // principal's messages (fail open), and the owner check keeps a
-        // mailbox private to the task that bound it. A denied receiver
-        // learns nothing about the mailbox, not even whether it is empty.
-        if !port
-            .required_recv_caps()
-            .is_subset_of(caller.caps.effective())
-            || port.owner() != caller.caps.process().0
-        {
-            return Err(Errno::PermissionDenied);
-        }
-
-        // Peek-then-commit (D.2): the message is dequeued only once it
-        // has been copied into the caller's buffer through the validated
-        // `copy_to_user` boundary. Resolving the caller's address space
-        // first nests the mailbox lock *inside* the address-space read
-        // guard, so the spinlock is held only for the bounded copy.
-        //
-        // `with_caller_aspace` yields `None` when the caller has no
-        // registered address space (a kernel task, or one withdrawn on
-        // `exit`); `recv_with` yields `Some(None)` when the mailbox is
-        // momentarily empty. The two are kept distinct so an empty
-        // mailbox is the retryable `WouldBlock`, never confused with a
-        // faulting pointer.
-        let copied = self.with_caller_aspace(caller, |space, physmap| {
-            port.recv_with(|msg| -> Result<usize, Errno> {
-                let payload = msg.payload.as_bytes();
-                // Refuse to truncate: a buffer smaller than the message
-                // fails closed and — because `recv_with` only commits on
-                // `Ok` — leaves the message queued for a retry with a
-                // larger buffer.
-                if payload.len() > len {
-                    return Err(Errno::BufferTooSmall);
-                }
-                // Write the sender's kernel-attested origin first, then
-                // the payload; both are inside the peek-then-commit, so a
-                // fault on either leaves the message queued for a retry
-                // (a partially written buffer is overwritten by that
-                // retry, and nothing was committed). Every `UaccessError`
-                // collapses onto the single `BadAddress` so a faulting
-                // pointer cannot be used as a memory-layout oracle.
-                let origin_bytes = msg.origin.to_le_bytes();
-                copy_out(space, physmap, VirtAddr::new(sender_out), &origin_bytes)
-                    .map_err(copy_fault_errno)?;
-                copy_out(space, physmap, VirtAddr::new(ptr), payload)
-                    .map(|()| payload.len())
-                    .map_err(copy_fault_errno)
-            })
-        });
-
-        // A committed dequeue frees a slot in exactly one sender's lane, so
-        // only the senders parked for room in that lane are woken. Collected
-        // while the registry guard still resolves the port and woken once it
-        // is dropped — waking takes scheduler locks and must not nest inside
-        // the registry — along with the taken message, whose payload is wiped
-        // and freed outside every lock.
-        let (outcome, taken, woken) = match copied {
-            // No registered address space — fail closed with the same
-            // `BadAddress` a fault produces, never leaking the case.
-            None => (Err(Errno::BadAddress), None, RoomWake::none()),
-            // Bound but empty: a live endpoint with nothing to deliver
-            // is retryable, not an error in the endpoint itself.
-            Some(None) => (Err(Errno::WouldBlock), None, RoomWake::none()),
-            // Delivered: answer the number of payload bytes copied.
-            Some(Some(Ok((n, message)))) => {
-                let woken = port.room_wake_for(message.origin.proc_id());
-                (Ok(n as u64), Some(message), woken)
+            // Gate the receiver against the port's required receive
+            // capabilities *and* its recorded owner *before* any message is
+            // observed or dequeued — the same handler-side gate `call_recv`
+            // applies to a call endpoint. `Port::create` proves only that the
+            // *binder* held these capabilities; without the per-receive check
+            // any task that could name the endpoint id could drain another
+            // principal's messages (fail open), and the owner check keeps a
+            // mailbox private to the task that bound it. A denied receiver
+            // learns nothing about the mailbox, not even whether it is empty.
+            if !port
+                .required_recv_caps()
+                .is_subset_of(caller.caps.effective())
+                || port.owner() != caller.caps.process().0
+            {
+                return Err(Errno::PermissionDenied);
             }
-            // Copy-out fault or undersized buffer: the message stays
-            // queued (`recv_with` did not commit).
-            Some(Some(Err(err))) => (Err(err), None, RoomWake::none()),
-        };
-        drop(ipc);
-        drop(taken);
-        wake_port_room(&woken);
-        outcome
+
+            // Peek-then-commit (D.2): the message is dequeued only once it
+            // has been copied into the caller's buffer through the validated
+            // `copy_to_user` boundary. Resolving the caller's address space
+            // first nests the mailbox lock *inside* the address-space read
+            // guard, so the spinlock is held only for the bounded copy.
+            //
+            // `with_caller_aspace` yields `None` when the caller has no
+            // registered address space (a kernel task, or one withdrawn on
+            // `exit`); `recv_with` yields `Some(None)` when the mailbox is
+            // momentarily empty. The two are kept distinct so an empty
+            // mailbox is the retryable `WouldBlock`, never confused with a
+            // faulting pointer.
+            let copied = self.with_caller_aspace(caller, |space, physmap| {
+                port.recv_with(|msg| -> Result<usize, Undelivered> {
+                    let payload = msg.payload.as_bytes();
+                    // Refuse to truncate: a buffer smaller than the message
+                    // fails closed and — because `recv_with` only commits on
+                    // `Ok` — leaves the message queued for a retry with a
+                    // larger buffer.
+                    if payload.len() > len {
+                        return Err(Undelivered::Refused(Errno::BufferTooSmall));
+                    }
+                    // Write the sender's kernel-attested origin first, then
+                    // the payload; both are inside the peek-then-commit, so a
+                    // fault on either leaves the message queued for a retry
+                    // (a partially written buffer is overwritten by that
+                    // retry, and nothing was committed). Every `UaccessError`
+                    // collapses onto the single `BadAddress` so a faulting
+                    // pointer cannot be used as a memory-layout oracle.
+                    let origin_bytes = msg.origin.to_le_bytes();
+                    copy_out(space, physmap, VirtAddr::new(sender_out), &origin_bytes)
+                        .map_err(Undelivered::of)?;
+                    copy_out(space, physmap, VirtAddr::new(ptr), payload)
+                        .map(|()| payload.len())
+                        .map_err(Undelivered::of)
+                })
+            });
+
+            // A committed dequeue frees a slot in exactly one sender's lane, so
+            // only the senders parked for room in that lane are woken. Collected
+            // while the registry guard still resolves the port and woken once it
+            // is dropped — waking takes scheduler locks and must not nest inside
+            // the registry — along with the taken message, whose payload is wiped
+            // and freed outside every lock.
+            let (outcome, taken, woken) = match copied {
+                // No registered address space — fail closed with the same
+                // `BadAddress` a fault produces, never leaking the case.
+                None => (Err(Errno::BadAddress), None, RoomWake::none()),
+                // Bound but empty: a live endpoint with nothing to deliver
+                // is retryable, not an error in the endpoint itself.
+                Some(None) => (Err(Errno::WouldBlock), None, RoomWake::none()),
+                // Delivered: answer the number of payload bytes copied.
+                Some(Some(Ok((n, message)))) => {
+                    let woken = port.room_wake_for(message.origin.proc_id());
+                    (Ok(n as u64), Some(message), woken)
+                }
+                // A page the caller reserved but has not touched: back it with
+                // every lock released, the message still queued, and look again.
+                Some(Some(Err(Undelivered::Missing(va)))) if budget > 0 => {
+                    drop(ipc);
+                    budget -= 1;
+                    if !self.resolve_user_miss(caller, va) {
+                        return Err(Errno::BadAddress);
+                    }
+                    continue;
+                }
+                // Copy-out fault or undersized buffer: the message stays
+                // queued (`recv_with` did not commit).
+                Some(Some(Err(undelivered))) => (Err(undelivered.errno()), None, RoomWake::none()),
+            };
+            let sender = taken.as_ref().map(|message| ProcessId(message.sender));
+            drop(ipc);
+            drop(taken);
+            wake_port_room(&woken);
+            // What the message held of its sender's budget came back with it.
+            if let Some(sender) = sender {
+                crate::waitq::budget_released(sender);
+            }
+            return outcome;
+        }
     }
 
     fn cap_query(&self, caller: &CallerContext<'_>, cap: CapabilityId) -> SyscallResult {
@@ -6973,13 +7130,8 @@ where
         let cpu = SchedulerArch::current_cpu(self.arch);
         let monotonic_ns = self.arch.monotonic_ns(cpu);
         let bytes = self.wall_clock.read(monotonic_ns).to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), &bytes)
-        }) {
-            Some(Ok(())) => Ok(bytes.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, out, &bytes)
+            .map(|()| bytes.len() as u64)
     }
 
     fn wall_time_set(
@@ -7051,13 +7203,8 @@ where
             return Err(Errno::EntropyNotReady);
         }
         let bytes = self.boot_id.to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), &bytes)
-        }) {
-            Some(Ok(())) => Ok(bytes.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, out, &bytes)
+            .map(|()| bytes.len() as u64)
     }
 
     fn boot_facts_get(
@@ -7079,13 +7226,8 @@ where
             return Err(Errno::NotImplemented);
         };
         let bytes = facts.to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), &bytes)
-        }) {
-            Some(Ok(())) => Ok(bytes.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, out, &bytes)
+            .map(|()| bytes.len() as u64)
     }
 
     fn boot_session_get(&self, _caller: &CallerContext<'_>) -> SyscallResult {
@@ -7250,13 +7392,9 @@ where
             .pty_slave(caller.process(), fd)
             .map(|pty| pty.geometry().to_le_bytes());
         if let Some(bytes) = pty_geometry {
-            return match self.with_caller_aspace(caller, |space, physmap| {
-                copy_out(space, physmap, VirtAddr::new(out), &bytes)
-            }) {
-                Some(Ok(())) => Ok(bytes.len() as u64),
-                Some(Err(err)) => Err(copy_fault_errno(err)),
-                None => Err(Errno::BadAddress),
-            };
+            return self
+                .copy_out_user(caller, out, &bytes)
+                .map(|()| bytes.len() as u64);
         }
         // Resolve `fd` against the caller's per-process descriptor table
         // first: only an open standard stream names a console. A descriptor
@@ -7283,13 +7421,8 @@ where
         };
         // The buffer bound was already enforced at the top of the handler.
         let bytes = geometry.to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), &bytes)
-        }) {
-            Some(Ok(())) => Ok(bytes.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, out, &bytes)
+            .map(|()| bytes.len() as u64)
     }
 
     fn irq_bind(&self, caller: &CallerContext<'_>, line: u32) -> SyscallResult {
@@ -7430,50 +7563,7 @@ where
         // itself never waits.
         let non_blocking = flags.is_non_blocking();
 
-        // Resolve the caller's address space once and stream the bytes
-        // out under its read guard. The reserve produces CSPRNG output
-        // into a fixed kernel staging buffer — never a per-call heap
-        // allocation whose failure path could OOM — and
-        // each chunk is copied into the caller's buffer through the
-        // validated `copy_out` boundary, then the staging is wiped
-        // (zeroed on consumption). The whole draw runs
-        // under the reserve's write guard so one request observes a
-        // contiguous stream from a single generator.
-        let outcome = self.with_caller_aspace(caller, |space, physmap| {
-            let mut reserve = self.rng.write();
-            let mut staging = [0u8; RANDOM_STAGE_CHUNK];
-            let mut offset = 0usize;
-            while offset < len {
-                let take = core::cmp::min(staging.len(), len - offset);
-                let chunk = &mut staging[..take];
-                if let Err(e) = reserve.draw(chunk, non_blocking) {
-                    staging.zeroize();
-                    return Err(reserve_errno(e));
-                }
-                // The destination is the caller pointer advanced by the
-                // bytes already delivered. A pointer that overflows the
-                // address space fails closed as `BadAddress` rather than
-                // wrapping.
-                let Some(addr) = buf.checked_add(offset as u64) else {
-                    staging.zeroize();
-                    return Err(Errno::BadAddress);
-                };
-                if let Err(e) = copy_out(space, physmap, VirtAddr::new(addr), chunk) {
-                    staging.zeroize();
-                    return Err(copy_fault_errno(e));
-                }
-                offset += take;
-            }
-            // Wipe the staging buffer once the request is fully served
-            // (the kernel copy of the output never
-            // lingers).
-            staging.zeroize();
-            Ok(offset as u64)
-        });
-        // A caller with no registered address space (a kernel task, or
-        // one withdrawn on `exit`) collapses onto the same fail-closed
-        // `BadAddress` every copy-path handler returns.
-        outcome.unwrap_or(Err(Errno::BadAddress))
+        self.draw_random_to_user(caller, buf, len, non_blocking)
     }
 
     fn stream_write(
@@ -7679,13 +7769,8 @@ where
         // no registered address space (a kernel task, or one withdrawn on
         // `exit`) — fail closed with the same `BadAddress` an actual
         // fault produces, never leaking which case occurred.
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), &payload[..read])
-        }) {
-            Some(Ok(())) => Ok(read as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, buf, &payload[..read])
+            .map(|()| read as u64)
     }
 
     // Mirrors the trait's register-shaped signature (see the trait's
@@ -8062,11 +8147,9 @@ where
         let mut bytes = [0u8; 8];
         bytes[..4].copy_from_slice(&read_fd.to_ne_bytes());
         bytes[4..].copy_from_slice(&write_fd.to_ne_bytes());
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), &bytes)
-        }) {
-            Some(Ok(())) => Ok(0),
-            outcome => {
+        self.copy_out_user(caller, out, &bytes)
+            .map(|()| 0)
+            .inspect_err(|_| {
                 // The caller can never learn the descriptor numbers, so
                 // unwind the pair whole (fail closed — the entries close both
                 // ends through their handles as they drop, once the registry
@@ -8079,12 +8162,7 @@ where
                     )
                 };
                 drop(unwound);
-                match outcome {
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    _ => Err(Errno::BadAddress),
-                }
-            }
-        }
+            })
     }
 
     fn pty_create(
@@ -8111,11 +8189,9 @@ where
         let mut bytes = [0u8; 8];
         bytes[..4].copy_from_slice(&master_fd.to_ne_bytes());
         bytes[4..].copy_from_slice(&slave_fd.to_ne_bytes());
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), &bytes)
-        }) {
-            Some(Ok(())) => Ok(0),
-            outcome => {
+        self.copy_out_user(caller, out, &bytes)
+            .map(|()| 0)
+            .inspect_err(|_| {
                 // The caller can never learn the descriptor numbers, so
                 // unwind the pair whole (fail closed — the entries close both
                 // ends through their handles as they drop, once the registry
@@ -8128,12 +8204,7 @@ where
                     )
                 };
                 drop(unwound);
-                match outcome {
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    _ => Err(Errno::BadAddress),
-                }
-            }
-        }
+            })
     }
 
     fn pty_set_size(
@@ -8244,7 +8315,7 @@ where
         // never per keystroke — and the record carries no key content,
         // count, or timing, so a typed secret and its cadence never reach
         // the log (no input-content/timing noise — secret hygiene).
-        self.witness_first_delivery(crate::seat::DeliveredInputKind::Key);
+        self.witness_first_delivery(InputKind::Key);
         Ok(consumed as u64)
     }
 
@@ -8356,49 +8427,7 @@ where
         buf: u64,
         len: usize,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_INPUT_READ` and that `buf` is
-        // non-null (`UserPtr`). A record is fixed-width: a `len` that cannot
-        // hold one fails closed, the kernel never writes a partial record.
-        if len < KeyInput::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        // Drain one record into a stack buffer first. `read_key` resolves
-        // the named seat (an unknown id fails closed `NotFound`) and
-        // owner-gates the drain against that seat's live lease — only the
-        // process that acquired the seat may take records off its desktop
-        // channel (`plans/DISPLAY.md` D2) — then returns `0` when the
-        // channel is momentarily empty (a valid short read the caller
-        // loops on) or one whole record's `WIRE_LEN`. The buffer is wiped
-        // on every exit (a key edge may carry a typed character).
-        let mut record_bytes = [0u8; KeyInput::WIRE_LEN];
-        let read = match self
-            .seat_registry
-            .read_key(seat, seat_owner(caller), &mut record_bytes)
-        {
-            Ok(read) => read,
-            Err(err) => {
-                record_bytes.zeroize();
-                return Err(err);
-            }
-        };
-        if read == 0 {
-            record_bytes.zeroize();
-            return Ok(0);
-        }
-
-        // Copy the record out to the caller's address space through the
-        // validated `copy_to_user` boundary. A `None`
-        // (unregistered caller) or a fault fails closed with `BadAddress`,
-        // never leaking which case occurred.
-        let result = match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), &record_bytes[..read])
-        }) {
-            Some(Ok(())) => Ok(read as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        };
-        record_bytes.zeroize();
-        result
+        self.read_input(caller, seat, buf, len, InputKind::Key)
     }
 
     fn pointer_inject(
@@ -8424,13 +8453,7 @@ where
         // case occurred. Unlike a key edge a pointer record never carries
         // typed content, so the staging buffer needs no zeroisation.
         let mut record_bytes = [0u8; PointerInput::WIRE_LEN];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(buf), &mut record_bytes)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, buf, &mut record_bytes)?;
 
         // Decode the record fail-closed: a malformed event is refused
         // rather than interpreted. The seat registry routes by who holds
@@ -8456,7 +8479,7 @@ where
         // driver is routing through the arbiter. The per-kind latch fires
         // at most once and the record carries no event content, so key and
         // pointer liveness are separately attributable from the log.
-        self.witness_first_delivery(crate::seat::DeliveredInputKind::Pointer);
+        self.witness_first_delivery(InputKind::Pointer);
         Ok(consumed as u64)
     }
 
@@ -8467,40 +8490,7 @@ where
         buf: u64,
         len: usize,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_INPUT_READ` and that `buf` is
-        // non-null (`UserPtr`). A record is fixed-width: a `len` that
-        // cannot hold one fails closed, the kernel never writes a partial
-        // record.
-        if len < TimedPointer::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        // Drain one record into a stack buffer first. `read_pointer`
-        // resolves the named seat (an unknown id fails closed `NotFound`)
-        // and owner-gates the drain against that seat's live lease — only
-        // the process that acquired the seat may take records off its pointer
-        // channel — then returns `0` when the channel is momentarily empty
-        // (a valid short read the caller loops on) or one whole record's
-        // `WIRE_LEN`. A pointer record carries no typed content, so no
-        // zeroisation is needed on the staging buffer.
-        let mut record_bytes = [0u8; TimedPointer::WIRE_LEN];
-        let read = self
-            .seat_registry
-            .read_pointer(seat, seat_owner(caller), &mut record_bytes)?;
-        if read == 0 {
-            return Ok(0);
-        }
-
-        // Copy the record out to the caller's address space through the
-        // validated `copy_to_user` boundary. A `None` (unregistered caller)
-        // or a fault fails closed with `BadAddress`, never leaking which
-        // case occurred.
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), &record_bytes[..read])
-        }) {
-            Some(Ok(())) => Ok(read as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.read_input(caller, seat, buf, len, InputKind::Pointer)
     }
 
     fn touch_inject(
@@ -8519,13 +8509,9 @@ where
         // A touchscreen's contacts can spell what was typed on an on-screen
         // keyboard, so the staging copy is wiped on every exit, as a key's is.
         let mut frame_bytes = [0u8; TouchFrame::WIRE_LEN];
-        let copied = match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(buf), &mut frame_bytes)
-        }) {
-            Some(Ok(())) => TouchFrame::from_bytes(&frame_bytes),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        };
+        let copied = self
+            .copy_in_user(caller, buf, &mut frame_bytes)
+            .and_then(|()| TouchFrame::from_bytes(&frame_bytes));
         frame_bytes.zeroize();
         // The kernel's stamp replaces whatever the driver wrote: the frame is
         // attributed to its real injector and timed by its arrival, not by
@@ -8535,7 +8521,7 @@ where
             .monotonic_ns(SchedulerArch::current_cpu(self.arch));
         let frame = copied?.stamped(caller.process().0, now_ns);
         let consumed = self.seat_registry.inject_touch(seat, &frame)?;
-        self.witness_first_delivery(crate::seat::DeliveredInputKind::Touch);
+        self.witness_first_delivery(InputKind::Touch);
         Ok(consumed as u64)
     }
 
@@ -8546,28 +8532,7 @@ where
         buf: u64,
         len: usize,
     ) -> SyscallResult {
-        // The dispatcher checked `CAP_INPUT_READ` and that `buf` is non-null;
-        // `read_touch` owner-gates the drain against the seat's live lease.
-        if len < TouchFrame::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let mut frame_bytes = [0u8; TouchFrame::WIRE_LEN];
-        let read = self
-            .seat_registry
-            .read_touch(seat, seat_owner(caller), &mut frame_bytes);
-        let result = match read {
-            Ok(0) => Ok(0),
-            Ok(read) => match self.with_caller_aspace(caller, |space, physmap| {
-                copy_out(space, physmap, VirtAddr::new(buf), &frame_bytes[..read])
-            }) {
-                Some(Ok(())) => Ok(read as u64),
-                Some(Err(err)) => Err(copy_fault_errno(err)),
-                None => Err(Errno::BadAddress),
-            },
-            Err(err) => Err(err),
-        };
-        frame_bytes.zeroize();
-        result
+        self.read_input(caller, seat, buf, len, InputKind::Touch)
     }
 
     fn mem_map(
@@ -8839,13 +8804,8 @@ where
         // driver that passes a bad pointer self-DoSes a buffer at worst — it
         // never widens authority.
         let device_bytes = device_addr.to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(device_out), &device_bytes)
-        }) {
-            Some(Ok(())) => Ok(carve.cpu_va),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, device_out, &device_bytes)
+            .map(|()| carve.cpu_va)
     }
 
     fn dma_free(&self, caller: &CallerContext<'_>, handle: u64, cpu_va: u64) -> SyscallResult {
@@ -8931,13 +8891,8 @@ where
         // validated `copy_to_user` boundary. A `None`
         // (unregistered caller) or a fault fails closed with `BadAddress`,
         // never leaking which case occurred.
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), &bytes)
-        }) {
-            Some(Ok(())) => Ok(bytes.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, buf, &bytes)
+            .map(|()| bytes.len() as u64)
     }
 
     fn mem_pin(&self, caller: &CallerContext<'_>) -> SyscallResult {
@@ -9144,13 +9099,7 @@ where
             return Err(Errno::LengthOutOfRange);
         }
         let mut payload = alloc::vec![0u8; request_len];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(request), &mut payload)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, request, &mut payload)?;
         // Decode fail-closed: every field is validated (extent shape,
         // filesystem type, name spelling) before anything is looked up.
         let decoded = tairix_abi::volume::VolumeAttachRequest::decode(&payload)?;
@@ -9184,16 +9133,30 @@ where
             return Err(Errno::LengthOutOfRange);
         }
         let mut payload = [0u8; tairix_abi::volume::VOLUME_DETACH_LEN];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(request), &mut payload)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, request, &mut payload)?;
         let decoded = tairix_abi::volume::VolumeDetachRequest::decode(&payload)?;
+        let who = crate::fs::Principal {
+            at_seat: at_seat(self.seat_registry, &self.caps.read(), caller),
+            ..principal(caller)
+        };
+        self.volume_service.detach(&decoded, &who).map(|()| 0)
+    }
+
+    fn volume_retitle(
+        &self,
+        caller: &CallerContext<'_>,
+        request: u64,
+        request_len: usize,
+    ) -> SyscallResult {
+        if request_len > tairix_abi::volume::VOLUME_RETITLE_MAX_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut payload = [0u8; tairix_abi::volume::VOLUME_RETITLE_MAX_LEN];
+        let frame = &mut payload[..request_len];
+        self.copy_in_user(caller, request, frame)?;
+        let decoded = tairix_abi::volume::VolumeRetitleRequest::decode(frame)?;
         self.volume_service
-            .detach(&decoded, &principal(caller))
+            .retitle(&principal(caller), &decoded.volume_id, &decoded.title)
             .map(|()| 0)
     }
 
@@ -9212,13 +9175,7 @@ where
         self.volume_service
             .read(volume, lba, len, &mut |offset, chunk| {
                 let at = buf.checked_add(offset as u64).ok_or(Errno::BadAddress)?;
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_out(space, physmap, VirtAddr::new(at), chunk)
-                }) {
-                    Some(Ok(())) => Ok(()),
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    None => Err(Errno::BadAddress),
-                }
+                self.copy_out_user(caller, at, chunk)
             })
             .map(|()| 0)
     }
@@ -9238,13 +9195,7 @@ where
         self.volume_service
             .write(volume, lba, len, &mut |offset, chunk| {
                 let at = buf.checked_add(offset as u64).ok_or(Errno::BadAddress)?;
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_in(space, physmap, VirtAddr::new(at), chunk)
-                }) {
-                    Some(Ok(())) => Ok(()),
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    None => Err(Errno::BadAddress),
-                }
+                self.copy_in_user(caller, at, chunk)
             })
             .map(|()| 0)
     }
@@ -9266,13 +9217,7 @@ where
         self.volume_service
             .archive_read(volume, region, offset, len, &mut |at, chunk| {
                 let at = buf.checked_add(at as u64).ok_or(Errno::BadAddress)?;
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_out(space, physmap, VirtAddr::new(at), chunk)
-                }) {
-                    Some(Ok(())) => Ok(()),
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    None => Err(Errno::BadAddress),
-                }
+                self.copy_out_user(caller, at, chunk)
             })
             .map(|read| read as u64)
     }
@@ -9294,13 +9239,7 @@ where
         self.volume_service
             .archive_write(volume, region, offset, len, &mut |at, chunk| {
                 let at = buf.checked_add(at as u64).ok_or(Errno::BadAddress)?;
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_in(space, physmap, VirtAddr::new(at), chunk)
-                }) {
-                    Some(Ok(())) => Ok(()),
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    None => Err(Errno::BadAddress),
-                }
+                self.copy_in_user(caller, at, chunk)
             })
             .map(|()| 0)
     }
@@ -9689,13 +9628,8 @@ where
         // which case occurred. `with_caller_aspace` yields `None`
         // when the caller has no registered address space; fail closed.
         let status_bytes = tairix_abi::WaitStatusRecord::encode(reported.status).to_ne_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(status), &status_bytes)
-        }) {
-            Some(Ok(())) => Ok(reported.pid),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, status, &status_bytes)
+            .map(|()| reported.pid)
     }
 
     fn signal(&self, caller: &CallerContext<'_>, pid: i64, signal: Signal) -> SyscallResult {
@@ -9936,13 +9870,7 @@ where
         // with no registered address space (a kernel task, or one withdrawn
         // on `exit`) and any copy fault both collapse onto `BadAddress`,
         // never leaking which case occurred.
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), &encoded)
-        }) {
-            Some(Ok(())) => Ok(0),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, out, &encoded).map(|()| 0)
     }
 
     fn rlimit_set(&self, caller: &CallerContext<'_>, kind: u32, value: u64) -> SyscallResult {
@@ -9977,6 +9905,10 @@ where
         self.aspaces
             .write()
             .set_limit(caller.process(), kind, stored);
+        // A new budget may be the room a thread of the process waits for.
+        if matches!(kind, LimitKind::IpcQueueBytes) {
+            crate::waitq::budget_released(caller.process());
+        }
         Ok(0)
     }
 
@@ -10000,13 +9932,8 @@ where
         // Copy the text out through the validated `copy_to_user` boundary. A faulting pointer — or a caller with no
         // registered address space — fails closed with `BadAddress`, never
         // leaking which case occurred.
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), &text)
-        }) {
-            Some(Ok(())) => Ok(text.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, buf, &text)
+            .map(|()| text.len() as u64)
     }
 
     fn users_admin(
@@ -10048,13 +9975,7 @@ where
         // response that did not fit the caller's capacity).
         if written > 0 {
             let len = usize::try_from(written).map_err(|_| Errno::LengthOutOfRange)?;
-            match self.with_caller_aspace(caller, |space, physmap| {
-                copy_out(space, physmap, VirtAddr::new(out), &out_buf[..len])
-            }) {
-                Some(Ok(())) => {}
-                Some(Err(err)) => return Err(copy_fault_errno(err)),
-                None => return Err(Errno::BadAddress),
-            }
+            self.copy_out_user(caller, out, &out_buf[..len])?;
         }
         Ok(written)
     }
@@ -10077,13 +9998,8 @@ where
         // Copy the bytes out through the validated `copy_to_user` boundary. A faulting pointer — or a caller with no
         // registered address space — fails closed with `BadAddress`,
         // never leaking which case occurred.
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), &blob)
-        }) {
-            Some(Ok(())) => Ok(blob.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, buf, &blob)
+            .map(|()| blob.len() as u64)
     }
 
     fn sysinfo_introspect(
@@ -10180,6 +10096,12 @@ where
             IntrospectDomain::Crashes => self
                 .crashes
                 .page(arg, records_that_fit(out_cap, CrashRecord::WIRE_LEN)?),
+            IntrospectDomain::VolumeRemovals => crate::introspect_source::record_page(
+                &self.volume_service.removals()?,
+                arg,
+                records_that_fit(out_cap, VolumeRemovalRecord::WIRE_LEN)?,
+                VolumeRemovalRecord::to_le_bytes,
+            )?,
             // A machine with no unit discovered has nothing to list but the
             // units a malformed table described.
             IntrospectDomain::DmaUnits
@@ -10220,13 +10142,8 @@ where
         // Copy the bytes out through the validated boundary. A faulting
         // pointer — or a caller with no registered address space — fails
         // closed with `BadAddress`, never leaking which case occurred.
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), &blob)
-        }) {
-            Some(Ok(())) => Ok(blob.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, out, &blob)
+            .map(|()| blob.len() as u64)
     }
 
     fn hw_tree_wait(
@@ -10293,8 +10210,7 @@ where
             self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
             // Park off the run queue until woken, keyed to the CPU this
             // task occupies right now (`park_current_task` reads it live, so
-            // a mid-wait migration is handled); the fallback yield covers a
-            // caller with no live dispatch loop so it never busy-spins.
+            // a mid-wait migration is handled).
             park_current_task(self.arch);
             // A doomed waiter never re-parks: a termination deferred against
             // this task unwinds the wait so the kill lands at the syscall
@@ -10374,8 +10290,7 @@ where
             self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
             // Park off the run queue until woken, keyed to the CPU this
             // task occupies right now (`park_current_task` reads it live, so
-            // a mid-wait migration is handled); the fallback yield covers a
-            // caller with no live dispatch loop so it never busy-spins.
+            // a mid-wait migration is handled).
             park_current_task(self.arch);
             // A doomed waiter never re-parks: a termination deferred against
             // this task unwinds the wait so the kill lands at the syscall
@@ -10639,9 +10554,7 @@ where
                 ReplyOutcome::Pending => {
                     // Park off the run queue until woken, keyed to the CPU
                     // this task occupies right now (`park_current_task` reads
-                    // it live, so a mid-wait migration is handled); the
-                    // fallback yield covers a caller with no live dispatch
-                    // loop so it never busy-spins.
+                    // it live, so a mid-wait migration is handled).
                     park_current_task(self.arch);
                     // A doomed waiter never re-parks: a termination deferred
                     // against this task unwinds the wait so the kill lands at
@@ -10654,6 +10567,10 @@ where
             }
         };
         crate::waitq::CALL_WAITQ.deregister(sched_task);
+        // The answer collected gave back what the call held of the budget.
+        if outcome.is_ok() {
+            crate::waitq::budget_released(caller.caps.process());
+        }
 
         let bytes = outcome?;
 
@@ -10668,13 +10585,8 @@ where
 
         // Copy the reply out through the validated `copy_to_user` boundary. A faulting pointer — or a caller with no
         // registered address space — fails closed with `BadAddress`.
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(reply), &bytes)
-        }) {
-            Some(Ok(())) => Ok(bytes.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, reply, &bytes)
+            .map(|()| bytes.len() as u64)
     }
 
     fn call_post(
@@ -10731,17 +10643,11 @@ where
         // post is withdrawn before failing closed rather than left to hold an
         // endpoint slot until teardown.
         let ticket_bytes = ticket.0.to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(ticket_out), &ticket_bytes)
-        }) {
-            Some(Ok(())) => Ok(0),
-            Some(Err(err)) => {
+        match self.copy_out_user(caller, ticket_out, &ticket_bytes) {
+            Ok(()) => Ok(0),
+            Err(err) => {
                 withdraw(&ep, caller.caps.process().0, ticket);
-                Err(copy_fault_errno(err))
-            }
-            None => {
-                withdraw(&ep, caller.caps.process().0, ticket);
-                Err(Errno::BadAddress)
+                Err(err)
             }
         }
     }
@@ -10823,6 +10729,7 @@ where
             .cancel_one(claimant, CallTicket(ticket))
             .ok_or(Errno::NotFound)?;
         crate::waitq::call_woken(&woken);
+        crate::waitq::budget_released(caller.caps.process());
         Ok(0)
     }
 
@@ -11032,9 +10939,7 @@ where
                     }
                     // Park keyed to the CPU this task occupies right now
                     // (`park_current_task` reads it live, so a mid-wait
-                    // migration is handled); the fallback yield covers a
-                    // caller with no live dispatch loop so it never
-                    // busy-spins.
+                    // migration is handled).
                     park_current_task(self.arch);
                     // A doomed waiter never re-parks: a termination deferred
                     // against this task unwinds the wait so the kill lands at
@@ -11058,24 +10963,17 @@ where
         // its protocol decoder rejects the truncated reply) and surface
         // `BadAddress` to the server.
         let ticket_bytes = call.ticket.0.to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
+        let delivered = (call.request.len() + ticket_bytes.len(), 2);
+        self.copy_user(caller, delivered, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(buf), &call.request)?;
             copy_out(space, physmap, VirtAddr::new(ticket_out), &ticket_bytes)
-        }) {
-            Some(Ok(())) => Ok(call.request.len() as u64),
-            Some(Err(err)) => {
-                if let Ok(woken) = ep.reply(call.ticket, &[], self.audit) {
-                    crate::waitq::call_woken(&woken);
-                }
-                Err(copy_fault_errno(err))
+        })
+        .map(|()| call.request.len() as u64)
+        .inspect_err(|_| {
+            if let Ok(woken) = ep.reply(call.ticket, &[], self.audit) {
+                crate::waitq::call_woken(&woken);
             }
-            None => {
-                if let Ok(woken) = ep.reply(call.ticket, &[], self.audit) {
-                    crate::waitq::call_woken(&woken);
-                }
-                Err(Errno::BadAddress)
-            }
-        }
+        })
     }
 
     fn call_reply(
@@ -11131,13 +11029,8 @@ where
         // post time, so it cannot be forged on the wire.
         let peer = ep.peer_origin(CallTicket(ticket)).ok_or(Errno::NotFound)?;
         let bytes = peer.to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(origin), &bytes)
-        }) {
-            Some(Ok(())) => Ok(bytes.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, origin, &bytes)
+            .map(|()| bytes.len() as u64)
     }
 
     fn call_peer_seat(
@@ -11256,13 +11149,8 @@ where
             return Err(Errno::NotFound);
         };
         let record = record.to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(node), &record)
-        }) {
-            Some(Ok(())) => Ok(record.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, node, &record)
+            .map(|()| record.len() as u64)
     }
 
     fn self_origin(&self, caller: &CallerContext<'_>, out: u64, out_cap: usize) -> SyscallResult {
@@ -11277,13 +11165,8 @@ where
         // caller-supplied value, so a task cannot forge another principal's
         // identity nor inflate its own.
         let bytes = caller.caps.attest_origin().to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), &bytes)
-        }) {
-            Some(Ok(())) => Ok(bytes.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, out, &bytes)
+            .map(|()| bytes.len() as u64)
     }
 
     fn log_emit(&self, caller: &CallerContext<'_>, record: u64, len: usize) -> SyscallResult {
@@ -11828,13 +11711,8 @@ where
         let ancestors = self.hw_tree.ancestor_status(node_id)?;
         let bytes =
             tairix_abi::HwSelfNode::new(node_id, node.match_keys(), ancestors)?.to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), &bytes)
-        }) {
-            Some(Ok(())) => Ok(bytes.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, buf, &bytes)
+            .map(|()| bytes.len() as u64)
     }
 
     fn msi_alloc(&self, caller: &CallerContext<'_>, out: u64, out_len: usize) -> SyscallResult {
@@ -11869,13 +11747,7 @@ where
         // Copied out before the grant is minted, so a faulting `out` widens
         // nothing; the vector stays the node's, for the next claim.
         let bytes = allocation.to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), &bytes)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, out, &bytes)?;
         // Granted as the allocation names it, so the caller may bind the line
         // and forward that same resource onto a child it publishes; the grant
         // ends with the node's device.
@@ -11922,17 +11794,11 @@ where
         // its frames) and fails closed, so a faulting call leaves no orphan
         // region behind and never widens authority.
         let id_bytes = id.to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(id_out), &id_bytes)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => {
+        match self.copy_out_user(caller, id_out, &id_bytes) {
+            Ok(()) => {}
+            Err(err) => {
                 self.release_shared_mapping(caller.process(), base_va);
-                return Err(copy_fault_errno(err));
-            }
-            None => {
-                self.release_shared_mapping(caller.process(), base_va);
-                return Err(Errno::BadAddress);
+                return Err(err);
             }
         }
         // Grant the calling task the per-region resource, so it may forward
@@ -12755,20 +12621,27 @@ where
         let mut deaf = false;
         if observes_room {
             crate::waitq::PORT_ROOM_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
-            // Have each observed port record this task as waiting for room in
-            // its own process's lane, so the drain that frees a slot there
-            // wakes exactly the senders waiting for one. Recorded *before* the
-            // first scan so a drain in the register/park window is not lost.
+        }
+        // Set once a scan finds a member short of budget: from then on the
+        // task also waits under its process on the budget queue.
+        let mut budget_watched = false;
+        // Records this task with each observed port as waiting for room in its
+        // own process's lane, before every scan: a drain takes the records it
+        // wakes, so one a sibling thread beat to the slot must record again to
+        // be named by the next.
+        let watch_rooms = || {
             let ipc = self.ipc.read();
             let sender = caller.caps.proc_id();
+            let mut recorded = true;
             for m in &members {
                 if m.kind == WaitSourceKind::PortRoom {
                     if let Some(port) = ipc.lookup(EndpointId(m.id)) {
-                        deaf |= port.watch_room(sched_task, sender).is_err();
+                        recorded &= port.watch_room(sched_task, sender).is_ok();
                     }
                 }
             }
-        }
+            recorded
+        };
         if observes_callreply {
             let claimant = caller.caps.process().0;
             let mut call_deadline = crate::waitq::NO_DEADLINE;
@@ -12825,6 +12698,7 @@ where
             if deaf {
                 break Err(Errno::OutOfMemory);
             }
+            let unrecorded = observes_room && !watch_rooms();
             let now = self.arch.monotonic_ns(cpu);
             // A quarantined IRQ member is terminal: the runaway-interrupt
             // safety net disabled its line, so it will never fire again.
@@ -12867,18 +12741,25 @@ where
             } else {
                 0
             };
+            let limit = if observes_room {
+                self.soft_limit(caller, LimitKind::IpcQueueBytes)
+            } else {
+                0
+            };
+            let mut short_of_budget = false;
             // First ready in the rotated snapshot wins. Each member's
             // readiness is the non-consuming, caller-re-checked peek of
             // `waitset_member_state`, so a faulting `token_out` below never
             // drops a delivered event and a torn-down resource simply is
             // not ready.
             for m in &members {
-                match self.waitset_member_state(caller, m, now, mounts) {
+                match self.waitset_member_state(caller, m, now, mounts, limit) {
                     crate::fswatch::MemberState::Ready => {
                         ready = Some((m.kind, m.id, m.token));
                         break;
                     }
                     crate::fswatch::MemberState::Due(at) => held_until = held_until.min(at),
+                    crate::fswatch::MemberState::OverBudget => short_of_budget = true,
                     crate::fswatch::MemberState::Idle => {}
                 }
             }
@@ -12888,6 +12769,18 @@ where
             }
             if now >= deadline_ns {
                 break Err(Errno::TimedOut);
+            }
+            // A room this task could not record itself as waiting for would
+            // never wake it.
+            if unrecorded {
+                break Err(Errno::OutOfMemory);
+            }
+            // Recorded before the look that parks, so a release of the
+            // process's budget since this scan is seen by the next.
+            if short_of_budget && !budget_watched {
+                crate::waitq::budget_watch(caller.process(), sched_task);
+                budget_watched = true;
+                continue;
             }
             let repoll_at = console_repoll_ns.map_or(crate::waitq::NO_DEADLINE, |interval| {
                 now.saturating_add(interval)
@@ -12918,8 +12811,7 @@ where
             self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
             // Park keyed to the CPU this task occupies right now
             // (`park_current_task` reads it live, so a mid-wait migration is
-            // handled); the fallback yield covers a caller with no live
-            // dispatch loop so it never busy-spins.
+            // handled).
             park_current_task(self.arch);
             // A doomed waiter never re-parks: a termination deferred against
             // this task unwinds the wait so the kill lands at the syscall
@@ -12966,6 +12858,9 @@ where
         }
         if observes_room {
             crate::waitq::PORT_ROOM_WAITQ.deregister(sched_task);
+            if budget_watched {
+                crate::waitq::budget_unwatch(caller.process(), sched_task);
+            }
             let ipc = self.ipc.read();
             let sender = caller.caps.proc_id();
             for m in &members {
@@ -12999,13 +12894,7 @@ where
         // caller) fails closed `BadAddress` without dropping a delivered
         // interrupt.
         let token_bytes = token.to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(token_out), &token_bytes)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, token_out, &token_bytes)?;
 
         // Consume an IRQ winner's edge now (the same `swap` `irq_wait`
         // performs) so the next wait re-arms and parks rather than
@@ -13302,13 +13191,8 @@ where
             return Ok(0);
         };
         let bytes = conflict.to_abi().to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), &bytes)
-        }) {
-            Some(Ok(())) => Ok(bytes.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, out, &bytes)
+            .map(|()| bytes.len() as u64)
     }
 
     fn fs_close(&self, caller: &CallerContext<'_>, fd: u32) -> SyscallResult {
@@ -13677,13 +13561,7 @@ where
             return Err(Errno::BufferTooSmall);
         }
         if !out.is_empty() {
-            match self.with_caller_aspace(caller, |space, physmap| {
-                copy_out(space, physmap, VirtAddr::new(buf), &out)
-            }) {
-                Some(Ok(())) => {}
-                Some(Err(err)) => return Err(copy_fault_errno(err)),
-                None => return Err(Errno::BadAddress),
-            }
+            self.copy_out_user(caller, buf, &out)?;
         }
         *listing = at;
         Ok(out.len() as u64)
@@ -13831,13 +13709,7 @@ where
             }
         };
         let out = dir_watch_batch(status, more, &names, &records)?;
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), &out)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, buf, &out)?;
         // Only what reached the caller is consumed: a refused copy leaves the
         // changes recorded for the next drain.
         if let Some(upto) = upto {
@@ -13890,13 +13762,8 @@ where
         }
         let mut buf = [0u8; FileStat::WIRE_LEN];
         stat.encode(&mut buf)?;
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), &buf)
-        }) {
-            Some(Ok(())) => Ok(FileStat::WIRE_LEN as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, out, &buf)
+            .map(|()| FileStat::WIRE_LEN as u64)
     }
 
     fn fs_truncate(&self, caller: &CallerContext<'_>, fd: u32, size: u64) -> SyscallResult {
@@ -14418,13 +14285,8 @@ where
                 .attr_get_node(handle, who, &name, &mut stage)?;
             Ok((stage, read))
         })?;
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(value_out), &stage[..read])
-        }) {
-            Some(Ok(())) => Ok(read as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, value_out, &stage[..read])
+            .map(|()| read as u64)
     }
 
     fn fs_attr_set(
@@ -14471,13 +14333,8 @@ where
         let Some(read) = read else {
             return Ok(0);
         };
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(key_out), &stage[..read])
-        }) {
-            Some(Ok(())) => Ok(read as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, key_out, &stage[..read])
+            .map(|()| read as u64)
     }
 
     fn fs_attr_remove(
@@ -14567,10 +14424,9 @@ where
         // is never silently re-pointed: a clash fails closed with
         // `AlreadyExists` (audited by the registry as the register-denied
         // decision) and the freshly built, never-visible port is dropped.
-        match self.ipc.write().register(port, self.audit) {
-            Ok(_) => Ok(0),
-            Err((_port, err)) => Err(err),
-        }
+        let registered = self.ipc.write().register(port, self.audit);
+        // A refused port drops here, the registry's lock released.
+        registered.map(|_| 0).map_err(|(_port, err)| err)
     }
 
     fn port_admit(&self, caller: &CallerContext<'_>, port: u64, server: u64) -> SyscallResult {
@@ -14585,13 +14441,19 @@ where
         // Every other sender's lane was discarded, so a sender parked for room
         // in one is woken once the registry guard is dropped, to find its
         // sends refused rather than wait for a drain that will never come.
-        let woken = if port.admit(server.owner_instance(), self.audit)? {
+        let discarded = port.admit(server.owner_instance(), self.audit)?;
+        let woken = if discarded {
             port.room_wake_everyone()
         } else {
             RoomWake::none()
         };
         drop(ipc);
         wake_port_room(&woken);
+        // What the discarded messages held of their senders' budgets went with
+        // them.
+        if discarded {
+            crate::waitq::budget_released_everywhere();
+        }
         Ok(0)
     }
 
@@ -14610,8 +14472,10 @@ where
             woken
         };
         // A sender parked for room learns its destination is gone rather than
-        // waiting for a drain that can never come.
+        // waiting for a drain that can never come, and one waiting for budget
+        // gets back what its messages there held.
         wake_port_room(&woken);
+        crate::waitq::budget_released_everywhere();
         Ok(0)
     }
 
@@ -16485,7 +16349,7 @@ where
 /// Park the calling task off the run queue for one wait iteration,
 /// suspending it on the CPU it is running on **right now** — read here at
 /// every call, so a wait loop that migrates across a park cannot suspend
-/// the wrong core's task.
+/// the wrong core's task. Answers whether it parked.
 ///
 /// The scheduler is never touched here. Re-enqueuing the caller from inside
 /// its own syscall would clear its per-CPU current-task slot while
@@ -16493,15 +16357,15 @@ where
 /// the next syscall could not attribute — and an unattributable syscall used
 /// to halt the CPU outright.
 ///
-/// A caller with no published resume handle simply is not suspended and
-/// its loop re-polls under its own deadline. `dispatch_step` publishes the
-/// handle before switching a user task in and clears it only once that
-/// task has switched back, so every EL0 caller has one throughout its
-/// syscall; the no-handle case is a host harness driving these paths with
-/// no dispatch loop behind them.
-fn park_current_task<A: KernelArch>(arch: &A) {
+/// A caller with no published resume handle is not suspended: its loop
+/// re-polls under its own deadline, or waits without a lock on what it looked
+/// at. `dispatch_step` publishes the handle before switching a user task in
+/// and clears it only once that task has switched back, so every EL0 caller
+/// has one throughout its syscall; the no-handle case is a host harness
+/// driving these paths with no dispatch loop behind them.
+fn park_current_task<A: KernelArch>(arch: &A) -> bool {
     let cpu = SchedulerArch::current_cpu(arch);
-    let _ = crate::kthread::reschedule_current(cpu, RescheduleAction::Park);
+    crate::kthread::reschedule_current(cpu, RescheduleAction::Park)
 }
 
 /// [`IrqWaiter`] adapter wiring the `irq_wait` syscall handler's
@@ -17607,7 +17471,7 @@ mod tests {
     use crate::test_sink::TestSink;
     use alloc::boxed::Box;
     use alloc::sync::Arc;
-    use tairix_abi::input::{KeyValue, Modifiers};
+    use tairix_abi::input::{KeyValue, Modifiers, TimedPointer};
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::sysinfo::CrashAccess;
     use tairix_abi::DirEntry;
@@ -17841,7 +17705,7 @@ mod tests {
             sink,
         )
         .expect("unrestricted port creation succeeds");
-        // `register`'s error half is `(Box<Port>, Errno)`, which is not
+        // `register`'s error half hands back the `Port`, which is not
         // `Debug`, so assert on the `Ok` discriminant rather than
         // `.expect()`ing the value.
         assert!(
@@ -24476,6 +24340,81 @@ mod tests {
         caps.admit(record, placement).expect("placed");
     }
 
+    /// The user at the seat is the ordinary account in the login session that
+    /// holds the primary seat: the same account signed in elsewhere, another
+    /// account, a system holder, a holder no login encloses and an unheld seat
+    /// make no one the user at it.
+    #[test]
+    fn the_user_at_the_seat_is_the_seat_holders_own_login() {
+        install_trace_filter();
+        let mut caps = CapTable::new();
+        let signed_in = |caps: &mut CapTable, pid: u64, byte: u8, uid: u32| {
+            let record = TaskCapabilities::derive(
+                ProcessId(pid),
+                UserId(uid),
+                CapabilitySet::EMPTY,
+                CapabilitySet::EMPTY,
+                make_sink(),
+            )
+            .with_proc_id(tairix_abi::ProcId::from_raw([byte; 16]));
+            let placement = caps
+                .resolve_placement(ProcessId::KERNEL, SpawnSession::New, true)
+                .expect("placeable");
+            caps.admit(record, placement).expect("placed");
+        };
+        signed_in(&mut caps, 1, 0x51, 1000);
+        place(
+            &mut caps,
+            session_record(2, 0x52),
+            ProcessId(1),
+            SpawnSession::Inherit,
+        );
+        signed_in(&mut caps, 3, 0x53, 1000);
+        signed_in(&mut caps, 4, 0x54, 1001);
+        signed_in(&mut caps, 5, 0x55, 0);
+        place(
+            &mut caps,
+            session_record(6, 0x56),
+            ProcessId::KERNEL,
+            SpawnSession::Inherit,
+        );
+        place(
+            &mut caps,
+            session_record(7, 0x57),
+            ProcessId::KERNEL,
+            SpawnSession::Inherit,
+        );
+        let queue: &'static crate::console::ConsoleInputQueue =
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seats = SeatRegistry::new(queue);
+        let seated = |seats: &SeatRegistry, pid: u64| {
+            let record = caps.caps_of_process(ProcessId(pid)).expect("admitted");
+            let caller = CallerContext {
+                task_id: SecTaskId(pid),
+                caps: record,
+            };
+            at_seat(seats, &caps, &caller)
+        };
+        assert!(!seated(&seats, 2), "an unheld seat has no one at it");
+        let held = |holder: u64| {
+            seats.release_owned_by(SeatOwner(1), make_sink());
+            seats.release_owned_by(SeatOwner(5), make_sink());
+            seats.release_owned_by(SeatOwner(6), make_sink());
+            seats
+                .acquire(SEAT_PRIMARY, SeatOwner(holder))
+                .expect("the seat is free");
+        };
+        held(1);
+        assert!(seated(&seats, 1), "the desktop holding the seat");
+        assert!(seated(&seats, 2), "a program in the desktop's own login");
+        assert!(!seated(&seats, 3), "the same account signed in elsewhere");
+        assert!(!seated(&seats, 4), "another account");
+        held(5);
+        assert!(!seated(&seats, 5), "a system holder, as a login screen is");
+        held(6);
+        assert!(!seated(&seats, 7), "a holder no login encloses");
+    }
+
     /// A child joined into a session goes where the join resolved when the
     /// spawn was asked for: the process that named the session exiting before
     /// the child is admitted leaves the session — and the child — standing.
@@ -29722,9 +29661,9 @@ mod tests {
         );
     }
 
-    /// A touch handler over a fresh seat registry, its caller (task 2) given an
-    /// address space at `0x1000` holding `bytes`.
-    macro_rules! touch_handlers {
+    /// Syscall handlers over a fresh seat registry, their caller (task 2)
+    /// given an address space at `0x1000` holding `bytes`.
+    macro_rules! seat_handlers {
         ($bytes:expr => $h:ident, $ctx:ident, $arch:ident, $sink:ident) => {
             install_trace_filter();
             let $sink = make_sink();
@@ -29757,6 +29696,116 @@ mod tests {
         };
     }
 
+    /// Where a seat read's copy can never land: no page maps it.
+    const UNMAPPED_READ_BUFFER: u64 = 0x8000;
+
+    /// A seat record whose copy to its reader fails stays at the front of its
+    /// channel, so the next read into a writable buffer delivers it, and
+    /// delivers it once — for each kind of input.
+    #[test]
+    fn a_seat_record_the_reader_could_not_take_is_read_again() {
+        fn read_back<const N: usize>(
+            h: &KernelSyscallHandlers<'_, TestArch>,
+            ctx: &CallerContext<'_>,
+        ) -> [u8; N] {
+            h.with_caller_aspace(ctx, |space, physmap| {
+                let mut buf = [0u8; N];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space")
+        }
+
+        let key = press_char('p');
+        {
+            seat_handlers!(&key.to_le_bytes() => h, ctx, _arch, _sink);
+            let len = KeyInput::WIRE_LEN;
+            assert_eq!(h.display_acquire(&ctx, SEAT_PRIMARY), Ok(1));
+            assert_eq!(
+                h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, len),
+                Ok(len as u64)
+            );
+            assert_eq!(
+                h.keyboard_read(&ctx, SEAT_PRIMARY, UNMAPPED_READ_BUFFER, len),
+                Err(Errno::BadAddress)
+            );
+            assert_eq!(
+                h.keyboard_read(&ctx, SEAT_PRIMARY, 0x1000, len),
+                Ok(len as u64)
+            );
+            assert_eq!(
+                KeyInput::from_bytes(&read_back::<{ KeyInput::WIRE_LEN }>(&h, &ctx)),
+                Ok(key)
+            );
+            assert_eq!(h.keyboard_read(&ctx, SEAT_PRIMARY, 0x1000, len), Ok(0));
+        }
+
+        let motion = PointerInput::MovedBy { dx: 3, dy: -4 };
+        {
+            seat_handlers!(&motion.to_le_bytes() => h, ctx, _arch, _sink);
+            let len = TimedPointer::WIRE_LEN;
+            assert_eq!(h.display_acquire(&ctx, SEAT_PRIMARY), Ok(1));
+            assert_eq!(
+                h.pointer_inject(
+                    &ctx,
+                    SEAT_PRIMARY,
+                    0x1000,
+                    PointerInput::WIRE_LEN,
+                    POINTER_EDGE_UNTIMED
+                ),
+                Ok(PointerInput::WIRE_LEN as u64)
+            );
+            assert_eq!(
+                h.pointer_read(&ctx, SEAT_PRIMARY, UNMAPPED_READ_BUFFER, len),
+                Err(Errno::BadAddress)
+            );
+            assert_eq!(
+                h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, len),
+                Ok(len as u64)
+            );
+            let timed =
+                TimedPointer::from_bytes(&read_back::<{ TimedPointer::WIRE_LEN }>(&h, &ctx));
+            assert_eq!(timed.map(|timed| timed.input), Ok(motion));
+            assert_eq!(h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, len), Ok(0));
+        }
+
+        let touch = {
+            use tairix_abi::touch::{Contact, TouchButtons, TouchExtent, TouchSurface};
+            let mut frame = TouchFrame::new(
+                2,
+                TouchSurface::Screen,
+                TouchButtons::NONE,
+                TouchExtent::default(),
+            );
+            frame
+                .push(Contact::finger(1, 500, 600))
+                .expect("room for a contact");
+            frame
+        };
+        {
+            seat_handlers!(&touch.to_le_bytes() => h, ctx, _arch, _sink);
+            let len = TouchFrame::WIRE_LEN;
+            assert_eq!(h.display_acquire(&ctx, SEAT_PRIMARY), Ok(1));
+            assert_eq!(
+                h.touch_inject(&ctx, SEAT_PRIMARY, 0x1000, len),
+                Ok(len as u64)
+            );
+            assert_eq!(
+                h.touch_read(&ctx, SEAT_PRIMARY, UNMAPPED_READ_BUFFER, len),
+                Err(Errno::BadAddress)
+            );
+            assert_eq!(
+                h.touch_read(&ctx, SEAT_PRIMARY, 0x1000, len),
+                Ok(len as u64)
+            );
+            let delivered =
+                TouchFrame::from_bytes(&read_back::<{ TouchFrame::WIRE_LEN }>(&h, &ctx))
+                    .expect("a valid frame");
+            assert_eq!(delivered.contacts(), touch.contacts());
+            assert_eq!(h.touch_read(&ctx, SEAT_PRIMARY, 0x1000, len), Ok(0));
+        }
+    }
+
     /// `touch_inject` replaces whatever injector and time the driver wrote
     /// with its own stamp and routes the frame to the seat owner's
     /// `touch_read` alone.
@@ -29773,7 +29822,7 @@ mod tests {
             .push(Contact::finger(3, 1_000, 2_000))
             .expect("room for a contact");
         let forged = frame.stamped(0xBAD, 0xBAD).to_le_bytes();
-        touch_handlers!(&forged => h, ctx, arch, _sink);
+        seat_handlers!(&forged => h, ctx, arch, _sink);
         let len = TouchFrame::WIRE_LEN;
 
         assert_eq!(
@@ -29832,7 +29881,7 @@ mod tests {
             TouchExtent::default(),
         )
         .to_le_bytes();
-        touch_handlers!(&frame => h, ctx, _arch, sink);
+        seat_handlers!(&frame => h, ctx, _arch, sink);
         let len = TouchFrame::WIRE_LEN;
         assert_eq!(
             h.touch_inject(&ctx, SEAT_PRIMARY, 0x1000, len - 1),
@@ -30239,7 +30288,7 @@ mod tests {
         // it once, and afterwards the task is a plain non-owner.
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         assert_eq!(
-            seat.read_key(SEAT_PRIMARY, SeatOwner(2), &mut buf),
+            seat.read(SEAT_PRIMARY, SeatOwner(2), InputKind::Key, &mut buf),
             Err(Errno::SeatRevoked)
         );
         assert_eq!(
@@ -37881,6 +37930,55 @@ mod tests {
         });
     }
 
+    /// A level change made with the heap exhausted still reaches every
+    /// thread: a display released then drops its owner back out of the
+    /// strongest band rather than leaving it there.
+    #[test]
+    fn a_display_released_with_the_heap_exhausted_still_drops_its_owner_back() {
+        with_display_owner(|h, ctx, sched, (owner, second, _)| {
+            assert_eq!(h.display_acquire(ctx, SEAT_PRIMARY), Ok(1));
+            h.seat_registry
+                .release(SEAT_PRIMARY, seat_owner(ctx), ReleaseSurface::Text)
+                .expect("the owner releases its lease");
+            crate::test_alloc::refuse_allocations_on_current_thread(true);
+            h.follow_display(ctx.process());
+            crate::test_alloc::refuse_allocations_on_current_thread(false);
+            for thread in [owner, second] {
+                assert_eq!(sched.priority(thread), Ok(Priority::Normal));
+            }
+        });
+    }
+
+    /// A level reaches every thread of a process however many batches its
+    /// threads take to collect, one past a full batch included.
+    #[test]
+    fn sched_set_priority_reweights_threads_past_one_batch() {
+        let (arch, table, ipc, aspaces, irq, ctl) = handler_fixture();
+        let sched = make_sched(arch.clone());
+        let (leader, pid) = spawn_priority_target(&sched, &table);
+        let threads: Vec<u64> = (0..2 * LEVEL_BATCH)
+            .map(|_| spawn_priority_thread(&sched, &table, leader))
+            .collect();
+        let rng = unseeded_rng();
+        let sink = make_sink();
+        let caps = make_caps_record(leader, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(leader),
+            caps: &caps,
+        };
+        let producer: &'static RecordingProcessSignal =
+            crate::forever(Box::new(RecordingProcessSignal::childless(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(h.sched_set_priority(&ctx, pid, SchedPriority::Low), Ok(0));
+        for thread in core::iter::once(leader).chain(threads) {
+            assert_eq!(sched.priority(thread), Ok(Priority::Low));
+        }
+    }
+
     /// The band a display raises a process to is the kernel's, not a level
     /// its principal set: raising the level it did set still needs the
     /// capability.
@@ -45465,8 +45563,6 @@ mod tests {
         crate::callreg::unregister(EndpointId(id));
     }
 
-    /// Post `depth` calls as `ctx` and answer each from the server side,
-    /// leaving every reply uncollected; the tickets, in posting order.
     /// Post `depth` calls as `ctx`'s process and leave them unanswered.
     fn fill_depth_with_unanswered_calls<A: KernelArch>(
         h: &KernelSyscallHandlers<'_, A>,
@@ -45477,6 +45573,58 @@ mod tests {
         for _ in 0..depth {
             assert_eq!(h.call_post(ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
         }
+    }
+
+    /// What `take` names once a thread has recorded itself as waiting for
+    /// room, or nobody if none has within a minute.
+    fn recorded_waiters<K>(take: impl Fn() -> RoomWake<K>) -> RoomWake<K> {
+        let started = std::time::Instant::now();
+        loop {
+            let waiting = take();
+            if !waiting.is_empty() || started.elapsed() > std::time::Duration::from_secs(60) {
+                return waiting;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// Answer `count` calls on `ep` as its server, waking `waiting` once the
+    /// first answer has made room.
+    fn answer_calls(ep: &CallEndpoint, count: usize, waiting: &RoomWake<u64>) {
+        let mut served = 0;
+        while served < count {
+            if let RecvCall::Received(call) = ep.recv_call(usize::MAX) {
+                let woken = ep
+                    .reply(call.ticket, b"pong", &NULL_LOG_SINK)
+                    .expect("reply");
+                crate::waitq::call_woken(&woken);
+                if served == 0 {
+                    wake_call_room(waiting);
+                }
+                served += 1;
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    /// Settle a call `stranger` posts to `ep`, leaving every other caller's room
+    /// as it was: to a thread no scheduler parks, which waits on the settle
+    /// count, the wake that finds the room still full.
+    fn settle_anothers_call(ep: &CallEndpoint, stranger: &TaskCapabilities) {
+        let process = stranger.process().0;
+        let ticket = ep
+            .post(
+                stranger,
+                process,
+                b"q",
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                &NULL_LOG_SINK,
+            )
+            .expect("its own room");
+        let woken = ep.cancel_one(process, ticket).expect("withdrawn");
+        crate::waitq::call_woken(&woken);
     }
 
     /// The lock-out a shared total allowed: a caller that held calls open held
@@ -45577,41 +45725,19 @@ mod tests {
         let depth = ep.per_sender();
         fill_depth_with_unanswered_calls(&h, &ctx, id, depth);
 
-        let written = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                let started = std::time::Instant::now();
+        let (recorded, written) = std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
                 // Taken as the server's answer would take it, which is how this
                 // thread learns the blocked call is waiting.
-                let waiting = loop {
-                    let waiting = ep.room_wake_for(principal);
-                    if !waiting.is_empty() {
-                        break waiting;
-                    }
-                    assert!(
-                        started.elapsed() < std::time::Duration::from_secs(60),
-                        "the blocked call never waited for room"
-                    );
-                    std::thread::yield_now();
-                };
+                let waiting = recorded_waiters(|| ep.room_wake_for(principal));
                 // The server answers every call, the blocked one last.
-                let mut served = 0;
-                while served <= depth {
-                    if let RecvCall::Received(call) = ep.recv_call(usize::MAX) {
-                        let woken = ep
-                            .reply(call.ticket, b"pong", &NULL_LOG_SINK)
-                            .expect("reply");
-                        crate::waitq::call_woken(&woken);
-                        if served == 0 {
-                            wake_call_room(&waiting);
-                        }
-                        served += 1;
-                    } else {
-                        std::thread::yield_now();
-                    }
-                }
+                answer_calls(&ep, depth + 1, &waiting);
+                !waiting.is_empty()
             });
-            h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64)
+            let written = h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64);
+            (server.join().expect("server joined"), written)
         });
+        assert!(recorded, "the blocked call never waited for room");
         assert_eq!(written, Ok(4));
         assert!(
             ep.room_wake_for(principal).is_empty(),
@@ -45621,6 +45747,177 @@ mod tests {
         let (_s, physmap) = guard.resolve(ProcessId(principal)).expect("aspace present");
         assert_eq!(read_reply_page(physmap, 4), b"pong");
         drop(guard);
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// A wake takes the record of every thread waiting as the process, so a
+    /// blocked call that finds the freed room taken by a sibling records itself
+    /// again before it parks, and the next answer still reaches it.
+    #[test]
+    fn ipc_call_beaten_to_the_room_by_a_sibling_waits_for_the_next() {
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let principal = crate::test_boot::claim_task();
+        let (space, physmap) = call_aspace(b"ping");
+        aspaces
+            .write()
+            .register(ProcessId(principal), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(principal, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(principal),
+            caps: &caps,
+        };
+        let stranger = make_caps_record(crate::test_boot::claim_peer_task(), &[], sink);
+        let id = 0xCA11_2008;
+        let ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let depth = ep.per_sender();
+        fill_depth_with_unanswered_calls(&h, &ctx, id, depth);
+
+        let (recorded_again, written) = std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                // Taken as a sibling's wake would take it, the room staying full.
+                let beaten = recorded_waiters(|| ep.room_wake_for(principal));
+                settle_anothers_call(&ep, &stranger);
+                let again = recorded_waiters(|| ep.room_wake_for(principal));
+                answer_calls(&ep, depth + 1, &again);
+                !beaten.is_empty() && !again.is_empty()
+            });
+            let written = h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64);
+            (server.join().expect("server joined"), written)
+        });
+        assert!(
+            recorded_again,
+            "a call whose wake a sibling took parked unrecorded"
+        );
+        assert_eq!(written, Ok(4));
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// A blocked call looks at its process's depth before it posts again, so
+    /// however often it is woken it is refused for room once, as it arrives,
+    /// rather than paying for a charge, a copy and an audit record per wake.
+    #[test]
+    fn ipc_call_waiting_for_room_is_refused_for_it_once() {
+        crate::test_sink::with_log_level(Level::Trace, || {
+            let _registry = crate::callreg::registry_guard();
+            let sink = make_sink();
+            let arch = Arc::new(TestArch::with_cpus(1));
+            let sched = make_sched(arch.clone());
+            let table = RwLock::new(CapTable::new());
+            let ipc = RwLock::new(PortRegistry::new());
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            let rng = unseeded_rng();
+            let principal = crate::test_boot::claim_task();
+            let (space, physmap) = call_aspace(b"ping");
+            aspaces
+                .write()
+                .register(ProcessId(principal), space, physmap)
+                .expect("registration succeeds");
+            let irq = IrqTable::new(31);
+            let ctl = UnsupportedController;
+            let caps = make_caps_record(principal, &[], sink);
+            let ctx = CallerContext {
+                task_id: SecTaskId(principal),
+                caps: &caps,
+            };
+            let stranger = make_caps_record(crate::test_boot::claim_peer_task(), &[], sink);
+            let id = 0xCA11_2009;
+            let ep = register_call_endpoint(id, sink);
+            let h = KernelSyscallHandlers::new(
+                &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+            );
+            let depth = ep.per_sender();
+            fill_depth_with_unanswered_calls(&h, &ctx, id, depth);
+            sink.clear();
+
+            let written = std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    // Recorded twice, a settle sending the wait round between.
+                    let _ = recorded_waiters(|| ep.room_wake_for(principal));
+                    settle_anothers_call(&ep, &stranger);
+                    let again = recorded_waiters(|| ep.room_wake_for(principal));
+                    answer_calls(&ep, depth + 1, &again);
+                });
+                h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64)
+            });
+            assert_eq!(written, Ok(4));
+            let refused = sink
+                .snapshot()
+                .iter()
+                .filter(|event| event.id == tairix_kernel_ipc::AuditEvent::CallQueueFull.id())
+                .count();
+            assert_eq!(
+                refused, 1,
+                "only the post it arrived with was refused for room"
+            );
+            crate::callreg::unregister(EndpointId(id));
+        });
+    }
+
+    /// A blocked call no scheduler parks waits on the endpoint's settle count
+    /// between looks, so with nothing settled it neither records itself nor
+    /// looks again: a poll would retake the locks its answer needs.
+    #[test]
+    fn ipc_call_unparked_waits_for_a_settle_rather_than_looking_again() {
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let principal = crate::test_boot::claim_task();
+        let (space, physmap) = call_aspace(b"ping");
+        aspaces
+            .write()
+            .register(ProcessId(principal), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(principal, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(principal),
+            caps: &caps,
+        };
+        let stranger = make_caps_record(crate::test_boot::claim_peer_task(), &[], sink);
+        let id = 0xCA11_200A;
+        let ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let depth = ep.per_sender();
+        fill_depth_with_unanswered_calls(&h, &ctx, id, depth);
+
+        let (quiet, written) = std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let _ = recorded_waiters(|| ep.room_wake_for(principal));
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let quiet = ep.room_wake_for(principal).is_empty();
+                settle_anothers_call(&ep, &stranger);
+                let again = recorded_waiters(|| ep.room_wake_for(principal));
+                answer_calls(&ep, depth + 1, &again);
+                quiet
+            });
+            let written = h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64);
+            (server.join().expect("server joined"), written)
+        });
+        assert!(quiet, "an unparked wait looked again with nothing settled");
+        assert_eq!(written, Ok(4));
         crate::callreg::unregister(EndpointId(id));
     }
 
@@ -47285,7 +47582,7 @@ mod tests {
             pin: None,
         };
         let ready =
-            || h.waitset_member_state(&ctx, &member, 0, 0) == crate::fswatch::MemberState::Ready;
+            || h.waitset_member_state(&ctx, &member, 0, 0, 0) == crate::fswatch::MemberState::Ready;
         assert!(!ready());
 
         let _ = h.reclaim_process_resources(ProcessId(peer_process), DriverEnding::Clean);
@@ -51595,7 +51892,7 @@ mod tests {
             ),
             Err(Errno::LengthOutOfRange)
         );
-        ipc.write().teardown_owned_by(0x5704, sink, |_| {});
+        teardown_ports_owned_by(&ipc, 0x5704, sink);
     }
 
     /// `port_bind` charges a port's worst case to the caller's
@@ -51670,7 +51967,7 @@ mod tests {
         assert_eq!(h.port_unbind(&ctx, c), Ok(0));
         assert_eq!(h.port_bind(&ctx, a, 64, 4), Ok(0), "and so is the id");
 
-        ipc.write().teardown_owned_by(owner, sink, |_| {});
+        teardown_ports_owned_by(&ipc, owner, sink);
         assert_eq!(held(), 0, "teardown returns every charge");
     }
 
@@ -51751,7 +52048,7 @@ mod tests {
         assert!(!crate::waitset::owned_by(owner, third));
         assert_eq!(held(LimitKind::WaitSets), 0);
         assert_eq!(held(LimitKind::WaitSetMembers), 0);
-        ipc.write().teardown_owned_by(owner, sink, |_| {});
+        teardown_ports_owned_by(&ipc, owner, sink);
     }
 
     /// Binding a **reserved** well-known endpoint id as a port requires
@@ -51792,7 +52089,7 @@ mod tests {
             caps: &privileged_caps,
         };
         assert_eq!(h.port_bind(&privileged, reserved, 64, 4), Ok(0));
-        ipc.write().teardown_owned_by(0x5706, sink, |_| {});
+        teardown_ports_owned_by(&ipc, 0x5706, sink);
     }
 
     /// A delivered message on a member port makes `waitset_wait` report
@@ -51870,8 +52167,8 @@ mod tests {
         assert_eq!(h.ipc_recv(&ctx, id, 0x1000, 64, 0x1800), Ok(4));
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
-        ipc.write().teardown_owned_by(owner, sink, |_| {});
-        ipc.write().teardown_owned_by(0xF0F0, sink, |_| {});
+        teardown_ports_owned_by(&ipc, owner, sink);
+        teardown_ports_owned_by(&ipc, 0xF0F0, sink);
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
@@ -51933,7 +52230,7 @@ mod tests {
             "the caller's own full lane is what parks it"
         );
 
-        ipc.write().teardown_owned_by(0xF0F5, sink, |_| {});
+        teardown_ports_owned_by(&ipc, 0xF0F5, sink);
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
@@ -52015,8 +52312,491 @@ mod tests {
         );
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
 
-        ipc.write().teardown_owned_by(0xF0F2, sink, |_| {});
+        teardown_ports_owned_by(&ipc, 0xF0F2, sink);
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
+    }
+
+    /// A drain takes the record of every thread waiting for room as the
+    /// sender, so a wait that finds the freed slot taken by a sibling records
+    /// itself again before it parks, and the next drain still reaches it.
+    #[test]
+    fn port_room_wait_beaten_to_the_slot_by_a_sibling_waits_for_the_next() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
+        aspaces
+            .write()
+            .register(ProcessId(owner), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(owner, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let id = 0x5EAD_0026u64;
+        register_port_for(&ipc, id, 0xF0F7, sink);
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PORT_ROOM, id, 0x47)
+            .expect("send authority admits the member");
+        let port = |f: &dyn Fn(&Port)| f(ipc.read().lookup(EndpointId(id)).expect("bound"));
+        for _ in 0..4 {
+            port(&|port| {
+                port.send(&caps, &[0x11; 2], tairix_abi::RLIMIT_INFINITY, sink)
+                    .expect("the caller's own room");
+            });
+        }
+        let sender = caps.proc_id();
+        let waiting = || {
+            ipc.read()
+                .lookup(EndpointId(id))
+                .expect("bound")
+                .room_wake_for(sender)
+        };
+
+        let (recorded_again, answer) = std::thread::scope(|scope| {
+            let drainer = scope.spawn(|| {
+                // Taken as a sibling's wake would take it, the lane staying full.
+                let beaten = recorded_waiters(waiting);
+                let again = recorded_waiters(waiting);
+                port(&|port| drop(port.recv()));
+                !beaten.is_empty() && !again.is_empty()
+            });
+            let answer = h.waitset_wait(&ctx, set, u64::MAX, 0x2000);
+            (drainer.join().expect("drainer joined"), answer)
+        });
+        assert!(
+            recorded_again,
+            "a wait whose wake a sibling took parked unrecorded"
+        );
+        assert_eq!(answer, Ok(0));
+
+        teardown_ports_owned_by(&ipc, 0xF0F7, sink);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+    }
+
+    /// A `PortRoom` member counts the caller's budget as room: it waits while
+    /// what the caller holds leaves too little for the port's largest message,
+    /// rather than report ready to sends refused `LimitExceeded`, and is ready
+    /// once a receive gives enough back, or once the caller holds nothing,
+    /// since no release could then make room. A wait that ends at once waits
+    /// for nothing, so it leaves no record on the budget queue.
+    #[test]
+    fn port_room_waits_while_the_callers_messages_hold_its_budget() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
+        aspaces
+            .write()
+            .register(ProcessId(owner), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(owner, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let id = 0x5EAD_0027u64;
+        register_port_for(&ipc, id, 0xF0F8, sink);
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PORT_ROOM, id, 0x48)
+            .expect("send authority admits the member");
+        // Messages of the port's largest size.
+        let send = |bound| {
+            ipc.read()
+                .lookup(EndpointId(id))
+                .expect("bound")
+                .send(&caps, &[0x11; 64], bound, sink)
+        };
+        let take = || ipc.read().lookup(EndpointId(id)).expect("bound").recv();
+        let budget = |soft| {
+            aspaces.write().set_limit(
+                ProcessId(owner),
+                LimitKind::IpcQueueBytes,
+                ResourceLimit::new(soft, tairix_abi::RLIMIT_INFINITY).expect("well-formed"),
+            );
+        };
+        for _ in 0..2 {
+            assert_eq!(send(tairix_abi::RLIMIT_INFINITY), Ok(()));
+        }
+        let held = caps.charges().held(LimitKind::IpcQueueBytes);
+        budget(held);
+        assert_eq!(send(held), Err(Errno::LimitExceeded));
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x2000),
+            Err(Errno::TimedOut),
+            "free slots are no room while the caller's messages hold its budget"
+        );
+        drop(take());
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x2000),
+            Ok(0),
+            "a receive gave back room for the port's largest message"
+        );
+        drop(take());
+        budget(0);
+        assert_eq!(caps.charges().held(LimitKind::IpcQueueBytes), 0);
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x2000),
+            Ok(0),
+            "holding nothing, no release could make room, so the send answers"
+        );
+        let (_, waiter) = crate::test_boot::claim_scheduler();
+        let hook = crate::waitq::wait_arch().expect("the claimed hook");
+        assert!(
+            !crate::waitq::BUDGET_WAITQ.wake_waiter(
+                hook,
+                crate::waitq::budget_key(ProcessId(waiter)),
+                waiter
+            ),
+            "a wait that never parked left no record"
+        );
+
+        teardown_ports_owned_by(&ipc, 0xF0F8, sink);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+    }
+
+    /// A `PortRoom` member judges the caller's whole budget, wherever it is
+    /// held: what its messages at another port hold leaves it waiting, and a
+    /// receive at that other port, which the member does not watch, wakes the
+    /// wait, which returns ready.
+    ///
+    /// Regression: the member judged the caller's lane at its own port alone,
+    /// so it reported ready to a send refused `LimitExceeded`, and nothing
+    /// woke a sender that waited for the budget to free.
+    #[test]
+    fn port_room_waits_for_budget_held_at_another_port_and_a_receive_there_wakes_it() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
+        aspaces
+            .write()
+            .register(ProcessId(owner), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(owner, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let (watched, elsewhere) = (0x5EAD_0028u64, 0x5EAD_0029u64);
+        register_port_for(&ipc, watched, 0xF0F9, sink);
+        register_port_for(&ipc, elsewhere, 0xF0FA, sink);
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PORT_ROOM, watched, 0x49)
+            .expect("send authority admits the member");
+        // Messages of the ports' largest size.
+        let send = |id, bound| {
+            ipc.read()
+                .lookup(EndpointId(id))
+                .expect("bound")
+                .send(&caps, &[0x11; 64], bound, sink)
+        };
+        let take = |id| ipc.read().lookup(EndpointId(id)).expect("bound").recv();
+        assert_eq!(send(watched, tairix_abi::RLIMIT_INFINITY), Ok(()));
+        for _ in 0..2 {
+            assert_eq!(send(elsewhere, tairix_abi::RLIMIT_INFINITY), Ok(()));
+        }
+        let held = caps.charges().held(LimitKind::IpcQueueBytes);
+        aspaces.write().set_limit(
+            ProcessId(owner),
+            LimitKind::IpcQueueBytes,
+            ResourceLimit::new(held, tairix_abi::RLIMIT_INFINITY).expect("well-formed"),
+        );
+        assert_eq!(send(watched, held), Err(Errno::LimitExceeded));
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x2000),
+            Err(Errno::TimedOut),
+            "not ready while the other port's messages hold the budget"
+        );
+        let budget = crate::waitq::budget_key(ProcessId(owner));
+        let (woken, answer) = std::thread::scope(|scope| {
+            let receiver = scope.spawn(|| {
+                let _ = crate::test_boot::claim_scheduler();
+                // The wait found the budget short and waits for it.
+                let registered = crate::waitq::wait_arch().is_some_and(|hook| {
+                    let started = std::time::Instant::now();
+                    while !crate::waitq::BUDGET_WAITQ.wake_waiter(hook, budget, owner) {
+                        if started.elapsed() > std::time::Duration::from_secs(60) {
+                            return false;
+                        }
+                        std::thread::yield_now();
+                    }
+                    true
+                });
+                let _ = crate::test_boot::take_unparked();
+                // What a receive at the other port releases, and its wake.
+                drop(take(elsewhere));
+                crate::waitq::budget_released(ProcessId(owner));
+                registered && crate::test_boot::take_unparked().contains(&owner)
+            });
+            let answer = h.waitset_wait(&ctx, set, u64::MAX, 0x2000);
+            (receiver.join().expect("receiver joined"), answer)
+        });
+        assert!(woken, "the wait was woken by the receive at the other port");
+        assert_eq!(answer, Ok(0), "and returned ready");
+        assert_eq!(
+            send(watched, held),
+            Ok(()),
+            "a receive at the other port gave back what the send needed"
+        );
+
+        teardown_ports_owned_by(&ipc, 0xF0F9, sink);
+        teardown_ports_owned_by(&ipc, 0xF0FA, sink);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+    }
+
+    /// A receive gives back what the message held of its sender's budget, so
+    /// it wakes that sender's threads waiting for budget — at whatever port
+    /// they wait — and no other process's.
+    #[test]
+    fn a_receive_wakes_the_senders_budget_waiters_and_no_others() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let (_, owner) = crate::test_boot::claim_scheduler();
+        aspaces
+            .write()
+            .register(ProcessId(owner), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(owner, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let id = 0x5EAD_002Au64;
+        assert_eq!(h.port_bind(&ctx, id, 64, 4), Ok(0));
+        let sender = crate::test_boot::claim_peer_task();
+        let bystander = crate::test_boot::claim_peer_task();
+        let from = make_caps_record(sender, &[], sink);
+        ipc.read()
+            .lookup(EndpointId(id))
+            .expect("bound")
+            .send(&from, &[0xEE; 4], tairix_abi::RLIMIT_INFINITY, sink)
+            .expect("sent");
+        for waiter in [sender, bystander] {
+            crate::waitq::budget_watch(ProcessId(waiter), waiter);
+        }
+        let _ = crate::test_boot::take_unparked();
+        assert_eq!(h.ipc_recv(&ctx, id, 0x1000, 64, 0x1800), Ok(4));
+        assert_eq!(
+            crate::test_boot::take_unparked(),
+            [sender],
+            "the receive woke its sender's budget waiter alone"
+        );
+        for waiter in [sender, bystander] {
+            crate::waitq::budget_unwatch(ProcessId(waiter), waiter);
+        }
+        teardown_ports_owned_by(&ipc, owner, sink);
+    }
+
+    /// A port torn down, unbound, or narrowed to one sender takes the other
+    /// senders' messages with it, and what they held of their budgets: each
+    /// wakes the threads waiting for budget.
+    #[test]
+    fn a_port_discarding_queued_messages_wakes_the_budget_waiters() {
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let (_, owner) = crate::test_boot::claim_scheduler();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(owner, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let id = 0x5EAD_002Bu64;
+        let sender = crate::test_boot::claim_peer_task();
+        let instance = ProcId::from_raw([0x5D; PROC_ID_LEN]);
+        let from = make_caps_record(sender, &[], sink).with_proc_id(instance);
+        let woken = |discard: &dyn Fn()| {
+            assert_eq!(h.port_bind(&ctx, id, 64, 4), Ok(0));
+            ipc.read()
+                .lookup(EndpointId(id))
+                .expect("bound")
+                .send(&from, &[0xEE; 4], tairix_abi::RLIMIT_INFINITY, sink)
+                .expect("sent");
+            crate::waitq::budget_watch(ProcessId(sender), sender);
+            let _ = crate::test_boot::take_unparked();
+            discard();
+            crate::waitq::budget_unwatch(ProcessId(sender), sender);
+            crate::test_boot::take_unparked().contains(&sender)
+        };
+        assert!(
+            woken(&|| teardown_ports_owned_by(&ipc, owner, sink)),
+            "a teardown"
+        );
+        assert!(
+            woken(&|| assert_eq!(h.port_unbind(&ctx, id), Ok(0))),
+            "an unbind"
+        );
+        let server = 0xCA11_2106u64;
+        let _ep = register_call_endpoint(server, sink);
+        assert!(
+            woken(&|| assert_eq!(h.port_admit(&ctx, id, server), Ok(0))),
+            "an admission of another sender"
+        );
+        crate::callreg::unregister(EndpointId(server));
+        teardown_ports_owned_by(&ipc, owner, sink);
+    }
+
+    /// Collecting a call's answer, a call timing out, and withdrawing one each
+    /// give back what the call held of its caller's budget, so each wakes the
+    /// caller's threads waiting for it; a reap that settles nothing does not.
+    #[test]
+    fn a_call_its_caller_settles_wakes_the_callers_budget_waiters() {
+        with_await_endpoint(0xCA11_2105, 100, |h, ctx, ep, post, _| {
+            let (_, waiter) = crate::test_boot::claim_scheduler();
+            let process = ctx.caps.process();
+            let woken = |settle: &dyn Fn()| {
+                crate::waitq::budget_watch(process, waiter);
+                let _ = crate::test_boot::take_unparked();
+                settle();
+                crate::waitq::budget_unwatch(process, waiter);
+                crate::test_boot::take_unparked().contains(&waiter)
+            };
+            let answered = post();
+            let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
+                panic!("the call is received");
+            };
+            let _ = ep
+                .reply(call.ticket, b"pong", &NULL_LOG_SINK)
+                .expect("reply");
+            assert!(
+                woken(&|| {
+                    assert_eq!(h.call_reap(ctx, ep.id().0, answered, 0x2000, 64), Ok(4));
+                }),
+                "a collected answer"
+            );
+            let withdrawn = post();
+            assert!(
+                woken(&|| assert_eq!(h.call_cancel(ctx, ep.id().0, withdrawn), Ok(0))),
+                "a withdrawal"
+            );
+            let lapsed = post();
+            h.arch.set_monotonic_ns(200);
+            assert!(
+                woken(&|| {
+                    assert_eq!(
+                        h.call_reap(ctx, ep.id().0, lapsed, 0x2000, 64),
+                        Err(Errno::TimedOut)
+                    );
+                }),
+                "a timeout"
+            );
+            let pending = post();
+            assert!(
+                !woken(&|| {
+                    assert_eq!(
+                        h.call_reap(ctx, ep.id().0, pending, 0x2000, 64),
+                        Err(Errno::WouldBlock)
+                    );
+                }),
+                "a reap that settles nothing frees nothing"
+            );
+        });
+    }
+
+    /// A change to the process's `ipc-queue-bytes` limit may be the room a
+    /// thread of it waits for, so it wakes the process's budget waiters; a
+    /// change to another limit does not.
+    #[test]
+    fn setting_the_ipc_budget_wakes_the_processs_budget_waiters() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let (_, owner) = crate::test_boot::claim_scheduler();
+        aspaces
+            .write()
+            .register(ProcessId(owner), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(owner, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let woken = |kind: LimitKind| {
+            let current = aspaces.read().limits(ProcessId(owner)).get(kind);
+            stage_limit(&h, &ctx, current);
+            let _ = crate::test_boot::take_unparked();
+            assert_eq!(h.rlimit_set(&ctx, kind.as_u32(), 0x1000), Ok(0));
+            crate::test_boot::take_unparked().contains(&owner)
+        };
+        crate::waitq::budget_watch(ProcessId(owner), owner);
+        assert!(
+            !woken(LimitKind::Processes),
+            "another limit frees no budget"
+        );
+        assert!(
+            woken(LimitKind::IpcQueueBytes),
+            "a new budget may be the room it waits for"
+        );
+        crate::waitq::budget_unwatch(ProcessId(owner), owner);
     }
 
     /// Observing a port's room is admitted by the caller's *send* authority
@@ -52120,7 +52900,7 @@ mod tests {
         // A destination that is gone reports ready too: the woken sender
         // fails its send closed rather than waiting on a mailbox that can
         // never drain again.
-        ipc.write().teardown_owned_by(0xF0F3, sink, |_| {});
+        teardown_ports_owned_by(&ipc, 0xF0F3, sink);
         assert_eq!(h.waitset_wait(&raw, set, 0, 0x2000), Ok(0));
 
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
@@ -52804,7 +53584,7 @@ mod tests {
         // A racing sender fails typed, never delivers into a dead mailbox.
         assert_eq!(h.ipc_send(&ctx, id, 0x1000, 4), Err(Errno::NotFound));
 
-        ipc.write().teardown_owned_by(0xF0F1, sink, |_| {});
+        teardown_ports_owned_by(&ipc, 0xF0F1, sink);
     }
 
     /// `waitset_ctl(Add)` owner-checks a `Child` member: before a producer
@@ -56079,6 +56859,153 @@ mod tests {
         assert_eq!(producer.mapping.lock().take(), offered, "fs_realpath");
     }
 
+    /// An answer bound for a page the caller reserved but never touched is
+    /// offered to the fault resolvers, as a store to that page would be, on
+    /// every path that writes into the caller's memory — random bytes, a
+    /// clock reading, the caller's own origin, a received message — and a
+    /// message whose copy ends at the budget stays queued for the next
+    /// receive. The recording producer installs no translation, so each copy
+    /// still ends at its retry budget.
+    ///
+    /// Regression: these paths copied without resolving a miss, so a valid
+    /// buffer on a page the process had yet to touch was refused out of hand.
+    #[test]
+    fn answers_for_an_untouched_page_offer_the_miss_to_the_resolvers() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = seeded_rng();
+        let owner = crate::test_boot::claim_task();
+        aspaces
+            .write()
+            .register(ProcessId(owner), space, physmap)
+            .expect("registration succeeds");
+        let untouched = 0x30_0000;
+        aspaces
+            .write()
+            .record_anon_region(ProcessId(owner), untouched, 1)
+            .expect("a disjoint extent is recorded");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(owner, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mem_map(producer);
+        let offered = Some((PAGE_SIZE, tairix_abi::MapFlags::FIXED.bits(), untouched));
+
+        assert_eq!(
+            h.random_get(&ctx, untouched, 32, RandomFlags::empty()),
+            Err(Errno::BadAddress)
+        );
+        assert_eq!(producer.mapping.lock().take(), offered, "random_get");
+        assert_eq!(h.wall_time_get(&ctx, untouched, 64), Err(Errno::BadAddress));
+        assert_eq!(producer.mapping.lock().take(), offered, "wall_time_get");
+        assert_eq!(
+            h.self_origin(&ctx, untouched, tairix_abi::ORIGIN_WIRE_LEN),
+            Err(Errno::BadAddress)
+        );
+        assert_eq!(producer.mapping.lock().take(), offered, "self_origin");
+
+        let id = 0x5EAD_0031u64;
+        register_port_for(&ipc, id, owner, sink);
+        let from = make_caps_record(crate::test_boot::claim_peer_task(), &[], sink);
+        ipc.read()
+            .lookup(EndpointId(id))
+            .expect("bound")
+            .send(&from, b"held", tairix_abi::RLIMIT_INFINITY, sink)
+            .expect("queued");
+        assert_eq!(
+            h.ipc_recv(&ctx, id, untouched, 64, 0x1000),
+            Err(Errno::BadAddress)
+        );
+        assert_eq!(producer.mapping.lock().take(), offered, "ipc_recv");
+        assert_eq!(
+            ipc.read().lookup(EndpointId(id)).expect("bound").len(),
+            1,
+            "a message the copy could not land stays queued"
+        );
+        assert_eq!(h.ipc_recv(&ctx, id, 0x1000, 64, 0x1100), Ok(4));
+        teardown_ports_owned_by(&ipc, owner, sink);
+    }
+
+    /// A call's reply bound for a page the caller reserved but never touched
+    /// is offered to the fault resolvers before it is answered for: the
+    /// ticket is retired as the reply is claimed, so a reply the copy cannot
+    /// land is gone.
+    ///
+    /// Regression: the reply was copied without resolving a miss, so a
+    /// mount list past one page of a fresh heap buffer was refused
+    /// `BadAddress` and lost with its ticket.
+    #[test]
+    fn a_call_reply_for_an_untouched_page_offers_the_miss_to_the_resolvers() {
+        let principal = crate::test_boot::claim_task();
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(principal), space, physmap)
+            .expect("registration succeeds");
+        let untouched = 0x30_0000;
+        aspaces
+            .write()
+            .record_anon_region(ProcessId(principal), untouched, 1)
+            .expect("a disjoint extent is recorded");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(principal, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(principal),
+            caps: &caps,
+        };
+        let id = 0xCA11_2107u64;
+        let ep = register_call_endpoint(id, sink);
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mem_map(producer);
+        assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
+        let ticket = {
+            let guard = aspaces.read();
+            let (_s, physmap) = guard.resolve(ProcessId(principal)).expect("aspace present");
+            read_ticket(physmap)
+        };
+        let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
+            panic!("the posted call is received");
+        };
+        let _ = ep
+            .reply(call.ticket, b"pong", &NULL_LOG_SINK)
+            .expect("reply");
+        assert_eq!(
+            h.call_reap(&ctx, id, ticket, untouched, 64),
+            Err(Errno::BadAddress)
+        );
+        assert_eq!(
+            producer.mapping.lock().take(),
+            Some((PAGE_SIZE, tairix_abi::MapFlags::FIXED.bits(), untouched))
+        );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
     /// A `WaitSourceKind::File` member keys on the node its descriptor pins,
     /// is not ready until that node's change generation advances, then
     /// reports the member once and consumes the edge — the `tail -f` wake
@@ -59214,6 +60141,57 @@ mod tests {
         crate::callreg::unregister(EndpointId(id));
     }
 
+    /// The removals a [`Recording`] volume service lists: the second and third
+    /// since boot, the first having fallen out of what it keeps.
+    fn recorded_removals() -> Vec<VolumeRemovalRecord> {
+        use tairix_abi::sysinfo::RemovedWrites;
+        alloc::vec![
+            VolumeRemovalRecord::new(2, [0x2A; 16], RemovedWrites::None).expect("a removal"),
+            VolumeRemovalRecord::new(3, [0x3A; 16], RemovedWrites::Held).expect("a removal"),
+        ]
+    }
+
+    /// The kernel lists the volume service's removals as it keeps them, oldest
+    /// first, paged as every list is: a buffer too small for one is refused,
+    /// an offset pages the tail, and one past the end answers the empty
+    /// terminator.
+    #[test]
+    fn the_volume_removals_domain_pages_what_the_volume_service_keeps() {
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let caller = VolumeCaller::new(&[CapabilityId::SYSINFO_INTROSPECT], None, sink);
+        let service: &'static Recording = crate::forever(Box::new(Recording::default()));
+        let h = caller.handlers(&sched, &arch, sink, service);
+        let ctx = caller.context();
+        let domain = IntrospectDomain::VolumeRemovals.as_u32();
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, domain, 0, 0x1000, VolumeRemovalRecord::WIRE_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, domain, 0, 0x1000, 4096),
+            Ok(2 * VolumeRemovalRecord::WIRE_LEN as u64)
+        );
+        let delivered = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; 2 * VolumeRemovalRecord::WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        let listed: Vec<VolumeRemovalRecord> = delivered
+            .chunks(VolumeRemovalRecord::WIRE_LEN)
+            .map(|bytes| VolumeRemovalRecord::from_bytes(bytes).expect("a valid removal"))
+            .collect();
+        assert_eq!(listed, recorded_removals());
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, domain, 1, 0x1000, 4096),
+            Ok(VolumeRemovalRecord::WIRE_LEN as u64)
+        );
+        assert_eq!(h.sysinfo_introspect(&ctx, domain, 2, 0x1000, 4096), Ok(0));
+    }
+
     /// What a [`Recording`] volume service was asked.
     #[derive(Default)]
     struct Asked {
@@ -59229,6 +60207,8 @@ mod tests {
         image: Option<Image>,
         /// What delivering an image attach's answer came to.
         image_delivered: Option<Result<(), Errno>>,
+        /// A retitle's caller, the volume it named and the title asked.
+        retitle: Option<(u32, [u8; 16], alloc::string::String)>,
     }
 
     /// A volume service that records what a handler hands it.
@@ -59375,6 +60355,24 @@ mod tests {
             ));
             self.0.lock().image_delivered = Some(delivered);
             delivered
+        }
+
+        fn removals(&self) -> Result<Vec<VolumeRemovalRecord>, Errno> {
+            Ok(recorded_removals())
+        }
+
+        fn retitle(
+            &self,
+            caller: &crate::fs::Principal<'_>,
+            volume_id: &[u8; 16],
+            title: &tairix_abi::driver::filesystem::VolumeTitle,
+        ) -> Result<(), Errno> {
+            self.0.lock().retitle = Some((
+                caller.uid,
+                *volume_id,
+                alloc::string::String::from(title.as_str()),
+            ));
+            Ok(())
         }
     }
 
@@ -59569,6 +60567,46 @@ mod tests {
         assert_eq!(
             AttachReply::decode(&reply).map(|reply| reply.volume_id),
             Ok([0x42; 16])
+        );
+    }
+
+    /// A retitle reaches the volume service with the caller's own identity,
+    /// and a frame that is too long or malformed is refused before it does.
+    #[test]
+    fn a_retitle_carries_who_asks_and_refuses_a_bad_frame() {
+        use tairix_abi::driver::filesystem::VolumeTitle;
+        use tairix_abi::volume::{VolumeRetitleRequest, VOLUME_RETITLE_MAX_LEN};
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let recorder: &'static Recording = crate::forever(Box::new(Recording::default()));
+        let caller = VolumeCaller::new(&[], None, sink);
+        let h = caller.handlers(&sched, &arch, sink, recorder);
+        let ctx = caller.context();
+        let mut frame = [0u8; VOLUME_RETITLE_MAX_LEN];
+        let len = VolumeRetitleRequest {
+            volume_id: [9; 16],
+            title: VolumeTitle::new("Holiday").expect("a title"),
+        }
+        .encode(&mut frame)
+        .expect("encodes");
+        h.copy_out_user(&ctx, 0x1000, &frame[..len])
+            .expect("staged");
+        assert_eq!(h.volume_retitle(&ctx, 0x1000, len), Ok(0));
+        assert_eq!(
+            recorder.0.lock().retitle,
+            Some((1000, [9; 16], alloc::string::String::from("Holiday"))),
+            "the service decides on the caller's own identity"
+        );
+        assert_eq!(
+            h.volume_retitle(&ctx, 0x1000, VOLUME_RETITLE_MAX_LEN + 1),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            h.volume_retitle(&ctx, 0x1000, len - 1),
+            Err(Errno::LengthOutOfRange),
+            "a frame its length byte does not describe"
         );
     }
 

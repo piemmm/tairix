@@ -57,6 +57,21 @@ impl DragArm {
     }
 }
 
+/// The entries a drag of the selection `selected`, listed low to high, shows,
+/// at most `most`: `pressed`, the selected entry the press landed on, in front
+/// — else the first selected — then the rest in listing order.
+pub fn drag_order(
+    pressed: Option<usize>,
+    selected: impl Iterator<Item = usize>,
+    most: usize,
+) -> impl Iterator<Item = usize> {
+    let mut rest = selected.peekable();
+    let lead = pressed.or_else(|| rest.peek().copied());
+    lead.into_iter()
+        .chain(rest.filter(move |&index| Some(index) != lead))
+        .take(most)
+}
+
 /// The bundle intent a gesture with (or without) shift held means.
 ///
 /// An application bundle is both a program and a directory, so activating one
@@ -465,10 +480,26 @@ pub const fn press_step(hold: PressHold, input: PressInput) -> PressStep {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundle_intent, press_step, primary_press as press_with, DragArm, Keyboard, NamePress,
-        PressHit, PressHold, PressInput, PressStep, PrimaryPress, RenameArm, RenameCommit,
-        SelectHow, SelectKeys,
+        bundle_intent, drag_order, press_step, primary_press as press_with, DragArm, Keyboard,
+        NamePress, PressHit, PressHold, PressInput, PressStep, PrimaryPress, RenameArm,
+        RenameCommit, SelectHow, SelectKeys,
     };
+
+    /// A drag shows the entry pressed in front, then the rest of the selection
+    /// in listing order, as many as it shows.
+    ///
+    /// Regression: the first selected entry led, whichever one was pressed.
+    #[test]
+    fn a_drag_shows_the_entry_pressed_in_front_of_the_rest() {
+        let order = |pressed, most| {
+            drag_order(pressed, [2, 5, 7, 9, 11].into_iter(), most).collect::<alloc::vec::Vec<_>>()
+        };
+        assert_eq!(order(Some(7), 4), [7, 2, 5, 9]);
+        assert_eq!(order(Some(2), 4), [2, 5, 7, 9]);
+        assert_eq!(order(Some(11), 2), [11, 2]);
+        assert_eq!(order(None, 3), [2, 5, 7], "the first selected leads");
+        assert!(drag_order(None, core::iter::empty(), 4).next().is_none());
+    }
     use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
     use tairix_abi::window_ipc::{PointerAction, WindowEvent};
     use tairix_geometry::{Point, Scale};

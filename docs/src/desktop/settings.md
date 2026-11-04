@@ -279,8 +279,9 @@ page](./cursors.md#helping-find-the-pointer).
 
 The desktop picture's only home: the backdrop
 menu's `Change Background…` opens Settings here rather than a second
-application. Its four rows — fit, backdrop, icon arrangement, icon sort —
-come from the same one registry as Appearance's, and post the *pinboard*
+application. Its five rows — fit, backdrop, icon arrangement, icon sort,
+and *Align to grid* — come from the same one registry as Appearance's, and
+post the *pinboard*
 half of the desktop's document, so a picture change and an appearance change
 cannot undo each other.
 

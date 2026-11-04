@@ -269,9 +269,10 @@ pub enum PickPurpose {
         /// The name the picker offers, which the user may keep or change.
         /// Empty offers none.
         suggested: DocumentName,
-        /// The endings the chosen name is held to: what the requester can
-        /// write, refused in the picker before any file is made.
-        endings: SaveEndings,
+        /// The formats the document can be saved in and the one it is in now,
+        /// which the picker opens on; the chosen name is held to the chosen
+        /// one before any file is made.
+        formats: SaveFormats,
     },
 }
 
@@ -284,120 +285,118 @@ impl PickPurpose {
         }
     }
 
-    /// The endings it holds a name to: none for an open.
-    const fn endings(&self) -> SaveEndings {
+    /// The formats it saves in: none for an open.
+    const fn formats(&self) -> &SaveFormats {
         match self {
-            Self::Open | Self::Folder => SaveEndings::ANY,
-            Self::Save { endings, .. } => *endings,
+            Self::Open | Self::Folder => &SaveFormats::ANY,
+            Self::Save { formats, .. } => formats,
         }
     }
 }
 
-/// Most endings a [`SaveEndings`] holds.
-pub const SAVE_ENDINGS_MAX: usize = 8;
+/// Most formats a [`SaveFormats`] offers.
+pub const SAVE_FORMATS_MAX: usize = 8;
 
-/// Longest ending a [`SaveEndings`] holds, its separator included: room for
+/// Most name extensions one [`SaveFormat`] names.
+pub const SAVE_EXTENSIONS_MAX: usize = 4;
+
+/// Longest extension a [`SaveFormat`] names, its dot included: room for
 /// `.markdown`, the longest the type registry knows, which it checks.
-pub const SAVE_ENDING_MAX: usize = 9;
+pub const SAVE_EXTENSION_MAX: usize = 9;
 
-/// The name endings a [`PickPurpose::Save`] holds the chosen name to — an
-/// extension such as `.png`, or a RISC OS file type such as `,b60` —
-/// matched without regard to ASCII case. None holds it to none.
-///
-/// Each is a `.` or a `,` and then ASCII letters or digits, so an ending can
-/// name nothing but a format.
+/// One format a document can be saved in: the RISC OS file type that types it
+/// on a volume recording one, and the extensions that type it in a name,
+/// matched without regard to ASCII case — the first the one a name with no
+/// ending of the format is given. A format naming no extension is typed by
+/// its file type alone: in the volume's record of it, or in the name's own
+/// `,xxx` where the volume keeps none.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct SaveEndings {
+pub struct SaveFormat {
+    filetype: Option<Filetype>,
     count: u8,
-    lens: [u8; SAVE_ENDINGS_MAX],
-    bytes: [[u8; SAVE_ENDING_MAX]; SAVE_ENDINGS_MAX],
+    lens: [u8; SAVE_EXTENSIONS_MAX],
+    bytes: [[u8; SAVE_EXTENSION_MAX]; SAVE_EXTENSIONS_MAX],
 }
 
-impl SaveEndings {
-    /// Any name: the requester writes whatever the document is called.
-    pub const ANY: Self = Self {
-        count: 0,
-        lens: [0; SAVE_ENDINGS_MAX],
-        bytes: [[0; SAVE_ENDING_MAX]; SAVE_ENDINGS_MAX],
-    };
+impl SaveFormat {
+    /// Bytes a format takes on the wire at most: a typed flag, the file type,
+    /// a count, then each extension length-prefixed.
+    const MAX_WIRE_LEN: usize = 4 + SAVE_EXTENSIONS_MAX * (1 + SAVE_EXTENSION_MAX);
 
-    /// Bytes the endings take on the wire: a count, then each length-prefixed.
-    const MAX_WIRE_LEN: usize = 1 + SAVE_ENDINGS_MAX * (1 + SAVE_ENDING_MAX);
+    /// A format of RISC OS `filetype`, or of none, naming no extension yet.
+    #[must_use]
+    pub const fn new(filetype: Option<Filetype>) -> Self {
+        Self {
+            filetype,
+            count: 0,
+            lens: [0; SAVE_EXTENSIONS_MAX],
+            bytes: [[0; SAVE_EXTENSION_MAX]; SAVE_EXTENSIONS_MAX],
+        }
+    }
 
-    /// Hold the name to `separator` and `code` too — `('.', "png")`.
+    /// Name `extension` — `.png` — too.
     ///
     /// # Errors
     ///
-    /// [`Errno::LengthOutOfRange`] past [`SAVE_ENDINGS_MAX`] endings or an
-    /// ending past [`SAVE_ENDING_MAX`] bytes; [`Errno::OutOfRange`] for a
-    /// separator other than `.` or `,`, or a code not wholly ASCII letters
-    /// and digits.
-    pub fn push(&mut self, separator: char, code: &str) -> Result<(), Errno> {
-        if code.len() >= SAVE_ENDING_MAX {
-            return Err(Errno::LengthOutOfRange);
-        }
-        let mut ending = [0u8; SAVE_ENDING_MAX];
-        ending[0] = match separator {
-            '.' => b'.',
-            ',' => b',',
-            _ => return Err(Errno::OutOfRange),
-        };
-        ending[1..=code.len()].copy_from_slice(code.as_bytes());
-        self.adopt(&ending[..=code.len()])
-    }
-
-    /// Take `ending` as the next, refusing one of another shape.
-    fn adopt(&mut self, ending: &[u8]) -> Result<(), Errno> {
+    /// [`Errno::LengthOutOfRange`] past [`SAVE_EXTENSIONS_MAX`] extensions or
+    /// one past [`SAVE_EXTENSION_MAX`] bytes; [`Errno::OutOfRange`] for one
+    /// that is not a `.` and then ASCII letters or digits, or one it names
+    /// already.
+    pub fn push_extension(&mut self, extension: &str) -> Result<(), Errno> {
         let slot = usize::from(self.count);
-        if slot == SAVE_ENDINGS_MAX || ending.len() > SAVE_ENDING_MAX {
+        if slot == SAVE_EXTENSIONS_MAX || extension.len() > SAVE_EXTENSION_MAX {
             return Err(Errno::LengthOutOfRange);
         }
-        let shaped = match ending {
-            [b'.' | b',', code @ ..] => {
-                !code.is_empty() && code.iter().all(u8::is_ascii_alphanumeric)
-            }
+        let shaped = match extension.as_bytes() {
+            [b'.', code @ ..] => !code.is_empty() && code.iter().all(u8::is_ascii_alphanumeric),
             _ => false,
         };
-        if !shaped {
+        if !shaped
+            || self
+                .extensions()
+                .any(|named| named.eq_ignore_ascii_case(extension))
+        {
             return Err(Errno::OutOfRange);
         }
-        let len = u8::try_from(ending.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        self.bytes[slot][..ending.len()].copy_from_slice(ending);
+        let len = u8::try_from(extension.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        self.bytes[slot][..extension.len()].copy_from_slice(extension.as_bytes());
         self.lens[slot] = len;
         self.count += 1;
         Ok(())
     }
 
-    /// Whether it holds a name to nothing.
+    /// The RISC OS file type it is, if it has one.
     #[must_use]
-    pub const fn is_any(&self) -> bool {
-        self.count == 0
+    pub const fn filetype(&self) -> Option<Filetype> {
+        self.filetype
     }
 
-    /// The endings, first the one a name with none is given.
-    pub fn iter(&self) -> impl Iterator<Item = &str> {
+    /// The extensions it names, first the one a name with none is given.
+    pub fn extensions(&self) -> impl Iterator<Item = &str> {
         self.lens[..usize::from(self.count)]
             .iter()
             .zip(&self.bytes)
-            // Every ending was checked to be ASCII on the way in.
+            // Every extension was checked to be ASCII on the way in.
             .map(|(&len, bytes)| core::str::from_utf8(&bytes[..usize::from(len)]).unwrap_or(""))
     }
 
-    /// Whether `name` is one it holds: any name when it holds none, else one
-    /// that ends in one of its endings after a stem of its own.
+    /// Whether `name` ends in one of its extensions, or in its own file type
+    /// after a `,`, with a stem before it.
     #[must_use]
-    pub fn accepts(&self, name: &str) -> bool {
-        self.is_any()
-            || self.iter().any(|ending| {
-                name.len() > ending.len()
-                    && name.as_bytes()[name.len() - ending.len()..]
-                        .eq_ignore_ascii_case(ending.as_bytes())
-            })
+    pub fn types(&self, name: &str) -> bool {
+        if self.extensions().any(|ending| ends_in(name, ending)) {
+            return true;
+        }
+        let Some(filetype) = self.filetype else {
+            return false;
+        };
+        let mut own = [0u8; 4];
+        ends_in(name, comma_filetype(filetype.get(), &mut own))
     }
 
     /// Bytes it takes on the wire.
     const fn wire_len(&self) -> usize {
-        let mut len = 1;
+        let mut len = 4;
         let mut slot = 0;
         while slot < self.count as usize {
             len += 1 + self.lens[slot] as usize;
@@ -409,8 +408,10 @@ impl SaveEndings {
     /// Write it at the head of `out`, which [`wire_len`](Self::wire_len)
     /// bytes fit.
     fn write(&self, out: &mut [u8]) {
-        out[0] = self.count;
-        let mut at = 1;
+        out[0] = u8::from(self.filetype.is_some());
+        put_u16(out, 1, self.filetype.map_or(0, Filetype::get));
+        out[3] = self.count;
+        let mut at = 4;
         for (&len, bytes) in self.lens[..usize::from(self.count)].iter().zip(&self.bytes) {
             let end = at + 1 + usize::from(len);
             out[at] = len;
@@ -419,21 +420,192 @@ impl SaveEndings {
         }
     }
 
-    /// The endings at the head of `bytes`; the frame's own length check
-    /// refuses anything past them.
-    fn read(bytes: &[u8]) -> Result<Self, Errno> {
-        let (&count, mut rest) = bytes.split_first().ok_or(Errno::BufferTooSmall)?;
-        if usize::from(count) > SAVE_ENDINGS_MAX {
+    /// The format at the head of `bytes` and the bytes after it.
+    fn read(bytes: &[u8]) -> Result<(Self, &[u8]), Errno> {
+        let head = bytes.get(..4).ok_or(Errno::BufferTooSmall)?;
+        let raw = read_u16(head, 1);
+        let filetype = match head[0] {
+            0 if raw == 0 => None,
+            1 => Some(Filetype::new(raw).ok_or(Errno::OutOfRange)?),
+            _ => return Err(Errno::OutOfRange),
+        };
+        let count = head[3];
+        if usize::from(count) > SAVE_EXTENSIONS_MAX {
             return Err(Errno::LengthOutOfRange);
         }
-        let mut endings = Self::ANY;
+        let mut format = Self::new(filetype);
+        let mut rest = &bytes[4..];
         for _ in 0..count {
             let (&len, tail) = rest.split_first().ok_or(Errno::BufferTooSmall)?;
-            let ending = tail.get(..usize::from(len)).ok_or(Errno::BufferTooSmall)?;
-            endings.adopt(ending)?;
+            let extension = tail.get(..usize::from(len)).ok_or(Errno::BufferTooSmall)?;
+            let extension = core::str::from_utf8(extension).map_err(|_| Errno::OutOfRange)?;
+            format.push_extension(extension)?;
             rest = &tail[usize::from(len)..];
         }
-        Ok(endings)
+        Ok((format, rest))
+    }
+}
+
+/// `filetype` as a name carries it, `,ff9`, written into `out`.
+fn comma_filetype(filetype: u16, out: &mut [u8; 4]) -> &str {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out[0] = b',';
+    for (at, shift) in [8u16, 4, 0].into_iter().enumerate() {
+        out[at + 1] = HEX[usize::from((filetype >> shift) & 0xF)];
+    }
+    // Four ASCII bytes.
+    core::str::from_utf8(out).unwrap_or(",")
+}
+
+/// Whether `name` ends in `ending`, ignoring ASCII case, with a stem before
+/// it.
+fn ends_in(name: &str, ending: &str) -> bool {
+    name.len() > ending.len()
+        && name.as_bytes()[name.len() - ending.len()..].eq_ignore_ascii_case(ending.as_bytes())
+}
+
+/// The formats a [`PickPurpose::Save`] may be made in, and the one the
+/// document is in now. None holds the name to nothing: the requester writes
+/// whatever the document is called.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SaveFormats {
+    count: u8,
+    current: u8,
+    formats: [SaveFormat; SAVE_FORMATS_MAX],
+}
+
+impl SaveFormats {
+    /// Any name, in no format.
+    pub const ANY: Self = Self {
+        count: 0,
+        current: 0,
+        formats: [SaveFormat {
+            filetype: None,
+            count: 0,
+            lens: [0; SAVE_EXTENSIONS_MAX],
+            bytes: [[0; SAVE_EXTENSION_MAX]; SAVE_EXTENSIONS_MAX],
+        }; SAVE_FORMATS_MAX],
+    };
+
+    /// Bytes the formats take on the wire at most: a count, the current one,
+    /// then each format.
+    const MAX_WIRE_LEN: usize = 2 + SAVE_FORMATS_MAX * SaveFormat::MAX_WIRE_LEN;
+
+    /// Offer `format` too, as the one the document is in now where `current`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] past [`SAVE_FORMATS_MAX`] formats;
+    /// [`Errno::OutOfRange`] for a format typed by neither file type nor
+    /// extension, or one sharing a file type or an extension with one offered.
+    pub fn push(&mut self, format: SaveFormat, current: bool) -> Result<(), Errno> {
+        let slot = usize::from(self.count);
+        if slot == SAVE_FORMATS_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if format.filetype.is_none() && format.count == 0 {
+            return Err(Errno::OutOfRange);
+        }
+        let shares = self.iter().any(|offered| {
+            (format.filetype.is_some() && offered.filetype == format.filetype)
+                || offered.extensions().any(|extension| {
+                    format
+                        .extensions()
+                        .any(|other| other.eq_ignore_ascii_case(extension))
+                })
+        });
+        if shares {
+            return Err(Errno::OutOfRange);
+        }
+        self.formats[slot] = format;
+        if current {
+            self.current = self.count;
+        }
+        self.count += 1;
+        Ok(())
+    }
+
+    /// Whether it offers no format, holding a name to nothing.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// How many formats it offers.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    /// The formats, in the order offered.
+    pub fn iter(&self) -> impl Iterator<Item = &SaveFormat> {
+        self.formats[..usize::from(self.count)].iter()
+    }
+
+    /// The format at `index`, if it offers one there.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&SaveFormat> {
+        self.formats[..usize::from(self.count)].get(index)
+    }
+
+    /// The format the document is in now, or `None` for none offered.
+    #[must_use]
+    pub const fn current(&self) -> Option<usize> {
+        if self.count == 0 {
+            None
+        } else {
+            Some(self.current as usize)
+        }
+    }
+
+    /// The format `name`'s ending types it as, if it offers one that does.
+    #[must_use]
+    pub fn of(&self, name: &str) -> Option<usize> {
+        self.iter().position(|format| format.types(name))
+    }
+
+    /// Bytes it takes on the wire.
+    const fn wire_len(&self) -> usize {
+        let mut len = 2;
+        let mut slot = 0;
+        while slot < self.count as usize {
+            len += self.formats[slot].wire_len();
+            slot += 1;
+        }
+        len
+    }
+
+    /// Write it at the head of `out`, which [`wire_len`](Self::wire_len)
+    /// bytes fit.
+    fn write(&self, out: &mut [u8]) {
+        out[0] = self.count;
+        out[1] = self.current;
+        let mut at = 2;
+        for format in self.iter() {
+            format.write(&mut out[at..]);
+            at += format.wire_len();
+        }
+    }
+
+    /// The formats at the head of `bytes`; the frame's own length check
+    /// refuses anything past them.
+    fn read(bytes: &[u8]) -> Result<Self, Errno> {
+        let head = bytes.get(..2).ok_or(Errno::BufferTooSmall)?;
+        let (count, current) = (head[0], head[1]);
+        if usize::from(count) > SAVE_FORMATS_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if current >= count.max(1) {
+            return Err(Errno::OutOfRange);
+        }
+        let mut formats = Self::ANY;
+        let mut rest = &bytes[2..];
+        for slot in 0..count {
+            let (format, tail) = SaveFormat::read(rest)?;
+            formats.push(format, slot == current)?;
+            rest = tail;
+        }
+        Ok(formats)
     }
 }
 
@@ -711,17 +883,18 @@ pub type AppMenuEntryText = BoundedText<0, APP_MENU_ENTRY_MAX>;
 /// resolves to nothing and the row draws the built-in glyph.
 pub type AppMenuBundle = BoundedText<0, APP_MENU_BUNDLE_MAX>;
 
-/// Maximum encoded length, in bytes, of the asset id a menu row names as its
-/// class picture ([`AppMenuItem::with_icon_asset`]): the public name an icon
-/// master is shipped under (`folder`, `disk-usb`).
-pub const APP_MENU_ASSET_MAX: usize = 32;
+/// Maximum encoded length, in bytes, of the asset id an application names a
+/// class picture by — a menu row's ([`AppMenuItem::with_icon_asset`]), a
+/// dragged item's ([`DragPicture`]): the public name an icon master is shipped
+/// under (`folder`, `disk-usb`).
+pub const ICON_ASSET_MAX: usize = 32;
 
 /// A validated class-picture asset id, over the shared validator.
 ///
 /// A name the desktop looks up in its own icon vocabulary, never a path: an
 /// application names a picture and can never name a file. An id the desktop
 /// does not know draws its generic glyph.
-pub type AppMenuAsset = BoundedText<1, APP_MENU_ASSET_MAX>;
+pub type IconAsset = BoundedText<1, ICON_ASSET_MAX>;
 
 /// Where a chooseable row's picture comes from.
 // A path dwarfs an asset id. The trade `AppMenuRow` makes: a `Copy`,
@@ -735,7 +908,7 @@ enum AppMenuIcon {
     /// The icon of the application bundle at this path.
     Bundle(AppMenuBundle),
     /// A class picture the desktop ships.
-    Asset(AppMenuAsset),
+    Asset(IconAsset),
 }
 
 /// A menu row's quick-entry field: one line of text the desktop puts in a
@@ -763,6 +936,9 @@ pub struct AppMenuEntry {
     /// What of `initial` the field opens with selected. A selection that does
     /// not lie on `initial`'s character boundaries refuses the row.
     pub selected: AppMenuEntrySelection,
+    /// Whether choosing the row opens the field rather than answering the
+    /// row's own id.
+    pub opens_on_choose: bool,
 }
 
 impl AppMenuEntry {
@@ -774,7 +950,17 @@ impl AppMenuEntry {
             id,
             initial,
             selected: AppMenuEntrySelection::end_of(&initial),
+            opens_on_choose: false,
         }
+    }
+
+    /// This entry opened by choosing its row, which then answers only through
+    /// the field: for a row whose whole purpose is the field, such as a title
+    /// to edit.
+    #[must_use]
+    pub const fn opened_by_choosing(mut self) -> Self {
+        self.opens_on_choose = true;
+        self
     }
 
     /// This entry opening with `range` of its text selected — a rename's
@@ -1053,7 +1239,7 @@ impl AppMenuItem {
     /// a folder, a kind of drive — through the same artwork cache every
     /// other surface draws that class through.
     #[must_use]
-    pub const fn with_icon_asset(mut self, asset: AppMenuAsset) -> Self {
+    pub const fn with_icon_asset(mut self, asset: IconAsset) -> Self {
         self.icon = AppMenuIcon::Asset(asset);
         self
     }
@@ -1156,6 +1342,9 @@ pub struct AppMenuEntryView<'a> {
     pub initial: &'a str,
     /// What of `initial` the field opens with selected.
     pub selected: AppMenuEntrySelection,
+    /// Whether choosing the row opens the field rather than answering the
+    /// row's own id.
+    pub opens_on_choose: bool,
 }
 
 /// One row of a built menu, with its text borrowed from the menu
@@ -1281,8 +1470,18 @@ impl RowRecord {
         self.flags & APP_MENU_ROW_FLAG_ASSET != 0
     }
 
-    /// The flag byte of a row stating these four things.
-    const fn flags_of(enabled: bool, mark: AppMenuMark, role: AppMenuRole, asset: bool) -> u8 {
+    /// Whether choosing the row opens its field.
+    const fn opens_entry(&self) -> bool {
+        self.flags & APP_MENU_ROW_FLAG_OPENS_ENTRY != 0
+    }
+
+    /// The flag byte of a row stating these things.
+    const fn flags_of(
+        enabled: bool,
+        mark: AppMenuMark,
+        role: AppMenuRole,
+        (asset, opens_entry): (bool, bool),
+    ) -> u8 {
         let mut flags = (mark as u8) << APP_MENU_ROW_MARK_SHIFT;
         if enabled {
             flags |= APP_MENU_ROW_FLAG_ENABLED;
@@ -1292,6 +1491,9 @@ impl RowRecord {
         }
         if asset {
             flags |= APP_MENU_ROW_FLAG_ASSET;
+        }
+        if opens_entry {
+            flags |= APP_MENU_ROW_FLAG_OPENS_ENTRY;
         }
         flags
     }
@@ -1484,6 +1686,7 @@ impl AppMenu {
                         id,
                         initial: self.text_field(entry_at, record.entry_len),
                         selected: record.entry_selected,
+                        opens_on_choose: record.opens_entry(),
                     }),
                 icon,
             }),
@@ -1523,6 +1726,7 @@ impl AppMenu {
             ..RowRecord::VACANT
         };
         let mut entry_text = AppMenuEntryText::EMPTY;
+        let mut opens_entry = false;
         let mut icon = AppMenuIcon::None;
         let (mut enabled, mut mark, mut role) = (false, AppMenuMark::None, AppMenuRole::Neutral);
         let (label, shortcut, reason) = match *row {
@@ -1536,6 +1740,7 @@ impl AppMenu {
                     record.entry_id = entry.id.get();
                     record.entry_selected = entry.selected;
                     entry_text = entry.initial;
+                    opens_entry = entry.opens_on_choose;
                 }
                 icon = item.icon;
                 (item.label, item.shortcut, item.reason)
@@ -1602,8 +1807,12 @@ impl AppMenu {
         record.reason_len = reason.len_byte();
         record.entry_len = entry_text.len_byte();
         record.icon_len = u8::try_from(icon_text.len()).map_err(|_| Errno::NoSpace)?;
-        record.flags =
-            RowRecord::flags_of(enabled, mark, role, icon_asset && !icon_text.is_empty());
+        record.flags = RowRecord::flags_of(
+            enabled,
+            mark,
+            role,
+            (icon_asset && !icon_text.is_empty(), opens_entry),
+        );
         self.rows[at] = record;
         self.text_len = u16::try_from(end).map_err(|_| Errno::NoSpace)?;
         self.len = self.len.saturating_add(1);
@@ -1784,6 +1993,11 @@ pub struct AppBar {
     /// application offers no menu, which the session honours by opening
     /// nothing.
     pub menu: AppMenu,
+    /// The declaring application's own number for this declaration. The
+    /// session never interprets it: it hands it back with every answer this
+    /// declaration's menu gives, so an answer chosen before a re-declaration
+    /// is resolved against the declaration it was chosen from.
+    pub revision: u32,
 }
 
 /// The `parent` byte value meaning "this row is at the top level".
@@ -3008,7 +3222,9 @@ pub enum WindowRequest {
     /// application with no window open at all still has somewhere to be
     /// clicked. The session keeps the declaration until the calling
     /// process exits; re-issuing it replaces the previous one whole, which
-    /// is how an application changes a row's enablement or its mark.
+    /// is how an application changes a row's enablement or its mark. A menu
+    /// opened before a re-issue still answers with the [`AppBar::revision`]
+    /// it was opened from.
     ///
     /// It carries no capability: an application asks only to be listed
     /// under its own attested identity, and the session draws the slot
@@ -3072,6 +3288,26 @@ pub enum WindowRequest {
         window_id: u64,
         /// The open whose commit is being pulled, from that open's reply.
         open_id: u64,
+    },
+    /// Take the text the user committed into the quick-entry field of the
+    /// caller's own icon-bar menu row `item`: the answer to a
+    /// [`WindowEvent::AppBarEntered`], pulled for the reason
+    /// [`Self::TakeMenuText`] is.
+    ///
+    /// Held per row with the revision it was committed under, so two rows
+    /// committed in quick succession never answer for each other, taken
+    /// once, and replaced by the next commit on the same row. A row with
+    /// nothing held under `revision` answers empty, so an answer from an
+    /// earlier declaration's menu never collects a later commit's text.
+    ///
+    /// It carries no capability: the caller's own icon-bar presence is the
+    /// scope, and ownership is the kernel-attested identity of the caller.
+    TakeAppBarText {
+        /// The row whose commit is being pulled.
+        item: AppMenuItemId,
+        /// The revision the [`WindowEvent::AppBarEntered`] being answered
+        /// carried.
+        revision: u32,
     },
     /// Take the next target queued for this **application** to open, if any.
     ///
@@ -3293,30 +3529,36 @@ pub enum WindowRequest {
         alert_id: u64,
     },
     /// Ask the desktop to authorise and perform `task` for the caller's own
-    /// window `window_id`.
+    /// window `window_id`, or for its icon-bar slot when `None`.
     ///
-    /// Answered only for the desktop's own Settings application: the desktop
-    /// puts its authorisation prompt up, naming Settings as the one asking,
-    /// and performs the task as the account the prompt allows it as. No
-    /// application collects a password; this one never sees one. The reply is
-    /// only the acceptance, and the task concludes exactly once with a
-    /// [`WindowEvent::Authorised`] delivered to the window's event endpoint.
-    /// One authorisation may be pending per window; a second is refused
-    /// (`AlreadyExists`), and one asked while anything else holds the seat is
+    /// Answered only for the desktop component the task belongs to — Settings
+    /// for the machine's configuration and accounts, the file manager for
+    /// ejecting a volume: the desktop puts its authorisation prompt up, naming
+    /// that component as the one asking, and performs the task as the account
+    /// the prompt allows it as. No application collects a password; this one
+    /// never sees one. The reply is only the acceptance, and the task
+    /// concludes exactly once with a [`WindowEvent::Authorised`] delivered to
+    /// the window's event endpoint, or to the slot's for a task asked from the
+    /// icon bar by an application with no window to hold it. One authorisation
+    /// may be pending per window, and one per slot; a second is refused
+    /// (`AlreadyExists`), one from a slot the caller never declared is refused
+    /// (`NotFound`), and one asked while anything else holds the seat is
     /// refused (`SeatBusy`).
     Authorise {
-        /// The caller's own window the outcome is delivered to.
-        window_id: u64,
+        /// The caller's own window the outcome is delivered to, or `None` for
+        /// its icon-bar slot, which the wire spells as window zero.
+        window_id: Option<core::num::NonZeroU64>,
         /// What to perform.
         task: SystemTask,
     },
-    /// Take what window `window_id`'s last task printed, once its
+    /// Take what the last task asked for window `window_id` — or for the
+    /// caller's icon-bar slot, when `None` — printed, once its
     /// [`WindowEvent::Authorised`] said it was captured. One-shot; the reply
     /// is a [`decode_authorised_output_reply`] frame, and `NotFound` once
     /// taken or before any capture concluded.
     TakeAuthorisedOutput {
-        /// The window whose task concluded.
-        window_id: u64,
+        /// The window whose task concluded, or `None` for the slot's.
+        window_id: Option<core::num::NonZeroU64>,
     },
 }
 
@@ -3414,6 +3656,8 @@ const OP_TAKE_AUTHORISED_OUTPUT: u16 = 43;
 const OP_SAVE_OFFER_ANSWER: u16 = 46;
 /// Wire operation discriminant of [`WindowRequest::SaveInto`].
 const OP_SAVE_INTO: u16 = 47;
+/// Wire operation discriminant of [`WindowRequest::TakeAppBarText`].
+const OP_TAKE_APP_BAR_TEXT: u16 = 48;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -3452,7 +3696,7 @@ const fn pick_file_wire_len(name: usize, endings: usize) -> usize {
     PICK_NAME_OFFSET + name + endings
 }
 const _: () = assert!(
-    pick_file_wire_len(crate::FS_NAME_MAX, SaveEndings::MAX_WIRE_LEN)
+    pick_file_wire_len(crate::FS_NAME_MAX, SaveFormats::MAX_WIRE_LEN)
         <= WindowRequest::MAX_WIRE_LEN
 );
 /// Byte offset of a [`WindowRequest::BeginDrag`]'s item count.
@@ -3469,12 +3713,33 @@ const DRAG_NAME_OFFSET: usize = DRAG_NAME_LEN_OFFSET + 1;
 const DRAG_OPENABLE: u8 = 1;
 /// Flag: the first item's volume records a filetype for it.
 const DRAG_TYPED: u8 = 2;
+/// A drag picture's flag: it says where its picture stood.
+const DRAG_PICTURE_PLACED: u8 = 1;
+/// Bytes a drag picture takes ahead of its asset id: its flags, where it
+/// stood, and the id's length.
+const DRAG_PICTURE_HEAD: usize = 1 + 4 + 4 + 1;
 
-/// Encoded size of a [`WindowRequest::BeginDrag`] whose first item's name is
-/// `name` bytes.
-const fn begin_drag_wire_len(name: usize) -> usize {
-    DRAG_NAME_OFFSET + name
+/// Encoded size of a [`WindowRequest::BeginDrag`] carrying `items`: the
+/// operands ahead of the first item's name, the name, how much of it is
+/// hidden, then each picture shown.
+const fn begin_drag_wire_len(items: &DragItems) -> usize {
+    let mut len = DRAG_NAME_OFFSET + items.first.len_byte() as usize + 1;
+    let mut slot = 0;
+    while slot < DRAG_SHOWN_MAX {
+        if let Some(picture) = &items.pictures[slot] {
+            len += DRAG_PICTURE_HEAD + picture.icon.len_byte() as usize;
+        }
+        slot += 1;
+    }
+    len
 }
+const _: () = assert!(
+    DRAG_NAME_OFFSET
+        + crate::FS_NAME_MAX
+        + 1
+        + DRAG_SHOWN_MAX * (DRAG_PICTURE_HEAD + ICON_ASSET_MAX)
+        <= WindowRequest::MAX_WIRE_LEN
+);
 
 /// Encoded size of a [`WindowRequest::DragVerdict`]: the header, the window,
 /// the serial, and the verdict.
@@ -3516,6 +3781,10 @@ const QUERY_DESKTOP_WIRE_LEN: usize = REQUEST_HEADER_LEN;
 /// Encoded size of a [`WindowRequest::TakeMenuText`]: the header, the window
 /// the chain belonged to, and the open whose commit is being pulled.
 const TAKE_MENU_TEXT_WIRE_LEN: usize = REQUEST_HEADER_LEN + 16;
+
+/// Encoded size of a [`WindowRequest::TakeAppBarText`]: the header, the row's
+/// id and the revision it answers, padded to the request's eight-byte rhythm.
+const TAKE_APP_BAR_TEXT_WIRE_LEN: usize = REQUEST_HEADER_LEN + 8;
 
 /// Encoded size of a [`WindowRequest::RevealDocument`]: the header, the
 /// window, and the location handle.
@@ -3751,9 +4020,11 @@ const APP_BAR_CLICK_OFFSET: usize = 16;
 const APP_BAR_ROW_COUNT_OFFSET: usize = APP_BAR_CLICK_OFFSET + 1;
 /// Byte offset of the length of a declaration's trailing text block.
 const APP_BAR_TEXT_LEN_OFFSET: usize = APP_BAR_ROW_COUNT_OFFSET + 1;
+/// Byte offset of a [`WindowRequest::SetAppBar`]'s [`AppBar::revision`].
+const APP_BAR_REVISION_OFFSET: usize = APP_BAR_TEXT_LEN_OFFSET + 2;
 /// Byte offset of the first of a [`WindowRequest::SetAppBar`]'s fixed-width
 /// row records. The text block follows the last of them.
-const APP_BAR_ROWS_OFFSET: usize = APP_BAR_TEXT_LEN_OFFSET + 2;
+const APP_BAR_ROWS_OFFSET: usize = APP_BAR_REVISION_OFFSET + 4;
 
 /// Encoded size, in bytes, of one menu row record: its kind, flag byte,
 /// parent, the lengths of its text fields, its item id, its quick-entry
@@ -3883,11 +4154,14 @@ const APP_MENU_ROW_FLAG_DESTRUCTIVE: u8 = 1 << 3;
 /// Bit of a menu row's flag byte meaning its icon source names a class asset
 /// rather than a bundle.
 const APP_MENU_ROW_FLAG_ASSET: u8 = 1 << 4;
+/// Bit of a menu row's flag byte meaning choosing the row opens its field.
+const APP_MENU_ROW_FLAG_OPENS_ENTRY: u8 = 1 << 5;
 /// Every flag bit a menu row defines; anything else is refused.
 const APP_MENU_ROW_FLAG_MASK: u8 = APP_MENU_ROW_FLAG_ENABLED
     | APP_MENU_ROW_MARK_MASK
     | APP_MENU_ROW_FLAG_DESTRUCTIVE
-    | APP_MENU_ROW_FLAG_ASSET;
+    | APP_MENU_ROW_FLAG_ASSET
+    | APP_MENU_ROW_FLAG_OPENS_ENTRY;
 
 /// Wire kind of [`AppMenuRow::Item`].
 const APP_MENU_KIND_ITEM: u8 = 1;
@@ -3947,21 +4221,20 @@ impl WindowRequest {
             | Self::TakeAuthorisedOutput { .. } => WINDOW_ID_WIRE_LEN,
             Self::OpenAlert { ref alert, .. } => OPEN_ALERT_SPEC_OFFSET + alert::wire_len(alert),
             Self::Authorise { ref task, .. } => AUTHORISE_TASK_OFFSET + task::wire_len(task),
-            Self::BeginDrag { ref items, .. } => {
-                begin_drag_wire_len(items.first().len_byte() as usize)
-            }
+            Self::BeginDrag { ref items, .. } => begin_drag_wire_len(items),
             Self::DragVerdict { .. } => DRAG_VERDICT_WIRE_LEN,
             Self::QueryDragSpot { .. } => QUERY_DRAG_SPOT_WIRE_LEN,
             Self::SaveOfferAnswer { .. } => SAVE_OFFER_ANSWER_WIRE_LEN,
             Self::SaveInto { .. } => SAVE_INTO_WIRE_LEN,
             Self::PickFile { purpose, .. } => pick_file_wire_len(
                 purpose.suggested_len_byte() as usize,
-                purpose.endings().wire_len(),
+                purpose.formats().wire_len(),
             ),
             Self::OpenLayer { .. } => OPEN_LAYER_WIRE_LEN,
             Self::PlaceLayer { .. } => PLACE_LAYER_WIRE_LEN,
             Self::TakeOpenTarget => TAKE_OPEN_TARGET_WIRE_LEN,
             Self::TakeMenuText { .. } => TAKE_MENU_TEXT_WIRE_LEN,
+            Self::TakeAppBarText { .. } => TAKE_APP_BAR_TEXT_WIRE_LEN,
             Self::RevealDocument { .. } => REVEAL_DOCUMENT_WIRE_LEN,
             Self::HandOverLaunch {
                 ref run_path,
@@ -4102,6 +4375,7 @@ impl WindowRequest {
             Self::OpenMenu { .. } => OP_OPEN_MENU,
             Self::TakeOpenTarget => OP_TAKE_OPEN_TARGET,
             Self::TakeMenuText { .. } => OP_TAKE_MENU_TEXT,
+            Self::TakeAppBarText { .. } => OP_TAKE_APP_BAR_TEXT,
             Self::HandOverLaunch { .. } => OP_HAND_OVER_LAUNCH,
             Self::RevealDocument { .. } => OP_REVEAL_DOCUMENT,
             Self::SetTooltip { .. } => OP_SET_TOOLTIP,
@@ -4254,6 +4528,10 @@ impl WindowRequest {
                 put_u64(out, 8, window_id);
                 put_u64(out, 16, open_id);
             }
+            Self::TakeAppBarText { item, revision } => {
+                put_u16(out, 8, item.get());
+                put_u32(out, 10, revision);
+            }
             Self::RevealDocument {
                 window_id,
                 location,
@@ -4303,10 +4581,12 @@ impl WindowRequest {
                 window_id,
                 ref task,
             } => {
-                put_u64(out, 8, window_id);
+                put_u64(out, 8, window_id.map_or(0, core::num::NonZeroU64::get));
                 task::write(&mut out[AUTHORISE_TASK_OFFSET..], task);
             }
-            Self::TakeAuthorisedOutput { window_id } => put_u64(out, 8, window_id),
+            Self::TakeAuthorisedOutput { window_id } => {
+                put_u64(out, 8, window_id.map_or(0, core::num::NonZeroU64::get));
+            }
             _ => {}
         }
     }
@@ -4617,12 +4897,8 @@ impl WindowRequest {
             OP_TAKE_OPEN_TARGET => {
                 exact_len(bytes, TAKE_OPEN_TARGET_WIRE_LEN).map(|()| Self::TakeOpenTarget)
             }
-            OP_TAKE_MENU_TEXT => {
-                exact_len(bytes, TAKE_MENU_TEXT_WIRE_LEN)?;
-                let window_id = nonzero_id(read_u64(bytes, 8))?;
-                let open_id = nonzero_id(read_u64(bytes, 16))?;
-                Ok(Self::TakeMenuText { window_id, open_id })
-            }
+            OP_TAKE_MENU_TEXT => read_take_menu_text(bytes),
+            OP_TAKE_APP_BAR_TEXT => read_take_app_bar_text(bytes),
             OP_REVEAL_DOCUMENT => read_reveal_document(bytes),
             OP_HAND_OVER_LAUNCH => read_hand_over(bytes),
             OP_SET_TOOLTIP => read_set_tooltip(bytes),
@@ -4670,19 +4946,22 @@ impl WindowRequest {
 }
 
 /// Decode a [`WindowRequest::Authorise`], whose task must fill the rest of
-/// the frame exactly, or a [`WindowRequest::TakeAuthorisedOutput`].
+/// the frame exactly, or a [`WindowRequest::TakeAuthorisedOutput`]: either
+/// names its window, zero for the caller's icon-bar slot.
 fn read_authorise_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    let window = bytes
+        .get(..WINDOW_ID_WIRE_LEN)
+        .ok_or(Errno::BufferTooSmall)?;
+    let window_id = core::num::NonZeroU64::new(read_u64(window, 8));
     if op == OP_TAKE_AUTHORISED_OUTPUT {
         exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
-        return Ok(WindowRequest::TakeAuthorisedOutput {
-            window_id: nonzero_id(read_u64(bytes, 8))?,
-        });
+        return Ok(WindowRequest::TakeAuthorisedOutput { window_id });
     }
     let task = bytes
         .get(AUTHORISE_TASK_OFFSET..)
         .ok_or(Errno::BufferTooSmall)?;
     Ok(WindowRequest::Authorise {
-        window_id: nonzero_id(read_u64(bytes, 8))?,
+        window_id,
         task: task::read(task)?,
     })
 }
@@ -4817,9 +5096,9 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
             };
             out[PICK_PURPOSE_OFFSET] = wire;
             out[PICK_NAME_LEN_OFFSET] = purpose.suggested_len_byte();
-            let endings = PICK_NAME_OFFSET + name.len();
-            out[PICK_NAME_OFFSET..endings].copy_from_slice(name.as_bytes());
-            purpose.endings().write(&mut out[endings..]);
+            let formats_at = PICK_NAME_OFFSET + name.len();
+            out[PICK_NAME_OFFSET..formats_at].copy_from_slice(name.as_bytes());
+            purpose.formats().write(&mut out[formats_at..]);
         }
         WindowRequest::BeginDrag {
             window_id,
@@ -4841,7 +5120,23 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
             );
             let text = items.first().as_str().as_bytes();
             out[DRAG_NAME_LEN_OFFSET] = items.first().len_byte();
-            out[DRAG_NAME_OFFSET..DRAG_NAME_OFFSET + text.len()].copy_from_slice(text);
+            let mut at = DRAG_NAME_OFFSET + text.len();
+            out[DRAG_NAME_OFFSET..at].copy_from_slice(text);
+            out[at] = items.hidden;
+            at += 1;
+            for picture in items.pictures() {
+                let (flags, (dx, dy)) = picture
+                    .from
+                    .map_or((0, (0, 0)), |from| (DRAG_PICTURE_PLACED, from));
+                out[at] = flags;
+                put_i32(out, at + 1, dx);
+                put_i32(out, at + 5, dy);
+                let asset = picture.icon.as_str().as_bytes();
+                out[at + 9] = picture.icon.len_byte();
+                out[at + DRAG_PICTURE_HEAD..at + DRAG_PICTURE_HEAD + asset.len()]
+                    .copy_from_slice(asset);
+                at += DRAG_PICTURE_HEAD + asset.len();
+            }
         }
         WindowRequest::DragVerdict {
             window_id,
@@ -4929,8 +5224,9 @@ fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> 
 }
 
 /// Decode the operands of a [`WindowRequest::BeginDrag`]: the count, the
-/// flags, the filetype exactly when they say there is one, and a name exactly
-/// as long as its length byte says.
+/// flags, the filetype exactly when they say there is one, a name exactly as
+/// long as its length byte says, how much of it is hidden, and a picture for
+/// each item shown, the frame ending with the last.
 fn read_begin_drag(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     if bytes.len() < DRAG_NAME_OFFSET {
         return Err(Errno::BufferTooSmall);
@@ -4947,21 +5243,60 @@ fn read_begin_drag(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         (false, _) => return Err(Errno::OutOfRange),
     };
     let len = bytes[DRAG_NAME_LEN_OFFSET];
-    exact_len(bytes, begin_drag_wire_len(usize::from(len)))?;
+    let end = DRAG_NAME_OFFSET + usize::from(len);
     let mut name = [0u8; crate::FS_NAME_MAX];
-    let text = bytes.get(DRAG_NAME_OFFSET..).ok_or(Errno::BufferTooSmall)?;
+    let text = bytes
+        .get(DRAG_NAME_OFFSET..end)
+        .ok_or(Errno::BufferTooSmall)?;
     name.get_mut(..text.len())
         .ok_or(Errno::LengthOutOfRange)?
         .copy_from_slice(text);
+    let (&hidden, mut rest) = bytes
+        .get(end..)
+        .and_then(<[u8]>::split_first)
+        .ok_or(Errno::BufferTooSmall)?;
+    let count = read_u32(bytes, DRAG_COUNT_OFFSET);
+    let shown = usize::try_from(count).map_or(DRAG_SHOWN_MAX, |count| count.min(DRAG_SHOWN_MAX));
+    let mut pictures = [None; DRAG_SHOWN_MAX];
+    for slot in pictures.iter_mut().take(shown) {
+        let (picture, tail) = read_drag_picture(rest)?;
+        *slot = Some(picture);
+        rest = tail;
+    }
     let items = DragItems::new(
         DocumentName::from_wire(len, &name)?,
-        read_u32(bytes, DRAG_COUNT_OFFSET),
+        count,
         flags & DRAG_OPENABLE != 0,
-    )?;
-    Ok(WindowRequest::BeginDrag {
-        window_id,
-        items: items.with_filetype(filetype),
-    })
+        pictures.into_iter().flatten(),
+    )?
+    .with_filetype(filetype)
+    .with_hidden_ending(usize::from(hidden))?;
+    exact_len(bytes, begin_drag_wire_len(&items))?;
+    Ok(WindowRequest::BeginDrag { window_id, items })
+}
+
+/// The drag picture at the head of `bytes`, and the bytes after it: one that
+/// says where it stood, or one that says nothing of it and carries no place.
+fn read_drag_picture(bytes: &[u8]) -> Result<(DragPicture, &[u8]), Errno> {
+    let head = bytes
+        .get(..DRAG_PICTURE_HEAD)
+        .ok_or(Errno::BufferTooSmall)?;
+    let place = (read_i32(head, 1), read_i32(head, 5));
+    let from = match head[0] {
+        DRAG_PICTURE_PLACED => Some(place),
+        0 if place == (0, 0) => None,
+        _ => return Err(Errno::OutOfRange),
+    };
+    let end = DRAG_PICTURE_HEAD + usize::from(head[9]);
+    let asset = bytes
+        .get(DRAG_PICTURE_HEAD..end)
+        .ok_or(Errno::BufferTooSmall)?;
+    let asset = core::str::from_utf8(asset).map_err(|_| Errno::OutOfRange)?;
+    let picture = DragPicture {
+        icon: IconAsset::new(asset)?,
+        from,
+    };
+    Ok((picture, &bytes[end..]))
 }
 
 /// Decode the operands of a [`WindowRequest::PickFile`]: an open names no
@@ -4976,11 +5311,11 @@ fn read_pick_file(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     let text = bytes
         .get(PICK_NAME_OFFSET..PICK_NAME_OFFSET + len)
         .ok_or(Errno::BufferTooSmall)?;
-    let endings = SaveEndings::read(&bytes[PICK_NAME_OFFSET + len..])?;
-    exact_len(bytes, pick_file_wire_len(len, endings.wire_len()))?;
+    let formats = SaveFormats::read(&bytes[PICK_NAME_OFFSET + len..])?;
+    exact_len(bytes, pick_file_wire_len(len, formats.wire_len()))?;
     let purpose = match bytes[PICK_PURPOSE_OFFSET] {
-        PICK_PURPOSE_OPEN if name_len == 0 && endings.is_any() => PickPurpose::Open,
-        PICK_PURPOSE_FOLDER if name_len == 0 && endings.is_any() => PickPurpose::Folder,
+        PICK_PURPOSE_OPEN if name_len == 0 && formats.is_empty() => PickPurpose::Open,
+        PICK_PURPOSE_FOLDER if name_len == 0 && formats.is_empty() => PickPurpose::Folder,
         PICK_PURPOSE_SAVE => {
             let mut name = [0u8; crate::FS_NAME_MAX];
             name.get_mut(..len)
@@ -4988,7 +5323,7 @@ fn read_pick_file(bytes: &[u8]) -> Result<WindowRequest, Errno> {
                 .copy_from_slice(text);
             PickPurpose::Save {
                 suggested: DocumentName::from_wire(name_len, &name)?,
-                endings,
+                formats,
             }
         }
         _ => return Err(Errno::OutOfRange),
@@ -5259,8 +5594,8 @@ fn read_menu_block(
 }
 
 /// Write an icon-bar declaration's operand block: the event route, the
-/// click behaviour, the declared row count and text length, then the shared
-/// menu block (mirrors [`read_app_bar`]).
+/// click behaviour, the declared row count and text length, the revision,
+/// then the shared menu block (mirrors [`read_app_bar`]).
 ///
 /// The block ends with the last text byte, so the counts and the frame
 /// length state the same thing and one menu has exactly one encoding.
@@ -5269,6 +5604,7 @@ fn write_app_bar(out: &mut [u8], bar: &AppBar) {
     out[APP_BAR_CLICK_OFFSET] = bar.click.to_wire();
     out[APP_BAR_ROW_COUNT_OFFSET] = bar.menu.len;
     put_u16(out, APP_BAR_TEXT_LEN_OFFSET, bar.menu.text_len);
+    put_u32(out, APP_BAR_REVISION_OFFSET, bar.revision);
     write_menu_block(out, APP_BAR_ROWS_OFFSET, &bar.menu);
 }
 
@@ -5297,6 +5633,7 @@ fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         event_endpoint,
         click,
         menu,
+        revision: read_u32(bytes, APP_BAR_REVISION_OFFSET),
     }))
 }
 
@@ -5379,6 +5716,7 @@ fn read_app_menu_row(
         return Err(Errno::OutOfRange);
     }
     let enabled = flags & APP_MENU_ROW_FLAG_ENABLED != 0;
+    let opens_entry = flags & APP_MENU_ROW_FLAG_OPENS_ENTRY != 0;
     let mark = AppMenuMark::from_u8((flags & APP_MENU_ROW_MARK_MASK) >> APP_MENU_ROW_MARK_SHIFT)?;
     let role = if flags & APP_MENU_ROW_FLAG_DESTRUCTIVE == 0 {
         AppMenuRole::Neutral
@@ -5418,7 +5756,7 @@ fn read_app_menu_row(
     // An asset id is never empty, so the flag with no id is refused by the
     // asset's own bound.
     let icon = if flags & APP_MENU_ROW_FLAG_ASSET != 0 {
-        AppMenuIcon::Asset(read_app_menu_text::<1, APP_MENU_ASSET_MAX>(
+        AppMenuIcon::Asset(read_app_menu_text::<1, ICON_ASSET_MAX>(
             text, cursor, icon_len,
         )?)
     } else {
@@ -5433,6 +5771,7 @@ fn read_app_menu_row(
     let item_only = shortcut.is_empty()
         && initial.is_empty()
         && icon == AppMenuIcon::None
+        && !opens_entry
         && entry_id == 0
         && selected == (0..0)
         && mark == AppMenuMark::None
@@ -5449,13 +5788,16 @@ fn read_app_menu_row(
                 .with_role(role);
             item.icon = icon;
             if entry_id != 0 {
-                item = item.with_entry(
-                    AppMenuEntry::new(AppMenuItemId::new(entry_id)?, initial)
-                        .with_selection(selected)?,
-                );
-            } else if !initial.is_empty() || selected != (0..0) {
-                // Initial text or a selection with no id to answer with names
-                // a field nothing could commit.
+                let entry = AppMenuEntry::new(AppMenuItemId::new(entry_id)?, initial)
+                    .with_selection(selected)?;
+                item = item.with_entry(if opens_entry {
+                    entry.opened_by_choosing()
+                } else {
+                    entry
+                });
+            } else if !initial.is_empty() || selected != (0..0) || opens_entry {
+                // Initial text, a selection, or opening on a choice with no
+                // id to answer with names a field nothing could commit.
                 return Err(Errno::OutOfRange);
             }
             AppMenuRow::Item(if enabled { item } else { item.disabled() })
@@ -5652,6 +5994,31 @@ fn read_transient(bytes: &[u8]) -> Result<Transient, Errno> {
             read_i32(bytes, TRANSIENT_OFFSET_X),
             read_i32(bytes, TRANSIENT_OFFSET_Y),
         ),
+    })
+}
+
+/// Decode a [`WindowRequest::TakeMenuText`]: neither id may be zero.
+fn read_take_menu_text(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, TAKE_MENU_TEXT_WIRE_LEN)?;
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let open_id = nonzero_id(read_u64(bytes, 16))?;
+    Ok(WindowRequest::TakeMenuText { window_id, open_id })
+}
+
+/// Decode a [`WindowRequest::TakeAppBarText`]: a row and the revision it
+/// answers, and nothing past them.
+fn read_take_app_bar_text(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, TAKE_APP_BAR_TEXT_WIRE_LEN)?;
+    if bytes[14..TAKE_APP_BAR_TEXT_WIRE_LEN]
+        .iter()
+        .any(|&b| b != 0)
+    {
+        return Err(Errno::OutOfRange);
+    }
+    let item = AppMenuItemId::new(read_u16(bytes, 8))?;
+    Ok(WindowRequest::TakeAppBarText {
+        item,
+        revision: read_u32(bytes, 10),
     })
 }
 
@@ -6110,38 +6477,73 @@ pub const WINDOW_PANE_NAME_MAX: usize = 32;
 /// the life of the connection rather than taking one per call.
 pub const WINDOW_OPEN_TARGET_REPLY_MAX: usize = OPEN_TARGET_REPLY_TEXT_OFFSET + crate::FS_PATH_MAX;
 
-/// What a drag carries, as the session sees it: the first item's name and the
-/// filetype its volume records, how many items there are, and whether the drag
-/// is one file an application may open.
+/// Most items a carried drag shows: the one pressed in front, and the next of
+/// what is carried behind it.
+pub const DRAG_SHOWN_MAX: usize = 4;
+
+/// One item a drag shows: the class picture its source shows it with, and
+/// where that picture's centre stood in the source window, from the press, in
+/// pixels — `None` where the source showed none of it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DragPicture {
+    /// The class picture its source shows it with.
+    pub icon: IconAsset,
+    /// Where its picture's centre stood, from the press.
+    pub from: Option<(i32, i32)>,
+}
+
+/// What a drag carries, as the session sees it: the item pressed — its name,
+/// how much of the name's ending its source hides, and the filetype its volume
+/// records — how many items there are, whether the drag is one file an
+/// application may open, and how the first [`DRAG_SHOWN_MAX`] are shown.
 ///
-/// The name is the plate's label; it, and the filetype where the name says
-/// nothing, are what an application slot's declared types are matched
-/// against. Only an openable drag is offered to a slot.
+/// The name, less its hidden ending, is the label the drag shows; the whole
+/// name, and the filetype where the name says nothing, are what an application
+/// slot's declared types are matched against. Only an openable drag is offered
+/// to a slot.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DragItems {
     first: DocumentName,
+    hidden: u8,
     filetype: Option<Filetype>,
     count: u32,
     openable: bool,
+    pictures: [Option<DragPicture>; DRAG_SHOWN_MAX],
 }
 
 impl DragItems {
     /// `count` items led by `first`, `openable` when the drag is exactly one
-    /// file an application may open.
+    /// file an application may open, shown as `pictures`: the lead's first,
+    /// then the next items' — one for each item, up to [`DRAG_SHOWN_MAX`].
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] for an unnamed first item, no items, or an
-    /// openable drag of more than one.
-    pub fn new(first: DocumentName, count: u32, openable: bool) -> Result<Self, Errno> {
-        if first.as_str().is_empty() || count == 0 || (openable && count != 1) {
+    /// [`Errno::OutOfRange`] for an unnamed first item, no items, an openable
+    /// drag of more than one, or other than a picture for each item shown.
+    pub fn new(
+        first: DocumentName,
+        count: u32,
+        openable: bool,
+        pictures: impl IntoIterator<Item = DragPicture>,
+    ) -> Result<Self, Errno> {
+        let shown =
+            usize::try_from(count).map_or(DRAG_SHOWN_MAX, |count| count.min(DRAG_SHOWN_MAX));
+        let mut held = [None; DRAG_SHOWN_MAX];
+        let mut given = 0;
+        for picture in pictures {
+            *held.get_mut(given).ok_or(Errno::OutOfRange)? = Some(picture);
+            given += 1;
+        }
+        if first.as_str().is_empty() || count == 0 || (openable && count != 1) || given != shown {
             return Err(Errno::OutOfRange);
         }
         Ok(Self {
             first,
+            hidden: 0,
             filetype: None,
             count,
             openable,
+            pictures: held,
         })
     }
 
@@ -6151,10 +6553,47 @@ impl DragItems {
         Self { filetype, ..self }
     }
 
+    /// These items, the first shown less the last `hidden` bytes of its name,
+    /// as its source shows it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an ending that is not one: all of the name,
+    /// or one splitting a character.
+    pub fn with_hidden_ending(self, hidden: usize) -> Result<Self, Errno> {
+        let name = self.first.as_str();
+        let kept = name.len().checked_sub(hidden).ok_or(Errno::OutOfRange)?;
+        if kept == 0 || !name.is_char_boundary(kept) {
+            return Err(Errno::OutOfRange);
+        }
+        let hidden = u8::try_from(hidden).map_err(|_| Errno::OutOfRange)?;
+        Ok(Self { hidden, ..self })
+    }
+
     /// The first item's name.
     #[must_use]
     pub const fn first(&self) -> &DocumentName {
         &self.first
+    }
+
+    /// The first item's name as its source shows it: less the ending it
+    /// hides.
+    #[must_use]
+    pub fn shown_name(&self) -> &str {
+        let name = self.first.as_str();
+        name.get(..name.len() - usize::from(self.hidden))
+            .unwrap_or(name)
+    }
+
+    /// How many bytes of the first item's name its source hides.
+    #[must_use]
+    pub const fn hidden_ending(&self) -> usize {
+        self.hidden as usize
+    }
+
+    /// How each item shown is shown, the lead's first.
+    pub fn pictures(&self) -> impl Iterator<Item = &DragPicture> {
+        self.pictures.iter().flatten()
     }
 
     /// The filetype the first item's volume records for it.
@@ -7707,6 +8146,8 @@ const EV_ALTERNATE_CLOSE_REQUESTED: u16 = 12;
 const EV_APP_BAR_DEFAULT: u16 = 13;
 /// Wire kind of [`WindowEvent::AppBarMenu`].
 const EV_APP_BAR_MENU: u16 = 14;
+/// Wire kind of [`WindowEvent::AppBarEntered`].
+const EV_APP_BAR_ENTERED: u16 = 29;
 
 /// Wire event discriminant of [`WindowEvent::ContentReleased`].
 const EV_CONTENT_RELEASED: u16 = 15;
@@ -8083,6 +8524,20 @@ pub enum WindowEvent {
     AppBarMenu {
         /// The chosen row's application-chosen id.
         item: AppMenuItemId,
+        /// The [`AppBar::revision`] of the declaration the menu was opened
+        /// from, which `item` is resolved against.
+        revision: u32,
+    },
+    /// The user committed the quick-entry field of the application's own
+    /// icon-bar menu row `item`. The text is pulled with
+    /// [`WindowRequest::TakeAppBarText`] naming the same row and revision, as
+    /// [`MenuOutcome::Entered`]'s is with [`WindowRequest::TakeMenuText`].
+    AppBarEntered {
+        /// The committed row's application-chosen id.
+        item: AppMenuItemId,
+        /// The [`AppBar::revision`] of the declaration the menu was opened
+        /// from.
+        revision: u32,
     },
     /// The whole answer to one accepted [`WindowRequest::OpenMenu`],
     /// delivered **exactly once**.
@@ -8116,10 +8571,11 @@ pub enum WindowEvent {
         outcome: AlertOutcome,
     },
     /// The whole answer to one accepted [`WindowRequest::Authorise`],
-    /// delivered **exactly once** to the window that asked.
+    /// delivered **exactly once** to the window that asked, or to the
+    /// application's icon-bar route for a task its slot asked for.
     Authorised {
-        /// The window the task was asked for.
-        window_id: u64,
+        /// The window the task was asked for, or `None` for the slot's.
+        window_id: Option<u64>,
         /// What became of it.
         outcome: AuthorisedOutcome,
     },
@@ -8363,12 +8819,27 @@ impl WindowEvent {
             | Self::TerrainChanged { window_id, .. }
             | Self::LayerPointer { window_id, .. }
             | Self::ToolMoved { window_id, .. }
-            | Self::MenuClosed { window_id, .. }
-            | Self::Authorised { window_id, .. } => Some(window_id),
+            | Self::MenuClosed { window_id, .. } => Some(window_id),
+            Self::Authorised { window_id, .. } => window_id,
             Self::AppBarDefault
             | Self::AppBarMenu { .. }
+            | Self::AppBarEntered { .. }
             | Self::OpenRequested
             | Self::AlertClosed { .. } => None,
+        }
+    }
+
+    /// Write an icon-bar event into the already-headed frame `out`.
+    fn write_app_bar(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        let (kind, answer) = match *self {
+            Self::AppBarMenu { item, revision } => (EV_APP_BAR_MENU, Some((item, revision))),
+            Self::AppBarEntered { item, revision } => (EV_APP_BAR_ENTERED, Some((item, revision))),
+            _ => (EV_APP_BAR_DEFAULT, None),
+        };
+        put_u16(out, 6, kind);
+        if let Some((item, revision)) = answer {
+            put_u16(out, 16, item.get());
+            put_u32(out, 18, revision);
         }
     }
 
@@ -8461,12 +8932,8 @@ impl WindowEvent {
             Self::ContentReleased { .. } => {
                 put_u16(&mut out, 6, EV_CONTENT_RELEASED);
             }
-            Self::AppBarDefault => {
-                put_u16(&mut out, 6, EV_APP_BAR_DEFAULT);
-            }
-            Self::AppBarMenu { item } => {
-                put_u16(&mut out, 6, EV_APP_BAR_MENU);
-                put_u16(&mut out, 16, item.get());
+            Self::AppBarDefault | Self::AppBarMenu { .. } | Self::AppBarEntered { .. } => {
+                self.write_app_bar(&mut out);
             }
             Self::MenuClosed {
                 open_id, outcome, ..
@@ -8545,6 +9012,16 @@ impl WindowEvent {
         if let Some(event) = read_app_scoped_event(kind, bytes) {
             return event;
         }
+        // Addressed to a window, or to the application where its icon-bar
+        // slot asked.
+        if kind == EV_AUTHORISED {
+            event_reserved_zero(bytes, task::AUTHORISED_WIRE_END)?;
+            let window_id = read_u64(bytes, 8);
+            return Ok(Self::Authorised {
+                window_id: (window_id != 0).then_some(window_id),
+                outcome: task::read_outcome(bytes)?,
+            });
+        }
         let window_id = nonzero_id(read_u64(bytes, 8))?;
         if let Some(event) = read_id_only_event(kind, window_id, bytes) {
             return event;
@@ -8609,13 +9086,6 @@ impl WindowEvent {
                     window_id,
                     open_id: nonzero_id(read_u64(bytes, 16))?,
                     outcome: read_menu_outcome(bytes)?,
-                })
-            }
-            EV_AUTHORISED => {
-                event_reserved_zero(bytes, task::AUTHORISED_WIRE_END)?;
-                Ok(Self::Authorised {
-                    window_id,
-                    outcome: task::read_outcome(bytes)?,
                 })
             }
             _ => Err(Errno::OutOfRange),
@@ -9007,12 +9477,14 @@ fn read_app_scoped_event(kind: u16, bytes: &[u8]) -> Option<Result<WindowEvent, 
             }
             WindowEvent::OpenRequested
         }
-        EV_APP_BAR_MENU => {
-            if let Err(err) = event_reserved_zero(bytes, 18) {
+        EV_APP_BAR_MENU | EV_APP_BAR_ENTERED => {
+            if let Err(err) = event_reserved_zero(bytes, 22) {
                 return Some(Err(err));
             }
+            let revision = read_u32(bytes, 18);
             match AppMenuItemId::new(read_u16(bytes, 16)) {
-                Ok(item) => WindowEvent::AppBarMenu { item },
+                Ok(item) if kind == EV_APP_BAR_MENU => WindowEvent::AppBarMenu { item, revision },
+                Ok(item) => WindowEvent::AppBarEntered { item, revision },
                 Err(err) => return Some(Err(err)),
             }
         }
@@ -9183,30 +9655,31 @@ mod tests {
         encode_minted_id_reply, encode_notify_sources_reply, encode_open_target_reply,
         encode_picked_name_reply, encode_terrain_reply, encode_wallpapers_reply,
         hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64, read_i32, read_u16,
-        read_u32, AppBar, AppBarClick, AppMenu, AppMenuAsset, AppMenuBundle, AppMenuEntry,
-        AppMenuEntryText, AppMenuIconView, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
-        AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, AppMenuSymbol,
-        BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems,
-        DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, HandOverTarget,
+        read_u32, AppBar, AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText,
+        AppMenuIconView, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason,
+        AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, AppMenuSymbol, BundleRunPath,
+        ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation,
+        DropSite, DropTarget, HandOverDocument, HandOverOutcome, HandOverTarget, IconAsset,
         LayerDepth, MenuOutcome, MenuRefusal, OpenTarget, PaneName, PickPurpose, PinchPhase,
-        PointerAction, SaveEndings, TerrainPlate, TooltipText, WallpaperEntry, WindowEvent,
-        WindowRegion, WindowRequest, WindowSizeState, WindowSizing, WindowTitle,
+        PointerAction, SaveFormat, SaveFormats, TerrainPlate, TooltipText, WallpaperEntry,
+        WindowEvent, WindowRegion, WindowRequest, WindowSizeState, WindowSizing, WindowTitle,
         APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
-        APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ASSET_MAX, APP_MENU_ENTRY_MAX, APP_MENU_KIND_SEPARATOR,
+        APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX, APP_MENU_KIND_SEPARATOR,
         APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS,
         APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX, APP_MENU_ROW_ENTRY_LEN_OFFSET,
         APP_MENU_ROW_ENTRY_SELECTED_OFFSET, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ASSET,
-        APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
-        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET,
-        APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET,
-        CLIPBOARD_MAX_BYTES, CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN,
-        DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_COUNT_OFFSET,
-        DRAG_EVENT_KIND_OFFSET, DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET,
-        DRAG_EVENT_WINDOW_OFFSET, DRAG_EVENT_X_OFFSET, DRAG_FILETYPE_OFFSET, DRAG_FLAGS_OFFSET,
-        DRAG_NAME_OFFSET, DRAG_TYPED, DROP_TARGET_REPLY_FLAGS_OFFSET, HAND_OVER_FLAGS_OFFSET,
-        HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PANE,
-        HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX, HAND_OVER_WRITABLE, LAYER_OPEN_DEPTH,
-        LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET,
+        APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_FLAG_OPENS_ENTRY, APP_MENU_ROW_ID_OFFSET,
+        APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
+        APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET, APP_MENU_ROW_WIRE_LEN,
+        APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET, CLIPBOARD_MAX_BYTES,
+        CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
+        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_EVENT_KIND_OFFSET, DRAG_EVENT_SERIAL_OFFSET,
+        DRAG_EVENT_SHIFT_OFFSET, DRAG_EVENT_WINDOW_OFFSET, DRAG_EVENT_X_OFFSET,
+        DRAG_FILETYPE_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET, DRAG_TYPED,
+        DROP_TARGET_REPLY_FLAGS_OFFSET, HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET,
+        HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PANE,
+        HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX, HAND_OVER_WRITABLE, ICON_ASSET_MAX,
+        LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET,
         MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY,
         MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET,
         NAME_LIST_COUNT_OFFSET, NAME_LIST_NAMES_OFFSET, OPEN_LAYER_WIRE_LEN,
@@ -9218,18 +9691,18 @@ mod tests {
         PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET,
         QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET,
         RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN,
-        REVEAL_DOCUMENT_WIRE_LEN, SAVE_ENDINGS_MAX, SAVE_ENDING_MAX, SAVE_EVENT_DROPPED_OFFSET,
-        SAVE_EVENT_DROP_X_OFFSET, SAVE_EVENT_Y_OFFSET, SCROLLED_MODIFIERS_OFFSET,
-        SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET,
-        SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET,
-        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
+        REVEAL_DOCUMENT_WIRE_LEN, SAVE_EVENT_DROPPED_OFFSET, SAVE_EVENT_DROP_X_OFFSET,
+        SAVE_EVENT_Y_OFFSET, SAVE_EXTENSIONS_MAX, SAVE_EXTENSION_MAX, SAVE_FORMATS_MAX,
+        SCROLLED_MODIFIERS_OFFSET, SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET,
+        SET_CURSOR_OFFSET, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN,
+        SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
         SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
         SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
-        TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
-        WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN,
-        WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
-        WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
-        WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
+        TAKE_APP_BAR_TEXT_WIRE_LEN, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN,
+        TOOLTIP_TEXT_MAX, WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX,
+        WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN,
+        WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_ENDPOINT,
+        WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
         WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
         WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX, WINDOW_PICKED_NAME_REPLY_MAX,
         WINDOW_PREVIEW_MAX_SIDE, WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX,
@@ -9246,6 +9719,7 @@ mod tests {
         SAVER_REPLY_OPTIONS, SAVER_REPLY_OPTION_COUNT, SAVER_REPLY_ORIGIN, SAVER_REPLY_PURPOSE,
         SAVER_REPLY_STANDING, SAVER_REPLY_TITLE_LEN, WINDOW_SCREENSAVER_REPLY_MAX,
     };
+    use super::{DragPicture, DRAG_PICTURE_HEAD, DRAG_PICTURE_PLACED, DRAG_SHOWN_MAX};
     use super::{PreviewOutcome, PreviewSubject, SystemTask};
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageList, DamageRect, DisplayFormat, MAX_DAMAGE_RECTS};
@@ -9578,15 +10052,15 @@ mod tests {
             event_endpoint: 0xE117_0000_0000_0009,
             click: AppBarClick::Open,
             menu: sample_menu(),
+            revision: 0x5EED_0001,
         }
     }
 
     /// The declaration around `menu`, to the same plain endpoint.
     fn declaring(menu: &AppMenu) -> WindowRequest {
         WindowRequest::SetAppBar(AppBar {
-            event_endpoint: 0xE117_0000_0000_0009,
-            click: AppBarClick::Open,
             menu: *menu,
+            ..sample_app_bar()
         })
     }
 
@@ -9675,17 +10149,50 @@ mod tests {
         BundleRunPath::new("/System/Applications/view.app/Run").expect("a valid bundle path")
     }
 
-    /// As many endings as a save pick holds, each as long as one may be.
-    fn widest_endings() -> SaveEndings {
-        let mut endings = SaveEndings::ANY;
-        for slot in 0..SAVE_ENDINGS_MAX {
-            let mut code = [b'a'; SAVE_ENDING_MAX - 1];
-            code[0] = b'0' + u8::try_from(slot).expect("a digit");
-            endings
-                .push('.', core::str::from_utf8(&code).expect("ASCII"))
-                .expect("an ending");
+    /// `raw` as a RISC OS file type.
+    fn ft(raw: u16) -> crate::fs::Filetype {
+        crate::fs::Filetype::new(raw).expect("twelve bits")
+    }
+
+    /// As many formats as a save pick holds, each typed and naming as many
+    /// extensions as one may, each as long as one may be.
+    /// A picture of the class `asset`, standing `from` the press.
+    fn picture(asset: &str, from: Option<(i32, i32)>) -> DragPicture {
+        DragPicture {
+            icon: IconAsset::new(asset).expect("a valid asset id"),
+            from,
         }
-        endings
+    }
+
+    /// As many pictures as a drag shows, each named as long as an asset id
+    /// may be, and standing as far off as a place may or nowhere.
+    fn widest_pictures() -> [DragPicture; DRAG_SHOWN_MAX] {
+        let long = "a".repeat(ICON_ASSET_MAX);
+        [
+            picture(&long, Some((i32::MIN, i32::MAX))),
+            picture(&long, None),
+            picture(&long, Some((i32::MAX, i32::MIN))),
+            picture(&long, Some((0, 0))),
+        ]
+    }
+
+    fn widest_formats() -> SaveFormats {
+        let mut formats = SaveFormats::ANY;
+        for slot in 0..SAVE_FORMATS_MAX {
+            let filetype = u16::try_from(slot).expect("a file type");
+            let mut format = SaveFormat::new(Some(ft(filetype)));
+            for extension in 0..SAVE_EXTENSIONS_MAX {
+                let mut code = [b'a'; SAVE_EXTENSION_MAX];
+                code[0] = b'.';
+                code[1] = b'0' + u8::try_from(slot).expect("a digit");
+                code[2] = b'0' + u8::try_from(extension).expect("a digit");
+                format
+                    .push_extension(core::str::from_utf8(&code).expect("ASCII"))
+                    .expect("an extension");
+            }
+            formats.push(format, slot == 3).expect("a format");
+        }
+        formats
     }
 
     /// The pick and drag requests [`each_request`] visits: each purpose, with
@@ -9695,32 +10202,35 @@ mod tests {
             window_id: 9,
             purpose: PickPurpose::Open,
         });
-        for (len, endings) in [
-            (0, SaveEndings::ANY),
-            (crate::FS_NAME_MAX, widest_endings()),
+        for (len, formats) in [
+            (0, SaveFormats::ANY),
+            (crate::FS_NAME_MAX, widest_formats()),
         ] {
             let name = DocumentName::new(&"n".repeat(len)).expect("a valid name");
             visit(WindowRequest::PickFile {
                 window_id: 9,
                 purpose: PickPurpose::Save {
                     suggested: name,
-                    endings,
+                    formats,
                 },
             });
             let first = DocumentName::new(&"n".repeat(len.max(1))).expect("a valid name");
             visit(WindowRequest::BeginDrag {
                 window_id: 9,
-                items: DragItems::new(first, 1, true).expect("one openable file"),
+                items: DragItems::new(first, 1, true, [picture("file", None)])
+                    .expect("one openable file"),
             });
             visit(WindowRequest::BeginDrag {
                 window_id: 9,
-                items: DragItems::new(first, u32::MAX, false).expect("many items"),
+                items: DragItems::new(first, u32::MAX, false, widest_pictures())
+                    .and_then(|items| items.with_hidden_ending(len.max(1) - 1))
+                    .expect("many items"),
             });
             for raw in [0, 0xFFB, 0xFFF] {
                 let filetype = crate::fs::Filetype::new(raw).expect("twelve bits");
                 visit(WindowRequest::BeginDrag {
                     window_id: 9,
-                    items: DragItems::new(first, 1, true)
+                    items: DragItems::new(first, 1, true, [picture("file", Some((-3, 4)))])
                         .expect("one openable file")
                         .with_filetype(Some(filetype)),
                 });
@@ -9928,10 +10438,24 @@ mod tests {
             SystemTask::ShowAddressing,
             SystemTask::ShowAccounts,
             SystemTask::SetClock,
+            SystemTask::Eject(words(&[
+                "id::07070707-0707-0707-0707-070707070707/",
+                "usb1",
+            ])),
         ] {
-            visit(WindowRequest::Authorise { window_id: 9, task });
+            visit(WindowRequest::Authorise {
+                window_id: core::num::NonZeroU64::new(9),
+                task,
+            });
+            visit(WindowRequest::Authorise {
+                window_id: None,
+                task,
+            });
         }
-        visit(WindowRequest::TakeAuthorisedOutput { window_id: 9 });
+        visit(WindowRequest::TakeAuthorisedOutput {
+            window_id: core::num::NonZeroU64::new(9),
+        });
+        visit(WindowRequest::TakeAuthorisedOutput { window_id: None });
     }
 
     /// The pointer-shape, activation and clipboard requests [`each_request`]
@@ -10485,7 +11009,7 @@ mod tests {
                 label("Home"),
                 AppMenuSymbol::Open,
             )
-            .with_icon_asset(AppMenuAsset::new("folder").expect("a valid id")),
+            .with_icon_asset(IconAsset::new("folder").expect("a valid id")),
         ))
         .expect("room for the row");
         menu.push(AppMenuRow::Item(AppMenuItem::new(
@@ -10505,8 +11029,8 @@ mod tests {
         };
         assert_eq!(icon(0), AppMenuIconView::Asset("folder"));
         assert_eq!(icon(1), AppMenuIconView::None);
-        assert!(AppMenuAsset::new("").is_err(), "an asset is named");
-        assert!(AppMenuAsset::new(&"a".repeat(APP_MENU_ASSET_MAX + 1)).is_err());
+        assert!(IconAsset::new("").is_err(), "an asset is named");
+        assert!(IconAsset::new(&"a".repeat(ICON_ASSET_MAX + 1)).is_err());
     }
 
     /// The asset flag is a property of a chooseable row's picture: on a row
@@ -10746,6 +11270,56 @@ mod tests {
         );
     }
 
+    /// A row whose choosing opens its field says so across the wire, and the
+    /// saying is refused on a row with no field for it to open.
+    #[test]
+    fn a_row_opened_for_its_field_survives_the_wire_and_needs_a_field() {
+        let mut menu = AppMenu::titled(label("Files"));
+        menu.push(AppMenuRow::Item(
+            AppMenuItem::new(
+                AppMenuItemId::new(1).expect("a valid id"),
+                label("Title"),
+                AppMenuSymbol::Rename,
+            )
+            .with_entry(
+                AppMenuEntry::new(
+                    AppMenuItemId::new(2).expect("a valid id"),
+                    AppMenuEntryText::new("Workbench").expect("a valid title"),
+                )
+                .opened_by_choosing(),
+            ),
+        ))
+        .expect("room for the title row");
+        menu.push(AppMenuRow::Item(AppMenuItem::new(
+            AppMenuItemId::new(3).expect("a valid id"),
+            label("Plain"),
+            AppMenuSymbol::Open,
+        )))
+        .expect("room for the row");
+        let frame = opening(&menu).frame();
+        let Ok(WindowRequest::OpenMenu { menu: back, .. }) = WindowRequest::from_bytes(&frame)
+        else {
+            panic!("the open decodes");
+        };
+        let entries = back
+            .rows()
+            .map(|(row, _)| match row {
+                AppMenuRowView::Item(item) => item.entry.map(|entry| entry.opens_on_choose),
+                _ => None,
+            })
+            .collect::<alloc::vec::Vec<_>>();
+        assert_eq!(entries, [Some(true), None]);
+
+        let flags_at = OPEN_MENU_ROWS_OFFSET + APP_MENU_ROW_WIRE_LEN + APP_MENU_ROW_FLAGS_OFFSET;
+        let mut fieldless = frame;
+        fieldless[flags_at] |= APP_MENU_ROW_FLAG_OPENS_ENTRY;
+        assert_eq!(
+            WindowRequest::from_bytes(&fieldless),
+            Err(Errno::OutOfRange),
+            "a row with no field has nothing to open"
+        );
+    }
+
     /// The shapes a dual row must not have: two answers spelling the same
     /// id, a second child beside a quick-entry field, and a field with no id
     /// to answer with.
@@ -10823,6 +11397,34 @@ mod tests {
         );
         let mut smuggled = [0u8; TAKE_MENU_TEXT_WIRE_LEN + 1];
         smuggled[..TAKE_MENU_TEXT_WIRE_LEN].copy_from_slice(&frame);
+        assert_eq!(WindowRequest::from_bytes(&smuggled), Err(Errno::BadMagic));
+    }
+
+    /// An icon-bar row's committed text is pulled by the row and revision it
+    /// answers, and a frame naming no row, or smuggling bytes past the
+    /// revision, is refused.
+    #[test]
+    fn taking_app_bar_text_names_its_row_and_revision() {
+        let request = WindowRequest::TakeAppBarText {
+            item: AppMenuItemId::new(5).expect("a valid id"),
+            revision: u32::MAX,
+        };
+        assert_eq!(request.wire_len(), TAKE_APP_BAR_TEXT_WIRE_LEN);
+        let frame = request.frame();
+        assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+        assert_eq!(read_u32(&frame, 10), u32::MAX, "after the row");
+        let mut rowless = frame;
+        put_u16(&mut rowless, 8, 0);
+        assert!(WindowRequest::from_bytes(&rowless).is_err(), "no row");
+        let mut padded = frame;
+        padded[TAKE_APP_BAR_TEXT_WIRE_LEN - 1] = 1;
+        assert_eq!(WindowRequest::from_bytes(&padded), Err(Errno::OutOfRange));
+        assert_eq!(
+            WindowRequest::from_bytes(&frame[..TAKE_APP_BAR_TEXT_WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut smuggled = [0u8; TAKE_APP_BAR_TEXT_WIRE_LEN + 1];
+        smuggled[..TAKE_APP_BAR_TEXT_WIRE_LEN].copy_from_slice(&frame);
         assert_eq!(WindowRequest::from_bytes(&smuggled), Err(Errno::BadMagic));
     }
 
@@ -11284,6 +11886,25 @@ mod tests {
         assert_eq!(AppBarClick::from_wire(3), None, "the set is closed");
     }
 
+    /// A declaration's revision crosses the wire whole, whatever its value,
+    /// and is part of the fixed head: a frame that ends inside it is refused.
+    #[test]
+    fn a_declarations_revision_round_trips_and_a_frame_ending_inside_it_is_refused() {
+        for revision in [0, 1, u32::MAX] {
+            let declared = WindowRequest::SetAppBar(AppBar {
+                revision,
+                ..sample_app_bar()
+            });
+            assert_eq!(WindowRequest::from_bytes(&declared.frame()), Ok(declared));
+        }
+        let bare = declaring(&AppMenu::EMPTY).frame();
+        assert_eq!(bare.len(), APP_BAR_ROWS_OFFSET, "the head alone");
+        assert_eq!(
+            WindowRequest::from_bytes(&bare.truncated()),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
     /// A decoded row is exactly a row the builder could have made: an
     /// unknown kind, an undefined flag bit, a field the row's kind does not
     /// use, and a shape the builder refuses are each refused here too.
@@ -11675,7 +12296,7 @@ mod tests {
             window_id: 9,
             purpose: PickPurpose::Save {
                 suggested: DocumentName::new("album").expect("a valid name"),
-                endings: SaveEndings::ANY,
+                formats: SaveFormats::ANY,
             },
         };
         let mut lying = named.frame();
@@ -11749,7 +12370,7 @@ mod tests {
             window_id: 9,
             purpose: PickPurpose::Save {
                 suggested: DocumentName::new("notes.txt").expect("a valid name"),
-                endings: SaveEndings::ANY,
+                formats: SaveFormats::ANY,
             },
         };
         let frame = save.frame();
@@ -11783,79 +12404,145 @@ mod tests {
     }
 
     #[test]
-    fn save_endings_hold_only_a_separator_and_a_short_code() {
-        let mut endings = SaveEndings::ANY;
-        assert!(endings.accepts("anything at all"));
-        assert_eq!(endings.push('/', "png"), Err(Errno::OutOfRange));
-        assert_eq!(endings.push('.', ""), Err(Errno::OutOfRange));
-        assert_eq!(endings.push('.', "p/g"), Err(Errno::OutOfRange));
-        let long = [b'm'; SAVE_ENDING_MAX];
-        let code = core::str::from_utf8(&long).expect("ASCII");
-        let mut longest = SaveEndings::ANY;
-        assert_eq!(longest.push('.', &code[1..]), Ok(()), "the bound fits");
-        assert_eq!(endings.push('.', code), Err(Errno::LengthOutOfRange));
-        endings.push('.', "png").expect("an extension");
-        endings.push(',', "b60").expect("a RISC OS file type");
-        let mut listed = endings.iter();
+    fn a_save_format_names_only_dotted_codes_and_types_names_by_them() {
+        let mut png = SaveFormat::new(Some(ft(0xB60)));
+        assert_eq!(png.push_extension("png"), Err(Errno::OutOfRange));
+        assert_eq!(png.push_extension(".p/g"), Err(Errno::OutOfRange));
+        assert_eq!(png.push_extension(","), Err(Errno::OutOfRange));
+        let long = [b'm'; SAVE_EXTENSION_MAX + 1];
+        let long = core::str::from_utf8(&long).expect("ASCII");
+        assert_eq!(png.push_extension(long), Err(Errno::LengthOutOfRange));
+        png.push_extension(".png").expect("an extension");
         assert_eq!(
-            (listed.next(), listed.next(), listed.next()),
-            (Some(".png"), Some(",b60"), None)
+            png.push_extension(".PNG"),
+            Err(Errno::OutOfRange),
+            "named once"
         );
+        assert_eq!(png.extensions().collect::<alloc::vec::Vec<_>>(), [".png"]);
+        assert!(png.types("Picture.PNG"), "matched without regard to case");
+        assert!(png.types("picture,B60"), "its own file type types it too");
+        assert!(!png.types(".png"), "an ending is not a name");
+        assert!(!png.types("picture.jpg"));
+        assert!(!png.types("picture"));
+        let sprite = SaveFormat::new(Some(ft(0xFF9)));
+        assert!(sprite.types("Sprites,ff9"));
         assert!(
-            endings.accepts("Picture.PNG"),
-            "matched without regard to case"
+            !sprite.types("Sprites"),
+            "a bare name is typed by the volume"
         );
-        assert!(endings.accepts("picture,B60"));
-        assert!(!endings.accepts(".png"), "an ending is not a name");
-        assert!(!endings.accepts("picture.jpg"));
-        assert!(!endings.accepts("picture"));
-        let mut full = widest_endings();
-        assert_eq!(full.push('.', "png"), Err(Errno::LengthOutOfRange));
     }
 
     #[test]
-    fn a_save_pick_carries_its_endings_and_refuses_ones_misstated() {
-        let mut endings = SaveEndings::ANY;
-        endings.push('.', "spr").expect("an extension");
-        endings.push(',', "ff9").expect("a RISC OS file type");
+    fn save_formats_refuse_a_format_that_cannot_be_told_apart() {
+        let mut formats = SaveFormats::ANY;
+        assert_eq!(formats.current(), None);
+        assert_eq!(
+            formats.push(SaveFormat::new(None), false),
+            Err(Errno::OutOfRange),
+            "a format must be typed by something"
+        );
+        let mut png = SaveFormat::new(Some(ft(0xB60)));
+        png.push_extension(".png").expect("an extension");
+        formats.push(png, false).expect("a format");
+        let sprite = SaveFormat::new(Some(ft(0xFF9)));
+        formats.push(sprite, true).expect("a format");
+        assert_eq!(formats.current(), Some(1));
+        assert_eq!(formats.push(sprite, false), Err(Errno::OutOfRange));
+        let mut shares = SaveFormat::new(None);
+        shares.push_extension(".Png").expect("an extension");
+        assert_eq!(formats.push(shares, false), Err(Errno::OutOfRange));
+        assert_eq!(formats.of("a,ff9"), Some(1));
+        assert_eq!(formats.of("a.png"), Some(0));
+        assert_eq!(formats.of("a.txt"), None);
+        let mut full = widest_formats();
+        let spare = SaveFormat::new(Some(ft(0x100)));
+        assert_eq!(full.push(spare, false), Err(Errno::LengthOutOfRange));
+    }
+
+    #[test]
+    fn a_save_pick_carries_its_formats_and_refuses_ones_misstated() {
+        let mut formats = SaveFormats::ANY;
+        let mut png = SaveFormat::new(Some(ft(0xB60)));
+        png.push_extension(".png").expect("an extension");
+        formats.push(png, false).expect("a format");
+        formats
+            .push(SaveFormat::new(Some(ft(0xFF9))), true)
+            .expect("a format");
         let save = WindowRequest::PickFile {
             window_id: 9,
             purpose: PickPurpose::Save {
-                suggested: DocumentName::new("Sprites.spr").expect("a valid name"),
-                endings,
+                suggested: DocumentName::new("Sprites").expect("a valid name"),
+                formats,
             },
         };
         let frame = save.frame();
         let len = save.wire_len();
         assert_eq!(WindowRequest::from_bytes(&frame[..len]), Ok(save));
-        let at = PICK_NAME_OFFSET + "Sprites.spr".len();
+        let at = PICK_NAME_OFFSET + "Sprites".len();
+        let first = at + 2;
 
         let mut too_many = frame;
-        too_many[at] = u8::try_from(SAVE_ENDINGS_MAX + 1).expect("a count byte");
+        too_many[at] = u8::try_from(SAVE_FORMATS_MAX + 1).expect("a count byte");
         assert_eq!(
             WindowRequest::from_bytes(&too_many[..len]),
             Err(Errno::LengthOutOfRange)
         );
+        let mut no_current = frame;
+        no_current[at + 1] = 2;
+        assert_eq!(
+            WindowRequest::from_bytes(&no_current[..len]),
+            Err(Errno::OutOfRange),
+            "the format the document is in is one offered"
+        );
+        let mut flag = frame;
+        flag[first] = 2;
+        assert_eq!(
+            WindowRequest::from_bytes(&flag[..len]),
+            Err(Errno::OutOfRange),
+            "a typed flag has one encoding"
+        );
+        let mut untyped_code = frame;
+        untyped_code[first] = 0;
+        assert_eq!(
+            WindowRequest::from_bytes(&untyped_code[..len]),
+            Err(Errno::OutOfRange),
+            "an untyped format carries no file type"
+        );
+        let mut wide = frame;
+        wide[first + 1..first + 3].copy_from_slice(&0x1000u16.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&wide[..len]),
+            Err(Errno::OutOfRange),
+            "a file type is twelve bits"
+        );
         let mut path = frame;
-        path[at + 2] = b'/';
+        path[first + 5] = b'/';
         assert_eq!(
             WindowRequest::from_bytes(&path[..len]),
             Err(Errno::OutOfRange),
-            "an ending names a format, never a path"
+            "an extension names a format, never a path"
+        );
+        let mut one_type = frame;
+        one_type[first + 1..first + 3].copy_from_slice(&0xFF9u16.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&one_type[..len]),
+            Err(Errno::OutOfRange),
+            "two formats of one type cannot be told apart"
         );
         let mut fewer = frame;
         fewer[at] = 1;
+        fewer[at + 1] = 0;
         assert_eq!(
             WindowRequest::from_bytes(&fewer[..len]),
             Err(Errno::BadMagic),
-            "bytes past the endings it states are smuggled"
+            "bytes past the formats it states are smuggled"
         );
         let mut held_open = frame;
         held_open[PICK_PURPOSE_OFFSET] = PICK_PURPOSE_OPEN;
         held_open[PICK_NAME_LEN_OFFSET] = 0;
         held_open.copy_within(at..len, PICK_NAME_OFFSET);
         assert_eq!(
-            WindowRequest::from_bytes(&held_open[..len - "Sprites.spr".len()]),
+            WindowRequest::from_bytes(&held_open[..len - "Sprites".len()]),
             Err(Errno::OutOfRange),
             "an open holds a name to nothing"
         );
@@ -11908,6 +12595,7 @@ mod tests {
                 DocumentName::new("notes.txt").expect("a valid name"),
                 1,
                 true,
+                [picture("text", None)],
             )
             .expect("one openable file"),
         };
@@ -11940,15 +12628,21 @@ mod tests {
     fn a_drag_names_at_least_one_item_and_only_one_openable_file() {
         let name = DocumentName::new("notes.txt").expect("a valid name");
         let unnamed = DocumentName::new("").expect("a valid name");
-        assert_eq!(DragItems::new(name, 0, false), Err(Errno::OutOfRange));
-        assert_eq!(DragItems::new(name, 2, true), Err(Errno::OutOfRange));
-        assert_eq!(DragItems::new(unnamed, 1, false), Err(Errno::OutOfRange));
-        let items = DragItems::new(name, 3, false).expect("three items");
+        let one = [picture("text", None)];
+        let two = [picture("text", None), picture("file", None)];
+        assert_eq!(DragItems::new(name, 0, false, []), Err(Errno::OutOfRange));
+        assert_eq!(DragItems::new(name, 2, true, two), Err(Errno::OutOfRange));
+        assert_eq!(
+            DragItems::new(unnamed, 1, false, one),
+            Err(Errno::OutOfRange)
+        );
+        let three = [picture("text", None); 3];
+        let items = DragItems::new(name, 3, false, three).expect("three items");
         assert_eq!((items.count(), items.openable()), (3, false));
 
         let frame = WindowRequest::BeginDrag {
             window_id: 9,
-            items: DragItems::new(name, 1, true).expect("one openable file"),
+            items: DragItems::new(name, 1, true, one).expect("one openable file"),
         };
         let len = frame.wire_len();
         let bytes = frame.frame();
@@ -11958,11 +12652,153 @@ mod tests {
             WindowRequest::from_bytes(&flagged[..len]),
             Err(Errno::OutOfRange)
         );
-        let mut several = bytes;
-        several[DRAG_COUNT_OFFSET..DRAG_COUNT_OFFSET + 4].copy_from_slice(&2u32.to_le_bytes());
+        let pair = WindowRequest::BeginDrag {
+            window_id: 9,
+            items: DragItems::new(name, 2, false, two).expect("two items"),
+        };
+        let mut opened = pair.frame();
+        opened[DRAG_FLAGS_OFFSET] |= super::DRAG_OPENABLE;
         assert_eq!(
-            WindowRequest::from_bytes(&several[..len]),
-            Err(Errno::OutOfRange)
+            WindowRequest::from_bytes(&opened[..pair.wire_len()]),
+            Err(Errno::OutOfRange),
+            "two items are never one file to open"
+        );
+    }
+
+    /// A drag shows a picture for each item up to the most it shows, the
+    /// pressed one first, each placed where it stood or nowhere: no more and
+    /// no fewer are taken, and each comes back exactly as it went.
+    #[test]
+    fn a_drag_carries_a_picture_for_each_item_it_shows() {
+        let name = DocumentName::new("Report.txt").expect("a valid name");
+        let pictures = widest_pictures();
+        for (count, shown) in [(1, 1), (3, 3), (4, 4), (9, 4), (u32::MAX, 4)] {
+            let items = DragItems::new(name, count, false, pictures[..shown].iter().copied())
+                .expect("a drag");
+            assert!(items
+                .pictures()
+                .copied()
+                .eq(pictures[..shown].iter().copied()));
+            let drag = WindowRequest::BeginDrag {
+                window_id: 9,
+                items,
+            };
+            assert_eq!(
+                WindowRequest::from_bytes(&drag.frame()[..drag.wire_len()]),
+                Ok(drag),
+                "{count} items"
+            );
+            for wrong in [shown - 1, shown + 1] {
+                let given = pictures.iter().copied().cycle().take(wrong);
+                assert_eq!(
+                    DragItems::new(name, count, false, given),
+                    Err(Errno::OutOfRange),
+                    "{wrong} pictures for {count} items"
+                );
+            }
+        }
+    }
+
+    /// A picture's place is read only where its flag says it has one, its
+    /// class only as an asset id: an unknown flag, a place stated for a
+    /// picture placed nowhere, an empty or unprintable id, and a frame running
+    /// past its last picture are refused.
+    #[test]
+    fn a_drag_picture_is_read_only_as_it_was_written() {
+        let name = DocumentName::new("a.txt").expect("a valid name");
+        let drag = WindowRequest::BeginDrag {
+            window_id: 9,
+            items: DragItems::new(name, 1, true, [picture("text", None)]).expect("one file"),
+        };
+        let len = drag.wire_len();
+        let bytes = drag.frame();
+        let at = DRAG_NAME_OFFSET + "a.txt".len() + 1;
+        assert_eq!(bytes[at], 0, "placed nowhere");
+        let mut unknown = bytes;
+        unknown[at] = DRAG_PICTURE_PLACED << 1;
+        let mut stated = bytes;
+        put_i32(&mut stated, at + 1, 7);
+        let mut unprintable = bytes;
+        unprintable[at + DRAG_PICTURE_HEAD] = 0x07;
+        for (bad, why) in [
+            (unknown, "an unknown flag"),
+            (stated, "a place for a picture placed nowhere"),
+            (unprintable, "an unprintable asset id"),
+        ] {
+            assert_eq!(
+                WindowRequest::from_bytes(&bad[..len]),
+                Err(Errno::OutOfRange),
+                "{why}"
+            );
+        }
+        let mut empty = bytes;
+        empty[at + DRAG_PICTURE_HEAD - 1] = 0;
+        assert_eq!(
+            WindowRequest::from_bytes(&empty[..len - "text".len()]),
+            Err(Errno::LengthOutOfRange),
+            "an empty asset id"
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&bytes[..len - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&bytes.over_long(0)),
+            Err(Errno::BadMagic)
+        );
+        let mut placed = bytes;
+        placed[at] = DRAG_PICTURE_PLACED;
+        put_i32(&mut placed, at + 1, -12);
+        put_i32(&mut placed, at + 5, 30);
+        let Ok(WindowRequest::BeginDrag { items, .. }) = WindowRequest::from_bytes(&placed[..len])
+        else {
+            panic!("a placed picture is read");
+        };
+        assert_eq!(
+            items.pictures().next().and_then(|shown| shown.from),
+            Some((-12, 30))
+        );
+    }
+
+    /// The ending a source hides is a whole tail of the name, never all of it
+    /// nor half a character, and the name it leaves is the one shown.
+    #[test]
+    fn a_drag_hides_only_a_whole_ending_of_its_name() {
+        let name = DocumentName::new("Sprites,ff9").expect("a valid name");
+        let items =
+            DragItems::new(name, 1, true, [picture("image-sprite", None)]).expect("one file");
+        let hidden = items.with_hidden_ending(4).expect("a whole ending");
+        assert_eq!(
+            (hidden.shown_name(), hidden.hidden_ending()),
+            ("Sprites", 4)
+        );
+        assert_eq!(items.shown_name(), "Sprites,ff9");
+        for refused in [11, 12, 300] {
+            assert_eq!(
+                items.with_hidden_ending(refused),
+                Err(Errno::OutOfRange),
+                "{refused}"
+            );
+        }
+        let accented = DocumentName::new("caf\u{e9}").expect("a valid name");
+        let accented = DragItems::new(accented, 1, true, [picture("file", None)]).expect("a file");
+        assert_eq!(
+            accented.with_hidden_ending(1),
+            Err(Errno::OutOfRange),
+            "half a character"
+        );
+        let drag = WindowRequest::BeginDrag {
+            window_id: 9,
+            items: hidden,
+        };
+        let len = drag.wire_len();
+        assert_eq!(WindowRequest::from_bytes(&drag.frame()[..len]), Ok(drag));
+        let mut whole = drag.frame();
+        whole[DRAG_NAME_OFFSET + "Sprites,ff9".len()] = 11;
+        assert_eq!(
+            WindowRequest::from_bytes(&whole[..len]),
+            Err(Errno::OutOfRange),
+            "all of the name"
         );
     }
 
@@ -11975,7 +12811,7 @@ mod tests {
         let basic = crate::fs::Filetype::new(0xFFB).expect("twelve bits");
         let typed = WindowRequest::BeginDrag {
             window_id: 9,
-            items: DragItems::new(name, 1, true)
+            items: DragItems::new(name, 1, true, [picture("file", None)])
                 .expect("one openable file")
                 .with_filetype(Some(basic)),
         };
@@ -12001,7 +12837,8 @@ mod tests {
         );
         let plain = WindowRequest::BeginDrag {
             window_id: 9,
-            items: DragItems::new(name, 1, true).expect("one openable file"),
+            items: DragItems::new(name, 1, true, [picture("file", None)])
+                .expect("one openable file"),
         };
         let plain_bytes = plain.frame();
         assert_eq!(read_u16(&plain_bytes, DRAG_FILETYPE_OFFSET), 0);
@@ -13206,9 +14043,15 @@ mod tests {
             WindowEvent::AppBarDefault,
             WindowEvent::AppBarMenu {
                 item: AppMenuItemId::new(1).expect("a valid id"),
+                revision: 0,
             },
             WindowEvent::AppBarMenu {
                 item: AppMenuItemId::new(u16::MAX).expect("a valid id"),
+                revision: u32::MAX,
+            },
+            WindowEvent::AppBarEntered {
+                item: AppMenuItemId::new(7).expect("a valid id"),
+                revision: 9,
             },
         ] {
             let bytes = event.to_le_bytes();
@@ -14200,10 +15043,25 @@ mod tests {
         // A zero item id names no row and is refused, never guessed at.
         let mut zero_item = WindowEvent::AppBarMenu {
             item: AppMenuItemId::new(3).expect("a valid id"),
+            revision: 1,
         }
         .to_le_bytes();
         zero_item[16..18].copy_from_slice(&0u16.to_le_bytes());
         assert_eq!(WindowEvent::from_bytes(&zero_item), Err(Errno::OutOfRange));
+    }
+
+    /// An icon-bar answer's revision follows its row, and nothing may ride
+    /// past it.
+    #[test]
+    fn an_icon_bar_answer_carries_its_revision_and_nothing_past_it() {
+        let mut bytes = WindowEvent::AppBarEntered {
+            item: AppMenuItemId::new(3).expect("a valid id"),
+            revision: u32::MAX,
+        }
+        .to_le_bytes();
+        assert_eq!(read_u32(&bytes, 18), u32::MAX);
+        bytes[22] = 1;
+        assert_eq!(WindowEvent::from_bytes(&bytes), Err(Errno::BadMagic));
     }
 
     #[test]

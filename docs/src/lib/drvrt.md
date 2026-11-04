@@ -138,8 +138,10 @@ every supplier needs is defined here once:
   ended peer's holds, service a bound interrupt line, and keep a deadline — a
   check its hardware raises no interrupt for, due at an instant on the
   monotonic clock (`deadline_us`), run when it comes (`expired`), which moves
-  the deadline on or clears it. **`Recorder<R>`** is where its decisions of
-  kind `R` go.
+  the deadline on or clears it — and, for a supplier that sends messages, keep
+  a room member armed on each port it holds one for that had no room
+  (`rooms`), offering it again when room comes or the pause for kernel memory
+  has run (`room`). **`Recorder<R>`** is where its decisions of kind `R` go.
 - **`serve::DutyNode`** is a supplier driver's bring-up: the node's grants
   read and its duty of the role the driver serves found
   (`DutyNode::open`), its one register window mapped, and every failure
@@ -163,7 +165,8 @@ every supplier needs is defined here once:
   service ends (`Service::run`), answering why. The wait is a one-shot
   timeout to the supplier's deadline, so the core sleeps until it, and a
   deadline that has come is run before the next wait, so a stream of calls
-  cannot starve it. A driver logs its readiness
+  cannot starve it. The room members the supplier asks for join the same wait
+  set, and a pause it owes for kernel memory shortens the timeout. A driver logs its readiness
   between the two, so readiness means bound. `serve::log_event` and
   `serve::instance_field` write its records.
 - **`serve::DeviceChannel`** is a device channel — an endpoint the driver

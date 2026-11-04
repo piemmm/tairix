@@ -1,8 +1,8 @@
 //! TAIRiX **terminal emulator** — the default graphical terminal
 //! (`userland/apps/`, `PLAN.md` Stage 7).
 //!
-//! The terminal runs the default shell and shows its output on a
-//! fixed-size character grid. Like the filesystem browser it is a graphical
+//! The terminal runs the default shell and shows its output on a character
+//! grid with a scrollback above it. Like the filesystem browser it is a graphical
 //! app, so it consumes the same `lib/*` building blocks the taskbar does
 //! (`lib/geometry`, `lib/theme`, `lib/raster`, `lib/font`) and never depends
 //! on the window manager.
@@ -87,7 +87,7 @@
 //! * [`render`](mod@render) — the retained [`Screen`] the grid is painted
 //!   into, and the cell diff that decides what a frame redraws.
 //! * [`menu`] — the window menu's rows and its keyboard shortcuts.
-//! * [`settings`] — the settings sheet, shown in a popup above the window.
+//! * [`settings`] — the settings sheet, shown in a window of its own.
 //! * [`swatch`] — the colour-well grid the custom scheme is edited with.
 //!
 //! # Layering & safety
@@ -137,7 +137,7 @@ pub use shell::ShellSource;
 pub use spawned::{
     shell_env, shell_reap, shell_wires, EndingShell, EndingShells, ShellReap, StreamShellSource,
 };
-pub use terminal::Terminal;
+pub use terminal::{Reshaped, Terminal};
 // The cell and rendition vocabulary the emulator consumes is `lib/vt`'s, not a
 // second definition; re-export it so callers name one type.
 pub use tairix_vt::{Attributes, Cell, Color};

@@ -90,7 +90,11 @@ nuova. Trascinare una fascia sposta il suo pannello sul suo lato o sull'altro,
 marcando strada facendo dove atterrerà; rilasciato lontano da entrambi i lati,
 o trascinato fuori dalla finestra, il pannello fluttua in una piccola finestra
 sua, spostata dalla sua fascia, tenuta sopra l'immagine e chiusa dal suo
-segno; riportato sopra un lato, vi si aggancia di nuovo.
+segno; riportato sopra un lato, vi si aggancia di nuovo. Anche la tavolozza
+fluttua: il pulsante all'estremità destra della sua striscia, o Vista ▸
+Pannelli ▸ Stacca la tavolozza, la porta in una piccola finestra sua, con i
+colori disposti in una griglia; chiudere quella finestra, o riportarla in
+fondo alla finestra, la rimette nella striscia.
 
 Lo strumento di selezione delimita un rettangolo, un'ellisse, un lazo a mano
 libera, un poligono cliccato angolo per angolo o, con la bacchetta magica, i

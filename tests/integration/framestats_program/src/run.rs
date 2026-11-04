@@ -134,7 +134,7 @@ mod program {
                             return fail(sink, reason);
                         }
                     }
-                    Ok(WindowEvent::AppBarMenu { item }) if tairix_window::is_quit(item) => {
+                    Ok(WindowEvent::AppBarMenu { item, .. }) if tairix_window::is_quit(item) => {
                         return 0;
                     }
                     _ => {}

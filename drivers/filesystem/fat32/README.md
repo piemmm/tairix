@@ -39,6 +39,17 @@ invalid scalar value, checksum mismatch) rather than surfacing a partial
 name. When a long name is present the internal 8.3 alias is *not*
 separately resolvable.
 
+## Label
+
+`FilesystemLabel` reads the label as the volume probe does — the root
+directory's label entry, else `BS_VolLab` — and writes both, with the backup
+boot sector's copy, the entry only where the probe reads it, in the head of
+the root's first cluster (`NoSpace` when that holds no slot for it): at most
+eleven upper-case ASCII letters, digits, interior spaces and a short name's
+punctuation. Lower case, any other character, `NO NAME` and a twelfth
+character are refused; the empty title removes the label. A retitle failing
+part-way leaves the volume refusing writes.
+
 ## Writing
 
 A file's `NodeId` is the place of its short directory entry, which holds

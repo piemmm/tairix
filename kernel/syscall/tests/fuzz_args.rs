@@ -1144,6 +1144,15 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn volume_retitle(
+        &self,
+        _c: &CallerContext<'_>,
+        _request: u64,
+        _request_len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn volume_read(
         &self,
         _c: &CallerContext<'_>,

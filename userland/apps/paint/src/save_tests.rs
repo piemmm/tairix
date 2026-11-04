@@ -11,7 +11,7 @@ use tairix_sandbox::imageedit::KeptReason;
 use tairix_sandbox::imagerender::ViewFormat;
 
 use super::{
-    encode, format_for, format_named, losses, lost_in, natural, restated, save_endings, write_back,
+    encode, format_for, format_named, losses, lost_in, natural, restated, save_formats, write_back,
     Loss, NotWrittenBack, SaveFormat, SaveRefusal, SaveSettings,
 };
 use crate::canvas::{Canvas, CanvasBuilder, Kind, Sample};
@@ -631,36 +631,41 @@ fn a_new_document_is_offered_the_name_of_what_it_is() {
     assert_eq!(natural(two.entries(), two.origin()), SaveFormat::Sprites);
 }
 
-/// A save is held to the endings of the format chosen, its first the one a
-/// name given none takes; a format that cannot hold the document has none.
+/// A save offers the one format chosen, as the registry types it — its file
+/// type, and its extensions, first the one a name given none takes, but none
+/// for a sprite file, named by its type alone — each reading back as it; a
+/// format that cannot hold the document offers nothing.
 #[test]
-fn a_documents_save_endings_are_those_of_the_format_chosen() {
-    let listed = |document: &Document, format| -> Vec<String> {
-        save_endings(document.entries(), document.origin(), format)
-            .expect("the format holds it")
-            .iter()
-            .map(String::from)
-            .collect()
+fn a_documents_save_offers_the_format_chosen() {
+    let offered = |document: &Document, format| {
+        let formats = save_formats(document.entries(), document.origin(), format)
+            .expect("the format holds it");
+        assert_eq!((formats.len(), formats.current()), (1, Some(0)));
+        *formats.get(0).expect("one format")
     };
     let one = Document::new(Picture::plain(stripes(false)));
-    assert_eq!(listed(&one, SaveFormat::Png), [".png", ",b60"]);
+    let png = offered(&one, SaveFormat::Png);
+    assert_eq!(png.filetype(), tairix_abi::fs::Filetype::new(0xB60));
+    assert_eq!(png.extensions().collect::<Vec<_>>(), [".png"]);
     assert_eq!(
-        listed(&one, SaveFormat::Tiff)[0],
-        ".tiff",
+        offered(&one, SaveFormat::Tiff).extensions().next(),
+        Some(".tiff"),
         "the registry's first"
     );
     for format in SaveFormat::ALL {
-        for ending in listed(&one, format) {
+        for extension in offered(&one, format).extensions() {
             assert_eq!(
-                format_named(&alloc::format!("a{ending}"), None),
+                format_named(&alloc::format!("a{extension}"), None),
                 Ok(Some(format)),
-                "{ending}"
+                "{extension}"
             );
         }
-        assert_eq!(
-            format_named(&alloc::format!("a.{}", format.extension()), None),
-            Ok(Some(format))
-        );
+        if !format.extension().is_empty() {
+            assert_eq!(
+                format_named(&alloc::format!("a.{}", format.extension()), None),
+                Ok(Some(format))
+            );
+        }
     }
     let two = Document::of(
         vec![
@@ -673,18 +678,29 @@ fn a_documents_save_endings_are_those_of_the_format_chosen() {
     )
     .expect("entries");
     assert_eq!(
-        save_endings(two.entries(), two.origin(), SaveFormat::Png),
+        save_formats(two.entries(), two.origin(), SaveFormat::Png),
         Err(SaveRefusal::SeveralPictures(2))
     );
-    assert_eq!(listed(&two, SaveFormat::Sprites), [".spr", ",ff9"]);
+    let sprites = offered(&two, SaveFormat::Sprites);
+    assert_eq!(sprites.filetype(), tairix_abi::fs::Filetype::new(0xFF9));
+    assert_eq!(sprites.extensions().count(), 0, "named by its type alone");
+    assert_eq!(
+        SaveFormat::Sprites.extension(),
+        "",
+        "offered with no extension"
+    );
+    assert_eq!(
+        format_named("Sprites,ff9", None),
+        Ok(Some(SaveFormat::Sprites))
+    );
 }
 
 /// A document no format can hold opens no picker: the refusal is said.
 #[test]
-fn a_document_no_format_holds_has_no_save_endings() {
+fn a_document_no_format_holds_offers_no_save() {
     let area = read(vec![kept(46)], ViewFormat::Sprite, Unkept::default());
     assert_eq!(
-        save_endings(area.entries(), area.origin(), SaveFormat::Sprites),
+        save_formats(area.entries(), area.origin(), SaveFormat::Sprites),
         Err(SaveRefusal::KeptSpriteOffWord(
             SpriteName::new("odd").expect("a name")
         ))

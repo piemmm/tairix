@@ -15,13 +15,18 @@
 //!
 //! A node's isochronous streams each ride a region of their own, created for
 //! the stream and granted to the caller that started it, whose slot
-//! completions go to the notify port its attested pid names. A stream ends
-//! with its device, with a controller reset, or when its notification cannot
-//! be delivered; its class driver is told why when it still can be.
+//! completions go to the notify port its attested pid names. A notice the port
+//! refuses for room, this process's IPC budget or kernel memory is held, with
+//! every notice after it, until the port's room wake or a timed retry, and a
+//! stream holds no more completions than it has slots. A stream ends with its
+//! device, with a controller reset or on a halt, its class driver owed why, or
+//! once its port is gone or refuses it for good.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
+use tairix_abi::ipc::{Reoffer, SendRefusal};
 use tairix_abi::usb_urb::{
     iso_notify_endpoint_for, IsoGrant, IsoNotify, IsoStartParams, UsbRequest, UsbTransferType,
     USB_REQUEST_MAX_LEN,
@@ -91,6 +96,15 @@ pub enum Note {
         /// Its endpoint address.
         endpoint: u8,
         /// Why.
+        reason: Errno,
+    },
+    /// Notices a stream's notify port refused for good were given up.
+    NoticesLost {
+        /// The port.
+        port: u64,
+        /// How many.
+        lost: usize,
+        /// The port's refusal.
         reason: Errno,
     },
 }
@@ -164,8 +178,13 @@ pub trait Seam {
     ///
     /// # Errors
     ///
-    /// The kernel's refusal: no such port, or a full one.
+    /// The kernel's refusal, which [`SendRefusal::of`] reads.
     fn notify(&mut self, port: u64, notice: &IsoNotify) -> Result<(), Errno>;
+    /// Have the event loop woken by room at `port` — a receive there, or a
+    /// release of this process's IPC budget — returning whether it took.
+    fn watch_room(&mut self, port: u64) -> bool;
+    /// Stop the event loop waking for room at `port`.
+    fn unwatch_room(&mut self, port: u64);
     /// The next call queued on `endpoint`, without blocking: its ticket and
     /// the length of the request copied into `request`.
     ///
@@ -207,6 +226,10 @@ struct Transport<B> {
     /// A faulted URB's answer, held while the engine looks at whether its
     /// device left: answered [`Errno::NotFound`] if it did.
     confirming: Option<UrbReply>,
+    /// What ended streams still owe their ports, kept past the stream and its
+    /// node. Its capacity covers every stream the node runs, so a stream
+    /// ending never allocates.
+    ended: Vec<Notices>,
 }
 
 struct Node<B> {
@@ -225,7 +248,45 @@ struct Stream<B> {
     endpoint: u8,
     number: NonZeroU32,
     region: B,
-    notify: u64,
+    /// Its region's slots: the most completions it holds unsent.
+    slots: usize,
+    notices: Notices,
+}
+
+/// What one notify port is owed, oldest first: the notice it refused and
+/// those that came after.
+///
+/// Room for a stream's whole debt, a completion per slot and its halt
+/// (`IsoLayout::notify_capacity`), is taken as the stream starts, so holding
+/// a notice never allocates.
+struct Notices {
+    port: u64,
+    held: VecDeque<IsoNotify>,
+    /// When the oldest held notice is offered again.
+    reoffer: Option<Reoffer>,
+}
+
+/// What offering a port its notices left.
+#[derive(Clone, Copy)]
+enum Offered {
+    /// It took everything, or holds the rest for what refused it.
+    Open,
+    /// It is gone with its class driver, and what it was owed with it.
+    Gone,
+    /// It refused a notice for good, and the `lost` it was owed are given up.
+    Refused { reason: Errno, lost: usize },
+}
+
+/// Why a stream ends.
+#[derive(Clone, Copy)]
+enum End {
+    /// It halted, or its device or the controller took it: its class driver
+    /// is owed the reason.
+    Halted(Errno),
+    /// Its port is gone with its class driver.
+    Gone,
+    /// Its port refuses its notices for good, and `lost` were given up.
+    Refused { reason: Errno, lost: usize },
 }
 
 impl<B> Default for Interfaces<B> {
@@ -452,14 +513,22 @@ impl<B: UrbBuffer> Interfaces<B> {
         }
     }
 
-    /// Tell every stream's class driver of each slot its stream finished,
-    /// ending a stream that halted or whose notification could not be
-    /// delivered.
-    pub fn deliver_streams<S: Seam<Buffer = B>>(&mut self, seam: &mut S) {
+    /// Offer every stream's class driver what it is owed and, while the
+    /// controller is served, each slot its stream finished, ending a stream
+    /// that halted or whose class driver can no longer be told.
+    ///
+    /// A notice refused for room or this process's IPC budget waits on its
+    /// port's room wake ([`Seam::watch_room`]), and one refused for kernel
+    /// memory on a pause ([`Self::next_notice_retry`]). Run on every pass: a
+    /// port watched for room wakes the loop until it is given what it is owed.
+    pub fn deliver_streams<S: Seam<Buffer = B>>(
+        &mut self,
+        health: &ControllerHealth,
+        seam: &mut S,
+    ) {
+        let serving = !(health.is_recovering() || health.is_failed_closed());
         for transport in &mut self.transports {
-            if let Some(node) = transport.node.as_mut() {
-                node.deliver(seam);
-            }
+            transport.deliver(serving, seam);
         }
     }
 
@@ -469,6 +538,17 @@ impl<B: UrbBuffer> Interfaces<B> {
         self.transports
             .iter()
             .filter_map(|transport| transport.service.deadline())
+            .min()
+    }
+
+    /// The soonest instant a held notice is offered again after a pause, if
+    /// one waits on a pause rather than its port's room wake.
+    #[must_use]
+    pub fn next_notice_retry(&self) -> Option<u64> {
+        self.transports
+            .iter()
+            .flat_map(Transport::notices)
+            .filter_map(Notices::retry_at)
             .min()
     }
 
@@ -608,8 +688,10 @@ impl<B: UrbBuffer> Interfaces<B> {
         if serving {
             // The reset took every stream with it; a node kept across it
             // governs its own interface alone again.
-            for node in self.transports.iter_mut().filter_map(|t| t.node.as_mut()) {
-                node.end_streams(Errno::WouldBlock, seam);
+            for transport in &mut self.transports {
+                if let Some(node) = transport.node.as_mut() {
+                    node.end_streams(Errno::WouldBlock, &mut transport.ended, seam);
+                }
             }
             self.reconcile_as(Matching::Reenumerated, seam);
             for transport in &mut self.transports {
@@ -667,7 +749,17 @@ impl<B> Transport<B> {
             service: UrbService::new(),
             node: None,
             confirming: None,
+            ended: Vec::new(),
         }
+    }
+
+    /// Every port debt the transport holds: its node's streams' and the
+    /// ended ones'.
+    fn notices(&self) -> impl Iterator<Item = &Notices> + '_ {
+        self.node
+            .iter()
+            .flat_map(|node| node.streams.iter().map(|stream| &stream.notices))
+            .chain(&self.ended)
     }
 
     fn answer_held<S: Seam>(&mut self, errno: Errno, seam: &mut S) {
@@ -701,7 +793,7 @@ impl<B: UrbBuffer> Transport<B> {
     /// left parked on a device that is gone. Its streams end first.
     fn retract<S: Seam<Buffer = B>>(&mut self, seam: &mut S) {
         if let Some(mut node) = self.node.take() {
-            node.end_streams(Errno::NotFound, seam);
+            node.end_streams(Errno::NotFound, &mut self.ended, seam);
             seam.remove(node.id);
         }
         if let Some(faulted) = self.confirming.take() {
@@ -712,6 +804,26 @@ impl<B: UrbBuffer> Transport<B> {
             seam.note(Note::FaultDetached);
         }
         self.answer_held(Errno::NotFound, seam);
+    }
+
+    /// Offer what the ended streams and the node's own owe their ports and,
+    /// while the controller is served, every slot the node's streams finished.
+    fn deliver<S: Seam<Buffer = B>>(&mut self, serving: bool, seam: &mut S) {
+        self.ended.retain_mut(|notices| match notices.flush(seam) {
+            Offered::Open => notices.owes(),
+            Offered::Gone => false,
+            Offered::Refused { reason, lost } => {
+                seam.note(Note::NoticesLost {
+                    port: notices.port,
+                    lost,
+                    reason,
+                });
+                false
+            }
+        });
+        if let Some(node) = self.node.as_mut() {
+            node.deliver(serving, &mut self.ended, seam);
+        }
     }
 
     /// Perform an interface or stream operation for the node: one the engine
@@ -739,7 +851,7 @@ impl<B: UrbBuffer> Transport<B> {
             },
             UsbRequest::ClearHalt { endpoint } => Operation::ClearHalt { endpoint },
             UsbRequest::IsoStop { endpoint } if reach == Reach::Served => {
-                if let Err(err) = node.forget_stream(endpoint) {
+                if let Err(err) = node.forget_stream(endpoint, seam) {
                     return UrbOutcome::Reply(UrbReply::status(ticket, Err(err.as_errno())));
                 }
                 Operation::IsoStop { endpoint }
@@ -768,7 +880,7 @@ impl<B: UrbBuffer> Transport<B> {
                 seam.engine(index).claim_interface(interface)
             }
             UsbRequest::IsoStart(params) => {
-                return match node.start_stream(params, endpoint, ticket, seam) {
+                return match node.start_stream(params, endpoint, ticket, &mut self.ended, seam) {
                     Ok(grant) => UrbReply::grant(ticket, &grant),
                     Err(errno) => UrbReply::status(ticket, Err(errno)),
                 };
@@ -797,18 +909,25 @@ impl<B: UrbBuffer> Transport<B> {
 impl<B: UrbBuffer> Node<B> {
     /// Start a stream for the caller of `ticket` on transport `endpoint`: a
     /// region of its own, granted to that caller, its notifications sent to
-    /// the port that caller's attested pid names.
+    /// the port that caller's attested pid names. Room for all it can come to
+    /// owe, there and once ended in `ended`, is taken first, so no notice it
+    /// owes is lost to this process's memory.
     fn start_stream<S: Seam<Buffer = B>>(
         &mut self,
         params: IsoStartParams,
         endpoint: u64,
         ticket: u64,
+        ended: &mut Vec<Notices>,
         seam: &mut S,
     ) -> Result<IsoGrant, Errno> {
         let notify = iso_notify_endpoint_for(seam.caller_pid(endpoint, ticket)?, params.endpoint);
         self.streams
             .try_reserve(1)
             .map_err(|_| Errno::OutOfMemory)?;
+        ended
+            .try_reserve(self.streams.len() + 1)
+            .map_err(|_| Errno::OutOfMemory)?;
+        let notices = Notices::new(notify, params.layout.notify_capacity())?;
         let mut region = seam
             .create_buffer(params.layout.region_len())
             .ok_or(Errno::OutOfMemory)?;
@@ -819,9 +938,23 @@ impl<B: UrbBuffer> Node<B> {
             .engine(self.index)
             .iso_start(params.endpoint, params.layout)
             .map_err(DriverError::as_errno)?;
-        // Whatever ran there before was replaced with the engine's stream.
-        self.streams
-            .retain(|stream| stream.endpoint != params.endpoint);
+        // Whatever ran there before was replaced with the engine's stream, and
+        // what it or an ended predecessor still owes the port is of a stream
+        // its class driver no longer holds.
+        self.streams.retain_mut(|stream| {
+            let replaced = stream.endpoint == params.endpoint;
+            if replaced {
+                stream.notices.release(seam);
+            }
+            !replaced
+        });
+        ended.retain_mut(|owed| {
+            let superseded = owed.port == notify;
+            if superseded {
+                owed.release(seam);
+            }
+            !superseded
+        });
         let region_grant = match seam.grant_peer(region.region(), endpoint, ticket) {
             Ok(grant) => grant,
             Err(errno) => {
@@ -834,7 +967,8 @@ impl<B: UrbBuffer> Node<B> {
             endpoint: params.endpoint,
             number,
             region,
-            notify,
+            slots: usize::from(params.layout.slots),
+            notices,
         });
         Ok(IsoGrant {
             region_grant,
@@ -873,85 +1007,248 @@ impl<B: UrbBuffer> Node<B> {
             .iso_queue(endpoint, slot, stream.region.bytes())
     }
 
-    /// Forget the stream on `endpoint`, which its class driver is stopping.
-    fn forget_stream(&mut self, endpoint: u8) -> Result<(), DriverError> {
+    /// Forget the stream on `endpoint`, which its class driver is stopping,
+    /// with what its port is still owed: notices of a stream its class driver
+    /// no longer holds.
+    fn forget_stream<S: Seam>(&mut self, endpoint: u8, seam: &mut S) -> Result<(), DriverError> {
         let at = self
             .streams
             .iter()
             .position(|stream| stream.endpoint == endpoint)
             .ok_or(DriverError::NotFound)?;
-        self.streams.swap_remove(at);
+        let mut stream = self.streams.swap_remove(at);
+        stream.notices.release(seam);
         Ok(())
     }
 
-    /// Notify each stream's finished slots, ending a stream that halted or
-    /// cannot be told.
-    fn deliver<S: Seam<Buffer = B>>(&mut self, seam: &mut S) {
+    /// Offer each stream's class driver what it is owed and, while the
+    /// controller is served, every slot its stream finished, ending a stream
+    /// that halted or whose class driver can no longer be told; what an ended
+    /// stream still owes is kept in `ended`.
+    fn deliver<S: Seam<Buffer = B>>(
+        &mut self,
+        serving: bool,
+        ended: &mut Vec<Notices>,
+        seam: &mut S,
+    ) {
         let index = self.index;
         let mut at = 0;
         while let Some(stream) = self.streams.get_mut(at) {
-            let ended = loop {
-                let taken = seam
-                    .engine(index)
-                    .iso_take(stream.endpoint, stream.region.bytes());
-                match taken {
-                    Ok(Some(done)) => {
-                        let notice = IsoNotify::SlotDone {
-                            endpoint: stream.endpoint,
-                            stream: stream.number,
-                            slot: done.slot,
-                            skipped: done.skipped,
-                            microframe: done.microframe,
-                            completed_at: seam.now_ns(),
-                        };
-                        if let Err(errno) = seam.notify(stream.notify, &notice) {
-                            break Some(errno);
-                        }
-                    }
-                    Ok(None) => break None,
-                    Err(err) => break Some(err.as_errno()),
-                }
-            };
-            let Some(reason) = ended else {
+            let Some(end) = stream.deliver(index, serving, seam) else {
                 at += 1;
                 continue;
             };
             let stream = self.streams.swap_remove(at);
-            let _ = seam.engine(index).iso_stop(stream.endpoint);
-            end_stream(index, &stream, reason, seam);
+            // A recovering controller is not driven; the reset ending its
+            // recovery takes the stream.
+            if serving {
+                let _ = seam.engine(index).iso_stop(stream.endpoint);
+            }
+            end_stream(index, stream, end, ended, seam);
         }
     }
 
-    /// End every stream, telling each class driver `reason`. The engine's
+    /// End every stream, owing each class driver `reason`. The engine's
     /// streams are already gone with the device or the controller state.
-    fn end_streams<S: Seam<Buffer = B>>(&mut self, reason: Errno, seam: &mut S) {
+    fn end_streams<S: Seam<Buffer = B>>(
+        &mut self,
+        reason: Errno,
+        ended: &mut Vec<Notices>,
+        seam: &mut S,
+    ) {
         for stream in core::mem::take(&mut self.streams) {
-            end_stream(self.index, &stream, reason, seam);
+            end_stream(self.index, stream, End::Halted(reason), ended, seam);
         }
     }
 }
 
-/// Tell `stream`'s class driver it ended, as best the port still allows, and
-/// record why.
-fn end_stream<B, S: Seam<Buffer = B>>(
+impl<B: UrbBuffer> Stream<B> {
+    /// Offer the class driver what it is owed and, while the controller is
+    /// served, each slot the stream has since finished, returning why the
+    /// stream ends if it does.
+    ///
+    /// No more completions are held than the stream has slots: the rest stay
+    /// finished in the engine, where none can be queued again, so a class
+    /// driver that stops reading holds the stream at its own depth.
+    fn deliver<S: Seam<Buffer = B>>(
+        &mut self,
+        index: usize,
+        serving: bool,
+        seam: &mut S,
+    ) -> Option<End> {
+        let mut offered = self.notices.flush(seam);
+        loop {
+            match offered {
+                Offered::Open => {}
+                Offered::Gone => return Some(End::Gone),
+                Offered::Refused { reason, lost } => return Some(End::Refused { reason, lost }),
+            }
+            if !serving || self.notices.held.len() >= self.slots {
+                return None;
+            }
+            let taken = seam
+                .engine(index)
+                .iso_take(self.endpoint, self.region.bytes());
+            let done = match taken {
+                Ok(Some(done)) => done,
+                Ok(None) => return None,
+                Err(err) => return Some(End::Halted(err.as_errno())),
+            };
+            let completed = IsoNotify::SlotDone {
+                endpoint: self.endpoint,
+                stream: self.number,
+                slot: done.slot,
+                skipped: done.skipped,
+                microframe: done.microframe,
+                completed_at: seam.now_ns(),
+            };
+            offered = self.notices.post(completed, seam);
+        }
+    }
+}
+
+/// End `stream`, owing its class driver why while its port remains, and
+/// record it. What the port is still owed is kept in `ended`, whose room the
+/// stream's start took.
+fn end_stream<B, S: Seam>(
     index: usize,
-    stream: &Stream<B>,
-    reason: Errno,
+    stream: Stream<B>,
+    end: End,
+    ended: &mut Vec<Notices>,
     seam: &mut S,
 ) {
-    let _ = seam.notify(
-        stream.notify,
-        &IsoNotify::Halted {
-            endpoint: stream.endpoint,
-            stream: stream.number,
+    let Stream {
+        endpoint,
+        number,
+        mut notices,
+        ..
+    } = stream;
+    let (why, told) = match end {
+        End::Halted(reason) => {
+            let halted = IsoNotify::Halted {
+                endpoint,
+                stream: number,
+                reason,
+            };
+            (reason, notices.post(halted, seam))
+        }
+        End::Gone => (Errno::NotFound, Offered::Gone),
+        End::Refused { reason, lost } => (reason, Offered::Refused { reason, lost }),
+    };
+    if let Offered::Refused { reason, lost } = told {
+        seam.note(Note::NoticesLost {
+            port: notices.port,
+            lost,
             reason,
-        },
-    );
+        });
+    }
     seam.note(Note::StreamEnded {
         index,
-        endpoint: stream.endpoint,
-        reason,
+        endpoint,
+        reason: why,
     });
+    if notices.owes() {
+        ended.push(notices);
+    }
+}
+
+impl Notices {
+    /// Notices for `port`, with room for `capacity` of them.
+    fn new(port: u64, capacity: usize) -> Result<Self, Errno> {
+        let mut held = VecDeque::new();
+        held.try_reserve_exact(capacity)
+            .map_err(|_| Errno::OutOfMemory)?;
+        Ok(Self {
+            port,
+            held,
+            reoffer: None,
+        })
+    }
+
+    /// Whether the port is owed anything.
+    fn owes(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    /// When what is held is next offered, if a pause decides it.
+    fn retry_at(&self) -> Option<u64> {
+        self.reoffer.and_then(Reoffer::deadline)
+    }
+
+    /// Owe `notice`, offering it at once unless something held must reach
+    /// the port first.
+    fn post<S: Seam>(&mut self, notice: IsoNotify, seam: &mut S) -> Offered {
+        self.held.push_back(notice);
+        if self.reoffer.is_some() {
+            return Offered::Open;
+        }
+        self.flush(seam)
+    }
+
+    /// Offer what is held, oldest first, until the port refuses one. A pause
+    /// is waited out; a room wait is offered on every pass, since its member
+    /// wakes the loop only once the port has room.
+    fn flush<S: Seam>(&mut self, seam: &mut S) -> Offered {
+        if self.retry_at().is_some_and(|at| seam.now_ns() < at) {
+            return Offered::Open;
+        }
+        while let Some(notice) = self.held.front() {
+            match seam.notify(self.port, notice) {
+                Ok(()) => {
+                    self.held.pop_front();
+                }
+                Err(errno) => return self.refused(errno, seam),
+            }
+        }
+        self.wait_on(None, seam);
+        Offered::Open
+    }
+
+    /// Hold what is owed for what refused the oldest of it, or give it up.
+    fn refused<S: Seam>(&mut self, errno: Errno, seam: &mut S) -> Offered {
+        match SendRefusal::of(errno) {
+            SendRefusal::Full | SendRefusal::Budget => {
+                if self.reoffer != Some(Reoffer::OnRoom) {
+                    let reoffer = if seam.watch_room(self.port) {
+                        Reoffer::OnRoom
+                    } else {
+                        Reoffer::pause(seam.now_ns())
+                    };
+                    self.reoffer = Some(reoffer);
+                }
+                Offered::Open
+            }
+            SendRefusal::Memory => {
+                self.wait_on(Some(Reoffer::pause(seam.now_ns())), seam);
+                Offered::Open
+            }
+            SendRefusal::Gone => {
+                self.release(seam);
+                Offered::Gone
+            }
+            SendRefusal::Final(reason) => {
+                let lost = self.held.len();
+                self.release(seam);
+                Offered::Refused { reason, lost }
+            }
+        }
+    }
+
+    /// Give up everything held.
+    fn release<S: Seam>(&mut self, seam: &mut S) {
+        self.held.clear();
+        self.wait_on(None, seam);
+    }
+
+    /// Be offered again at `reoffer`, unwatching the port's room once that no
+    /// longer decides: its member is ready while the port has room, so one
+    /// left armed would wake the loop for ever.
+    fn wait_on<S: Seam>(&mut self, reoffer: Option<Reoffer>, seam: &mut S) {
+        if self.reoffer == Some(Reoffer::OnRoom) && reoffer != Some(Reoffer::OnRoom) {
+            seam.unwatch_room(self.port);
+        }
+        self.reoffer = reoffer;
+    }
 }
 
 impl<B> Node<B> {

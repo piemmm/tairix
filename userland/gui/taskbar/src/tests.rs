@@ -1882,7 +1882,10 @@ fn secondary_press_on_an_app_slot_asks_for_the_menu_it_declared() {
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
     assert_eq!(
         request.subject,
-        MenuSubject::App { owner: TERMINAL },
+        MenuSubject::App {
+            owner: TERMINAL,
+            revision: 0,
+        },
         "named by the process, so a choice reaches it wherever its slot has moved"
     );
     assert_eq!(
@@ -1890,6 +1893,40 @@ fn secondary_press_on_an_app_slot_asks_for_the_menu_it_declared() {
         "Terminal",
         "the plate is titled from the bundle's signed manifest"
     );
+}
+
+/// A committed entry field of an application's own menu is handed back to
+/// that application with what was typed; the bar's own menus declare none,
+/// so a commit naming one of theirs answers nothing.
+#[test]
+fn an_entry_committed_on_an_app_menu_reaches_its_application_alone() {
+    let item = AppMenuItemId::new(3).expect("a valid id");
+    assert_eq!(
+        MenuSubject::entered(
+            &MenuSubject::App {
+                owner: TERMINAL,
+                revision: 3,
+            },
+            item,
+            alloc::string::String::from("Archive")
+        ),
+        Some(TaskbarResponse::AppMenuEntered {
+            owner: TERMINAL,
+            item,
+            revision: 3,
+            text: alloc::string::String::from("Archive"),
+        })
+    );
+    for subject in [
+        MenuSubject::System,
+        MenuSubject::Clock,
+        MenuSubject::Network,
+    ] {
+        assert_eq!(
+            subject.entered(item, alloc::string::String::from("x")),
+            None
+        );
+    }
 }
 
 /// A row chosen once another application has taken the slot's place in the
@@ -1916,6 +1953,32 @@ fn a_menu_chosen_after_the_strip_moved_answers_its_own_application() {
         panic!("the row is the application's own");
     };
     assert_eq!(owner, TERMINAL, "not whoever is first in the strip now");
+}
+
+/// A row chosen after its application re-declared answers with the revision
+/// of the declaration the menu was opened from, so the application resolves
+/// it against the menu the user saw rather than the one replacing it.
+#[test]
+fn a_menu_chosen_after_a_re_declaration_answers_the_revision_it_was_opened_from() {
+    let declared = |revision| {
+        alloc::vec![app("Terminal")
+            .with_declaration(declared_menu(), AppBarClick::Open)
+            .with_revision(revision)
+            .with_identity(identity("Terminal"))]
+    };
+    let mut bar = bottom_bar();
+    bar.set_apps(declared(1), Scale::ONE);
+    let mut input = TaskbarInput::new();
+    let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
+    bar.set_apps(declared(2), Scale::ONE);
+    assert_eq!(
+        choose_row(&mut bar, &request, "Quit"),
+        Some(TaskbarResponse::AppMenuChosen {
+            owner: TERMINAL,
+            item: AppMenuItemId::new(2).expect("non-zero"),
+            revision: 1,
+        })
+    );
 }
 
 #[test]
@@ -2051,7 +2114,8 @@ fn a_menu_at_the_row_cap_states_every_row_it_declared() {
         bar.menu_chosen(&request.subject, last, NOW_NS, Scale::ONE),
         Some(TaskbarResponse::AppMenuChosen {
             owner: ProcId::from_raw(*b"Busy\0\0\0\0\0\0\0\0\0\0\0\0"),
-            item: last
+            item: last,
+            revision: 0,
         })
     );
 }
@@ -2100,7 +2164,8 @@ fn choosing_a_declared_row_relays_the_applications_own_id() {
             choose_row(&mut bar, &request, label),
             Some(TaskbarResponse::AppMenuChosen {
                 owner: TERMINAL,
-                item
+                item,
+                revision: 0,
             })
         );
     }
@@ -2144,6 +2209,7 @@ fn a_declared_submenu_becomes_a_child_plate_whose_rows_keep_their_own_ids() {
         Some(TaskbarResponse::AppMenuChosen {
             owner: TERMINAL,
             item: AppMenuItemId::new(8).expect("non-zero"),
+            revision: 0,
         })
     );
 }

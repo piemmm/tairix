@@ -3,7 +3,8 @@
 //!
 //! One profile is one [`Profile`]: the colour scheme in force, the sixteen
 //! ANSI colours and three screen roles of the user's own custom scheme, the
-//! text size, and the strength of every screen effect. It is a closed registry
+//! text size, how many lines the scrollback keeps, and the strength of every
+//! screen effect. It is a closed registry
 //! of dotted keys ([`ProfileKey`]) in the OS app-data store, reached through
 //! [`tairix_appdata`] — so it is private to this application, gated on the
 //! kernel-attested bundle identity, and readable or writable by no other app
@@ -53,6 +54,14 @@ pub const DEFAULT_FONT_SIZE_PX: u16 = 14;
 /// in logical pixels.
 pub const FONT_SIZE_STEP_PX: u16 = 1;
 
+/// How many lines of output the scrollback keeps when the user has not said.
+pub const DEFAULT_SCROLLBACK_LINES: u16 = 500;
+
+/// The most lines the scrollback may be set to keep: the bound on the
+/// setting, which holds a window's history at its widest screen to a few
+/// hundred mebibytes.
+pub const MAX_SCROLLBACK_LINES: u16 = 10_000;
+
 /// One key of the closed profile registry.
 ///
 /// Adding a key means adding a variant here, its row in [`ProfileKey::ALL`],
@@ -64,6 +73,8 @@ pub enum ProfileKey {
     Scheme,
     /// `font.size` — the text size in logical pixels.
     FontSize,
+    /// `scrollback.lines` — how many lines of output the scrollback keeps.
+    ScrollbackLines,
     /// `effects.opacity` — how opaque the background is, in permille.
     Opacity,
     /// `effects.blur` — how strongly the compositor blurs the backdrop, in
@@ -94,9 +105,10 @@ pub enum ProfileKey {
 
 impl ProfileKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Scheme,
         Self::FontSize,
+        Self::ScrollbackLines,
         Self::Opacity,
         Self::Blur,
         Self::ScanLines,
@@ -117,6 +129,7 @@ impl ProfileKey {
         match self {
             Self::Scheme => "scheme",
             Self::FontSize => "font.size",
+            Self::ScrollbackLines => "scrollback.lines",
             Self::Opacity => "effects.opacity",
             Self::Blur => "effects.blur",
             Self::ScanLines => "effects.scanlines",
@@ -144,6 +157,9 @@ pub struct Profile {
     /// The text size, in logical pixels, always within
     /// [`MIN_FONT_SIZE_PX`]..=[`MAX_FONT_SIZE_PX`].
     pub font_size_px: u16,
+    /// How many lines of output the scrollback keeps, at most
+    /// [`MAX_SCROLLBACK_LINES`]; none at zero.
+    pub scrollback_lines: u16,
     /// The strength of every screen effect.
     pub effects: Effects,
     /// The user's own scheme, used when [`scheme`](Self::scheme) is
@@ -156,6 +172,7 @@ impl Default for Profile {
         Self {
             scheme: Scheme::System,
             font_size_px: DEFAULT_FONT_SIZE_PX,
+            scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             effects: Effects::default(),
             custom: default_custom_scheme(),
         }
@@ -170,6 +187,7 @@ impl Profile {
     /// make text unreadable.
     pub fn clamp(&mut self) {
         self.font_size_px = self.font_size_px.clamp(MIN_FONT_SIZE_PX, MAX_FONT_SIZE_PX);
+        self.scrollback_lines = self.scrollback_lines.min(MAX_SCROLLBACK_LINES);
         self.effects.opacity = self.effects.opacity.clamp(MIN_OPACITY, FULL);
         self.effects.blur = self.effects.blur.min(FULL);
         self.effects.scanlines = self.effects.scanlines.min(FULL);
@@ -225,6 +243,10 @@ fn set_field(profile: &mut Profile, key: ProfileKey, value: &str) -> bool {
         },
         ProfileKey::FontSize => match parse_bounded(value, MIN_FONT_SIZE_PX, MAX_FONT_SIZE_PX) {
             Some(size) => profile.font_size_px = size,
+            None => return false,
+        },
+        ProfileKey::ScrollbackLines => match parse_bounded(value, 0, MAX_SCROLLBACK_LINES) {
+            Some(lines) => profile.scrollback_lines = lines,
             None => return false,
         },
         ProfileKey::Opacity => match parse_bounded(value, MIN_OPACITY, FULL) {
@@ -295,6 +317,7 @@ impl Registry for Profile {
         let written = match key {
             ProfileKey::Scheme => out.write_str(self.scheme.name()),
             ProfileKey::FontSize => write!(out, "{}", self.font_size_px),
+            ProfileKey::ScrollbackLines => write!(out, "{}", self.scrollback_lines),
             ProfileKey::Opacity => write!(out, "{}", self.effects.opacity),
             ProfileKey::Blur => write!(out, "{}", self.effects.blur),
             ProfileKey::ScanLines => write!(out, "{}", self.effects.scanlines),
@@ -321,6 +344,9 @@ impl Live for Profile {
         match key {
             ProfileKey::Scheme => overwrite(&mut self.scheme, from.scheme),
             ProfileKey::FontSize => overwrite(&mut self.font_size_px, from.font_size_px),
+            ProfileKey::ScrollbackLines => {
+                overwrite(&mut self.scrollback_lines, from.scrollback_lines)
+            }
             ProfileKey::Opacity => overwrite(&mut self.effects.opacity, from.effects.opacity),
             ProfileKey::Blur => overwrite(&mut self.effects.blur, from.effects.blur),
             ProfileKey::ScanLines => overwrite(&mut self.effects.scanlines, from.effects.scanlines),
@@ -405,6 +431,8 @@ impl Invalidation {
     /// The backdrop-blur radius: tell the compositor. The surface's own pixels
     /// are unaffected, because the blur is behind them.
     const BLUR: u8 = 1 << 3;
+    /// The scrollback's limit: hold every window's history to it.
+    const SCROLLBACK: u8 = 1 << 4;
 
     /// What replacing `was` with `now` makes stale.
     #[must_use]
@@ -435,6 +463,9 @@ impl Invalidation {
         // in the opacity an opaque window zeroes the blur by.
         if was.effects.blur_radius_px() != now.effects.blur_radius_px() {
             stale |= Self::BLUR;
+        }
+        if was.scrollback_lines != now.scrollback_lines {
+            stale |= Self::SCROLLBACK;
         }
         Self(stale)
     }
@@ -472,6 +503,12 @@ impl Invalidation {
     #[must_use]
     pub const fn blur(self) -> bool {
         self.0 & Self::BLUR != 0
+    }
+
+    /// Whether the scrollback's limit changed.
+    #[must_use]
+    pub const fn scrollback(self) -> bool {
+        self.0 & Self::SCROLLBACK != 0
     }
 
     /// Whether the surface's own pixels must be built again.

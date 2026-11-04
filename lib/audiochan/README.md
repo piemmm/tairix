@@ -72,8 +72,19 @@ they are released again on the mixer's next `Service`. An under- or over-run
 is reported as the *delta* since the previous service, because the wire report
 already carries the running total.
 
+A notification the mixer's port refuses for want of room, or the driver's own
+IPC budget, is held and sent when the port's room member reports room; one the
+kernel had no memory for waits on a one-shot pause. An endpoint holds at most
+one of each kind — a newer clock pair, drain, connector change or fault
+supersedes the one held, and a held loss absorbs the next, its frames summed —
+so a mixer that falls behind costs a bounded store, and it hears what is held
+in the order it happened. A refusal for good is given up and recorded (event
+29013) each time the running total doubles.
+
 Nothing polls: between events the process parks on its wait set, and the
-device's own period interrupt is the only timer in the stack.
+device's own period interrupt is the only timer in the stack, beside the
+one-shot pause before a notification the kernel had no memory for is offered
+again.
 
 ## Fail closed
 

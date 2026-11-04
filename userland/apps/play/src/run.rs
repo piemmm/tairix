@@ -12,10 +12,11 @@
 //! and the signal intake; a paced decoder restart is its only timer. The
 //! full-screen interface, when there is a terminal to draw it on, is a thread
 //! of its own, parked on the keyboard relay, a wake the playback loop nudges
-//! when the status changes, and the terminal's foreground edge. It paints from
-//! the status alone, at most once a frame, and only while this process holds
-//! the terminal — so `play` keeps playing in the background and draws itself
-//! again when it is brought back.
+//! when the status changes, the terminal's foreground edge, and — while it
+//! holds a command the playback's mailbox refused — that mailbox's room. It
+//! paints from the status alone, at most once a frame, and only while this
+//! process holds the terminal — so `play` keeps playing in the background and
+//! draws itself again when it is brought back.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -45,6 +46,7 @@ mod program {
     use tairix_audio::target::AudioTarget;
     use tairix_curses::{Input, Screen, Size, StreamTty};
     use tairix_play::command::{parse, Command, Interface, Options, USAGE};
+    use tairix_play::owed::{Owed, COMMAND_CAPACITY};
     use tairix_play::report;
     use tairix_play::view::{self, Key};
     use tairix_player::rt::{live, EngineWaits, RtEngine, RtFiles, Tokens};
@@ -53,6 +55,7 @@ mod program {
     };
     use tairix_rt::io::{write_stderr_line, StdInfo, Stderr, Write};
     use tairix_rt::keys::{KeyRelay, Keys};
+    use tairix_rt::room::RoomMember;
     use tairix_rt::sync::{Mutex, WorkerWake};
     use tairix_rt::thread::{JoinHandle, Thread};
     use tairix_rt::PrivatePort;
@@ -70,14 +73,7 @@ mod program {
     const KEYS: u64 = 1;
     const STATUS: u64 = 2;
     const HANDS: u64 = 3;
-
-    /// The command a suspend key sends: the playback thread pauses, stops
-    /// the process, and plays on once it is continued.
-    const SUSPEND: u8 = 0xFF;
-
-    /// Commands the interface may have queued before the playback loop
-    /// drains them.
-    const COMMAND_CAPACITY: usize = 32;
+    const ROOM: u64 = 4;
 
     /// The shortest time between two paints: twenty frames a second is as
     /// fast as a terminal's text is read, and a burst of status changes costs
@@ -140,6 +136,43 @@ mod program {
                 }
             }
             Ok(Self { set, keys })
+        }
+    }
+
+    /// What the interface owes the playback's mailbox, and the room member
+    /// that reports it draining.
+    struct Outbox {
+        owed: Owed,
+        mailbox: u64,
+        room: RoomMember,
+    }
+
+    impl Outbox {
+        /// Send `key`'s command, or hold it for what refused it.
+        fn send(&mut self, key: Key, now: u64) {
+            let mailbox = self.mailbox;
+            self.owed.offer(key, now, |key| post(mailbox, key));
+        }
+
+        /// Offer what is owed again.
+        fn flush(&mut self, now: u64) {
+            let mailbox = self.mailbox;
+            self.owed.flush(now, |key| post(mailbox, key));
+        }
+
+        /// Offer what is owed again if its timed retry fell due, watch the
+        /// mailbox's room exactly while what is owed waits on it — room is
+        /// level-triggered — and answer how long the interface may park.
+        fn settle(&mut self, now: u64) -> u64 {
+            if self.owed.retry_due(now) {
+                self.flush(now);
+            }
+            let wanted = self.owed.watches_room().then_some(self.mailbox);
+            if !self.room.keep_on(wanted) {
+                // Nothing would report the room, so the timer offers it again.
+                self.owed.room_unwatched(now);
+            }
+            self.owed.retry_in(now).unwrap_or(u64::MAX)
         }
     }
 
@@ -208,11 +241,16 @@ mod program {
         let Wakes { set, mut keys } = wakes;
         let mut screen = Screen::new(StreamTty, term, terminal_size());
         let mut input = Input::new();
+        let mut outbox = Outbox {
+            owed: Owed::new(),
+            mailbox: commands,
+            room: RoomMember::new(set, ROOM),
+        };
         let mut shown = false;
         let mut dirty = true;
         let mut painted_at: Option<u64> = None;
         let mut held = tairix_rt::foreground_held(STDIN).unwrap_or(false);
-        loop {
+        let stopped = loop {
             if held && !shown {
                 let _ = tairix_rt::set_input_mode(InputMode::Raw);
                 shown = screen.enter_full_screen().is_ok();
@@ -227,10 +265,10 @@ mod program {
                 (board.status.clone(), board.notice.clone(), board.done)
             };
             if done {
-                break;
+                break None;
             }
             let now = tairix_rt::clock_get();
-            let mut timeout = u64::MAX;
+            let mut timeout = outbox.settle(now);
             if shown && dirty {
                 let due = painted_at.map_or(0, |at| at.saturating_add(PAINT_NS));
                 if now >= due {
@@ -238,7 +276,7 @@ mod program {
                     painted_at = Some(now);
                     dirty = false;
                 } else {
-                    timeout = due - now;
+                    timeout = timeout.min(due - now);
                 }
             }
             let mut token = 0;
@@ -246,15 +284,10 @@ mod program {
             if parked != 0 {
                 match Errno::from_syscall(parked) {
                     Errno::TimedOut => continue,
-                    errno => {
-                        if shown {
-                            hide(&mut screen);
-                        }
-                        write_stderr_line(format_args!("play: the interface stopped: {errno}"));
-                        return;
-                    }
+                    errno => break Some(errno),
                 }
             }
+            let now = tairix_rt::clock_get();
             match token {
                 KEYS => {
                     while let Some(typed) = keys.take() {
@@ -267,19 +300,29 @@ mod program {
                                 shown = false;
                                 held = false;
                             }
-                            let _ = tairix_rt::ipc_send(commands, &[command_byte(key)]);
+                            outbox.send(key, now);
                         }
                     }
                 }
+                ROOM => outbox.flush(now),
                 STATUS => {
                     wake.drain();
                     dirty = true;
                 }
                 _ => held = tairix_rt::foreground_held(STDIN).unwrap_or(false),
             }
-        }
+        };
         if shown {
             hide(&mut screen);
+        }
+        if let Some(errno) = stopped {
+            write_stderr_line(format_args!("play: the interface stopped: {errno}"));
+        }
+        let unsent = outbox.owed.lost();
+        if unsent > 0 {
+            write_stderr_line(format_args!(
+                "play: {unsent} of the keys typed never reached the playback"
+            ));
         }
     }
 
@@ -303,26 +346,11 @@ mod program {
             .map_or(FALLBACK, |grid| Size::new(grid.rows(), grid.cols()))
     }
 
-    const CONTROLS: [Control; 8] = [
-        Control::TogglePause,
-        Control::Forward,
-        Control::Back,
-        Control::Next,
-        Control::Previous,
-        Control::Louder,
-        Control::Quieter,
-        Control::Stop,
-    ];
-
-    fn command_byte(key: Key) -> u8 {
-        match key {
-            Key::Suspend => SUSPEND,
-            Key::Control(control) => CONTROLS
-                .iter()
-                .position(|known| *known == control)
-                .and_then(|at| u8::try_from(at).ok())
-                .unwrap_or(SUSPEND),
-        }
+    /// Post `key`'s command to the playback's mailbox; one with no command is
+    /// refused for good.
+    fn post(mailbox: u64, key: Key) -> Result<(), Errno> {
+        let command = key.byte().ok_or(Errno::OutOfRange)?;
+        tairix_rt::ipc_send(mailbox, &[command])
     }
 
     /// The playback thread's own mailbox, where only the interface thread
@@ -697,14 +725,14 @@ mod program {
         }
     }
 
-    /// Carry out one command the interface sent.
+    /// Carry out one command the interface sent: a suspend pauses the
+    /// playback, stops the process, and plays on once it is continued.
     fn obey(engine: &mut RtEngine<List, RtFiles>, command: u8) {
         let now = tairix_rt::clock_get();
-        if command != SUSPEND {
-            if let Some(control) = CONTROLS.get(usize::from(command)) {
-                engine.on_control(now, *control);
-            }
-            return;
+        match Key::from_byte(command) {
+            Some(Key::Control(control)) => return engine.on_control(now, control),
+            Some(Key::Suspend) => {}
+            None => return,
         }
         let playing = matches!(
             engine.status().transport,

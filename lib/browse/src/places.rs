@@ -36,7 +36,9 @@ use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::filesystem::MountFlags;
 use tairix_abi::fs::STORAGE_CATALOG;
 use tairix_abi::home::{HOME_DESKTOP_DIR, HOME_FILES_DIR};
-use tairix_abi::sysinfo::{MountAvailability, MountRecord, VOLUME_ID_LEN, VOLUME_ID_UNPUBLISHED};
+use tairix_abi::sysinfo::{
+    MountAvailability, MountRecord, VolumeClass, VOLUME_ID_LEN, VOLUME_ID_UNPUBLISHED,
+};
 use tairix_icon::{disk_icon, IconKind};
 use tairix_procinfo::list::field_lossy;
 use tairix_procinfo::VolumeBytes;
@@ -163,13 +165,19 @@ impl Place {
 pub struct VolumeFacts {
     /// The filesystem's name as its driver reports it, empty when none.
     pub filesystem: String,
+    /// The volume's own title, the label its filesystem records: empty where
+    /// none is set, or the mount table withholds it.
+    pub title: String,
+    /// What kind of volume it is: a device's, a network share, or one a
+    /// disk-image file holds.
+    pub class: VolumeClass,
     /// The bytes an ordinary write may still take, or `None` for a volume that
     /// keeps no accounting.
     pub free: Option<u64>,
     /// Whether the volume is serving, and how well.
     pub availability: MountAvailability,
     /// The principal it was attached for — a network share's or a disk
-    /// image's — who may eject it, or `None` for one no one owns.
+    /// image's — or `None` for one no one owns.
     pub owner: Option<u32>,
     /// The identity a detach names it by, the reserved unpublished identity
     /// for one it cannot name.
@@ -178,20 +186,48 @@ pub struct VolumeFacts {
     pub read_only: bool,
 }
 
+/// Who may eject a volume.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Ejector {
+    /// The principal it was attached for: a disk image's, a share's.
+    Owner(u32),
+    /// The user at the machine: a device on a port it can be pulled from,
+    /// which the kernel lets that user eject while nothing holds it open.
+    AtTheSeat,
+}
+
+impl Ejector {
+    /// Whether the principal `uid`, using this machine, is one this lets
+    /// eject: the one a volume was attached for, or anyone at the seat. The
+    /// one rule every surface offering an eject asks.
+    #[must_use]
+    pub const fn admits(self, uid: u32) -> bool {
+        match self {
+            Self::Owner(owner) => owner == uid,
+            Self::AtTheSeat => true,
+        }
+    }
+}
+
 impl VolumeFacts {
-    /// Whether the principal `uid` may eject the volume: it was attached for
-    /// them.
+    /// Whether the principal `uid`, using this machine, may eject the volume.
     #[must_use]
     pub fn ejectable_by(&self, uid: u32) -> bool {
-        self.ejector() == Some(uid)
+        self.ejector().is_some_and(|ejector| ejector.admits(uid))
     }
 
-    /// The principal who may eject the volume — the one it was attached for —
-    /// or `None` where no one may, or a detach could not name it.
+    /// Who may eject the volume, or `None` where no one may, or a detach
+    /// could not name it.
     #[must_use]
-    pub fn ejector(&self) -> Option<u32> {
-        self.owner
-            .filter(|_| self.volume_id != VOLUME_ID_UNPUBLISHED)
+    pub fn ejector(&self) -> Option<Ejector> {
+        if self.volume_id == VOLUME_ID_UNPUBLISHED {
+            return None;
+        }
+        match (self.owner, self.class) {
+            (Some(owner), _) => Some(Ejector::Owner(owner)),
+            (None, VolumeClass::Removable) => Some(Ejector::AtTheSeat),
+            (None, _) => None,
+        }
     }
 }
 
@@ -242,6 +278,8 @@ impl Volume {
             offered: !record.is_withheld() && !gone,
             facts: VolumeFacts {
                 filesystem: field_lossy(record.fstype_bytes()),
+                title: String::from(record.title().as_str()),
+                class: record.class(),
                 free: VolumeBytes::of(&record.usage()).map(|bytes| bytes.available),
                 availability,
                 owner: record.owner(),

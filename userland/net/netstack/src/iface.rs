@@ -235,8 +235,11 @@ pub struct ServiceOutcome {
 /// passes [`Default`].
 #[derive(Copy, Clone, Debug, Default)]
 pub struct ServiceHint {
-    /// The link state the waking notify carried, if a notify woke this pump.
-    pub link: Option<LinkState>,
+    /// The driver saw its link change. This pump must doorbell to learn the
+    /// link from the reply, which is ordered with every other report the
+    /// stack asks for, so a notify that waited in the port never sets an
+    /// older link over a newer one.
+    pub link_changed: bool,
     /// The driver masked its completion source. This pump must doorbell
     /// after draining even with nothing to transmit, or the device stays
     /// masked and receives nothing further.
@@ -1665,12 +1668,12 @@ impl Netstack {
         let iface = &mut interfaces[index];
         // The device's cumulative pre-filter count: whatever the waking
         // notify carried, superseded by any doorbell report this pump gets.
-        // Monotonic, so the latest observation is always the right one.
         let mut filtered = hint.filtered;
         // A driver holding its completion source masked must be released
-        // whatever else this pump finds, and an in-process device is only
-        // ever run by the doorbell itself.
-        let mut doorbell = hint.back_pressure || fs.receive_needs_doorbell();
+        // whatever else this pump finds, a link change is learned only from
+        // a reply, and an in-process device is only ever run by the doorbell
+        // itself.
+        let mut doorbell = hint.back_pressure || hint.link_changed || fs.receive_needs_doorbell();
         {
             let mut rings = FrameRings::bind(fs.region_mut(), geometry, class)?;
             queue_frames(&mut rings, &out.frames);
@@ -1682,13 +1685,13 @@ impl Netstack {
         }
         // The driver stamps its live link on every service report; keep the
         // latest across both doorbells of this pump. Without a doorbell the
-        // link is what the waking notify stated, or the last recorded value.
+        // link is the last recorded, since no notify reported a change.
         let mut reported_link = if doorbell {
             let report = fs.service()?;
             filtered = Some(report.filtered);
             report.link
         } else {
-            hint.link.unwrap_or(last_link)
+            last_link
         };
 
         // Feed delivered frames through the engine; its replies join
@@ -1741,8 +1744,10 @@ impl Netstack {
         // belongs to the device that shed the frames, and a link change on
         // the serviced NIC is what a bond failover keys on.
         let channel = &mut interfaces[channel_index];
+        // The count only grows over a channel's life, so a notify that waited
+        // in the port behind a newer reply cannot take it back.
         if let Some(filtered) = filtered {
-            channel.rx_filtered = filtered;
+            channel.rx_filtered = channel.rx_filtered.max(filtered);
         }
         let link_change = (reported_link != channel.facts.link).then_some(reported_link);
         Ok(ServiceOutcome {

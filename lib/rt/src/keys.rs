@@ -18,6 +18,7 @@
 //! relay: a keystroke read under the cooked one would already be echoed and
 //! held to the end of its line.
 
+use tairix_abi::ipc::{SendRefusal, IPC_MEMORY_RETRY_NS};
 use tairix_abi::waitset::WaitSourceKind;
 use tairix_abi::{Errno, Origin, ORIGIN_WIRE_LEN, STDIN};
 
@@ -74,8 +75,9 @@ impl KeyRelay {
         let port = PrivatePort::bind(KEY_CHUNK + 1, KEY_CAPACITY)?;
         let room = watching(WaitSourceKind::PortRoom, port.id())?;
         let hands = watching(WaitSourceKind::Foreground, u64::from(STDIN))?;
+        let pause = WaitSet::create()?;
         let mailbox = port.id();
-        Thread::spawn(move || read_keys(mailbox, &room, &hands))?.detach();
+        Thread::spawn(move || read_keys(mailbox, &room, &hands, &pause))?.detach();
         Ok(Self {
             port,
             pid,
@@ -121,14 +123,15 @@ fn read_message<'a>(
 
 /// The reader: block in a read of standard input, forward what arrived, and
 /// on a refusal for want of the foreground wait for the hands to change.
-fn read_keys(port: u64, room: &WaitSet, hands: &WaitSet) {
+fn read_keys(port: u64, room: &WaitSet, hands: &WaitSet, pause: &WaitSet) {
+    let relay = |message: &[u8]| post(room.handle(), pause.handle(), port, message);
     let mut buf = [0u8; KEY_CHUNK + 1];
     buf[0] = TAG_TYPED;
     loop {
         match Stdin.read(&mut buf[1..]) {
             Ok(0) => break,
             Ok(read) => {
-                if !post(room, port, &buf[..=read]) {
+                if !relay(&buf[..=read]) {
                     return;
                 }
             }
@@ -141,7 +144,7 @@ fn read_keys(port: u64, room: &WaitSet, hands: &WaitSet) {
             Err(_) => break,
         }
     }
-    let _ = post(room, port, &[TAG_ENDED]);
+    let _ = relay(&[TAG_ENDED]);
 }
 
 /// A wait-set holding one member.
@@ -151,19 +154,31 @@ fn watching(kind: WaitSourceKind, id: u64) -> Result<WaitSet, Errno> {
     Ok(set)
 }
 
-/// Post `message`, parking for mailbox room rather than dropping a keystroke;
-/// `false` once the send is refused for anything but room, which no wait for
-/// room can lift.
-fn post(room: &WaitSet, port: u64, message: &[u8]) -> bool {
+/// Post `message`, waiting rather than dropping a keystroke: on `room` while
+/// the mailbox is full or the process's budget spent, both of which its room
+/// member reports, and on the empty `pause` for [`IPC_MEMORY_RETRY_NS`] while
+/// the kernel has no memory for it, which nothing reports; `false` once the
+/// send is refused for good.
+fn post(room: u64, pause: u64, port: u64, message: &[u8]) -> bool {
     loop {
-        let sent = crate::ipc_send(port, message);
-        if sent >= 0 {
+        let Err(refused) = crate::ipc_send(port, message) else {
             return true;
-        }
+        };
+        let (wait_on, timeout) = match SendRefusal::of(refused) {
+            SendRefusal::Full | SendRefusal::Budget => (room, u64::MAX),
+            SendRefusal::Memory => (pause, IPC_MEMORY_RETRY_NS),
+            // The mailbox unbound is how the relay is told to end.
+            SendRefusal::Gone => return false,
+            SendRefusal::Final(refused) => {
+                crate::io::write_stderr_line(format_args!(
+                    "keys: a keystroke could not be relayed: {refused}"
+                ));
+                return false;
+            }
+        };
         let mut token = 0;
-        if Errno::from_syscall(sent) != Errno::WouldBlock
-            || crate::waitset_wait(room.handle(), u64::MAX, &mut token) != 0
-        {
+        let waited = crate::waitset_wait(wait_on, timeout, &mut token);
+        if waited != 0 && Errno::from_syscall(waited) != Errno::TimedOut {
             return false;
         }
     }
@@ -172,10 +187,12 @@ fn post(room: &WaitSet, port: u64, message: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use tairix_abi::{
-        CapabilitySummary, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN,
+        CapabilitySummary, Errno, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN,
     };
+    use tairix_abi_trap::seam::{arm_script, calls, refusal};
 
-    use super::{read_message, Keys, TAG_ENDED, TAG_TYPED};
+    use super::{post, read_message, Keys, IPC_MEMORY_RETRY_NS, TAG_ENDED, TAG_TYPED};
+    use crate::{NUM_IPC_SEND, NUM_WAITSET_WAIT};
 
     fn from(pid: u64) -> [u8; ORIGIN_WIRE_LEN] {
         Origin::new(
@@ -205,6 +222,43 @@ mod tests {
     fn nothing_another_process_sends_is_typed() {
         assert_eq!(read_message(&[TAG_TYPED, b'q'], &from(8), 7), None);
         assert_eq!(read_message(&[TAG_ENDED], &from(8), 7), None);
+    }
+
+    /// A keystroke the mailbox or the budget refused waits on the room member,
+    /// one the kernel had no memory for pauses on the empty set, and each is
+    /// sent once its wait ends; a refusal no wait lifts ends the relay.
+    #[test]
+    fn a_refused_keystroke_waits_for_what_refused_it_and_is_then_sent() {
+        const ROOM: u64 = 3;
+        const PAUSE: u64 = 4;
+        const MAILBOX: u64 = 9;
+        for (refused, set, timeout) in [
+            (Errno::WouldBlock, ROOM, u64::MAX),
+            (Errno::LimitExceeded, ROOM, u64::MAX),
+            (Errno::OutOfMemory, PAUSE, IPC_MEMORY_RETRY_NS),
+        ] {
+            arm_script(&[refusal(refused), refusal(Errno::TimedOut)], 0);
+            assert!(post(ROOM, PAUSE, MAILBOX, b"q"), "{refused:?}");
+            let traps: Vec<(u64, u64, u64)> = calls()
+                .iter()
+                .map(|(number, args)| (*number, args[0], args[1]))
+                .collect();
+            assert_eq!(traps.len(), 3, "{refused:?}");
+            assert_eq!((traps[0].0, traps[0].1), (NUM_IPC_SEND, MAILBOX));
+            assert_eq!(traps[1], (NUM_WAITSET_WAIT, set, timeout), "{refused:?}");
+            assert_eq!((traps[2].0, traps[2].1), (NUM_IPC_SEND, MAILBOX));
+        }
+        arm_script(&[refusal(Errno::NotFound)], 0);
+        assert!(
+            !post(ROOM, PAUSE, MAILBOX, b"q"),
+            "the mailbox gone ends the relay"
+        );
+        assert_eq!(calls().len(), 1, "without a wait");
+        arm_script(&[refusal(Errno::WouldBlock), refusal(Errno::NotFound)], 0);
+        assert!(
+            !post(ROOM, PAUSE, MAILBOX, b"q"),
+            "a wait that fails ends it"
+        );
     }
 
     #[test]

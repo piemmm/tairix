@@ -7,7 +7,7 @@ use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
 use tairix_abi::window_ipc::{DragAt, PointerAction, ToolOver, WindowEvent, WindowSizeState};
 use tairix_abi::Errno;
 
-use crate::holdback::{Delivery, HoldBack, HOLD_BACK_CAPACITY};
+use crate::holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
 
 const MAILBOX: u64 = 0x0A00;
 const OTHER_MAILBOX: u64 = 0x0B00;
@@ -110,7 +110,7 @@ fn tool_moved(window_id: u64, x: u32, ended: bool) -> WindowEvent {
 /// Offer `event` to a destination whose mailbox is full, so it is held,
 /// reporting whether it asked for a room wake.
 fn hold_for(held: &mut HoldBack, endpoint: u64, event: WindowEvent) -> bool {
-    match held.deliver(endpoint, &event, |_| Err(Errno::WouldBlock)) {
+    match held.deliver(endpoint, &event, |_, _| Err(Errno::WouldBlock)) {
         Ok(Delivery::Owed { watch }) => watch,
         other => panic!("back-pressure is held, not {other:?}"),
     }
@@ -219,7 +219,7 @@ fn a_resize_and_a_pick_conclusion_survive_a_full_mailbox() {
 
     for _ in 0..2 {
         assert_eq!(
-            held.deliver(MAILBOX, &typed(WINDOW), |event| post.send(event)),
+            held.deliver(MAILBOX, &typed(WINDOW), |_, event| post.send(event)),
             Ok(Delivery::Sent),
             "room to spare"
         );
@@ -228,7 +228,7 @@ fn a_resize_and_a_pick_conclusion_survive_a_full_mailbox() {
 
     // The app is behind, and the desktop has two things it must not lose.
     assert_eq!(
-        held.deliver(MAILBOX, &resized(WINDOW, 800), |event| post.send(event)),
+        held.deliver(MAILBOX, &resized(WINDOW, 800), |_, event| post.send(event)),
         Ok(Delivery::Owed { watch: true }),
         "the first debt asks for a room wake"
     );
@@ -236,7 +236,7 @@ fn a_resize_and_a_pick_conclusion_survive_a_full_mailbox() {
         held.deliver(
             MAILBOX,
             &WindowEvent::PickCancelled { window_id: WINDOW },
-            |event| post.send(event)
+            |_, event| post.send(event)
         ),
         Ok(Delivery::Owed { watch: false }),
         "held behind the resize, on the wake already armed"
@@ -268,14 +268,14 @@ fn a_later_event_never_overtakes_one_already_owed() {
     let mut held = HoldBack::new();
 
     let _ = held
-        .deliver(MAILBOX, &typed(WINDOW), |event| post.send(event))
+        .deliver(MAILBOX, &typed(WINDOW), |_, event| post.send(event))
         .expect("room to spare");
     let _ = held
-        .deliver(MAILBOX, &resized(WINDOW, 800), |event| post.send(event))
+        .deliver(MAILBOX, &resized(WINDOW, 800), |_, event| post.send(event))
         .expect("refused and held");
     post.drained_by_its_owner();
     assert_eq!(
-        held.deliver(MAILBOX, &pressed(WINDOW), |event| post.send(event)),
+        held.deliver(MAILBOX, &pressed(WINDOW), |_, event| post.send(event)),
         Ok(Delivery::Owed { watch: false }),
         "the destination has room again, but it owes something first"
     );
@@ -307,7 +307,7 @@ fn an_owed_event_is_distinguishable_from_a_sent_one() {
     let mut held = HoldBack::new();
 
     assert_eq!(
-        held.deliver(MAILBOX, &typed(WINDOW), |event| post.send(event)),
+        held.deliver(MAILBOX, &typed(WINDOW), |_, event| post.send(event)),
         Ok(Delivery::Sent)
     );
     for expected in [
@@ -316,7 +316,7 @@ fn an_owed_event_is_distinguishable_from_a_sent_one() {
         Delivery::Owed { watch: false },
     ] {
         assert_eq!(
-            held.deliver(MAILBOX, &typed(WINDOW), |event| post.send(event)),
+            held.deliver(MAILBOX, &typed(WINDOW), |_, event| post.send(event)),
             Ok(expected),
             "every event the app cannot take is still owed"
         );
@@ -330,10 +330,110 @@ fn an_owed_event_is_distinguishable_from_a_sent_one() {
 fn a_refusal_that_is_not_back_pressure_is_surfaced() {
     let mut held = HoldBack::new();
     assert_eq!(
-        held.deliver(MAILBOX, &resized(WINDOW, 800), |_| Err(Errno::NotFound)),
+        held.deliver(MAILBOX, &resized(WINDOW, 800), |_, _| Err(Errno::NotFound)),
         Err(Errno::NotFound)
     );
     assert!(!held.owes(MAILBOX), "nothing is owed to a dead port");
+}
+
+/// The session's own spent budget is back-pressure like a full mailbox: the
+/// event is held and its destination's room wake armed — the kernel raises it
+/// as the budget frees, whichever app takes one of the session's messages —
+/// and the flush that wake runs delivers it, no send elsewhere needed.
+/// Nothing of it counts against the app.
+///
+/// Regression: an event held for the budget armed nothing, and went only with
+/// the next send to some app that happened to go through.
+#[test]
+fn an_event_the_sessions_budget_refused_waits_on_the_room_wake_and_its_flush_sends_it() {
+    let mut held = HoldBack::new();
+    assert_eq!(
+        held.deliver(MAILBOX, &resized(WINDOW, 800), |_, _| Err(
+            Errno::LimitExceeded
+        )),
+        Ok(Delivery::OverBudget { watch: true }),
+        "watched for room, as a full mailbox is"
+    );
+    assert_eq!(
+        held.deliver(MAILBOX, &typed(WINDOW), |_, _| Ok(())),
+        Ok(Delivery::OverBudget { watch: false }),
+        "held behind it, on the wake already armed"
+    );
+    let mut received = Vec::new();
+    let report = held.flush(|_, event| {
+        received.push(*event);
+        Ok(())
+    });
+    assert_eq!(report.settled, vec![MAILBOX], "its room wake goes");
+    assert_eq!(received, vec![resized(WINDOW, 800), typed(WINDOW)]);
+    assert!(!held.owes(MAILBOX));
+}
+
+/// A flush the session's spent budget stops keeps the rest owed on the same
+/// room wake, which the kernel raises for the budget too.
+#[test]
+fn a_flush_the_sessions_budget_stops_keeps_the_rest_owed_on_the_room_wake() {
+    let mut held = HoldBack::new();
+    let _ = hold(&mut held, typed(WINDOW));
+    let report = held.flush(|_, _| Err(Errno::LimitExceeded));
+    assert_eq!(report, Flushed::default(), "the room wake stays armed");
+    assert_eq!(
+        held.deliver(MAILBOX, &pressed(WINDOW), |_, _| Ok(())),
+        Ok(Delivery::OverBudget { watch: false }),
+        "what the debt waits on now is the budget"
+    );
+    assert_eq!(held.depth(MAILBOX, Some(WINDOW)), 2, "both are owed");
+}
+
+/// A send the kernel had no memory for holds the event with no room wake,
+/// which would fire at once, and nothing against the app; the flush the
+/// caller times delivers it.
+#[test]
+fn an_event_refused_for_kernel_memory_is_held_for_the_timed_flush() {
+    let mut held = HoldBack::new();
+    assert_eq!(
+        held.deliver(MAILBOX, &resized(WINDOW, 800), |_, _| Err(
+            Errno::OutOfMemory
+        )),
+        Ok(Delivery::Starved)
+    );
+    assert!(held.starved(), "a timed flush is owed");
+    assert_eq!(
+        held.deliver(MAILBOX, &typed(WINDOW), |_, _| Ok(())),
+        Ok(Delivery::Starved),
+        "held behind it, still waiting on memory"
+    );
+    let mut received = Vec::new();
+    let report = held.flush(|_, event| {
+        received.push(*event);
+        Ok(())
+    });
+    assert_eq!(report, Flushed::default(), "it had no room wake to drop");
+    assert_eq!(received, vec![resized(WINDOW, 800), typed(WINDOW)]);
+    assert!(!held.starved());
+}
+
+/// A debt's wait moves between its room wake and the timed flush as its sends
+/// are refused, and each flush says which room wakes to drop or arm again.
+#[test]
+fn a_debt_moves_between_its_room_wake_and_the_timed_flush() {
+    let mut held = HoldBack::new();
+    assert!(hold(&mut held, typed(WINDOW)), "watched for room");
+    let report = held.flush(|_, _| Err(Errno::OutOfMemory));
+    assert_eq!(
+        report.settled,
+        vec![MAILBOX],
+        "its room wake would fire at once"
+    );
+    assert!(held.starved());
+    let report = held.flush(|_, _| Err(Errno::WouldBlock));
+    assert_eq!(
+        report.watch,
+        vec![MAILBOX],
+        "behind a full mailbox, it is watched again"
+    );
+    assert!(!held.starved());
+    assert_eq!(held.depth(MAILBOX, Some(WINDOW)), 1, "still owed");
 }
 
 // --- Folding ---------------------------------------------------------------
@@ -747,6 +847,7 @@ fn an_unrecoverable_refusal_drops_only_that_event() {
         }
     });
     assert_eq!(offered, 2, "the second event was still offered");
+    assert_eq!(report.dropped, 1, "and the one given up on is counted");
     assert_eq!(report.settled, vec![MAILBOX]);
     assert!(!held.owes(MAILBOX));
 }

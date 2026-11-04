@@ -10,17 +10,19 @@
 //! Structure" (mdfs.net).
 //!
 //! The engine keeps the raw 512-byte map image and edits only the fields
-//! it owns — the free-area entries, the end pointer, and the checksums —
-//! so the disc name, boot option, disc id, and the Level 3 fileserver
-//! partition pointers round-trip byte-exact.
+//! it owns — the free-area entries, the end pointer, the checksums, and the
+//! disc name when the disc is retitled — so the boot option, disc id, and
+//! the Level 3 fileserver partition pointers round-trip byte-exact. A
+//! retitle writes the name over the low bytes of those pointers, which its
+//! bytes share.
 
 use crate::bytes::{get_u24, put_u24};
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
 use tairix_fsprobe::adfs::{
-    old_map_checksum, validate_old_map, DISC_SECTORS, END_POINTER, MAX_FREE_AREAS, OLD_DISC_ID,
-    OLD_MAP_SIZE,
+    old_map_checksum, validate_old_map, DISC_SECTORS, END_POINTER, MAX_FREE_AREAS, NAME_LEN,
+    OLD_DISC_ID, OLD_MAP_SIZE, OLD_NAME_BYTES,
 };
 
 pub use tairix_fsprobe::adfs::{OLD_SECTOR_SIZE, OLD_SECTOR_SIZE_U32};
@@ -67,6 +69,14 @@ impl OldMap {
     /// Total sectors on the volume.
     pub fn disc_sectors(&self) -> u32 {
         self.disc_sectors
+    }
+
+    /// Spell `name` across the two sectors a character at a time, for
+    /// [`Self::store`] to write and reseal.
+    pub fn set_name(&mut self, name: [u8; NAME_LEN]) {
+        for (&byte, &at) in name.iter().zip(OLD_NAME_BYTES.iter()) {
+            self.raw[at] = byte;
+        }
     }
 
     /// Number of live free-area entries.

@@ -22,7 +22,8 @@ is device bring-up plus one `serve` call.
 * `serve` — the freestanding process loop (bare-metal targets only): it
   claims a reserved device-channel endpoint bound restricted-sender, emits
   the `netchan` hardware-tree node the device manager binds to the stack, and
-  parks on a wait set over `{call endpoint, device interrupt}`.
+  parks on a wait set over `{call endpoint, device interrupt}`, and room in
+  the stack's port while a notify it refused is owed.
 
 ## The interrupt path
 
@@ -52,7 +53,10 @@ ask for frames with a blocking call cost two extra process switches per batch
 for nothing. The interrupt fills the ring and rings the doorbell once,
 carrying the live link and a back-pressure flag; the stack reads the ring in
 its own time and calls back only when it has transmit work or a masked source
-to release. The ring's atomic counters are what make that safe.
+to release. The ring's atomic counters are what make that safe. A notify the
+stack's port refuses for room, budget or memory is held, a later one folded
+into it, and offered again on the port's room wake or after the memory retry:
+its back-pressure flag is the only request to release a masked source.
 
 ## Fail closed
 

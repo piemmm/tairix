@@ -10,7 +10,7 @@ use tairix_abi::driver::thermal::{
 use tairix_abi::driver::{named_register_window, sole_register_window, DeviceWake};
 use tairix_abi::hwlink::{LinkDuty, LinkRole};
 use tairix_abi::hwtree::{HwResource, NodeEndpointBlock};
-use tairix_abi::ipc::IPC_SENDER_DEPTH_MAX;
+use tairix_abi::ipc::{MemoryPause, IPC_SENDER_DEPTH_MAX};
 use tairix_abi::rtc_ipc::{self, RTC_ENDPOINT};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
@@ -138,6 +138,9 @@ const ENDPOINT_TOKEN: u64 = 0;
 const PEER_EXIT_TOKEN: u64 = 1;
 /// Token of the first event source; source `k` is `WAKE_TOKEN + k`.
 const WAKE_TOKEN: u64 = 2;
+/// Token of the room members a supplier arms; the event sources count up
+/// from [`WAKE_TOKEN`], so the top of the range is free.
+const ROOM_TOKEN: u64 = u64::MAX;
 
 /// Why a supplier's service ended.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -248,7 +251,16 @@ impl<'b> Service<'b> {
     pub fn run<S: Supplier + ?Sized>(self, supplier: &mut S) -> Ended {
         let clock = tairix_rt::ClockDelay::new();
         let timed_out = -i64::from(Errno::TimedOut.as_i32());
+        let set = self.set;
+        let mut member = |op: WaitSetOp, port: u64| {
+            tairix_rt::waitset_ctl(set, op, WaitSourceKind::PortRoom, port, ROOM_TOKEN) == 0
+        };
+        let mut pause = MemoryPause::new();
         loop {
+            if pause.ran_out(tairix_rt::clock_get) {
+                supplier.room();
+            }
+            pause.keep(supplier.rooms(&mut member), tairix_rt::clock_get);
             // Checked before waiting, so a stream of calls cannot starve it.
             let timeout_ns = match timer(supplier.deadline_us(), clock.now_us()) {
                 Timer::Due => {
@@ -259,6 +271,7 @@ impl<'b> Service<'b> {
                 }
                 Timer::Wait(ns) => ns,
             };
+            let timeout_ns = pause.bound(timeout_ns, tairix_rt::clock_get);
             let mut token = 0u64;
             let status = tairix_rt::waitset_wait(self.set, timeout_ns, &mut token);
             if status == timed_out {
@@ -281,6 +294,7 @@ impl<'b> Service<'b> {
                         supplier.peer_exited(peer);
                     }
                 }
+                ROOM_TOKEN => supplier.room(),
                 token => {
                     let wake = token
                         .checked_sub(WAKE_TOKEN)

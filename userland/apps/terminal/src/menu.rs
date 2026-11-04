@@ -36,18 +36,21 @@ pub enum Command {
     ActualSize,
     /// Clear the screen the emulator is showing.
     Clear,
+    /// Forget the lines the screen has scrolled off.
+    ClearScrollback,
     /// Close the terminal.
     Close,
 }
 
 impl Command {
     /// Every command, in the order the menu lists them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Settings,
         Self::Larger,
         Self::Smaller,
         Self::ActualSize,
         Self::Clear,
+        Self::ClearScrollback,
         Self::Close,
     ];
 
@@ -72,23 +75,27 @@ impl Command {
             Self::Smaller => "Smaller text",
             Self::ActualSize => "Actual size",
             Self::Clear => "Clear screen",
+            Self::ClearScrollback => "Clear scrollback",
             Self::Close => "Close",
         }
     }
 
-    /// The accelerator caption the row states, as the user must type it.
+    /// The accelerator caption the row states, as the user must type it, or
+    /// `None` for a row no key reaches: forgetting the scrollback cannot be
+    /// undone, so nothing a stray chord types does it.
     ///
     /// Every caption here is really honoured by
     /// [`accelerator`](Self::accelerator); a row never advertises a key
     /// combination that does nothing.
-    const fn shortcut(self) -> &'static str {
+    const fn shortcut(self) -> Option<&'static str> {
         match self {
-            Self::Settings => "Ctrl ,",
-            Self::Larger => "Ctrl +",
-            Self::Smaller => "Ctrl -",
-            Self::ActualSize => "Ctrl 0",
-            Self::Clear => "Ctrl Shift K",
-            Self::Close => "Ctrl Shift W",
+            Self::Settings => Some("Ctrl ,"),
+            Self::Larger => Some("Ctrl +"),
+            Self::Smaller => Some("Ctrl -"),
+            Self::ActualSize => Some("Ctrl 0"),
+            Self::Clear => Some("Ctrl Shift K"),
+            Self::ClearScrollback => None,
+            Self::Close => Some("Ctrl Shift W"),
         }
     }
 
@@ -104,7 +111,7 @@ impl Command {
             Self::Larger => AppMenuSymbol::TextLarger,
             Self::Smaller => AppMenuSymbol::TextSmaller,
             Self::ActualSize => AppMenuSymbol::TextActual,
-            Self::Clear => AppMenuSymbol::Clear,
+            Self::Clear | Self::ClearScrollback => AppMenuSymbol::Clear,
             Self::Close => AppMenuSymbol::Close,
         }
     }
@@ -170,14 +177,15 @@ pub fn model() -> Result<AppMenu, Errno> {
         if command.opens_group() {
             menu.push(AppMenuRow::Separator)?;
         }
-        menu.push(AppMenuRow::Item(
-            AppMenuItem::new(
-                row_id(index)?,
-                AppMenuLabel::new(command.label())?,
-                command.symbol(),
-            )
-            .with_shortcut(AppMenuShortcut::new(command.shortcut())?),
-        ))?;
+        let mut item = AppMenuItem::new(
+            row_id(index)?,
+            AppMenuLabel::new(command.label())?,
+            command.symbol(),
+        );
+        if let Some(caption) = command.shortcut() {
+            item = item.with_shortcut(AppMenuShortcut::new(caption)?);
+        }
+        menu.push(AppMenuRow::Item(item))?;
     }
     Ok(menu)
 }

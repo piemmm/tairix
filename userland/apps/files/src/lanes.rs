@@ -91,12 +91,16 @@ impl Routes {
             .map_or(Lane::Services, |path| self.lane_of_path(path))
     }
 
-    /// The lane `act` is carried out on: an eject on its volume's, so it waits
-    /// for the read under way there; a mount on the lane of the image file.
+    /// The lane the eject desk carries `act` out on: an eject's volume's, so
+    /// it waits for the read under way there. Only ejects wait there — a
+    /// mount or a retitle goes to the mount worker — so any other act is
+    /// placed where its own reads would run.
     #[must_use]
     pub fn lane_of_act(&self, act: &MountAct) -> Lane {
         match act {
-            MountAct::Eject { volume_id, .. } => Lane::of_volume(*volume_id),
+            MountAct::Eject { volume_id, .. } | MountAct::Retitle { volume_id, .. } => {
+                Lane::of_volume(*volume_id)
+            }
             MountAct::Attach { path, .. } => self.lane_of_path(path),
         }
     }

@@ -28,6 +28,7 @@
 | DESK-22 | Every caller's IPC in a lane of its own: no application can refuse another the desktop | done |
 | DESK-23 | Settings and the viewer paint once per burst of input, not once per event | planned |
 | DESK-24 | The process holding a seat's display runs in the high band while it holds it | done |
+| DESK-25 | A present that replaces an unshown frame is answered once that frame is shown | planned |
 
 Binding under `AGENTS.md`. This plan removes the desktop freeze that
 occurs while an application is loaded and started, fixes it as a
@@ -965,7 +966,7 @@ Each stage is independently reviewable and must leave the whole-project
 - `terminal::sheet::SheetScreen` is the sheet's retained picture, the sibling
   of `render::Screen` for the grid: the reports accumulate in it across a
   drained batch, `paint` clips the render to them and answers the rectangle,
-  and `write_frame` and the present carry exactly that. `invalidate` covers the
+  and the present carries exactly that. `invalidate` covers the
   sheet for a change no control could have reported — a re-theme, a new scale,
   a profile adopted from the store, or a released frame region, which holds
   none of the pixels a partial present would leave standing.
@@ -1077,35 +1078,54 @@ Each stage is independently reviewable and must leave the whole-project
   converts each window's newest frame through the session's `FrameShow` once a
   desktop frame, inside `pacer.admit` immediately before the composite; a
   pending frame is damage at both admit sites and at the saver's hold. A resize
-  or a release drops what it supersedes, and a frame the compositor cannot show
-  is logged (`FRAME_REFUSED`) and dropped.
+  or a release drops what it supersedes. A frame the compositor cannot show is
+  logged (`FRAME_REFUSED`) once until the window next shows one and is tried
+  again with the next frame the desktop composes, asking for none of its own; a
+  later present carries its change too. Whether a frame is due is a running
+  count that every latch recounts, so neither the pacer's question nor a latch
+  with nothing pending walks the windows.
 - **Two frames, each brought up to date.** `FRAME_COUNT` is 2.
   `WindowPane::present_list` draws into the frame the session is not reading,
   first catching it up from the app's surface with what the other frame was
   presented with (`tairix_geometry::StaleFrames`, hoisted from `lib/display`,
   which keeps its own frames through it; `tairix_display::stale_frames` builds
   both rings). The newest frame may replace one pending because every frame is
-  whole when it is presented.
+  whole when it is presented. The pane draws through `FrameRing`, whose present
+  awaits the window's previous one before drawing the other frame.
 - **Posted, one in flight.** `WindowClient::present` posts once the window's
   previous present is answered (`await_present`, on the `call_await` syscall,
-  which that call's answer alone ends), so a client waits only when it outruns
-  the session serving it, never on a conversion or a composite. A present
-  refused for room goes as a call. A refused present reaches the app as
-  `EventError::Refused` and the next present declares the whole window; a
-  `NotAttached` refusal marks the window released instead. The library's redraw
-  answer is held behind a present in flight, never awaited.
+  which that call's answer alone ends, reaping nothing else), so a client waits
+  only when it outruns the session serving it, never on a conversion or a
+  composite. A present refused for room goes as a call. A refused present
+  reaches the app as `EventError::Refused` and the next present declares the
+  whole window; a `NotAttached` refusal marks the window released instead. The
+  library's redraw answer is held behind a present in flight, never awaited,
+  and a resize drops every present of the window not yet sent, since it names
+  a frame of the region the resize replaced.
 - **Released and hidden.** The client marks a window released on
   `ContentReleased` (or a `NotAttached` refusal) and hidden until the session's
-  `RedrawRequested`. Nothing is presented while it is hidden (`is_hidden`), the
-  next present re-attaches and sends the whole window, and the redraw answer
-  declines a released window: its repaint is the application's own.
+  `RedrawRequested`. Nothing is presented while it is hidden (`is_hidden`), a
+  resize keeps it hidden, the next present re-attaches and sends the whole
+  window, and the redraw answer declines a released window: its repaint is the
+  application's own. A re-attach the session has no room for presents nothing
+  and keeps no region; once room is made the window is owed its reported size
+  or, never sized, a `RedrawRequested`.
 - **The per-client bound.** `CLIENT_FRAME_RAM_DIVISOR` is 2: each window holds
   two frames, so half of RAM keeps the measured capacity.
-- **What it does not fix.** The session's own composite cost.
+- **What it does not fix.** The session's own composite cost, and a client
+  presenting faster than the desktop shows frames is not held back (DESK-25).
 - **Proven by** `a_present_is_posted_and_the_next_waits_only_for_its_answer`,
   `presents_between_frames_are_shown_once_with_every_change`,
   `a_resize_or_a_release_drops_the_pending_frame`,
-  `a_frame_the_host_cannot_show_is_reported_once_and_dropped`,
+  `a_frame_the_host_cannot_show_is_reported_once_and_owed_to_the_next`,
+  `a_refused_frame_is_tried_again_with_the_next_desktop_frame`,
+  `a_closed_windows_frame_asks_for_no_desktop_frame`,
+  `a_resize_drops_a_redraw_held_for_the_region_it_replaced`,
+  `a_resize_while_hidden_keeps_the_window_hidden`,
+  `a_reattach_refused_for_room_asks_for_the_paint_again`,
+  `a_frame_is_drawn_only_once_the_previous_present_is_answered`,
+  `awaiting_a_present_reaps_nothing_else`, the session's
+  `a_window_is_mapped_when_the_latch_shows_its_first_frame`,
   `a_redraw_asked_with_a_present_in_flight_follows_it_without_waiting`,
   `a_released_window_is_left_for_its_application_to_paint`,
   `a_released_window_is_hidden_until_the_session_asks_for_it_again`,
@@ -1172,9 +1192,9 @@ Each stage is independently reviewable and must leave the whole-project
   room until room is made, and sends a present refused for room as a call.
   Room waiters are kept per sender, so a wake names only that sender's threads
   and there is no broadcast.
-- **Depths.** Every endpoint's bound was re-derived as what one caller holds
-  at once; the window endpoint's is `WINDOW_CALLER_DEPTH` (64: each window's
-  posted kinds and present, and a call per thread).
+- **Depths.** Every endpoint's bound was re-derived as what one caller or
+  sender holds at once; the window endpoint's is `WINDOW_CALLER_DEPTH` (64:
+  each window's posted kinds and present, and a call per thread).
 - **Proven by** the lane, port and call unit tests (`a_full_sender_never_refuses_another`,
   `a_full_caller_holds_only_its_own_depth`,
   `the_depth_bounds_unanswered_calls_and_an_answer_frees_room`,
@@ -1224,6 +1244,21 @@ Each stage is independently reviewable and must leave the whole-project
   `a_display_owner_still_needs_the_capability_to_raise_its_own_level`,
   `a_registering_thread_joins_its_processs_level` and the `ProcessLevel` unit
   tests.
+
+### DESK-25 — A present replacing an unshown frame waits for it to be shown
+- **The defect.** `WindowServer::present` answers every present as it records
+  it, so nothing holds back a client presenting faster than the desktop shows
+  frames: the terminal presents after every shell read, and streaming output
+  encodes hundreds of whole frames a second that nobody sees.
+- **The design.** The engine withholds the answer to a present that replaces a
+  frame not yet shown and gives it once that frame is shown or refused, or a
+  resize, a release or a close supersedes it. The session's serve loop sends no
+  reply for a withheld present, sends the engine's answers after each latch, and
+  has every withheld present answered on a turn the latch does not run — the
+  saver dark, the lock uncovered — so no client stalls behind a screensaver.
+- **Remains.** All of it. The three hooks are the serve loop's, and the
+  `lib/window` loopback attests every call of a client by one ticket, so it
+  must mint one per call before a withheld answer can be told from the next.
 
 ### DESK-11 — The file manager's reads off its loop
 - Every unbounded read the file manager makes now runs off its loop, on the

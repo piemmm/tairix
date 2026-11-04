@@ -875,7 +875,7 @@ mod program {
             let Ok(len) = message.encode(&mut buf) else {
                 return false;
             };
-            tairix_rt::ipc_send(mailbox, &buf[..len]) == 0
+            tairix_rt::ipc_send(mailbox, &buf[..len]).is_ok()
         }
     }
 

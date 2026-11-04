@@ -52,19 +52,20 @@ impl StaleFrames {
     /// Once `update` succeeds the frame lacks nothing and `changed` is owed to
     /// every other frame. A refusal leaves the frame lacking all of it, since
     /// what a refused update wrote is unknown, and owes the others nothing.
-    /// A frame the ring does not have is handed its whole bounds.
     ///
     /// # Errors
     ///
-    /// `update`'s refusal, unchanged.
+    /// `missing` for a frame the ring does not have, which is handed nothing
+    /// and owes nothing on, and otherwise `update`'s refusal, unchanged.
     pub fn bring_up_to_date<E>(
         &mut self,
         index: usize,
         changed: &Region,
+        missing: E,
         update: impl FnOnce(&Region) -> Result<(), E>,
     ) -> Result<(), E> {
         let Some(slot) = self.owed.get_mut(index) else {
-            return update(&Region::from(self.bounds));
+            return Err(missing);
         };
         let mut refresh = core::mem::replace(slot, Region::with_budget(self.budget));
         refresh.add_region(changed);

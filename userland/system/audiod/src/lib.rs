@@ -46,8 +46,9 @@
 //! stream's own scratch, so exactly **one** region is borrowed at a time —
 //! which [`RegionHost::bytes`] enforces by taking `&mut self`. The service
 //! parks on {device notify, client doorbells, control endpoint, the seat's
-//! lease} and never spins: the device's own period interrupt is the only
-//! timer in the stack.
+//! lease, room in a client mailbox a held wake waits on} and never spins: the
+//! device's own period interrupt is the only timer in the stack, beside the
+//! one-shot pause before a wake the kernel had no memory for is offered again.
 //!
 //! # Fail closed
 //!
@@ -72,10 +73,12 @@ mod device;
 pub mod events;
 mod region;
 mod service;
+mod wakes;
 
 pub use channel::{AudioChannelClient, AudioChannelTransport};
 pub use region::{RegionHost, RegionId};
 pub use service::{AudioService, Notifier};
+pub use wakes::Wakes;
 
 #[cfg(test)]
 #[path = "tests.rs"]

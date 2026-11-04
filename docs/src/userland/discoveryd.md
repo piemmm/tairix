@@ -47,8 +47,11 @@ process's mailbox. Each request is answered continuously until it is stopped.
 Answers queue in the session and are taken with a call that never waits; the
 service rings the port once when answers are waiting and not again until the
 client has collected them all, so a slow reader costs one doorbell however many
-answers queue. A doorbell a full port refuses is owed, not lost, and posted
-once the port has room. A client believes a doorbell only when its
+answers queue. A doorbell its port refuses for room or for the service's own
+IPC budget is owed, not lost, and posted once the port has room; one the
+kernel had no memory for is offered again after `IPC_MEMORY_RETRY_NS`, and one
+refused for good is given up on and recorded (`25_006`), its answers left for a
+collect. A client believes a doorbell only when its
 kernel-attested sender is the service's account and it names one of the
 client's own sessions.
 
@@ -305,9 +308,12 @@ datagrams, and drained at most one mailbox's worth per wake), the port the
 fetch connections' events arrive on, the decoder's two pipe ends, the
 discovery endpoint, the thread's peer-exit feed, and room on any
 client port a doorbell is owed to, with a timeout for the one instant the front
-must next act by. A port is watched only while a doorbell is owed there, and the
-watches change only for a port whose count crossed zero since the last turn. A
-dead wait-set ends the service rather than degrading into a poll.
+must next act by, a doorbell's memory retry among them. A port is watched only
+while a doorbell is owed there for room, and the watches change only for a port
+whose count crossed zero since the last turn. The doorbells owed at a port whose
+watch is refused wait on the memory retry instead, and the watch is tried again
+once one is owed there for room. A dead wait-set ends the service rather than
+degrading into a poll.
 
 ## Audit records
 
@@ -322,6 +328,7 @@ decoder launch is its `6001`.
 | `25_003` | `SERVICE_UNAVAILABLE` | Error | The service cannot serve and is exiting; carries the reason, and each family's outcome when no socket could be opened. |
 | `25_004` | `REQUEST_DENIED` | Warn | A client request was refused for want of authority; carries what was lacking, the caller's uid, and the type asked for. |
 | `25_005` | `GRANTS_REFUSED` | Warn | The grant store could not be opened or read, or was refused whole, so no application may browse; carries the reason. |
+| `25_006` | `DOORBELLS_LOST` | Warn | Doorbells client ports refused for good were given up on, their answers left for a collect; carries the running total, recorded each time it doubles. |
 
 ## Tests
 
@@ -335,7 +342,7 @@ every transmit rule, one session holding hundreds of requests through the real
 decoder, ids freed only by the decoder's word and never run out, a withheld or
 unprompted acknowledgement condemning the decoder, a doorbell port the caller
 does not own refused, owed doorbells and the edge-driven watches on their
-ports, a flush told once per request, replays shared and budgeted, a third
+ports, doorbells refused for the budget, for memory or for good, a flush told once per request, replays shared and budgeted, a third
 copy of a request refused, copies of a record renewing it once a second, a
 request that lost answers offered nothing more, the runs kept in step through
 random churn, a query the budget cannot pay for waiting due, scheduled sends
@@ -358,7 +365,8 @@ decoder first and once, spaces its ticks, contains the decoder, relays to its
 replacement, sends only to its protocols' groups, and opens a fetch only to a
 WS-Discovery sender heard on that link. It also drives random calls from
 several accounts and processes against a real decoder — foreign doorbell
-ports, doorbells that block or vanish, segment answers, computers announcing
+ports, doorbells refused for room, the budget, memory or good, or vanishing,
+segment answers, computers announcing
 themselves and their metadata fetched, link edges, and the decoder killed and
 replaced mid-sweep — checking the front's tables after every step, that a
 computer is named, and that nothing any client asked for is left once every

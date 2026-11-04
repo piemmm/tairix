@@ -328,6 +328,26 @@ fn a_secret_ring_of_records_scrubs_a_displaced_record() {
     assert_eq!(ring.backing_store(), &[*b"ghi", *b"\0\0\0"]);
 }
 
+/// A record taken off the front and put back is the next one out again, a
+/// full ring refuses it, and what leaves afterwards is still scrubbed.
+#[test]
+fn a_secret_ring_takes_a_record_back_at_the_front() {
+    let mut ring: SecretRing<[u8; 2], 3> = SecretRing::new([0; 2]);
+    assert_eq!(ring.try_push_back(*b"ab"), Ok(()));
+    assert_eq!(ring.try_push_back(*b"cd"), Ok(()));
+    let taken = ring.pop_front().expect("queued");
+    assert_eq!(ring.try_push_back(*b"ef"), Ok(()));
+    assert_eq!(ring.try_push_front(taken), Ok(()));
+    assert_eq!(
+        ring.iter().copied().collect::<std::vec::Vec<_>>(),
+        [*b"ab", *b"cd", *b"ef"],
+        "the record is back ahead of what came after it"
+    );
+    assert_eq!(ring.try_push_front(*b"zz"), Err(CapacityError::new(*b"zz")));
+    assert_eq!(ring.discard_front(3), 3);
+    assert_eq!(ring.backing_store(), &[[0; 2]; 3]);
+}
+
 #[test]
 fn a_clone_preserves_order_and_is_independent() {
     let mut ring: RingBuf<u32, 4> = RingBuf::new();

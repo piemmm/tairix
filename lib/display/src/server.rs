@@ -29,6 +29,12 @@
 //! * **One present is in flight.** A present the device queues holds the next
 //!   until its latch, which the driver reports or the deadline forces, so a
 //!   presenter can never write a frame the device is still reading.
+//! * **A latch waiting would deliver is owed, never dropped.** One the
+//!   presenter's port refuses for room, or for this service's budget, is
+//!   posted again on the port's room wake, and one the kernel had no memory
+//!   for once [`IPC_MEMORY_RETRY_NS`](tairix_abi::ipc::IPC_MEMORY_RETRY_NS)
+//!   has passed. Only the latest is owed: a
+//!   present latching answers for every one before it.
 
 use tairix_abi::display_ipc::{
     encode_buffer_reply, encode_configure_reply, encode_mode_reply, encode_planes_reply,
@@ -41,11 +47,13 @@ use tairix_abi::driver::display::{
     AccelLayer, BufferId, DamageList, DamageRect, Display, DisplayDeviceReport, DisplayFormat,
     DisplayMode, DisplayPower, OutputMode, Presented, Serviced,
 };
+use tairix_abi::ipc::{Reoffer, SendRefusal};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::seat::{DisplayLease, ReleaseSurface, SEAT_PRIMARY};
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, DriverError, Errno, ProcId};
 use tairix_inline::ArrayVec;
+use tairix_log::Doubling;
 
 /// Upper bound, in bytes, of any reply [`DisplayServer::serve`] writes.
 pub const DISPLAY_REPLY_MAX: usize = max(
@@ -114,7 +122,9 @@ pub trait Delivery {
     ///
     /// # Errors
     ///
-    /// The kernel's refusal: a full port, or one gone with its owner.
+    /// The kernel's refusal, as [`SendRefusal::of`] reads it: a full port or a
+    /// spent budget, kernel memory short, a port gone with its owner, or one
+    /// no wait lifts.
     fn post(&mut self, port: u64, event: &DisplayEvent) -> Result<(), Errno>;
 }
 
@@ -148,6 +158,14 @@ struct Queued {
     deadline_ns: u64,
 }
 
+/// A latch its presenter's port could not take yet, and when it is posted
+/// again.
+#[derive(Copy, Clone, Debug)]
+struct Owed {
+    seq: u64,
+    reoffer: Reoffer,
+}
+
 /// One lease's buffers.
 struct Configured {
     seat_id: u64,
@@ -159,24 +177,55 @@ struct Configured {
     cursor: Option<BufferId>,
     next_seq: u64,
     queued: Option<Queued>,
+    /// The latch its presenter's port could not take yet: one at most, since
+    /// a later latch answers for every present before it.
+    owed: Option<Owed>,
 }
 
 impl Configured {
     fn held(&self, id: BufferId) -> Option<Held> {
         self.buffers.iter().copied().find(|held| held.id == id)
     }
+
+    /// Post present `seq`'s latch to the presenter's port, owing it for what
+    /// refused it in place of any latch still owed; `now_ns` times a wait on
+    /// kernel memory.
+    fn offer(
+        &mut self,
+        seq: u64,
+        delivery: &mut dyn Delivery,
+        now_ns: impl FnOnce() -> u64,
+    ) -> Latch {
+        let posted = delivery.post(self.events_port, &DisplayEvent::Presented { seq });
+        let (reoffer, latch) = match posted.map_err(SendRefusal::of) {
+            Ok(()) => (None, Latch::Posted),
+            Err(SendRefusal::Full | SendRefusal::Budget) => (Some(Reoffer::OnRoom), Latch::Owed),
+            Err(SendRefusal::Memory) => (Some(Reoffer::pause(now_ns())), Latch::Owed),
+            Err(SendRefusal::Gone) => (None, Latch::Gone),
+            Err(SendRefusal::Final(refused)) => (None, Latch::Undelivered(refused)),
+        };
+        self.owed = reoffer.map(|reoffer| Owed { seq, reoffer });
+        latch
+    }
 }
 
-/// What a latch that came too late, or never, left behind.
+/// What became of a latch, or of a present that never latched.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Latch {
-    /// No present is queued.
+    /// No latch was due.
     Idle,
-    /// The queued present latched, and its presenter was told.
+    /// The presenter was told its present latched.
     Posted,
-    /// The queued present was released at its deadline, unlatched.
+    /// The queued present was released at its deadline, unlatched; its latch
+    /// fares as any other.
     Overdue,
-    /// The presenter could not be told: its port refused the event.
+    /// The presenter's port could not take the latch yet: it is owed, and
+    /// posted again on the port's room wake or once its retry falls due.
+    Owed,
+    /// The presenter's port is gone with its owner, and nobody waits on it.
+    Gone,
+    /// The presenter's port refused the latch for good: it is given up and
+    /// counted.
     Undelivered(Errno),
 }
 
@@ -195,6 +244,10 @@ pub struct DisplayServer<C: MonotonicClock> {
     /// A presenter's frame has reached the device at least once.
     presented: bool,
     power: Power,
+    /// Latches presenters' ports refused for good.
+    undelivered: Doubling,
+    /// The latest of those refusals.
+    refusal: Option<Errno>,
 }
 
 impl<C: MonotonicClock> DisplayServer<C> {
@@ -208,6 +261,8 @@ impl<C: MonotonicClock> DisplayServer<C> {
             engine_origin_ns: None,
             presented: false,
             power: Power::Unverified,
+            undelivered: Doubling::new(),
+            refusal: None,
         }
     }
 
@@ -342,7 +397,7 @@ impl<C: MonotonicClock> DisplayServer<C> {
     }
 
     /// Take what the display's event sources reported: a queued present that
-    /// latched is posted to its presenter.
+    /// latched has its latch posted to its presenter, or owed it.
     pub fn serviced(&mut self, serviced: Serviced, delivery: &mut dyn Delivery) -> Latch {
         if !serviced.latched {
             return Latch::Idle;
@@ -350,40 +405,99 @@ impl<C: MonotonicClock> DisplayServer<C> {
         self.post_latch(delivery).unwrap_or(Latch::Idle)
     }
 
-    /// When the queued present's deadline falls, if one is queued: the
-    /// hosting loop wakes then at the latest.
+    /// When the hosting loop wakes at the latest: the queued present's
+    /// deadline, or the retry of a latch the kernel had no memory for.
     #[must_use]
     pub fn deadline_ns(&self) -> Option<u64> {
-        self.configured
-            .as_ref()
-            .and_then(|c| c.queued)
-            .map(|queued| queued.deadline_ns)
+        let configured = self.configured.as_ref()?;
+        let latch = configured.queued.map(|queued| queued.deadline_ns);
+        let retry = configured.owed.and_then(|owed| owed.reoffer.deadline());
+        latch.into_iter().chain(retry).min()
     }
 
-    /// Release a queued present whose deadline has passed, as though it
-    /// latched: its presenter is never left waiting on a latch that does not
-    /// come, nor is `display` left waiting on it.
+    /// Act on what fell due by [`Self::deadline_ns`]. A queued present whose
+    /// deadline passed is released as though it latched — its presenter is
+    /// never left waiting on a latch that does not come, nor is `display`
+    /// left waiting on it — and an owed latch whose retry fell due is posted
+    /// again.
     pub fn expire(&mut self, display: &mut dyn Display, delivery: &mut dyn Delivery) -> Latch {
         let now = self.clock.now_ns();
-        let due = self.deadline_ns().is_some_and(|deadline| now >= deadline);
-        if !due {
+        let Some(configured) = self.configured.as_ref() else {
             return Latch::Idle;
+        };
+        if configured.queued.is_some_and(|q| now >= q.deadline_ns) {
+            display.abandon_queued();
+            // Overdue however its latch fares: the device never latched it.
+            self.post_latch(delivery);
+            return Latch::Overdue;
         }
-        display.abandon_queued();
-        match self.post_latch(delivery) {
-            Some(Latch::Posted) => Latch::Overdue,
-            other => other.unwrap_or(Latch::Idle),
+        let retry = configured
+            .owed
+            .and_then(|owed| owed.reoffer.deadline())
+            .is_some_and(|at_ns| now >= at_ns);
+        if retry {
+            return self.redeliver(delivery);
+        }
+        Latch::Idle
+    }
+
+    /// Post an owed latch again: its port reported room.
+    pub fn redeliver(&mut self, delivery: &mut dyn Delivery) -> Latch {
+        let Some(owed) = self.configured.as_ref().and_then(|c| c.owed) else {
+            return Latch::Idle;
+        };
+        self.offer(owed.seq, delivery)
+    }
+
+    /// The port whose room an owed latch waits on. Room is level-triggered,
+    /// so the hosting loop watches it while this answers it, and only then.
+    #[must_use]
+    pub fn room_port(&self) -> Option<u64> {
+        let configured = self.configured.as_ref()?;
+        let owed = configured.owed?;
+        if owed.reoffer != Reoffer::OnRoom {
+            return None;
+        }
+        Some(configured.events_port)
+    }
+
+    /// Time an owed latch's next post instead: the room member that would
+    /// report its port draining could not be armed.
+    pub fn room_unwatched(&mut self) {
+        let clock = &self.clock;
+        let owed = self.configured.as_mut().and_then(|c| c.owed.as_mut());
+        if let Some(owed) = owed.filter(|o| o.reoffer == Reoffer::OnRoom) {
+            owed.reoffer = Reoffer::pause(clock.now_ns());
         }
     }
 
+    /// How many latches presenters' ports refused for good, with the latest
+    /// refusal, once the count has doubled since it was last reported: a
+    /// presenter refusing every latch costs a record per doubling.
+    pub fn undelivered_to_report(&mut self) -> Option<(u64, Errno)> {
+        let refusal = self.refusal?;
+        self.undelivered.take_due().map(|total| (total, refusal))
+    }
+
+    /// Post the queued present's latch, `None` when no present is queued.
     fn post_latch(&mut self, delivery: &mut dyn Delivery) -> Option<Latch> {
-        let configured = self.configured.as_mut()?;
-        let queued = configured.queued.take()?;
-        let event = DisplayEvent::Presented { seq: queued.seq };
-        Some(match delivery.post(configured.events_port, &event) {
-            Ok(()) => Latch::Posted,
-            Err(err) => Latch::Undelivered(err),
-        })
+        let queued = self.configured.as_mut()?.queued.take()?;
+        Some(self.offer(queued.seq, delivery))
+    }
+
+    /// Post present `seq`'s latch, owed for what refused it and counted when
+    /// refused for good.
+    fn offer(&mut self, seq: u64, delivery: &mut dyn Delivery) -> Latch {
+        let clock = &self.clock;
+        let Some(configured) = self.configured.as_mut() else {
+            return Latch::Idle;
+        };
+        let latch = configured.offer(seq, delivery, || clock.now_ns());
+        if let Latch::Undelivered(refused) = latch {
+            self.undelivered.note();
+            self.refusal = Some(refused);
+        }
+        latch
     }
 
     /// Drop the configuration — the display told where the screen went first
@@ -527,6 +641,7 @@ impl<C: MonotonicClock> DisplayServer<C> {
             cursor: None,
             next_seq: 1,
             queued: None,
+            owed: None,
         };
         let mut grants = ArrayVec::<BufferGrant, { DISPLAY_MAX_FRAMES as usize }>::new();
         let mut stride = None;

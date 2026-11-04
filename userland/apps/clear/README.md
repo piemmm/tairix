@@ -8,9 +8,10 @@ ncurses `clear` model. Which bytes those are is decided by the inherited
 (fail-closed: an unknown `TERM` degrades to the dumb baseline, which
 cannot clear, and the tool reports that honestly instead of printing
 escape garbage), and the sequence is encoded through the one shared
-`lib/vt` vocabulary. `-x` is accepted for GNU/ncurses compatibility
-("do not clear the scrollback"); a TAIRiX console keeps no scrollback,
-so the output is identical with and without it. `-h`/`-?` render the
+`lib/vt` vocabulary. Where the terminal can (`E3`), it then erases the
+saved lines — the scrollback — as the standard `clear` does, last so the
+rows a display erase hands them go too, and `-x` keeps
+them. `-h`/`-?` render the
 tool's own short help from its bundled `Help/` tree through the shared
 `lib/help` engine, in the locale the inherited `LANG` variable names,
 falling back to the usage banner when the tree is unavailable.
@@ -28,7 +29,7 @@ under the caller's attested identity.
 ```
 clear [-x]
 
-  -x             ignored (a TAIRiX console keeps no scrollback)
+  -x             keep the scrollback: erase only the screen
   -h, -?         show this command's own short help
 ```
 

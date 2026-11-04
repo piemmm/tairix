@@ -36,6 +36,7 @@ session ends. It consumes and never contradicts
 | DI20 | Partitioned removable devices: the volume manager plans the partitions an Amiga Rigid Disk Block lays out on a device, as it plans a PC table's, rather than attaching none | planned |
 | DI21 | An image the user opened unmounted once no window shows it: `DetachMode::Idle`, the file manager's opened set, the `files.unmount_when_closed` setting | done |
 | DI22 | A per-attachment identity in the image attach reply and the idle detach, so an unmount the user did not ask for can only take the attachment the file manager made | planned |
+| DI23 | Retitling an owned image volume: its label written through `FilesystemLabel` and `fsserve-v1`'s `Label`/`SetLabel` by `VolumeService::retitle`, for its owner alone; the mount record's title; the syscall and `files.app`'s *Title* row | done |
 
 ## 1. What an image is
 
@@ -198,6 +199,21 @@ such a volume to every other principal withheld — without its source or
 usage, marked so — and a binding of it only where it is its catalog entry,
 without the subtree shown; no capability widens either. Its catalog name is
 still listed in `/Storage` to everyone (DI12).
+
+The record's `title` is the volume's own label (DI23): the probe's as it
+attaches, cut between characters to `VOLUME_TITLE_MAX`, then what its owner
+retitles it. `VolumeService::retitle` takes the owner alone, holds the volume
+as any operation does, has its driver write the title without reading the one
+it replaces — the driver answers for its format, so one keeping no title says
+so before a volume taking no writes is refused — and lists the new title once
+the driver holds it, its writeback publishing it should the flush fail; no
+format's identity takes in its label, so a retitled volume is still the
+attachment it was, and the catalog name stays while the volume is
+attached. It is withheld with the source. The file manager's icon-bar slot
+offers *Title* on a titled image of the user's own: the row's field opens on
+the title with the caret at its end, choosing the row opens it, and a commit
+is carried out on the mount worker (`MountAct::Retitle`), never on the loop; an
+emptied or over-long title is refused before the kernel is asked.
 
 ## 6. AmigaDOS (`drivers/filesystem/affs`)
 

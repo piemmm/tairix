@@ -28,7 +28,8 @@
 //!   [`PROCESS_HEADER`], [`render_process`], and [`state_char`] — the
 //!   shared columnar rendering.
 //! * [`for_each_mount`] and [`for_each_view`], the paged walks of the attached
-//!   volumes and the view bindings onto them; [`Namespace`], the join that
+//!   volumes and the view bindings onto them, and [`for_each_volume_removal`],
+//!   of the volumes that left without being ejected; [`Namespace`], the join that
 //!   resolves a path to the binding covering it and that binding's volume;
 //!   [`render_binding`], the `source on target type fstype (options)` row;
 //!   and the [`volume`] view model every surface turns a mount record into
@@ -177,8 +178,9 @@ pub use kstats::{
 };
 pub use list::{field_lossy, walk_pages, walk_pages_with, walk_records, ListError, WalkStep};
 pub use mount::{
-    covering, for_each_mount, for_each_view, for_each_volume_service, render_binding,
-    render_options, Namespace, MOUNT_PAGE, VIEW_PAGE, VOLUME_SERVICE_PAGE,
+    covering, for_each_mount, for_each_view, for_each_volume_removal, for_each_volume_service,
+    render_binding, render_options, Namespace, MOUNT_PAGE, REMOVAL_PAGE, VIEW_PAGE,
+    VOLUME_SERVICE_PAGE,
 };
 pub use netaddr::{
     render_if_addr, render_ip, render_mac, render_neighbor, render_route, render_server,

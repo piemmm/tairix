@@ -24,8 +24,14 @@ nunca se adivina.
 El escritorio inicia el gestor de archivos con la sesión y lo mantiene en la
 barra de iconos, y este nunca termina: el menú de su ranura lista sus propios
 lugares y todo lo montado, y elegir uno abre allí una ventana; *Red* y
-*Configuración…* van al final. Un clic en la ranura abre una donde indique la
-configuración. Pedir una carpeta que ya tiene ventana trae esa ventana al
+*Configuración…* van al final. Un volumen que puede expulsar — una memoria
+USB, una tarjeta de memoria u otro disco extraíble, o una imagen de disco o
+un recurso compartido que usted montó — abre un submenú que contiene
+*Expulsar*, y el de una imagen de disco suya que tiene título contiene
+también *Título*: esta fila abre un campo con el título del disco, listo
+para cambiarlo, y pulsar `Return` escribe el nuevo en el disco. Un clic en
+la ranura abre una donde indique la configuración. Pedir una carpeta que ya
+tiene ventana trae esa ventana al
 frente en lugar de abrir otra. El menú no tiene fila *Salir*: el gestor de
 archivos forma parte del escritorio, cerrar sus ventanas simplemente lo
 retira y, si alguna vez se detiene, el escritorio vuelve a iniciarlo.
@@ -121,9 +127,15 @@ uso; si otra cosa lo sigue usando — por ejemplo, un documento de ese volumen
 abierto en otra aplicación —, permanece montado y se vuelve a intentar
 desmontarlo cuando aquello pueda haberlo liberado. La configuración puede,
 en cambio, mantener montado lo que abra hasta que lo expulse o termine su
-sesión. *Expulsar* retira un volumen que usted montó, desde su icono o desde
-su fila en la columna de lugares, cuyo propio menú contextual contiene
-*Abrir* y *Expulsar*; sus ventanas en él pasan antes a `/Storage`. Si un
+sesión. *Expulsar* retira un volumen que usted montó, o un disco extraíble
+mientras usa el propio ordenador, desde su icono, desde su fila en la
+columna de lugares, cuyo propio menú contextual contiene *Abrir* y
+*Expulsar*, o desde el menú de la ranura de la barra de iconos; sus
+ventanas en él pasan antes a `/Storage`. Un disco extraíble con un archivo
+aún abierto en él no se expulsa, y se le avisa de ello. Cuando no tiene
+permiso para expulsar un disco extraíble — no es usted quien está ante el
+ordenador —, el escritorio pide el nombre y la contraseña de un
+administrador, y lo expulsa con su autorización. Si un
 volumen desaparece — retirado su disco, o perdido su servidor — antes de que
 se guarde todo lo que usted haya escrito en él, sale de la columna de
 lugares, pero conserva su icono en `/Storage`, y lo que no se guardó se

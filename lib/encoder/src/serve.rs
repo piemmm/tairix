@@ -4,6 +4,7 @@ use tairix_abi::driver::audio::Audio;
 use tairix_abi::driver::encoder::{Encoder, ENCODER_MAX_REPLY, ENCODER_MAX_REQUEST};
 use tairix_abi::driver::DeviceWake;
 use tairix_abi::hwlink::LinkDuty;
+use tairix_abi::waitset::WaitSetOp;
 use tairix_abi::{DriverError, ProcId, PROC_ID_HEX_LEN};
 use tairix_audiochan::Channel;
 use tairix_drvrt::exit::{end, step, DriverExit};
@@ -134,6 +135,14 @@ impl<E: Encoder, A: Audio> Supplier for WithAudio<E, A> {
         self.server.expired()?;
         self.channel.on_event();
         Ok(())
+    }
+
+    fn rooms(&mut self, member: &mut dyn FnMut(WaitSetOp, u64) -> bool) -> bool {
+        self.channel.rooms(member)
+    }
+
+    fn room(&mut self) {
+        self.channel.on_room();
     }
 }
 

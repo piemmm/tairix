@@ -190,6 +190,19 @@ fn no_record_emits_a_sequence_absent_from_vt() {
 }
 
 #[test]
+fn a_record_references_the_saved_lines_erase_exactly_where_it_claims_it() {
+    for term in TermType::ALL {
+        let caps = term.capabilities();
+        assert_eq!(
+            caps.referenced_ops().contains(&Op::EraseSavedLines),
+            caps.erase_saved_lines,
+            "{}",
+            term.term_name(),
+        );
+    }
+}
+
+#[test]
 fn resolve_color_never_is_always_plain() {
     use crate::{resolve_color, ColorChoice};
     assert_eq!(

@@ -62,15 +62,18 @@ fn a_move_lands_in_the_gap_shown_whichever_dock_it_came_from() {
         [PaneKind::Tools, PaneKind::Adjustment]
     );
     assert_eq!(kinds(&panes, Side::Right), [PaneKind::Colour]);
-    // Every pane is in one dock, once.
+    // Every pane is in one dock, once: down a side, or the palette in its
+    // strip.
     for kind in PaneKind::ALL {
         let count = Side::BOTH
             .iter()
             .flat_map(|&side| panes.docked(side))
             .filter(|docked| docked.kind == kind)
             .count();
-        assert_eq!(count, 1, "{kind:?}");
+        let sides = usize::from(kind != PaneKind::Palette);
+        assert_eq!(count, sides, "{kind:?}");
     }
+    assert!(panes.in_strip());
 }
 
 #[test]
@@ -91,28 +94,37 @@ fn an_arrangement_is_stored_as_every_pane_once() {
     let mut panes = Arrangement::default();
     let mut text = alloc::string::String::new();
     panes.spell(&mut text);
-    assert_eq!(text, "tools:left colour:right adjustment:right:hidden");
+    assert_eq!(
+        text,
+        "tools:left colour:right palette:strip adjustment:right:hidden"
+    );
     assert_eq!(Arrangement::parse(&text), Some(panes.clone()));
 
     panes.move_to(PaneKind::Adjustment, Side::Left, 0);
     panes.toggle_collapsed(PaneKind::Tools);
     panes.hide(PaneKind::Colour);
+    panes.float(PaneKind::Palette);
     text.clear();
     panes.spell(&mut text);
     assert_eq!(
         text,
-        "adjustment:left tools:left:collapsed colour:right:hidden"
+        "adjustment:left tools:left:collapsed colour:right:hidden palette:strip:floating"
     );
     assert_eq!(Arrangement::parse(&text), Some(panes));
 
     for refused in [
         "",
-        "tools:left colour:right",
-        "tools:left colour:right adjustment:right tools:left",
-        "tools:up colour:right adjustment:right",
-        "tools:left:open colour:right adjustment:right",
-        "tools:left:hidden:again colour:right adjustment:right",
-        "brushes:left colour:right adjustment:right",
+        "tools:left colour:right palette:strip",
+        // As stored before the palette was a pane.
+        "tools:left colour:right adjustment:right:hidden",
+        "tools:left colour:right adjustment:right palette:strip tools:left",
+        "tools:up colour:right adjustment:right palette:strip",
+        "tools:left:open colour:right adjustment:right palette:strip",
+        "tools:left:hidden:again colour:right adjustment:right palette:strip",
+        "brushes:left colour:right adjustment:right palette:strip",
+        "tools:left colour:right adjustment:right palette:left",
+        "tools:strip colour:right adjustment:right palette:strip",
+        "tools:left colour:right adjustment:right palette:strip:collapsed",
     ] {
         assert_eq!(Arrangement::parse(refused), None, "{refused:?}");
     }
@@ -126,7 +138,7 @@ fn a_floating_pane_is_shown_open_in_no_dock_and_docks_again_where_it_is_moved() 
     assert!(panes.shows(PaneKind::Colour) && panes.is_open(PaneKind::Colour));
     assert_eq!(panes.place(PaneKind::Colour), None);
     assert!(kinds(&panes, Side::Right).is_empty());
-    assert_eq!(panes.home(PaneKind::Colour), Side::Right);
+    assert_eq!(panes.home(PaneKind::Colour), Some(Side::Right));
     assert_eq!(panes.floating().collect::<Vec<_>>(), [PaneKind::Colour]);
 
     panes.show(PaneKind::Colour);
@@ -168,10 +180,37 @@ fn a_floating_pane_is_spelled_with_its_home_and_read_back() {
     panes.float(PaneKind::Tools);
     let mut spelled = alloc::string::String::new();
     panes.spell(&mut spelled);
-    assert_eq!(spelled, "colour:right adjustment:right tools:left:floating");
+    assert_eq!(
+        spelled,
+        "colour:right adjustment:right palette:strip tools:left:floating"
+    );
     assert_eq!(Arrangement::parse(&spelled), Some(panes));
     assert_eq!(
-        Arrangement::parse("tools:left:floating:x colour:right adjustment:right:hidden"),
+        Arrangement::parse(
+            "tools:left:floating:x colour:right adjustment:right:hidden palette:strip"
+        ),
         None
     );
+}
+
+#[test]
+fn the_palette_docks_only_in_its_strip() {
+    let mut panes = Arrangement::default();
+    assert!(panes.in_strip() && panes.is_open(PaneKind::Palette));
+    assert_eq!(panes.place(PaneKind::Palette), None, "down neither side");
+    assert_eq!(panes.home(PaneKind::Palette), None);
+    panes.float(PaneKind::Palette);
+    assert!(!panes.in_strip() && panes.shows(PaneKind::Palette));
+    panes.move_to(PaneKind::Palette, Side::Left, 0);
+    assert!(panes.in_strip(), "a side is never its dock");
+    assert_eq!(kinds(&panes, Side::Left), [PaneKind::Tools]);
+    panes.toggle_collapsed(PaneKind::Palette);
+    assert!(panes.is_open(PaneKind::Palette), "never rolled up");
+    panes.float(PaneKind::Palette);
+    panes.redock(PaneKind::Palette);
+    assert!(panes.in_strip() && !panes.floats(PaneKind::Palette));
+    panes.hide(PaneKind::Palette);
+    assert!(!panes.shows(PaneKind::Palette));
+    panes.show(PaneKind::Palette);
+    assert!(panes.in_strip(), "shown, it is back in its strip");
 }

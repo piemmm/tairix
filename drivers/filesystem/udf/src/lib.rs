@@ -4,9 +4,10 @@
 //! physical, sparable, virtual (write-once, through its allocation table)
 //! and metadata partitions — through [`FilesystemRead`],
 //! [`FilesystemWrite`](tairix_abi::driver::filesystem::FilesystemWrite),
-//! [`FilesystemSecurity`], [`FilesystemAttrs`] and
-//! [`FilesystemStats`]. A rewritable or overwritable volume is written in
-//! place; [`Udf::write_refusal`] names why any other is mounted read-only.
+//! [`FilesystemSecurity`], [`FilesystemAttrs`], [`FilesystemStats`] and
+//! [`FilesystemLabel`](tairix_abi::driver::filesystem::FilesystemLabel). A
+//! rewritable or overwritable volume is written in place;
+//! [`Udf::write_refusal`] names why any other is mounted read-only.
 //! [`Udf::format`] lays a new volume out. `docs/src/filesystem/udf.md`
 //! describes the supported structures.
 
@@ -25,6 +26,7 @@ mod layout;
 mod mkfs;
 mod served;
 mod space;
+mod title;
 mod write;
 
 #[cfg(test)]
@@ -243,7 +245,7 @@ impl<B: Block> Udf<B> {
             volume,
         };
         fs.partitions = fs.build_partitions(layout)?;
-        fs.root = fs.file_set_root()?;
+        fs.root = fs.file_set_root()?.1;
         fs.integrity = integrity::read(&mut fs)?;
         fs.refusal = fs.refusal_cause();
         match kind_of(fs.resolve(fs.root)?.entry.file_type) {
@@ -264,6 +266,12 @@ impl<B: Block> Udf<B> {
     #[must_use]
     pub fn write_refusal(&self) -> Option<WriteRefusal> {
         self.refusal
+    }
+
+    /// Refuse every write from now on for `why`, keeping a refusal already
+    /// held.
+    pub(crate) fn refuse_writes(&mut self, why: WriteRefusal) {
+        self.refusal.get_or_insert(why);
     }
 
     /// Hand the device back.
@@ -536,15 +544,16 @@ impl<B: Block> Udf<B> {
         Ok(runs)
     }
 
-    /// The root directory the prevailing file set descriptor names.
-    fn file_set_root(&mut self) -> Result<LbAddr, DriverError> {
+    /// Where the prevailing file set descriptor lies, and the root directory
+    /// it names.
+    fn file_set_root(&mut self) -> Result<(LbAddr, LbAddr), DriverError> {
         let start = self.file_set;
         let blocks = start
             .bytes()
             .div_ceil(self.block_size)
             .clamp(1, MAX_FSD_BLOCKS);
         let mut block = zeroed(self.block_size)?;
-        let mut best: Option<(u32, LongAd)> = None;
+        let mut best: Option<(u32, LbAddr, LongAd)> = None;
         for index in 0..blocks {
             let addr = LbAddr {
                 block: start
@@ -560,18 +569,19 @@ impl<B: Block> Udf<B> {
                 Some(tag) if tag.id == TAG_FSD => {
                     let f = Fields(&block);
                     let number = f.u32(44)?;
-                    if best.is_none_or(|(seen, _)| number >= seen) {
-                        best = Some((number, f.long_ad(400)?));
+                    if best.is_none_or(|(seen, _, _)| number >= seen) {
+                        best = Some((number, addr, f.long_ad(400)?));
                     }
                 }
                 _ => break,
             }
         }
-        let (_, root) = best.ok_or(DriverError::BadMagic)?;
-        Ok(LbAddr {
+        let (_, at, root) = best.ok_or(DriverError::BadMagic)?;
+        let root = LbAddr {
             block: root.block,
             partition: root.partition,
-        })
+        };
+        Ok((at, root))
     }
 
     /// The entry the ICB at `addr` holds: followed through indirect entries,

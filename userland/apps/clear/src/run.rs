@@ -41,14 +41,14 @@ mod program {
         let Some(arguments) = tairix_help::arguments("clear") else {
             return tairix_help::MISUSE;
         };
-        match parse(&arguments) {
-            Ok(Command::Run) => {}
+        let keep_scrollback = match parse(&arguments) {
+            Ok(Command::Run { keep_scrollback }) => keep_scrollback,
             Ok(Command::Help) => return tairix_help::print_own_short_help("clear", Some(USAGE)),
             Err(err) => {
                 tairix_help::report_misuse("clear", &err);
                 return tairix_help::MISUSE;
             }
-        }
+        };
 
         // The terminal's capabilities come from the inherited `TERM`
         // (fail-closed: unknown or absent degrades to the dumb baseline
@@ -56,7 +56,7 @@ mod program {
         let term = tairix_rt::env_var(b"TERM")
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .map_or(tairix_termcap::TermType::Dumb, from_term);
-        let Some(bytes) = clear_bytes(&term.capabilities()) else {
+        let Some(bytes) = clear_bytes(&term.capabilities(), keep_scrollback) else {
             // The dumb baseline cannot clear: report honestly rather than
             // print bytes the terminal would render as garbage.
             write_stderr_line("clear: terminal cannot clear the screen");

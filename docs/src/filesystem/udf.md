@@ -84,6 +84,26 @@ at the last sector, a main and a reserve descriptor sequence, the integrity
 descriptor, and one overwritable partition with a space bitmap, a file set
 and an empty root, recording any revision from 1.02 to 2.01.
 
+## Volume title
+
+`FilesystemLabel` reads the title as the volume probe does: the logical
+volume identifier, or the primary volume descriptor's volume identifier where
+the logical volume records none. A retitle is a change like any other, the
+integrity descriptor marked open around it, and records the title whole as
+the logical volume identifier of the logical volume descriptor and of the
+logical volume information, in both the main and the reserve sequence, and
+of the prevailing file set descriptor, each descriptor resealed. That
+identifier holds 126 eight-bit characters, or 63 UTF-16 units once a
+character needs them; a longer title is refused (`LengthOutOfRange`), as is
+one closing with a space, which readers take for padding (`OutOfRange`). The
+volume identifier holds only 30 or 15, so a longer title is recorded there as
+its longest leading part in whole characters, its closing spaces dropped:
+only a title the logical volume identifier cannot hold is refused.
+`Udf::format` records its label by the same rule. The empty title clears both
+identifiers, and a volume mounted read-only refuses a retitle (`ReadOnly`). A
+retitle changes neither field the volume's identity is a digest of: the
+primary volume descriptor's volume set identifier and its recording time.
+
 ## Held nodes
 
 `pin` holds a node for the kernel: it checks the node is live and answers

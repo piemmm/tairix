@@ -3,8 +3,8 @@
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
-    AllocationClass, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
-    FilesystemStats, FilesystemWrite, NodeId,
+    AllocationClass, DirVisit, FilesystemAttrsProvider, FilesystemLabel, FilesystemRead,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
 };
 use tairix_abi::fs::{is_component, FS_ATTR_VALUE_MAX, FS_SYMLINK_MAX};
 use tairix_abi::fsserve::{
@@ -17,7 +17,12 @@ use crate::host::{Clock, ServedHost};
 /// Everything a served driver is: the filesystem driver traits an in-kernel
 /// driver implements, so one driver crate serves either way.
 pub trait ServedFilesystem:
-    FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + FilesystemAttrsProvider
+    FilesystemRead
+    + FilesystemWrite
+    + FilesystemSecurity
+    + FilesystemStats
+    + FilesystemAttrsProvider
+    + FilesystemLabel
 {
 }
 
@@ -27,6 +32,7 @@ impl<T> ServedFilesystem for T where
         + FilesystemSecurity
         + FilesystemStats
         + FilesystemAttrsProvider
+        + FilesystemLabel
 {
 }
 
@@ -281,6 +287,11 @@ fn run<'s, F: ServedFilesystem, W: Window + ?Sized>(
         }
         // Calls are answered one at a time, so every earlier one is done.
         Request::Release { .. } => Answer::Done,
+        Request::Label => Answer::Label(fs.label()?),
+        Request::SetLabel { title } => {
+            fs.set_label(&title)?;
+            Answer::Done
+        }
     })
 }
 

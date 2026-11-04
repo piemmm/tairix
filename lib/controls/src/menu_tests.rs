@@ -1947,7 +1947,7 @@ fn a_declared_class_picture_is_resolved_to_its_kind_and_an_unknown_one_to_the_ge
         wire.push(AppMenuRow::Item(
             AppMenuItem::new(wire_id(id), wire_label("Place"), AppMenuSymbol::Open)
                 .with_icon_asset(
-                    tairix_abi::window_ipc::AppMenuAsset::new(asset).expect("a valid asset id"),
+                    tairix_abi::window_ipc::IconAsset::new(asset).expect("a valid asset id"),
                 ),
         ))
         .expect("a row");
@@ -1998,6 +1998,30 @@ fn a_declared_entry_field_becomes_the_rows_child() {
         }
         other => panic!("the child is a field, not {other:?}"),
     }
+}
+
+/// A field declared to open on choosing makes a row with no answer of its
+/// own, so activating it opens the field rather than ending the chain.
+#[test]
+fn a_field_opened_by_choosing_leaves_its_row_no_answer() {
+    let mut wire = wire_menu("App");
+    wire.push(AppMenuRow::Item(
+        AppMenuItem::new(wire_id(1), wire_label("Title"), AppMenuSymbol::Rename).with_entry(
+            tairix_abi::window_ipc::AppMenuEntry::new(
+                wire_id(2),
+                tairix_abi::window_ipc::AppMenuEntryText::new("Workbench").expect("a title"),
+            )
+            .opened_by_choosing(),
+        ),
+    ))
+    .expect("a row");
+    let model = ChainModel::from_app_menu("App", &wire, None);
+    let row = &model.rows()[0];
+    assert_eq!(row.id(), None, "choosing it answers nothing of its own");
+    assert!(matches!(
+        row.child(),
+        ChainChild::Entry { id, .. } if *id == wire_id(2)
+    ));
 }
 
 /// A row given already-rasterised artwork draws it in the icon column, in

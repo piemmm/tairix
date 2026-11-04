@@ -564,6 +564,7 @@ impl View {
             | Action::SwapColours
             | Action::Pane(_)
             | Action::ResetPanes
+            | Action::FloatPalette
             | Action::Tool(_)
             | Action::Undo
             | Action::Redo

@@ -92,7 +92,11 @@ Seite oder auf die andere, und die Stelle, an der er landen wird, ist dabei
 markiert; abseits beider Seiten losgelassen oder aus dem Fenster gezogen,
 schwebt der Bereich in einem kleinen eigenen Fenster, das an seinem Band
 verschoben wird, über dem Bild bleibt und mit seiner Markierung geschlossen
-wird; zurück über eine Seite gezogen, dockt er dort wieder an.
+wird; zurück über eine Seite gezogen, dockt er dort wieder an. Auch die
+Palette kann schweben: Die Schaltfläche am rechten Ende ihres Streifens oder
+Ansicht ▸ Bereiche ▸ Palette lösen bringt sie in ein kleines eigenes Fenster,
+ihre Farben in einem Raster angeordnet; wird dieses Fenster geschlossen oder
+an den unteren Rand des Fensters zurückgezogen, liegt sie wieder im Streifen.
 
 Das Auswahlwerkzeug zieht ein Rechteck, eine Ellipse, ein freihändiges
 Lasso oder ein Polygon Ecke für Ecke auf, oder es wählt mit dem Zauberstab

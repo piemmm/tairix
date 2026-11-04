@@ -1,11 +1,14 @@
 //! The window's panes and where each one is: docked down the left or the
-//! right edge, in order, rolled up to its band or open; floating in a tool
-//! window of its own; or hidden.
+//! right edge, in order, rolled up to its band or open, or the palette in its
+//! strip beneath the canvas; floating in a tool window of its own; or hidden.
 
 use alloc::string::String;
 
 use tairix_abi::window_ipc::AppMenuSymbol;
 use tairix_inline::ArrayVec;
+
+/// The palette's place in the stored arrangement: its strip.
+const STRIP: &str = "strip";
 
 /// One pane of the window's chrome.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -16,16 +19,19 @@ pub enum PaneKind {
     Colour,
     /// The adjustment being set.
     Adjustment,
+    /// The palette's wells, which dock only in their strip beneath the
+    /// canvas.
+    Palette,
 }
 
 impl PaneKind {
     /// Every pane, in the order a list of them reads.
-    pub const ALL: [Self; 3] = [Self::Tools, Self::Colour, Self::Adjustment];
+    pub const ALL: [Self; 4] = [Self::Tools, Self::Colour, Self::Adjustment, Self::Palette];
 
-    /// The order a dock gives its panes room in when it cannot give each all
-    /// it wants: the adjustment first, as what was asked for last, then the
-    /// tool box, which scrolls, then the colour picker, which gives up its
-    /// fields.
+    /// The order a dock down a side gives its panes room in when it cannot
+    /// give each all it wants: the adjustment first, as what was asked for
+    /// last, then the tool box, which scrolls, then the colour picker, which
+    /// gives up its fields. The palette docks down neither side.
     pub const BY_CLAIM: [Self; 3] = [Self::Adjustment, Self::Tools, Self::Colour];
 
     /// What the pane's band names it.
@@ -35,6 +41,7 @@ impl PaneKind {
             Self::Tools => "Tools",
             Self::Colour => "Colour",
             Self::Adjustment => "Adjustment",
+            Self::Palette => "Palette",
         }
     }
 
@@ -43,7 +50,7 @@ impl PaneKind {
     pub const fn symbol(self) -> AppMenuSymbol {
         match self {
             Self::Tools => AppMenuSymbol::Tools,
-            Self::Colour => AppMenuSymbol::Colours,
+            Self::Colour | Self::Palette => AppMenuSymbol::Colours,
             Self::Adjustment => AppMenuSymbol::Adjust,
         }
     }
@@ -55,6 +62,7 @@ impl PaneKind {
             Self::Tools => "tools",
             Self::Colour => "colour",
             Self::Adjustment => "adjustment",
+            Self::Palette => "palette",
         }
     }
 
@@ -65,6 +73,7 @@ impl PaneKind {
             Self::Tools => 0,
             Self::Colour => 1,
             Self::Adjustment => 2,
+            Self::Palette => 3,
         }
     }
 }
@@ -110,33 +119,39 @@ pub struct Docked {
     pub collapsed: bool,
 }
 
-/// The panes down one dock: at most every pane, held inline so an
-/// arrangement copies without an allocation.
-type Dock = ArrayVec<Docked, { PaneKind::ALL.len() }>;
+/// The panes down one dock: at most every pane but the palette, held inline
+/// so an arrangement copies without an allocation.
+type Dock = ArrayVec<Docked, { PaneKind::BY_CLAIM.len() }>;
 
 /// Where every pane is.
 ///
-/// A pane is in one dock or in none, never in two. One not docked floats or
-/// is hidden, and remembers the side it last stood on, which showing a hidden
-/// one puts it back on.
+/// A pane is in one dock or in none, never in two, the palette's one dock its
+/// strip. One not docked floats or is hidden, and remembers the side it last
+/// stood on, which showing a hidden one puts it back on.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Arrangement {
     docks: [Dock; 2],
-    homes: [Side; PaneKind::ALL.len()],
+    /// The side each pane last stood on: none for the palette.
+    homes: [Option<Side>; PaneKind::ALL.len()],
     floating: [bool; PaneKind::ALL.len()],
+    /// Whether the palette lies in its strip.
+    strip: bool,
 }
 
 impl Default for Arrangement {
     /// The tool box down the left; the colour pane down the right, where the
-    /// adjustment pane joins it beneath once one is opened.
+    /// adjustment pane joins it beneath once one is opened; the palette in
+    /// its strip.
     fn default() -> Self {
         let mut arrangement = Self {
             docks: [Dock::new(), Dock::new()],
-            homes: [Side::Left, Side::Right, Side::Right],
+            homes: [Some(Side::Left), Some(Side::Right), Some(Side::Right), None],
             floating: [false; PaneKind::ALL.len()],
+            strip: false,
         };
-        arrangement.show(PaneKind::Tools);
-        arrangement.show(PaneKind::Colour);
+        for kind in [PaneKind::Tools, PaneKind::Colour, PaneKind::Palette] {
+            arrangement.show(kind);
+        }
         arrangement
     }
 }
@@ -148,8 +163,8 @@ impl Arrangement {
         &self.docks[side.index()]
     }
 
-    /// Where `kind` is docked — its side and its place down it — or `None`
-    /// where it floats or is hidden.
+    /// Where `kind` is docked down a side — its side and its place down it —
+    /// or `None` where it floats, is hidden, or is the palette.
     #[must_use]
     pub fn place(&self, kind: PaneKind) -> Option<(Side, usize)> {
         Side::BOTH.into_iter().find_map(|side| {
@@ -160,10 +175,16 @@ impl Arrangement {
         })
     }
 
+    /// Whether the palette lies in its strip beneath the canvas.
+    #[must_use]
+    pub const fn in_strip(&self) -> bool {
+        self.strip
+    }
+
     /// Whether `kind` is shown, docked or floating.
     #[must_use]
     pub fn shows(&self, kind: PaneKind) -> bool {
-        self.floats(kind) || self.place(kind).is_some()
+        self.floats(kind) || self.is_docked(kind)
     }
 
     /// Whether `kind` floats in a tool window of its own.
@@ -178,21 +199,23 @@ impl Arrangement {
     }
 
     /// The side `kind` last stood on, which docking it again without a place
-    /// puts it on.
+    /// puts it on; none for the palette, whose one dock is its strip.
     #[must_use]
-    pub const fn home(&self, kind: PaneKind) -> Side {
+    pub const fn home(&self, kind: PaneKind) -> Option<Side> {
         self.homes[kind.index()]
     }
 
     /// Whether `kind` is shown open rather than rolled up to its band: a
-    /// floating pane always is.
+    /// floating pane, and the palette, always are.
     #[must_use]
     pub fn is_open(&self, kind: PaneKind) -> bool {
-        self.floats(kind) || self.find(kind).is_some_and(|docked| !docked.collapsed)
+        self.floats(kind)
+            || (self.is_docked(kind) && self.find(kind).is_none_or(|docked| !docked.collapsed))
     }
 
-    /// Show `kind` at the foot of the side it last stood on, open; one
-    /// already shown is unrolled where it is, and one floating floats on.
+    /// Show `kind` at the foot of the side it last stood on, or the palette in
+    /// its strip, open; one already shown is unrolled where it is, and one
+    /// floating floats on.
     pub fn show(&mut self, kind: PaneKind) {
         if self.floats(kind) {
             return;
@@ -201,8 +224,11 @@ impl Arrangement {
             docked.collapsed = false;
             return;
         }
-        let side = self.homes[kind.index()];
-        // A dock holds every pane, and this one is in neither.
+        let Some(side) = self.home(kind) else {
+            self.strip = true;
+            return;
+        };
+        // A dock holds every pane but the palette, and this one is in neither.
         let _ = self.docks[side.index()].try_push(Docked {
             kind,
             collapsed: false,
@@ -221,11 +247,14 @@ impl Arrangement {
         self.floating[kind.index()] = true;
     }
 
-    /// Take `kind` out of the dock it is in, keeping that side as its home.
+    /// Take `kind` out of the dock it is in, keeping that side as its home,
+    /// or the palette out of its strip.
     fn undock(&mut self, kind: PaneKind) {
         if let Some((side, at)) = self.place(kind) {
             self.docks[side.index()].remove(at);
-            self.homes[kind.index()] = side;
+            self.homes[kind.index()] = Some(side);
+        } else if self.home(kind).is_none() {
+            self.strip = false;
         }
     }
 
@@ -239,8 +268,12 @@ impl Arrangement {
     /// Move `kind` down `side`, landing before the pane that stands at
     /// `before` there now — the dock's length to land at its foot — so a drop
     /// lands in the gap the pointer showed whichever dock, or tool window, it
-    /// came from.
+    /// came from. The palette docks in its strip, whatever side it is given.
     pub fn move_to(&mut self, kind: PaneKind, side: Side, before: usize) {
+        if self.home(kind).is_none() {
+            self.redock(kind);
+            return;
+        }
         self.floating[kind.index()] = false;
         let mut before = before.min(self.docked(side).len());
         let removed = self.place(kind).and_then(|(from, at)| {
@@ -253,24 +286,38 @@ impl Arrangement {
             kind,
             collapsed: false,
         });
-        // A dock holds every pane, and this one is now in neither.
+        // A dock holds every pane but the palette, and this one is now in
+        // neither.
         let _ = self.docks[side.index()].try_insert(before, docked);
-        self.homes[kind.index()] = side;
+        self.homes[kind.index()] = Some(side);
+    }
+
+    /// Dock `kind` again: at the foot of the side it last stood on, or the
+    /// palette in its strip.
+    pub fn redock(&mut self, kind: PaneKind) {
+        if let Some(side) = self.home(kind) {
+            self.move_to(kind, side, usize::MAX);
+        } else {
+            self.floating[kind.index()] = false;
+            self.strip = true;
+        }
     }
 
     /// Spell the arrangement into `out` as it is stored: each pane once, as
-    /// `pane:side`, down each dock in turn and then the rest, a pane rolled up
-    /// marked `:collapsed`, one floating `:floating` and one hidden `:hidden`.
+    /// `pane:side`, down each dock in turn, then the palette as
+    /// `palette:strip` where it lies in its strip, and then the rest, a pane
+    /// rolled up marked `:collapsed`, one floating `:floating` and one hidden
+    /// `:hidden`.
     pub fn spell(&self, out: &mut String) {
         let mut first = true;
-        let mut word = |out: &mut String, kind: PaneKind, side: Side, mark: Option<&str>| {
+        let mut word = |out: &mut String, kind: PaneKind, home: &str, mark: Option<&str>| {
             if !first {
                 out.push(' ');
             }
             first = false;
             out.push_str(kind.token());
             out.push(':');
-            out.push_str(side.token());
+            out.push_str(home);
             if let Some(mark) = mark {
                 out.push(':');
                 out.push_str(mark);
@@ -281,43 +328,56 @@ impl Arrangement {
                 word(
                     out,
                     docked.kind,
-                    side,
+                    side.token(),
                     docked.collapsed.then_some("collapsed"),
                 );
             }
         }
+        if self.strip {
+            word(out, PaneKind::Palette, STRIP, None);
+        }
         for kind in PaneKind::ALL {
-            if self.place(kind).is_none() {
+            if !self.is_docked(kind) {
                 let mark = if self.floats(kind) {
                     "floating"
                 } else {
                     "hidden"
                 };
-                word(out, kind, self.homes[kind.index()], Some(mark));
+                word(
+                    out,
+                    kind,
+                    self.home(kind).map_or(STRIP, Side::token),
+                    Some(mark),
+                );
             }
         }
     }
 
     /// The arrangement `text` spells as [`spell`](Self::spell) does: every
-    /// pane exactly once, or none at all.
+    /// pane exactly once, the palette only ever in its strip, or none at all.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         let mut arrangement = Self {
             docks: [Dock::new(), Dock::new()],
-            homes: [Side::Left; PaneKind::ALL.len()],
+            homes: [None; PaneKind::ALL.len()],
             floating: [false; PaneKind::ALL.len()],
+            strip: false,
         };
         let mut seen = [false; PaneKind::ALL.len()];
         for word in text.split_whitespace() {
             let mut parts = word.split(':');
-            let (pane, side) = (parts.next()?, parts.next()?);
+            let (pane, home) = (parts.next()?, parts.next()?);
             let kind = PaneKind::ALL
                 .into_iter()
                 .find(|kind| kind.token() == pane)?;
-            let side = Side::BOTH.into_iter().find(|at| at.token() == side)?;
+            let side = match (kind, home) {
+                (PaneKind::Palette, STRIP) => None,
+                (PaneKind::Palette, _) => return None,
+                (_, home) => Some(Side::BOTH.into_iter().find(|at| at.token() == home)?),
+            };
             let (collapsed, docked) = match parts.next() {
                 None => (false, true),
-                Some("collapsed") => (true, true),
+                Some("collapsed") if side.is_some() => (true, true),
                 Some("floating") => {
                     arrangement.floating[kind.index()] = true;
                     (false, false)
@@ -329,13 +389,23 @@ impl Arrangement {
                 return None;
             }
             arrangement.homes[kind.index()] = side;
-            if docked {
-                arrangement.docks[side.index()]
-                    .try_push(Docked { kind, collapsed })
-                    .ok()?;
+            match side {
+                Some(side) if docked => {
+                    arrangement.docks[side.index()]
+                        .try_push(Docked { kind, collapsed })
+                        .ok()?;
+                }
+                Some(_) => {}
+                None => arrangement.strip = docked,
             }
         }
         seen.iter().all(|&seen| seen).then_some(arrangement)
+    }
+
+    /// Whether `kind` stands in a dock: down a side, or the palette in its
+    /// strip.
+    fn is_docked(&self, kind: PaneKind) -> bool {
+        self.place(kind).is_some() || (self.home(kind).is_none() && self.strip)
     }
 
     fn find(&self, kind: PaneKind) -> Option<&Docked> {

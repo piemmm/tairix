@@ -403,7 +403,7 @@ fn running_as_an_administrator_asks_to_start_the_programs_own_entry_binary() {
         "and pictures the bundle it starts"
     );
     assert_eq!(request.purpose, RUN_ELEVATED_PURPOSE);
-    assert_eq!(request.window, None, "the desktop's own request");
+    assert_eq!(request.asker, None, "the desktop's own request");
 }
 
 #[test]

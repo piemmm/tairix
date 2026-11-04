@@ -11,17 +11,19 @@ there, and the full folder browser one press away.
 
 | id | What it is | Status |
 |---|---|---|
-| SD1 | The Save panel: the document's icon, its name with the stem selected, *Where* (the folder it goes in) and *Format* (the endings the requester writes), Cancel and Save, *Show folders* expanding the browser with *New Folder*, and every control on the keyboard | done |
-| SD2 | *Where* and *Format* as session menus (`ChainOwner::Picker`): the user's own places and the folder last chosen; each ending by the registry's own name for its type | done |
-| SD3 | Drag to save: the panel's icon carried by the seat's drag carrier as a save, dropped on the desktop or a folder in a file manager window to save there | done |
+| SD1 | The Save panel: the document's icon, its name with the stem selected, *Where* (the folder it goes in) and *Format* (the format it is written in), Cancel and Save, *Show folders* expanding the browser with *New Folder*, and every control on the keyboard | done |
+| SD2 | *Where* and *Format* as session menus (`ChainOwner::Picker`): the user's own places and the folder last chosen; each format offered by the registry's own name for its type | done |
+| SD3 | Drag to save: the panel's icon carried by the seat's drag carrier as a save, shown as the document's large tile held where it was pressed, dropped on the desktop or a folder in a file manager window to save there | done |
 | SD4 | The save offer: `SaveOffered`, `SaveOfferAnswer`, `SaveOfferEnded` and `SaveInto`, the drop target naming the folder by a location grant it minted itself | done |
 | SD5 | The file manager as a save target: the folder under the pointer lit while the offer stands, its location granted off the loop on the drop | done |
+| SD6 | Formats, not endings: the requester offers each format it writes — a RISC OS file type and the extensions that name it — and the one the document is in, which the panel opens on; the file is typed by its volume where that records file types, by `,xxx` where not, so the requester tells the format chosen from the file it is handed | done |
 
 ## 1. The panel (SD1)
 
 - **One window, two extents.** The panel opens compact: the icon on the left,
-  then *Name*, *Where* and *Format* (shown only when the requester writes more
-  than one ending), a line for a message, and *Show folders*, *Cancel* and
+  then *Name*, *Where* and *Format* (stated when the requester writes one
+  format, a choice when it writes more, absent when it writes any name), a
+  line for a message, and *Show folders*, *Cancel* and
   *Save* along the foot. *Show folders* swaps the window's surface for the
   expanded one (`Compositor::set_surface`): the same controls over the shared
   listing (`lib/browse`) and *New Folder*. Collapsing keeps the folder shown.
@@ -36,18 +38,54 @@ there, and the full folder browser one press away.
   (`DesktopShell::open_dialog_window`), not at a fixed point, so it reads as
   that document's question. The open and folder picks keep their fixed origin
   and geometry (`PICKER_ORIGIN`), which the QEMU picker vertical reconstructs.
+- **Modal to its requester alone.** A pick holds the window that asked, as an
+  owner-modal dialog does (`SessionWindows::hold_for_pick`): a press on that
+  window brings the picker forward, and its menus, raises and drags are
+  refused. The picker holds the seat only while it has the keyboard
+  (`seat_held`), so every other application stays usable, and the desktop's own
+  menus and program library open over it even then (`seat_modal`), handing the
+  keyboard back as they close; when the pick ends
+  the keyboard goes back to the requester only if the picker had it. While it
+  is on screen it is still a trusted surface (`trusted_up`), so the desktop
+  layer surface stays hidden.
 - **The name.** Offered as the requester suggests it, the stem selected so
-  typing replaces the name and keeps the ending. The endings hold it exactly
-  as the save band did (`SaveEndings::accepts`, the first ending added to a
-  name with none, a refusal naming the endings).
+  typing replaces the name and keeps the ending; an ending the registry names
+  another type by is left off, so a picture saved in another format is not
+  offered under its old type's name (`offered`). On Save the name is held to
+  the chosen format (`SaveBand::held`): one ending as the format — one of its
+  extensions, its own `,xxx`, or one the registry names its type by — is kept
+  as typed; one of another type is refused, saying how to name it; one with no
+  ending takes the format's first extension, or, for a format named by its
+  file type alone, is left for the folder to type.
 - **A name taken where no listing showed it.** An exclusive create refused
   because the name exists is told apart on the file worker: a file is asked
   about as any other, while a folder or a link holding the name is refused
   (`IsADirectory`, `LinkLoop`), since no save replaces either.
-- **The format.** Each ending is a format: the icon and the *Format* row show
-  the type the media registry names for it (`tairix_browse::media`), and
-  choosing another replaces the name's ending. No format list is carried on the
-  wire: the endings *are* the formats.
+- **The format (SD6).** `PickPurpose::Save` carries `SaveFormats`: at most
+  eight `SaveFormat`s — a RISC OS file type, or none, and at most four
+  extensions — and the one the document is in now, which the panel opens on
+  whatever the name ends in. No two may share a file type or an extension, and
+  the decoder refuses a frame that misstates any of it. The panel names a
+  format by the registry's name for its type and draws its type's picture, never
+  a label the requester chose; typing an ending of another format offered
+  chooses it, and choosing one renames the stem with its extension. A requester
+  builds a format from the registry (`tairix_browse::media::save_format`): its
+  file type, and its extensions but for a type RISC OS is home to and other
+  systems name by an extension (`FILETYPE_NAMED`: a sprite file is named
+  `Sprites`, not `Sprites.spr`).
+- **The file's type.** Whether a volume records file types is known only on
+  the file worker (`tairix_browse::vfs::keeps_filetypes`), so the worker makes
+  the file (`open_save`): it opens the folder, finishes a bare name with the
+  type's `,xxx` where the volume records none (`Typing::leaf`), creates the file
+  relative to the folder it asked so the folder cannot change between the
+  asking and the making, and records the file type where the volume records one,
+  before any requester holds it — a type it cannot record refuses the save and
+  takes back a file it made. A bare name is created exclusively without a
+  listing check, its name being the folder's to finish, and a name found taken
+  is asked about by the name the file would have had. The requester tells the
+  chosen format from the file it is handed, typed so before it holds it, and
+  no two formats offered share a type or an extension: Paint writes the format
+  the file's name and recorded type say (`save::format_for`).
 - **The folder.** *Where* names the browser's folder. The panel starts where
   the picker starts (the user's `Home`) and the browser behind it is the one
   the expanded panel shows, so a folder chosen either way is the same one.
@@ -74,14 +112,16 @@ there, and the full folder browser one press away.
   the last save went to, each by its name and its folder picture. The picker
   is not bounded to them: the browser reaches every folder it lists, so the
   list offers nothing a navigation could not.
-- *Format* lists each ending the requester writes, by its type's name and its
-  ending.
+- *Format* lists each format the requester writes, by its type's name, the
+  chosen one marked.
 
 ## 3. Drag to save (SD3)
 
 - **The icon is the document.** A press on it carried past the drag slop
-  begins a *save* drag on the seat's one drag carrier (`drag.rs`): the plate
-  names the document, the pointer shows whether a drop there saves.
+  begins a *save* drag on the seat's one drag carrier (`drag.rs`): the
+  document's large tile — its picture above its name, as a listing draws it —
+  held where the press held the panel's picture (`PictureGrab`), the pointer
+  showing whether a drop there saves.
 - **Where a save drag lands.** On the desktop: the folder the pinboard shows
   there, a folder icon's or the `Desktop` folder itself, resolved by the
   session. On a window of an application that answers the offer (SD4): the

@@ -28,6 +28,18 @@ services its ring from that interrupt and sends one notification carrying the
 endpoint's clock model and refills. There is no audio tick anywhere in the
 system, and nothing polls.
 
+A client's wake is never dropped because its mailbox refused it. One the
+mailbox had no room for, or that this service's own IPC budget refused, is held
+and sent when the mailbox's room member reports room; one the kernel had no
+memory for waits on a one-shot pause, since nothing reports memory freeing. A
+stream owes its client at most one wake of each kind — the newest
+`SpaceAvailable` and `StateChanged` supersede the one held, and a held `Xrun`
+absorbs the next, its frames summed — so a client that falls behind costs a
+bounded store, sized when the stream opens so the period path allocates
+nothing, and hears what is held in the order it happened. A closed stream's
+held wakes go with it; a wake refused for good is given up and recorded (event
+30037) each time the running total doubles.
+
 The first stream on an endpoint programs its period: half that stream's
 latency target, so a ring two periods deep holds it, but never longer than
 20 ms (`MAX_PERIOD_MS`), clamped into what the device will do. The period is

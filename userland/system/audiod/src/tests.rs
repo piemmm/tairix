@@ -9,6 +9,7 @@
 //! router, the matrix, the volume model, the mixer and the rings.
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -32,6 +33,7 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::seat::{DisplayLease, ReleaseSurface};
 use tairix_abi::sound_cue::SOUNDD_UID;
 use tairix_abi::time::{MonotonicClock, Time64};
+use tairix_abi::waitset::WaitSetOp;
 use tairix_abi::{CapabilityId, DriverError, Errno};
 use tairix_audio::route::Room;
 use tairix_audiochan::AudioChannelServer;
@@ -399,16 +401,23 @@ impl RegionHost for FixtureRegions {
     }
 }
 
-/// Every frame the service notified, as (endpoint, frame).
+/// Every frame the service delivered, as (endpoint, frame).
 type Notified = Rc<RefCell<Vec<(u64, Vec<u8>)>>>;
 
-/// A notifier that keeps every frame it was handed where the test can read
-/// them.
-struct Recorder(Notified);
+/// What the service's next sends are refused with, one send each.
+type Refusals = Rc<RefCell<VecDeque<Errno>>>;
+
+/// A notifier that keeps every frame it delivered where the test can read
+/// them, and refuses a send for each refusal the test queued.
+struct Recorder(Notified, Refusals);
 
 impl Notifier for Recorder {
-    fn notify(&mut self, endpoint: u64, frame: &[u8]) {
+    fn notify(&mut self, endpoint: u64, frame: &[u8]) -> Result<(), Errno> {
+        if let Some(refused) = self.1.borrow_mut().pop_front() {
+            return Err(refused);
+        }
         self.0.borrow_mut().push((endpoint, frame.to_vec()));
+        Ok(())
     }
 }
 
@@ -431,6 +440,7 @@ struct Fixture {
     regions: Rc<RefCell<FixtureRegions>>,
     device: Rc<RefCell<AudioChannelServer<FixtureDevice>>>,
     notified: Notified,
+    refusals: Refusals,
     /// Each stream's client ring, by stream id.
     rings: Vec<(u64, RegionId)>,
 }
@@ -495,9 +505,10 @@ impl Fixture {
         let regions = Rc::new(RefCell::new(FixtureRegions::new()));
         let device = Rc::new(RefCell::new(AudioChannelServer::new(FixtureDevice::new())));
         let notified = Notified::default();
+        let refusals = Refusals::default();
         let service = AudioService::new(
             SharedRegions(Rc::clone(&regions)),
-            Recorder(Rc::clone(&notified)),
+            Recorder(Rc::clone(&notified), Rc::clone(&refusals)),
             TickClock {
                 now: RefCell::new(0),
             },
@@ -507,6 +518,7 @@ impl Fixture {
             regions,
             device,
             notified,
+            refusals,
             rings: Vec::new(),
         }
     }
@@ -2865,4 +2877,172 @@ fn a_resumed_change_count_goes_on_from_where_it_was_resumed() {
     assert_eq!(fixture.service.changes(), 42);
     fixture.bind();
     assert!(fixture.service.changes() > 42, "binding is a change");
+}
+
+/// The room members the serve loop keeps, as a test sees them.
+#[derive(Default)]
+struct Members {
+    armed: Vec<u64>,
+}
+
+impl Members {
+    /// Add or delete the room member of `mailbox`, which always takes.
+    fn apply(&mut self, op: WaitSetOp, mailbox: u64) -> bool {
+        match op {
+            WaitSetOp::Add => self.armed.push(mailbox),
+            WaitSetOp::Del => self.armed.retain(|armed| *armed != mailbox),
+        }
+        true
+    }
+}
+
+/// Bring the room members in line with the wakes the service holds,
+/// answering whether every one it needs is armed.
+fn watch_rooms(fixture: &mut Fixture, members: &mut Members) -> bool {
+    fixture
+        .service
+        .wakes()
+        .watch(&mut |op, mailbox| members.apply(op, mailbox))
+}
+
+/// The states `grant`'s client was told, in order.
+fn states(fixture: &Fixture, grant: &StreamGrant) -> Vec<StreamState> {
+    fixture
+        .told(grant)
+        .iter()
+        .map(|(state, _)| *state)
+        .collect()
+}
+
+/// A playback stream for `owner` with frames queued, not yet started.
+fn queued(fixture: &mut Fixture, owner: &Origin) -> StreamGrant {
+    fixture.bind();
+    let music = fixture.open_playback(owner, DEVICE_HZ, 4_096);
+    assert_eq!(fixture.client_write(&music, &signal(1_500)), 1_500);
+    music
+}
+
+/// A wake its mailbox refused for want of room, or this service's budget, is
+/// held — with every wake behind it — its mailbox's room watched, and arrives
+/// once room comes. Regression: the refusal used to drop the wake, so the
+/// client never learned its stream started, and no full mailbox was left for
+/// its read-back to notice.
+#[test]
+fn a_wake_refused_for_room_or_budget_arrives_once_room_comes() {
+    for refused in [Errno::WouldBlock, Errno::LimitExceeded] {
+        let mut fixture = Fixture::new();
+        let owner = caller(7, &[]);
+        let music = queued(&mut fixture, &owner);
+        fixture.refusals.borrow_mut().push_back(refused);
+        start(&mut fixture, &owner, &music);
+        assert!(fixture.told(&music).is_empty(), "{refused:?}: held");
+        let mut members = Members::default();
+        assert!(watch_rooms(&mut fixture, &mut members), "{refused:?}");
+        assert_eq!(members.armed, [music.notify_endpoint], "{refused:?}");
+        assert!(!fixture.service.wakes().starved(), "{refused:?}");
+        fixture.service.wakes().flush();
+        assert_eq!(
+            states(&fixture, &music),
+            [StreamState::Running],
+            "{refused:?}"
+        );
+        assert!(watch_rooms(&mut fixture, &mut members), "{refused:?}");
+        assert!(
+            members.armed.is_empty(),
+            "{refused:?}: nothing owed, nothing watched"
+        );
+    }
+}
+
+/// A wake the kernel had no memory for waits on the pause the serve loop
+/// times, with no room member armed for it — one would report room at once,
+/// for a send the kernel would refuse again — and arrives when the pause has
+/// run. Regression: the refusal used to drop it.
+#[test]
+fn a_wake_refused_for_memory_waits_on_the_pause_with_no_room_watched() {
+    let mut fixture = Fixture::new();
+    let owner = caller(7, &[]);
+    let music = queued(&mut fixture, &owner);
+    fixture.refusals.borrow_mut().push_back(Errno::OutOfMemory);
+    start(&mut fixture, &owner, &music);
+    assert!(fixture.service.wakes().starved());
+    let mut members = Members::default();
+    assert!(watch_rooms(&mut fixture, &mut members));
+    assert!(members.armed.is_empty(), "nothing armed for kernel memory");
+    fixture.service.wakes().flush();
+    assert_eq!(states(&fixture, &music), [StreamState::Running]);
+    assert!(!fixture.service.wakes().starved());
+}
+
+/// A wake refused for good is given up once — counted, reported and never
+/// offered again — and one to a mailbox gone with its client is dropped and
+/// reported to nobody.
+#[test]
+fn a_wake_refused_for_good_is_reported_once_and_one_to_a_mailbox_gone_is_not() {
+    for (refused, reported) in [(Errno::PermissionDenied, Some(1)), (Errno::NotFound, None)] {
+        let mut fixture = Fixture::new();
+        let owner = caller(7, &[]);
+        let music = queued(&mut fixture, &owner);
+        fixture.refusals.borrow_mut().push_back(refused);
+        start(&mut fixture, &owner, &music);
+        assert_eq!(fixture.service.wakes().given_up(), reported, "{refused:?}");
+        assert!(
+            !fixture.service.wakes().starved(),
+            "{refused:?}: nothing held"
+        );
+        fixture.service.wakes().flush();
+        assert!(
+            fixture.told(&music).is_empty(),
+            "{refused:?}: never offered again"
+        );
+    }
+}
+
+/// A stream's held state change folds into the next, so a client that stays
+/// behind is told where its stream now stands, once, rather than every step
+/// on the way.
+#[test]
+fn a_held_state_change_folds_into_the_next() {
+    let mut fixture = Fixture::new();
+    let owner = caller(7, &[]);
+    let music = queued(&mut fixture, &owner);
+    fixture.refusals.borrow_mut().push_back(Errno::WouldBlock);
+    start(&mut fixture, &owner, &music);
+    fixture.grant(
+        &owner,
+        &AudioRequest::Stop {
+            stream_id: music.stream_id,
+            at: Frames::ZERO,
+        },
+    );
+    fixture.service.wakes().flush();
+    assert_eq!(states(&fixture, &music), [StreamState::Paused]);
+}
+
+/// A closed stream's held wakes go with it, and its mailbox's room is let go,
+/// so what the service holds for a client that stopped draining stays bounded
+/// by the streams it keeps open.
+#[test]
+fn a_closed_streams_held_wakes_go_with_it() {
+    let mut fixture = Fixture::new();
+    let owner = caller(7, &[]);
+    let music = queued(&mut fixture, &owner);
+    fixture.refusals.borrow_mut().push_back(Errno::WouldBlock);
+    start(&mut fixture, &owner, &music);
+    let mut members = Members::default();
+    assert!(watch_rooms(&mut fixture, &mut members));
+    assert_eq!(members.armed, [music.notify_endpoint]);
+    fixture.grant(
+        &owner,
+        &AudioRequest::Close {
+            stream_id: music.stream_id,
+        },
+    );
+    assert!(watch_rooms(&mut fixture, &mut members));
+    assert!(members.armed.is_empty(), "its room is let go");
+    fixture.service.wakes().flush();
+    assert!(
+        fixture.told(&music).is_empty(),
+        "nothing owed for a closed stream"
+    );
 }

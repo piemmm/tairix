@@ -2120,8 +2120,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ret: AbiType::Errno,
         // The retraction half of `volume_attach`, `fsserve_attach` and
         // `image_attach`. The principal a network or disk-image volume was
-        // attached for may detach it, so the mount authority is checked by
-        // the handler against the volume named; every decision is audited.
+        // attached for may detach it, and the user at the seat a removable
+        // device's volume, so the mount authority is checked by the handler
+        // against the volume named; every decision is audited.
         required_capability: None,
         audit: true,
     },
@@ -4020,6 +4021,27 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::VOLUME_RETITLE,
+        name: "volume_retitle",
+        arg_count: 2,
+        args: [
+            // Non-null `UserPtr` to the encoded `VolumeRetitleRequest`, then
+            // its length.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Only the principal a disk image's volume was attached for may
+        // retitle it, which the handler judges against the volume named; no
+        // capability widens that. Every decision is audited.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -4632,6 +4654,7 @@ mod tests {
             (SyscallNumber::VIEW_BIND, None),
             (SyscallNumber::VIEW_UNBIND, None),
             (SyscallNumber::IMAGE_ATTACH, None),
+            (SyscallNumber::VOLUME_RETITLE, None),
         ];
         for (number, gate) in gates {
             let spec = spec_for(number).unwrap();

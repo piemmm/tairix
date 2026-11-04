@@ -19,11 +19,11 @@ use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{Errno, Notice, NoticeTopic, ORIGIN_WIRE_LEN};
 use tairix_rt::shm::SharedRegion;
 
-use crate::stream::{AudioTransport, NotifyDrain, OpenFailure, StreamClient, Written};
+use crate::stream::{AudioTransport, OpenFailure, StreamClient, Written};
 
-/// Notifications a stream's mailbox holds before the service's next is
-/// dropped: well past the periods a client can fall behind by before its
-/// next wake drains them all.
+/// Notifications a stream's mailbox holds from the service, its one sender,
+/// before the service holds its next until this client drains: well past the
+/// periods a client can fall behind by before its next wake drains them all.
 const NOTIFY_CAPACITY: usize = 64;
 
 /// The wait-set token the blocking wait parks on its mailbox under.
@@ -153,7 +153,6 @@ pub struct LiveStream {
     client: StreamClient,
     region: SharedRegion,
     geometry: PcmGeometry,
-    drain: NotifyDrain,
 }
 
 impl LiveStream {
@@ -171,7 +170,6 @@ impl LiveStream {
                 client,
                 region,
                 geometry,
-                drain: NotifyDrain::new(NOTIFY_CAPACITY),
             }),
             Err(failure) => {
                 let _ = client.close(transport);
@@ -255,7 +253,7 @@ impl LiveStream {
     ///
     /// As [`StreamClient::take_notify`].
     pub fn take_notify(&mut self, transport: &mut RtAudio) -> Result<Option<AudioNotify>, Errno> {
-        self.client.take_notify(transport, &mut self.drain)
+        self.client.take_notify(transport)
     }
 
     /// Close the stream; its ring is unmapped as this is dropped.

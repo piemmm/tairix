@@ -32,11 +32,16 @@ pub const REQUEST_DENIED: EventId = EventId(25_004);
 /// application is granted any type; carries the reason.
 pub const GRANTS_REFUSED: EventId = EventId(25_005);
 
+/// Doorbells client ports refused for good were given up on, their answers
+/// left for a collect; carries the running total, recorded each time it has
+/// doubled.
+pub const DOORBELLS_LOST: EventId = EventId(25_006);
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DECODER_STARTED, DISCOVERYD_RANGE_END, DISCOVERYD_RANGE_START, GRANTS_REFUSED,
-        REQUEST_DENIED, SERVICE_STARTED, SERVICE_UNAVAILABLE,
+        DECODER_STARTED, DISCOVERYD_RANGE_END, DISCOVERYD_RANGE_START, DOORBELLS_LOST,
+        GRANTS_REFUSED, REQUEST_DENIED, SERVICE_STARTED, SERVICE_UNAVAILABLE,
     };
     use tairix_log::EventId;
 
@@ -47,12 +52,14 @@ mod tests {
         assert_eq!(SERVICE_UNAVAILABLE, EventId(25_003));
         assert_eq!(REQUEST_DENIED, EventId(25_004));
         assert_eq!(GRANTS_REFUSED, EventId(25_005));
+        assert_eq!(DOORBELLS_LOST, EventId(25_006));
         for id in [
             SERVICE_STARTED,
             DECODER_STARTED,
             SERVICE_UNAVAILABLE,
             REQUEST_DENIED,
             GRANTS_REFUSED,
+            DOORBELLS_LOST,
         ] {
             assert!((DISCOVERYD_RANGE_START..DISCOVERYD_RANGE_END).contains(&id.0));
         }

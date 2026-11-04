@@ -7,7 +7,7 @@
 //! device. It claims a
 //! reserved device-channel endpoint bound restricted-sender, publishes the
 //! [`NETCHAN_NODE_COMPATIBLE`] node so `devmgr` hands the endpoint to the
-//! stack, and then parks — never busy-polls — on a wait set over two
+//! stack, and then parks — never busy-polls — on a wait set over three
 //! sources:
 //!
 //! * a **call** wake decodes one request, admits its caller, and drives the
@@ -15,7 +15,11 @@
 //!   `Service` drives one device doorbell over it, `Detach` unmaps it;
 //! * an **interrupt** wake masks the device's completion sources, harvests
 //!   the rings into the shared region itself, and wakes the stack with a
-//!   single notify.
+//!   single notify;
+//! * a **room** wake, armed only while a notify the stack's port refused for
+//!   room or for this driver's budget is owed, offers it again
+//!   ([`Notifier`]); one the kernel had no memory for is offered again on a
+//!   timed retry, the one timeout the loop parks with.
 //!
 //! # Why the interrupt path harvests, and why it masks first
 //!
@@ -51,9 +55,10 @@ use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, ProcId, PROC_ID_HEX_LEN};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
+use tairix_rt::room::RoomMember;
 use tairix_rt::{LogSink, ServedCall};
 
-use crate::{Drain, DrainAction, Drained, NetChannelServer};
+use crate::{Drain, DrainAction, Drained, NetChannelServer, Notifier};
 use tairix_drvrt::exit::{end, step, DriverExit};
 use tairix_drvrt::serve::{instance_field, log_event, publish_channel, DeviceChannel};
 
@@ -66,12 +71,20 @@ const NETCHAN_READY: EventId = EventId(29_180);
 /// stack, or not the stack instance attached.
 const NETCHAN_REFUSED: EventId = EventId(29_181);
 
+/// Diagnostic event id: notifies the stack's port refused for good were
+/// given up on; carries the running total, recorded each time it doubles.
+const NETCHAN_NOTIFY_LOST: EventId = EventId(29_182);
+
 /// Wait-set token for a device-channel call doorbell on the claimed
 /// endpoint.
 const CALL_TOKEN: u64 = 1;
 
 /// Wait-set token for "the device interrupt fired".
 const IRQ_TOKEN: u64 = 2;
+
+/// Wait-set token for room in the stack's port, armed only while a notify
+/// is owed there for room.
+const ROOM_TOKEN: u64 = 3;
 
 /// Calls the stack may hold at the device-channel endpoint at once. It issues
 /// one control request at a time (it blocks on the reply); the room beyond
@@ -197,41 +210,91 @@ pub fn serve<N: Net>(net: N, irq_handle: u64) -> i32 {
     serve_loop(server, set, endpoint)
 }
 
-/// Park on the wait set and serve device-channel doorbells and device
-/// interrupts for the life of the driver. Never returns on the success
-/// path; a wait-set fault exits fail-closed.
+/// Park on the wait set and serve device-channel doorbells, device
+/// interrupts, and room for a notify owed, for the life of the driver. Never
+/// returns on the success path; a wait-set fault exits fail-closed.
 fn serve_loop<N: Net>(mut server: NetChannelServer<N>, set: u64, endpoint: u64) -> i32 {
     let mut region: Option<Region> = None;
     let mut request = [0u8; NET_CHANNEL_MAX_REQUEST];
+    let mut notifier = Notifier::default();
+    let mut room = RoomMember::new(set, ROOM_TOKEN);
     loop {
+        // The clock is read only while a notify waits on kernel memory.
+        let timeout = if notifier.starved() {
+            notifier
+                .retry_starved(tairix_rt::clock_get(), server.reported_filtered(), post)
+                .unwrap_or(WAITSET_TIMEOUT_NONE)
+        } else {
+            WAITSET_TIMEOUT_NONE
+        };
+        if !room.keep_on(notifier.room()) {
+            // It waits on the timed retry instead, timed on the next turn.
+            notifier.watch_refused();
+            continue;
+        }
+        report_lost(&mut notifier);
         let mut token = 0u64;
-        let woke = tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token);
-        if woke < 0 {
+        let woke = tairix_rt::waitset_wait(set, timeout, &mut token);
+        if woke < 0 && Errno::from_syscall(woke) != Errno::TimedOut {
             return end(
                 DriverExit::ServeFailed,
                 &[step("netchan: the serve wait set faulted")],
             );
         }
         if woke != 0 {
-            // A spurious/lapsed wake with no ready source; re-park.
+            // A memory retry fell due, offered on the next turn, or a
+            // spurious wake with no ready source.
             continue;
         }
         match token {
-            IRQ_TOKEN => on_interrupt(&mut server, &mut region),
-            CALL_TOKEN => serve_call(&mut server, endpoint, &mut request, &mut region),
+            IRQ_TOKEN => on_interrupt(&mut server, &mut region, &mut notifier),
+            CALL_TOKEN => serve_call(
+                &mut server,
+                endpoint,
+                &mut request,
+                &mut region,
+                &mut notifier,
+            ),
+            ROOM_TOKEN => notifier.retry_room(server.reported_filtered(), post),
             _ => {}
         }
     }
 }
 
+/// Post `notify` to the stack's port `endpoint`.
+fn post(endpoint: u64, notify: &NetChannelNotify) -> Result<(), Errno> {
+    tairix_rt::ipc_send(endpoint, &notify.encode())
+}
+
+/// Record how many notifies the stack's port refused for good, once the
+/// count has doubled since it was last recorded.
+fn report_lost(notifier: &mut Notifier) {
+    let Some(total) = notifier.lost_to_report() else {
+        return;
+    };
+    log_event(
+        Level::Warn,
+        NETCHAN_NOTIFY_LOST,
+        "netchan: notifies the stack's port refused for good were given up on",
+        &[Field {
+            key: "total",
+            value: FieldValue::UnsignedInt(total),
+        }],
+    );
+}
+
 /// Serve one device interrupt: mask the completion sources, acknowledge the
-/// device, harvest the rings into the shared region, and wake the stack once
-/// if anything moved.
+/// device, harvest the rings into the shared region, and ring the stack once
+/// through `notifier` if anything moved.
 ///
 /// The mask comes first because the acknowledgement below clears a latch
 /// over a still-asserted level condition; leaving the source unmasked across
 /// the drain is what makes the driver spin.
-fn on_interrupt<N: Net>(server: &mut NetChannelServer<N>, region: &mut Option<Region>) {
+fn on_interrupt<N: Net>(
+    server: &mut NetChannelServer<N>,
+    region: &mut Option<Region>,
+    notifier: &mut Notifier,
+) {
     let _ = server.net_mut().set_completion_interrupts(false);
     server.net_mut().ack_interrupt();
 
@@ -251,14 +314,14 @@ fn on_interrupt<N: Net>(server: &mut NetChannelServer<N>, region: &mut Option<Re
     if outcome.moved || outcome.link_changed || outcome.masked.needs_release() {
         if let Some(notify_endpoint) = server.notify_endpoint() {
             let notify = NetChannelNotify {
-                link: outcome.link,
+                link_changed: outcome.link_changed,
                 back_pressure: outcome.masked.needs_release(),
                 // The stack reads the pre-filter's count from here: a pure
                 // receive rings no doorbell, so this notify is the only
                 // report of it the stack will ever see.
                 filtered: outcome.filtered,
             };
-            let _ = tairix_rt::ipc_send(notify_endpoint, &notify.encode());
+            notifier.ring(notify_endpoint, notify, post);
         }
     }
 }
@@ -308,7 +371,7 @@ fn drain<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8]) -> Drained 
 }
 
 /// Drain on the doorbell path, then release the completion sources unless
-/// the device faulted.
+/// the device faulted, answering what the drain saw.
 ///
 /// The reply is the only channel back on this path — `rx_ring_full` in a
 /// `ServiceReport` asks for nothing, unlike the notify's back-pressure flag
@@ -317,10 +380,12 @@ fn drain<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8]) -> Drained 
 /// self-healing instead: the stack has just drained its ring, and a source
 /// still asserted merely re-interrupts, which *is* the path that carries a
 /// release request.
-fn drain_and_release<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8]) {
-    if drain(server, bytes).masked.may_rearm() {
+fn drain_and_release<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8]) -> Drained {
+    let outcome = drain(server, bytes);
+    if outcome.masked.may_rearm() {
         let _ = server.net_mut().set_completion_interrupts(true);
     }
+    outcome
 }
 
 /// Serve one device-channel doorbell on the claimed endpoint: receive the
@@ -328,12 +393,14 @@ fn drain_and_release<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8])
 /// A transient recv error simply drops the doorbell (the stack retries); a
 /// call the kernel cannot attribute, a frame that does not decode, and a
 /// caller [`NetChannelServer::admit`] refuses are answered with the typed
-/// refusal, the last recorded.
+/// refusal, the last recorded. An attach or a detach forgets the notify
+/// owed, which reported on the region it ends.
 fn serve_call<N: Net>(
     server: &mut NetChannelServer<N>,
     endpoint: u64,
     request: &mut [u8; NET_CHANNEL_MAX_REQUEST],
     region: &mut Option<Region>,
+    notifier: &mut Notifier,
 ) {
     let Ok(Some(ServedCall {
         ticket,
@@ -372,11 +439,12 @@ fn serve_call<N: Net>(
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
         }
         NetChannelRequest::Attach(params) => {
+            notifier.forget();
             let status = attach(server, params, caller.proc_id(), region);
             let _ = tairix_rt::call_reply(endpoint, ticket, &status);
         }
         NetChannelRequest::Service => {
-            let reply = match region.as_mut() {
+            let (reply, drained) = match region.as_mut() {
                 Some(region) => {
                     let reply = server.service_reply(region.bytes);
                     // The stack calls here after draining its ring, so this
@@ -385,14 +453,24 @@ fn serve_call<N: Net>(
                     // rung for a *transmit* arrives with the sources still
                     // up, and `drain` reports whether it left them down.
                     let _ = server.net_mut().set_completion_interrupts(false);
-                    drain_and_release(server, region.bytes);
-                    reply
+                    (reply, Some(drain_and_release(server, region.bytes)))
                 }
                 // Detached (or region lost): the server answers
                 // `NotConnected` before it ever touches the slice.
-                None => server.service_reply(&mut []),
+                None => (server.service_reply(&mut []), None),
             };
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
+            // The reply carried the link as it stood before this drain, so a
+            // change the drain saw is the stack's to learn as an interrupt's.
+            let changed = drained.filter(|outcome| outcome.link_changed);
+            if let (Some(outcome), Some(port)) = (changed, server.notify_endpoint()) {
+                let notify = NetChannelNotify {
+                    link_changed: true,
+                    back_pressure: false,
+                    filtered: outcome.filtered,
+                };
+                notifier.ring(port, notify, post);
+            }
         }
         NetChannelRequest::SetMulticast(groups) => {
             let reply = server.set_multicast_reply(&groups);
@@ -407,6 +485,7 @@ fn serve_call<N: Net>(
             // nowhere to harvest into would otherwise storm this driver.
             let _ = server.net_mut().set_completion_interrupts(false);
             let reply = server.detach();
+            notifier.forget();
             if let Some(region) = region.take() {
                 let _ = tairix_rt::shm_unmap(region.base, region.len);
             }

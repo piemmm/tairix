@@ -188,7 +188,9 @@ seat shows it as a tooltip on dwell; a `MenuItem` has no way to carry it and
 measures none, because a caption beside every disabled label made a plate as
 wide as its longest excuse), and the `MenuItem` that draws it. The two are independent:
 a row may carry an id *and* a child, so clicking it answers while arriving on
-it opens. A desktop surface builds one in process; an
+it opens — unless it is a row whose whole purpose is its field
+(`ChainRow::opened_for_its_field`), which carries no id, so clicking it opens
+the field. A desktop surface builds one in process; an
 application's bounded wire declaration decodes into one
 (`ChainModel::from_app_menu`), which is why the model lives here rather than with
 the chain that renders it — its clients are not all in the process that owns the
@@ -1088,10 +1090,32 @@ picture rather than a colour the theme knows: a resting tile paints no plate, so
 the login chooser's account names sit straight on its scene. A tile that
 sets none draws exactly the pixels it always did.
 
+`IconTile::label_halo` blurs that shadow once, laid out for a tile of a given
+size, into a `LabelHalo` its owner keeps, and `IconTile::with_label_halo`
+hands it back to each paint, which lays it down where the name stands rather
+than blurring it again — the same pixels for the cost of a composite. The
+desktop keeps one per resting name until the name, the scale or the theme
+changes.
+
+`IconTile::with_label_ink` draws that name — with the built-in glyph and the
+live mark, which wear the name's ink — in a colour the owner states rather than
+the theme's foreground. A resting tile on a picture wears no plate, so only its
+owner knows what reads there: the desktop's resting icons take it with a halo,
+and a tile on a state's plate keeps the theme's ink by its owner setting none.
+The name is clipped to the tile's bounds, so a shadow reaching past its ink
+never lands on a neighbour. A tile that sets no ink draws exactly the pixels it
+did.
+
 `IconTile::with_live_mark` draws a small disc beneath the picture, in the
 name's own ink, for an item that is live — a running program in the launcher.
 It is a mark of state rather than of choice, so it never takes the accent the
 selection wears, and a tile that sets none draws exactly the pixels it did.
+
+`IconTile::with_count` wears a count in an accent pill over the picture's top
+trailing corner, within the picture's breadth: how many items a stack the tile
+fronts stands for, as the front card of a carried drag does. The pill is the
+one recipe a `Card`'s count badge is drawn by, and a tile that sets none draws
+exactly the pixels it did.
 
 A tile renders state and never dispatches. The view owns the grid geometry and
 hit-tests pointer input against that same geometry, so a tile carries no pointer

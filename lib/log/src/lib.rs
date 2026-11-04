@@ -31,6 +31,7 @@ pub mod chain;
 mod cursor;
 pub mod diag;
 pub mod dict;
+pub mod doubling;
 pub mod ingress;
 pub mod journal;
 pub mod ratelimit;
@@ -62,6 +63,7 @@ pub use diag::{level_tag, write_diag_line};
 pub use dict::{
     DictionaryBuilder, DictionaryView, ARENA_BYTES, MAX_CANDIDATES, MAX_DICT_STRING, MAX_ENTRIES,
 };
+pub use doubling::Doubling;
 pub use ingress::{Admission, Ingress, DEFAULT_EFFECTIVE_LEVEL, STREAM_COUNT};
 pub use journal::{Journal, JournalError, SegmentStore, Stamp, SEGMENT_BUF_BYTES};
 pub use ratelimit::{DropReport, RateDecision, RateLimit, RateLimiter};

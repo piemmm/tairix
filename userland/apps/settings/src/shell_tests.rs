@@ -2545,6 +2545,43 @@ fn accessibility_offers_the_pointer_aids_and_each_posts_its_own_key() {
     }
 }
 
+/// The Wallpaper pane's grid switch is off until someone turns it on, and
+/// posts the pinboard's keys, `grid` turned on and the rest as they were.
+#[test]
+fn wallpaper_offers_align_to_grid_and_posts_the_pinboard_keys() {
+    let pane = Pane::Wallpaper;
+    let category = pane.locate().expect("a located pane").0;
+    let mut shell = shell_at(Location { category, pane });
+    let form = shell.form_mut_for_test().expect("a form");
+    let (group, row) = form
+        .groups()
+        .iter()
+        .enumerate()
+        .find_map(|(group, held)| {
+            held.rows()
+                .iter()
+                .position(|field| field.label() == Setting::AlignToGrid.label())
+                .map(|row| (group, row))
+        })
+        .expect("the Align to grid row");
+    let tairix_controls::FieldControl::Combo(switch) = form.groups()[group].rows()[row].control()
+    else {
+        panic!("the switch is a choice");
+    };
+    assert_eq!(switch.selected_text(), Some("Off"), "off by default");
+    let crate::FormOutcome::Apply(document) = form.choose_for_test(group, row, 0) else {
+        panic!("the switch is posted");
+    };
+    let expected = DesktopSettings {
+        align_to_grid: true,
+        ..DesktopSettings::default()
+    };
+    assert_eq!(
+        document,
+        tairix_appconf::Registry::document_of(&expected, &SettingsKey::PINBOARD).render()
+    );
+}
+
 /// Before the desktop answers, the pointer-set row still offers the
 /// always-present built-in set: a list of nothing is a control that cannot
 /// be used.

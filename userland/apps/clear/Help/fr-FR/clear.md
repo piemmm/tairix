@@ -15,15 +15,13 @@ dépend du terminal nommé par `TERM` ; un terminal incapable d'effacer
 commande plutôt que d'imprimer des octets que le terminal afficherait
 comme des caractères parasites.
 
-Les consoles TAIRiX ne conservent aucun historique de défilement : il
-n'y a donc rien à effacer de ce côté. `-x` (l'option GNU qui préserve
-l'historique) est acceptée pour la compatibilité des scripts et ne
-change rien.
+Lorsque le terminal le permet, les lignes qu'il conserve au-dessus de
+l'écran — l'historique de défilement — sont également effacées, de sorte
+qu'aucun défilement arrière ne permet de revoir ce qui était à l'écran.
 
 ## OPTIONS
 
-- `-x` — acceptée pour la compatibilité GNU ; une console TAIRiX ne
-  conserve aucun historique, la sortie est donc identique avec ou sans.
+- `-x` — conserver l'historique de défilement : n'effacer que l'écran.
 - `-h, -?` — afficher l'aide courte de cette commande.
 
 ## EXAMPLES

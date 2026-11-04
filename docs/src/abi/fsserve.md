@@ -48,8 +48,12 @@ this order, so a served volume answers exactly what an in-kernel driver would:
 `Pin`, `Unpin`, `ReleasePins`, `Create`, `CreateLink`, `Link`, `WriteAt`,
 `Truncate`, `Punch`, `Remove`, `Rename`, `Flush`, `Security`, `SetSecurity`,
 `RecordsOwnership`, `Stats`, `GetAttr`, `SetAttr`, `ListAttr`, `RemoveAttr`,
-and `Release`.
+`Release`, `Label` and `SetLabel`.
 
+- `Label` and `SetLabel` read and set the volume's title (`FilesystemLabel`):
+  text of at most `VOLUME_TITLE_MAX` bytes with no control character, refused
+  at decode on either side otherwise. A driver that serves no title answers
+  `Unsupported`.
 - A create carries the security record the node is born with; a byte write,
   truncate or punch names the node it changes.
 - A listing is answered in batches bounded by `FSSERVE_REPLY_MAX`, each ending

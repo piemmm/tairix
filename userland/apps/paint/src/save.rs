@@ -14,8 +14,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::fs::Filetype;
-use tairix_abi::window_ipc::SaveEndings;
-use tairix_browse::media::{media_for_document, name_endings, Ending, MediaType};
+use tairix_abi::window_ipc::SaveFormats;
+use tairix_browse::media::{media_for_document, named_extension, Ending, MediaType};
 use tairix_image::{
     desktop_palette, encode_bmp, encode_gif, encode_jpeg, encode_ora, encode_png,
     encode_sprite_area, encode_tiff, opaque_sprite_writes_back, Density, DensityUnit, EncodeError,
@@ -123,12 +123,10 @@ impl SaveFormat {
     }
 
     /// The extension a new file of this format is given: the registry's
-    /// first for it.
+    /// first for it, or `""` for one named by its file type alone.
     #[must_use]
     pub fn extension(self) -> &'static str {
-        name_endings(self.media())
-            .find_map(|(separator, code)| (separator == '.').then_some(code))
-            .unwrap_or_default()
+        named_extension(self.media()).unwrap_or_default()
     }
 
     /// The format a file read as `format` is written back in, if Paint
@@ -311,26 +309,23 @@ pub fn format_for(
     writable_as(format_named(name, recorded)?, entries, origin)
 }
 
-/// The endings a document of `entries`, read from `origin`, may be saved
-/// under as `format`: every name ending of it, so a name given none takes
-/// the first.
+/// The one format a document of `entries`, read from `origin`, is offered to
+/// be saved in as `format`: the registry's, its file type and the extensions
+/// that name it.
 ///
 /// # Errors
 ///
 /// The refusal of a save in that format, where it cannot hold the document.
-pub fn save_endings(
+pub fn save_formats(
     entries: &[Entry],
     origin: Origin,
     format: SaveFormat,
-) -> Result<SaveEndings, SaveRefusal> {
+) -> Result<SaveFormats, SaveRefusal> {
     writable_as(Some(format), entries, origin)?;
-    let mut endings = SaveEndings::ANY;
-    for (separator, code) in name_endings(format.media()) {
-        // An ending past the table's bound is left out, so the picker
-        // refuses it: narrower than the save, never wider.
-        let _ = endings.push(separator, code);
-    }
-    Ok(endings)
+    let mut formats = SaveFormats::ANY;
+    // A registry type is always one a pick can carry.
+    let _ = formats.push(tairix_browse::media::save_format(format.media()), true);
+    Ok(formats)
 }
 
 /// The format a document of `entries`, read from `origin`, is written in as

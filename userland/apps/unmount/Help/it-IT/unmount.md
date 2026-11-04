@@ -45,8 +45,11 @@ comunque in modo pulito; nulla viene scartato quando una conferma pulita
 è possibile.
 
 Potete scollegare un'immagine disco o una condivisione di rete che
-avete montato voi stessi; qualsiasi altro volume richiede l'autorità
-di montaggio (`CAP_FS_MOUNT`). Il kernel la verifica e registra ogni
+avete montato voi stessi, e anche un disco rimovibile — una chiavetta
+USB, una scheda di memoria — mentre state usando il computer stesso,
+ma solo con uno scollegamento semplice, mai con `--force`; qualsiasi
+altro volume richiede l'autorità di montaggio (`CAP_FS_MOUNT`). Il
+kernel la verifica e registra ogni
 decisione. I volumi di avvio permanenti e i collegamenti di vista del
 sistema non sono scollegabili.
 

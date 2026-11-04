@@ -87,6 +87,7 @@ pub(crate) fn apply(grid: &mut Grid, op: &Op) {
         Op::CursorPosition { row, col } => grid.move_to(to_zero_based(col), to_zero_based(row)),
         Op::EraseInDisplay(mode) => grid.erase_in_display(mode),
         Op::EraseInLine(mode) => grid.erase_in_line(mode),
+        Op::EraseSavedLines => grid.clear_scrollback(),
         Op::ScrollUp(n) => grid.scroll_up(n),
         Op::ScrollDown(n) => grid.scroll_down(n),
         Op::SetScrollRegion { top, bottom } => grid.set_scroll_region(top, bottom),

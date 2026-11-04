@@ -71,8 +71,9 @@ mod program {
         MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, PlatformCompatible,
         ProcessRecord, RamzipStats, ResourceLimitRecord, SeatRecord, SelfAccountRecord,
         SystemIdentity, Uptime, UserDirectoryRecord, ViewBindingRecord, VolumeIoHealthRecord,
-        VolumeIoQueueRecord, VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT,
-        SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_PAYLOAD_MAX, SYSTEM_CONFIG_MAX_LEN,
+        VolumeIoQueueRecord, VolumeIoStatsRecord, VolumeRemovalRecord, RESOURCE_LIMITS_REPORT_LEN,
+        SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_PAYLOAD_MAX,
+        SYSTEM_CONFIG_MAX_LEN,
     };
     use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, LimitKind, PROC_ID_LEN};
@@ -220,6 +221,14 @@ mod program {
                 IntrospectDomain::Views,
                 ViewBindingRecord::WIRE_LEN,
                 ViewBindingRecord::from_bytes,
+            )
+        }
+
+        fn volume_removals(&self, _caller: &Caller) -> Result<Vec<VolumeRemovalRecord>, Errno> {
+            decode_list(
+                IntrospectDomain::VolumeRemovals,
+                VolumeRemovalRecord::WIRE_LEN,
+                VolumeRemovalRecord::from_bytes,
             )
         }
 

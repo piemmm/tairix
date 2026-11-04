@@ -67,8 +67,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
-    FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    MountFlags,
+    FilesystemAttrsProvider, FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats,
+    FilesystemWrite, MountFlags,
 };
 use tairix_abi::{DriverHandle, Errno};
 use tairix_drv_fs_arxfs::{Keying, ARXFS};
@@ -134,6 +134,7 @@ where
         + FilesystemSecurity
         + FilesystemStats
         + FilesystemAttrsProvider
+        + FilesystemLabel
         + Send
         + 'static,
 {

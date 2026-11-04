@@ -26,6 +26,9 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # beside the wire formats it reads (Ethernet, ARP, IPv4/IPv6 destinations),
 # never re-derived here.
 tairix-net = { path = "../net", version = "=0.0.0" }
+# Structured logging: the doubling count of notifies given up on, and over the
+# `log_emit` syscall the serve loop's readiness beacon and loss records.
+tairix-log = { path = "../log", version = "=0.0.0" }
 
 # The serve loop is a freestanding user-space program path, so its runtime
 # is linked only for the bare-metal targets a driver binary is built for; on
@@ -40,6 +43,3 @@ tairix-caps = { path = "../caps", version = "=0.0.0" }
 # / `ipc_send` / `shm_map` / `waitset_*` / `hw_emit_node` wrappers the serve
 # loop issues (one syscall trap).
 tairix-rt = { path = "../rt", version = "=0.0.0" }
-# Structured audit logging over the `log_emit` syscall: the one-shot
-# "device channel published, serving" readiness beacon.
-tairix-log = { path = "../log", version = "=0.0.0" }

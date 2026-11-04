@@ -3373,29 +3373,31 @@ impl HwTreeHeader {
 #[must_use]
 pub fn fault_domain_owner(nodes: &[HwNode], node_id: u32) -> Option<u32> {
     resolve_owner(node_id, nodes.len(), &|id| {
-        nodes.iter().find(|node| node.id() == id).map(FaultNode::of)
+        nodes.iter().find(|node| node.id() == id).map(NodeFacts::of)
     })
 }
 
-/// The handful of fields the fault-domain walk needs from one node, decoded
-/// once from whichever backing the walk runs over — a [`HwNode`] slice or the
+/// The handful of fields the ancestor walks need from one node, decoded once
+/// from whichever backing the walk runs over — a [`HwNode`] slice or the
 /// kernel store's lookup by id — so the traversal is written once and the two
 /// can never drift apart.
 #[derive(Copy, Clone)]
-struct FaultNode {
+struct NodeFacts {
     id: u32,
     parent: u32,
     class: Option<HwDeviceClass>,
     fault_health: FaultDomainState,
+    removable: bool,
 }
 
-impl FaultNode {
+impl NodeFacts {
     fn of(node: &HwNode) -> Self {
         Self {
             id: node.id(),
             parent: node.parent(),
             class: node.class(),
             fault_health: node.fault_health(),
+            removable: node.is_removable(),
         }
     }
 
@@ -3404,8 +3406,28 @@ impl FaultNode {
     }
 }
 
+/// Node `node_id` and every node above it, nearest first, each looked up by
+/// id through `lookup`: the one parent walk every ancestor query runs. It
+/// ends at a root or a broken link, and after `bound` nodes, the tree's node
+/// count, which a chain of distinct nodes never exceeds, so a cyclic chain
+/// ends it rather than spinning.
+fn lineage<F>(node_id: u32, bound: usize, lookup: &F) -> impl Iterator<Item = NodeFacts> + '_
+where
+    F: Fn(u32) -> Option<NodeFacts>,
+{
+    let mut next = lookup(node_id);
+    core::iter::from_fn(move || {
+        let node = next.take()?;
+        if !node.is_root() {
+            next = lookup(node.parent);
+        }
+        Some(node)
+    })
+    .take(bound)
+}
+
 /// Resolve the nearest fault-domain owner of `node_id`, looking each node up
-/// by id through `lookup` — the single traversal behind both
+/// by id through `lookup` — the single resolution behind both
 /// [`fault_domain_owner`] (a slice lookup) and the ancestor fold.
 ///
 /// It walks strictly upward to the nearest [`HwDeviceClass::Bus`] /
@@ -3414,20 +3436,12 @@ impl FaultNode {
 /// ends the walk rather than spinning (fail closed, `None`).
 fn resolve_owner<F>(node_id: u32, bound: usize, lookup: &F) -> Option<u32>
 where
-    F: Fn(u32) -> Option<FaultNode>,
+    F: Fn(u32) -> Option<NodeFacts>,
 {
-    let mut current = lookup(node_id)?;
-    for _ in 0..bound {
-        if current.is_root() {
-            return None;
-        }
-        let parent = lookup(current.parent)?;
-        if matches!(parent.class, Some(HwDeviceClass::Bus | HwDeviceClass::Root)) {
-            return Some(parent.id);
-        }
-        current = parent;
-    }
-    None
+    lineage(node_id, bound.saturating_add(1), lookup)
+        .skip(1)
+        .find(|node| matches!(node.class, Some(HwDeviceClass::Bus | HwDeviceClass::Root)))
+        .map(|node| node.id)
 }
 
 /// Fold the imposed child status of every interior fault-domain ancestor of
@@ -3442,7 +3456,7 @@ where
 /// fail-closed exactly as [`resolve_owner`].
 fn fold_ancestor_status<F>(node_id: u32, bound: usize, lookup: &F) -> BlkStatus
 where
-    F: Fn(u32) -> Option<FaultNode>,
+    F: Fn(u32) -> Option<NodeFacts>,
 {
     let mut status = BlkStatus::Ok;
     let mut current = node_id;
@@ -3560,7 +3574,7 @@ impl Iterator for FaultDomainChain<'_> {
 #[must_use]
 pub fn ancestor_imposed_status(nodes: &[HwNode], node_id: u32) -> BlkStatus {
     fold_ancestor_status(node_id, nodes.len(), &|id| {
-        nodes.iter().find(|node| node.id() == id).map(FaultNode::of)
+        nodes.iter().find(|node| node.id() == id).map(NodeFacts::of)
     })
 }
 
@@ -3572,7 +3586,20 @@ pub fn ancestor_imposed_status_by<F>(node_id: u32, bound: usize, lookup: F) -> B
 where
     F: Fn(u32) -> Option<HwNode>,
 {
-    fold_ancestor_status(node_id, bound, &|id| lookup(id).as_ref().map(FaultNode::of))
+    fold_ancestor_status(node_id, bound, &|id| lookup(id).as_ref().map(NodeFacts::of))
+}
+
+/// Whether hardware-tree node `node_id`, or a node above it, sits on a port it
+/// can be pulled from while the machine runs ([`HwNode::is_removable`]), each
+/// node looked up by id through `lookup` and the walk bounded by `bound`, the
+/// tree's node count, so it has no fixed-depth ceiling. An absent node, or a
+/// chain broken or cyclic above fixed nodes, reads as fixed.
+#[must_use]
+pub fn on_removable_port_by<F>(node_id: u32, bound: usize, lookup: F) -> bool
+where
+    F: Fn(u32) -> Option<HwNode>,
+{
+    lineage(node_id, bound, &|id| lookup(id).as_ref().map(NodeFacts::of)).any(|node| node.removable)
 }
 
 /// The nodes of a kernel hardware-tree snapshot, decoded lazily in wire order.
@@ -5766,6 +5793,24 @@ mod tests {
         // A dangling parent yields no owner, so no ancestor imposes anything.
         let broken = [HwNode::new(20, 21, HwDeviceClass::Storage)];
         assert_eq!(ancestor_imposed_status(&broken, 20), BlkStatus::Ok);
+    }
+
+    #[test]
+    fn a_removable_port_is_found_above_a_node_and_no_cycle_spins_the_walk() {
+        let mut nodes = usb_shaped_tree();
+        nodes[2].set_removable(true);
+        let lookup = |id: u32| nodes.iter().find(|node| node.id() == id).copied();
+        let removable = |id| on_removable_port_by(id, nodes.len(), lookup);
+        assert!(removable(3), "the disk on the hub");
+        assert!(removable(2), "the hub itself");
+        assert!(!removable(4), "the disk beside it");
+        assert!(!removable(999), "a node not in the tree");
+        let cyclic = [
+            HwNode::new(30, 31, HwDeviceClass::Other),
+            HwNode::new(31, 30, HwDeviceClass::Other),
+        ];
+        let lookup = |id: u32| cyclic.iter().find(|node| node.id() == id).copied();
+        assert!(!on_removable_port_by(30, cyclic.len(), lookup));
     }
 
     /// Encode `[HwTreeHeader][HwNode; n]` into `out` exactly as the kernel

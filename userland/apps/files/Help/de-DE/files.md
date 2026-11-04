@@ -24,8 +24,15 @@ Benutzers: ein nicht lesbares Verzeichnis wird abgelehnt, niemals erraten.
 Der Desktop startet den Dateimanager mit der Sitzung und hält ihn auf der
 Symbolleiste, und dieser beendet sich nie: das Menü seines Platzes listet
 Ihre eigenen Orte und alles Eingebundene, und die Wahl eines Eintrags öffnet
-dort ein Fenster; *Netzwerk* und *Einstellungen…* stehen zuletzt. Ein Klick
-auf den Platz öffnet eines dort, wo die Einstellungen es bestimmen. Wer einen
+dort ein Fenster; *Netzwerk* und *Einstellungen…* stehen zuletzt. Ein
+Datenträger, den Sie auswerfen können — ein USB-Stick, eine Speicherkarte
+oder ein anderer Wechseldatenträger sowie ein Datenträgerabbild oder eine
+Freigabe, die Sie eingehängt haben —, öffnet ein Untermenü mit *Auswerfen*,
+und bei einem eigenen Datenträgerabbild, das einen Titel hat, enthält es
+auch *Titel*: dieser Eintrag öffnet ein Feld, das den Titel des Datenträgers
+zum Ändern bereithält, und ein Druck auf `Return` schreibt den neuen auf den
+Datenträger. Ein Klick auf den Platz öffnet eines dort, wo die Einstellungen
+es bestimmen. Wer einen
 Ordner verlangt, für den schon ein Fenster offen ist, holt dieses Fenster
 nach vorn, statt ein weiteres zu öffnen. Das Menü hat keine Zeile *Beenden* —
 der Dateimanager ist Teil des Desktops, das Schließen seiner Fenster räumt
@@ -128,9 +135,15 @@ geöffnet ist —, bleibt es eingehängt, und das Aushängen wird erneut versuch
 sobald dieses es freigegeben haben könnte. Die Einstellungen können das, was
 Sie öffnen, stattdessen eingehängt lassen, bis Sie es auswerfen oder Ihre
 Anmeldesitzung endet. *Auswerfen* nimmt einen Datenträger heraus, den Sie
-eingehängt haben, von seinem Symbol oder von seiner Zeile in der
+eingehängt haben, oder einen Wechseldatenträger, während Sie direkt am
+Computer arbeiten, und zwar von seinem Symbol aus, von seiner Zeile in der
 Orte-Leiste aus, deren eigenes Rechtsklickmenü *Öffnen* und *Auswerfen*
-enthält; Ihre Fenster darauf wechseln zuvor nach `/Storage`. Ein
+enthält, oder aus dem Menü des Platzes auf der Symbolleiste; Ihre Fenster
+darauf wechseln zuvor nach `/Storage`. Ein Wechseldatenträger, auf dem noch
+eine Datei geöffnet ist, wird nicht ausgeworfen, und eine Meldung sagt dies.
+Dürfen Sie einen Wechseldatenträger nicht auswerfen — weil nicht Sie am
+Computer sitzen —, fragt der Desktop nach dem Namen und dem Kennwort eines
+Administrators und wirft ihn mit dessen Zustimmung aus. Ein
 Datenträger, der weggefallen ist — weil seine Platte entfernt wurde oder
 sein Server verloren ging —, bevor alles gespeichert war, was Sie darauf
 geschrieben haben, verschwindet aus der Orte-Leiste, behält aber sein

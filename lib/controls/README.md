@@ -362,6 +362,12 @@ than a colour the theme knows: a resting tile paints no plate, so the login
 chooser's account names sit straight on the wallpaper. A tile that sets none
 draws exactly the pixels it always did.
 
+`with_label_ink` draws that name, and the built-in glyph and live mark that
+wear its ink, in a colour the owner states instead of the theme's foreground:
+the desktop's resting icons take near-white over a halo on a picture, and a
+tile on a state's plate keeps the theme's ink by its owner setting none. The
+name is clipped to the tile's bounds, its shadow included.
+
 ## Masked text entry
 
 `SecretField::new(max_bytes)` is the password/passphrase/PIN entry. It shares

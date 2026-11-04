@@ -1,22 +1,14 @@
 //! The settings sheet's picture, retained between frames, and the rectangle
 //! it owes its next paint.
 //!
-//! [`crate::render::Screen`] is this for the terminal's grid; this is it for
-//! the sheet, and for the same reason. The sheet's controls already report the
-//! rectangles they change — that is what the shared damage sink is for — but
-//! the popup was re-derived from nothing on every pointer sample: a
-//! whole-sheet surface allocated afresh, every tab, row, label and swatch
-//! re-rendered, and the whole window presented. A slider drag delivers samples
-//! as fast as a hand moves, so the cost of one edit was the cost of the whole
-//! sheet, several dozen times a second, and the knob lagged the pointer.
-//!
-//! Retaining the picture is what makes a reported rectangle worth anything:
-//! the pixels outside it are already right, so the paint clips to what moved
-//! and the present carries only that.
+//! [`crate::render::Screen`] is this for the terminal's grid. The sheet's
+//! controls report the rectangles they change, and retaining the picture is
+//! what makes a report worth anything: the pixels outside it are already
+//! right, so a slider drag repaints and presents only what moved.
 
 use tairix_controls::damage;
 use tairix_geometry::{Rect, Region, Scale};
-use tairix_raster::{Color, Surface};
+use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use crate::settings::Settings;
@@ -103,11 +95,6 @@ impl SheetScreen {
             return Rect::EMPTY;
         };
         self.surface.with_clip(x, y, rect.width, rect.height, |s| {
-            // The sheet's panel is centred and does not fill the popup, and
-            // what shows through around it is the terminal behind. Clearing
-            // first is what keeps a repaint from compositing over the pixels
-            // it is replacing.
-            s.fill(Color::TRANSPARENT);
             sheet.render(s, viewport, scale, theme);
         });
         rect

@@ -25,7 +25,7 @@ use crate::blkio::{
     BlkStatus, IoBudget, BLK_DEVICE_NAME_LEN, BLK_HEALTH_COUNTERS_LEN, BLK_IO_COUNTERS_LEN,
     BLK_MEDIUM_LEN, BLK_QUEUE_COUNTERS_LEN,
 };
-use crate::driver::filesystem::{MountFlags, VolumeStats};
+use crate::driver::filesystem::{MountFlags, VolumeStats, VolumeTitle, VOLUME_TITLE_MAX};
 use crate::hwtree::{HwMatchKey, HwMatchKind, HwNode, HW_NODE_MAX_MATCH_KEYS};
 use crate::le::{decode_bool, put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::origin::ProcId;
@@ -725,6 +725,14 @@ impl SysinfoQueryId {
     /// Ungated: the board's model is no secret, and every other system shows
     /// it to every user.
     pub const PLATFORM_COMPATIBLE: Self = Self(53);
+    /// List the device-backed volumes whose device went away while they were
+    /// attached, oldest first, the most recent the kernel keeps: one
+    /// [`VolumeRemovalRecord`] each, paged by a [`PageRequest`].
+    ///
+    /// Ungated, exactly as [`Self::MOUNT_LIST`]: a device-backed volume is
+    /// listed there to every principal, so that it went away discloses
+    /// nothing that listing did not.
+    pub const VOLUME_REMOVALS: Self = Self(54);
 
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
@@ -897,6 +905,10 @@ pub enum IntrospectDomain {
     /// The view bindings: one packed [`ViewBindingRecord`] each, paged by the
     /// syscall's `arg`.
     Views = 28,
+    /// The device-backed volumes whose device went away while they were
+    /// attached, the most recent kept: one packed [`VolumeRemovalRecord`]
+    /// each, oldest first, paged by the syscall's `arg`.
+    VolumeRemovals = 29,
 }
 
 impl IntrospectDomain {
@@ -940,6 +952,7 @@ impl IntrospectDomain {
             26 => Ok(Self::DmaGroups),
             27 => Ok(Self::DmaNodes),
             28 => Ok(Self::Views),
+            29 => Ok(Self::VolumeRemovals),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -1326,6 +1339,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::PLATFORM_COMPATIBLE,
         name: "platform_compatible",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::VOLUME_REMOVALS,
+        name: "volume_removals",
         required_capability: None,
         audit: false,
     },
@@ -3484,6 +3503,11 @@ impl NetInterfaceRatesRequest {
 /// misdetection is diagnosed from the record rather than inferred. A volume
 /// with no declared medium and a record the decoder does not define both
 /// report `None`: the record never fabricates a medium.
+///
+/// Last comes the volume's [`title`](MountRecord::title): the label its
+/// filesystem records, as a disk image's volume attaches and as its owner
+/// retitles it, empty for every other volume and on a
+/// [`withheld`](MountRecord::withheld) record.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MountRecord {
@@ -3503,6 +3527,8 @@ pub struct MountRecord {
     source: [u8; MOUNT_SOURCE_MAX],
     target: [u8; MOUNT_TARGET_MAX],
     fstype: [u8; MOUNT_FSTYPE_MAX],
+    title_len: u8,
+    title: [u8; VOLUME_TITLE_MAX],
 }
 
 /// The live state of the volume behind a mount: how much of it is in use,
@@ -3531,10 +3557,10 @@ impl MountRecord {
     /// the storage-medium record, the usage block (`block_size(4)` + reserved
     /// pad `(4)` + five `u64` counts), the 16-byte volume identity, the
     /// owner (4), the volume class (1), whether it is private (1), whether it
-    /// is withheld (1) and whether its source was cut (1), then the three
-    /// fixed-capacity string buffers.
-    pub const WIRE_LEN: usize =
-        Self::SOURCE_OFFSET + MOUNT_SOURCE_MAX + MOUNT_TARGET_MAX + MOUNT_FSTYPE_MAX;
+    /// is withheld (1) and whether its source was cut (1), the three
+    /// fixed-capacity string buffers, then the title's length (1), its buffer
+    /// and the zero pad closing the record on its eight-byte alignment.
+    pub const WIRE_LEN: usize = Self::PAD_OFFSET.next_multiple_of(8);
 
     /// The storage-medium record ([`BlkMedium::encode`]), which ends where the
     /// eight-byte-aligned usage block begins.
@@ -3545,6 +3571,8 @@ impl MountRecord {
     const SOURCE_OFFSET: usize = Self::OWNER_OFFSET + 8;
     const TARGET_OFFSET: usize = Self::SOURCE_OFFSET + MOUNT_SOURCE_MAX;
     const FSTYPE_OFFSET: usize = Self::TARGET_OFFSET + MOUNT_TARGET_MAX;
+    const TITLE_OFFSET: usize = Self::FSTYPE_OFFSET + MOUNT_FSTYPE_MAX;
+    const PAD_OFFSET: usize = Self::TITLE_OFFSET + 1 + VOLUME_TITLE_MAX;
 
     /// Build a record from its parts.
     ///
@@ -3606,6 +3634,8 @@ impl MountRecord {
             source: [0u8; MOUNT_SOURCE_MAX],
             target: [0u8; MOUNT_TARGET_MAX],
             fstype: [0u8; MOUNT_FSTYPE_MAX],
+            title_len: 0,
+            title: [0u8; VOLUME_TITLE_MAX],
         };
         record.source[..source.len()].copy_from_slice(source);
         record.target[..target.len()].copy_from_slice(target);
@@ -3629,8 +3659,19 @@ impl MountRecord {
         Self { class, ..self }
     }
 
+    /// This record, of a volume its filesystem titles `title`.
+    #[must_use]
+    pub const fn with_title(self, title: VolumeTitle) -> Self {
+        Self {
+            title_len: title.len_byte(),
+            title: *title.raw_bytes(),
+            ..self
+        }
+    }
+
     /// This record as a principal other than its owner is shown it: without
-    /// the source its owner attached it from, or the usage of what it holds.
+    /// the source its owner attached it from, the usage of what it holds, or
+    /// its title.
     #[must_use]
     pub fn withheld(self) -> Self {
         Self {
@@ -3638,6 +3679,8 @@ impl MountRecord {
             source: [0; MOUNT_SOURCE_MAX],
             source_cut: false,
             usage: VolumeStats::default(),
+            title_len: 0,
+            title: [0; VOLUME_TITLE_MAX],
             withheld: true,
             ..self
         }
@@ -3733,6 +3776,15 @@ impl MountRecord {
         &self.fstype[..self.fstype_len as usize]
     }
 
+    /// The volume's own title, the label its filesystem records: empty where
+    /// none is set, and on a [`withheld`](Self::withheld) record.
+    #[must_use]
+    pub fn title(&self) -> VolumeTitle {
+        // Validated at construction and decode; an impossible failure reads
+        // as no title, never a panic.
+        VolumeTitle::from_wire(self.title_len, &self.title).unwrap_or(VolumeTitle::EMPTY)
+    }
+
     /// Encode `self` into its little-endian wire representation.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -3763,6 +3815,8 @@ impl MountRecord {
             .copy_from_slice(&self.target);
         out[Self::FSTYPE_OFFSET..Self::FSTYPE_OFFSET + MOUNT_FSTYPE_MAX]
             .copy_from_slice(&self.fstype);
+        out[Self::TITLE_OFFSET] = self.title_len;
+        out[Self::TITLE_OFFSET + 1..Self::PAD_OFFSET].copy_from_slice(&self.title);
         out
     }
 
@@ -3778,8 +3832,9 @@ impl MountRecord {
     ///   names no known state, a reserved pad is non-zero, the usage block is
     ///   internally inconsistent (available exceeding free, or free exceeding
     ///   total — a hostile reply, refused whole), a withheld record carries
-    ///   a source or usage, or a source marked cut is shorter than a cut
-    ///   leaves one.
+    ///   a source, usage or title, a source marked cut is shorter than a cut
+    ///   leaves one, or the title is not text with no control character and
+    ///   nothing past its length.
     /// * [`Errno::LengthOutOfRange`] if any length byte exceeds its buffer.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
@@ -3824,7 +3879,22 @@ impl MountRecord {
         let private = decode_bool(bytes[Self::OWNER_OFFSET + 5])?;
         let withheld = decode_bool(bytes[Self::OWNER_OFFSET + 6])?;
         let source_cut = decode_bool(bytes[Self::OWNER_OFFSET + 7])?;
-        if withheld && (source_len != 0 || usage != VolumeStats::default()) {
+        if bytes[Self::PAD_OFFSET..Self::WIRE_LEN]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        let mut title_image = [0u8; VOLUME_TITLE_MAX];
+        title_image.copy_from_slice(&bytes[Self::TITLE_OFFSET + 1..Self::PAD_OFFSET]);
+        let title =
+            VolumeTitle::from_wire(bytes[Self::TITLE_OFFSET], &title_image).map_err(|errno| {
+                match errno {
+                    Errno::LengthOutOfRange => Errno::LengthOutOfRange,
+                    _ => Errno::OutOfRange,
+                }
+            })?;
+        if withheld && (source_len != 0 || usage != VolumeStats::default() || !title.is_empty()) {
             return Err(Errno::OutOfRange);
         }
         if source_cut && usize::from(source_len) + CUT_BACKOFF_MAX < MOUNT_SOURCE_MAX {
@@ -3857,6 +3927,8 @@ impl MountRecord {
             source,
             target,
             fstype,
+            title_len: title.len_byte(),
+            title: *title.raw_bytes(),
         })
     }
 }
@@ -3891,6 +3963,10 @@ pub enum VolumeClass {
     /// A volume a disk-image file holds, attached for the principal that
     /// handed the kernel the file.
     Image = 2,
+    /// A volume on a device on a port it can be pulled from while the machine
+    /// runs — a USB stick, a card reader's card — which the user at the seat
+    /// may eject.
+    Removable = 3,
 }
 
 impl VolumeClass {
@@ -3904,6 +3980,7 @@ impl VolumeClass {
             0 => Ok(Self::Local),
             1 => Ok(Self::Network),
             2 => Ok(Self::Image),
+            3 => Ok(Self::Removable),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -4209,6 +4286,153 @@ impl ViewBindingRecord {
             .subtree
             .copy_from_slice(&bytes[Self::SUBTREE_OFFSET..Self::WIRE_LEN]);
         Ok(record)
+    }
+}
+
+/// What became of the writes a volume had not yet given its device when the
+/// device went away.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RemovedWrites {
+    /// None were outstanding: nothing written to the volume was lost.
+    None = 0,
+    /// They are held, so a verified re-insert can still give them to the
+    /// device; the volume stays listed as
+    /// [`UnavailableDirty`](MountAvailability::UnavailableDirty).
+    Held = 1,
+    /// They are lost; the volume stays listed as
+    /// [`UnavailableLost`](MountAvailability::UnavailableLost).
+    Lost = 2,
+}
+
+impl RemovedWrites {
+    /// The outcome `raw` codes.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a code naming none.
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Held),
+            2 => Ok(Self::Lost),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// How many of the most recent removals the kernel keeps for
+/// [`SysinfoQueryId::VOLUME_REMOVALS`]: every volume a hub of partitioned disks
+/// takes with it at once, so a reader woken by the change finds each, while a
+/// stream of removals never grows the record. A reader further behind than
+/// this sees the gap in the numbers, and none accepts a longer list.
+pub const VOLUME_REMOVALS_KEPT: usize = 32;
+
+/// A device-backed volume whose device went away while it was attached —
+/// disconnected, or dead — rather than being detached first, returned by
+/// [`SysinfoQueryId::VOLUME_REMOVALS`].
+///
+/// Removals are numbered from 1 in the order they happened since boot, so a
+/// reader that remembers the last number it saw knows exactly which removals
+/// are new to it, and a gap below the oldest one listed is ones it has missed.
+/// An eject or unmount is never one: what tells a volume removed without
+/// being ejected from one ejected first is the kernel's word, not the
+/// reader's guess from a volume gone from the mount table. A flat `repr(C)`
+/// block of [`Self::WIRE_LEN`] bytes encoded little-endian.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct VolumeRemovalRecord {
+    sequence: u64,
+    volume_id: [u8; VOLUME_ID_LEN],
+    writes: RemovedWrites,
+    reserved: [u8; 7],
+}
+
+impl VolumeRemovalRecord {
+    /// Encoded size of a [`VolumeRemovalRecord`] on the wire: the sequence
+    /// number (8), the volume identity (16), what became of its writes (1)
+    /// and seven reserved zero bytes.
+    pub const WIRE_LEN: usize = 32;
+
+    const VOLUME_ID_OFFSET: usize = 8;
+    const WRITES_OFFSET: usize = Self::VOLUME_ID_OFFSET + VOLUME_ID_LEN;
+
+    /// The `sequence`th removal since boot, of the volume published as
+    /// `volume_id`, its outstanding writes having come to `writes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a sequence of 0, which numbers none, or the
+    /// unpublished identity, which names no volume.
+    pub fn new(
+        sequence: u64,
+        volume_id: [u8; VOLUME_ID_LEN],
+        writes: RemovedWrites,
+    ) -> Result<Self, Errno> {
+        if sequence == 0 || volume_id == VOLUME_ID_UNPUBLISHED {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            sequence,
+            volume_id,
+            writes,
+            reserved: [0; 7],
+        })
+    }
+
+    /// Where the removal stands among those since boot, from 1.
+    #[must_use]
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// The removed volume's published identity, the key of the
+    /// [`MountRecord`] it had.
+    #[must_use]
+    pub const fn volume_id(&self) -> [u8; VOLUME_ID_LEN] {
+        self.volume_id
+    }
+
+    /// What became of the writes it had not yet given its device.
+    #[must_use]
+    pub const fn writes(&self) -> RemovedWrites {
+        self.writes
+    }
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u64(&mut out, 0, self.sequence);
+        out[Self::VOLUME_ID_OFFSET..Self::WRITES_OFFSET].copy_from_slice(&self.volume_id);
+        out[Self::WRITES_OFFSET] = self.writes as u8;
+        out
+    }
+
+    /// Decode `bytes` into a [`VolumeRemovalRecord`].
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::OutOfRange`] for a sequence of 0, the unpublished identity,
+    ///   an outcome byte naming none, or a reserved byte that is not zero.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[Self::WRITES_OFFSET + 1..Self::WIRE_LEN]
+            .iter()
+            .any(|&byte| byte != 0)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        let mut volume_id = [0u8; VOLUME_ID_LEN];
+        volume_id.copy_from_slice(&bytes[Self::VOLUME_ID_OFFSET..Self::WRITES_OFFSET]);
+        Self::new(
+            read_u64(bytes, 0),
+            volume_id,
+            RemovedWrites::from_u8(bytes[Self::WRITES_OFFSET])?,
+        )
     }
 }
 
@@ -7674,13 +7898,72 @@ mod tests {
             (26, IntrospectDomain::DmaGroups),
             (27, IntrospectDomain::DmaNodes),
             (28, IntrospectDomain::Views),
+            (29, IntrospectDomain::VolumeRemovals),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(29), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(30), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
+    }
+
+    /// A removal round-trips byte-exact, and every field a reader acts on is
+    /// checked rather than trusted: a sequence that numbers no removal, an
+    /// identity that names no volume, an outcome naming none and a reserved
+    /// byte set are all refused.
+    #[test]
+    fn a_volume_removal_round_trips_and_fails_closed() {
+        use super::{RemovedWrites, VolumeRemovalRecord, VOLUME_ID_UNPUBLISHED};
+        let id = [0x5A; 16];
+        for writes in [
+            RemovedWrites::None,
+            RemovedWrites::Held,
+            RemovedWrites::Lost,
+        ] {
+            let record = VolumeRemovalRecord::new(7, id, writes).expect("a removal");
+            let bytes = record.to_le_bytes();
+            assert_eq!(bytes.len(), VolumeRemovalRecord::WIRE_LEN);
+            assert_eq!(VolumeRemovalRecord::from_bytes(&bytes), Ok(record));
+            assert_eq!(record.sequence(), 7);
+            assert_eq!(record.volume_id(), id);
+            assert_eq!(record.writes(), writes);
+        }
+        assert_eq!(
+            VolumeRemovalRecord::new(0, id, RemovedWrites::None),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            VolumeRemovalRecord::new(1, VOLUME_ID_UNPUBLISHED, RemovedWrites::None),
+            Err(Errno::OutOfRange)
+        );
+        let good = VolumeRemovalRecord::new(1, id, RemovedWrites::Held)
+            .expect("a removal")
+            .to_le_bytes();
+        assert_eq!(
+            VolumeRemovalRecord::from_bytes(&good[..VolumeRemovalRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut bad = good;
+        bad[24] = 3;
+        assert_eq!(
+            VolumeRemovalRecord::from_bytes(&bad),
+            Err(Errno::OutOfRange)
+        );
+        for reserved in 25..VolumeRemovalRecord::WIRE_LEN {
+            let mut bad = good;
+            bad[reserved] = 1;
+            assert_eq!(
+                VolumeRemovalRecord::from_bytes(&bad),
+                Err(Errno::OutOfRange)
+            );
+        }
+        let mut unnumbered = good;
+        unnumbered[..8].fill(0);
+        assert_eq!(
+            VolumeRemovalRecord::from_bytes(&unnumbered),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]
@@ -8892,7 +9175,7 @@ mod tests {
             volume_id,
         )
         .unwrap();
-        assert_eq!(MountRecord::WIRE_LEN, 232);
+        assert_eq!(MountRecord::WIRE_LEN, 488);
         // The record's in-memory image is its wire image: the generated C
         // view mirrors one layout, not two.
         assert_eq!(core::mem::size_of::<MountRecord>(), MountRecord::WIRE_LEN);
@@ -8919,7 +9202,7 @@ mod tests {
         assert_eq!(MountRecord::from_bytes(&bytes), Ok(network));
         let class_at = MountRecord::OWNER_OFFSET + 4;
         for (at, byte) in [
-            (class_at, 3),
+            (class_at, 4),
             (class_at + 1, 2),
             (class_at + 2, 1),
             (class_at + 3, 1),
@@ -9051,6 +9334,64 @@ mod tests {
             MountRecord::from_bytes(&withheld),
             Err(Errno::OutOfRange),
             "a withheld record has no source to have cut"
+        );
+    }
+
+    #[test]
+    fn every_volume_class_round_trips_and_no_other_code_names_one() {
+        for class in [
+            VolumeClass::Local,
+            VolumeClass::Network,
+            VolumeClass::Image,
+            VolumeClass::Removable,
+        ] {
+            assert_eq!(VolumeClass::from_u8(class as u8), Ok(class));
+        }
+        assert_eq!(VolumeClass::from_u8(4), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn a_mount_records_title_is_withheld_with_its_source_and_held_to_a_title() {
+        let titled = MountRecord::new(
+            b"Letters.adf",
+            b"/Storage/letters",
+            b"affs",
+            MountFlags::NOEXEC,
+            MountVolumeState {
+                usage: VolumeStats::default(),
+                availability: MountAvailability::Available,
+                medium: None,
+            },
+            [7; 16],
+        )
+        .unwrap()
+        .with_title(crate::driver::filesystem::VolumeTitle::new("Letters").unwrap());
+        assert_eq!(titled.title().as_str(), "Letters");
+        let bytes = titled.to_le_bytes();
+        assert_eq!(MountRecord::from_bytes(&bytes), Ok(titled));
+        assert!(
+            titled.withheld().title().is_empty(),
+            "withheld with the source"
+        );
+        let at = MountRecord::TITLE_OFFSET;
+        for (offset, byte, refusal) in [
+            (at, 253, Errno::LengthOutOfRange),
+            (at + 1, b'\n', Errno::OutOfRange),
+            (at + 1, 0xFF, Errno::OutOfRange),
+            (at + 8, b'x', Errno::OutOfRange),
+            (MountRecord::PAD_OFFSET, 1, Errno::OutOfRange),
+        ] {
+            let mut bad = bytes;
+            bad[offset] = byte;
+            assert_eq!(MountRecord::from_bytes(&bad), Err(refusal), "byte {offset}");
+        }
+        let mut withheld = titled.withheld().to_le_bytes();
+        withheld[at] = 1;
+        withheld[at + 1] = b'L';
+        assert_eq!(
+            MountRecord::from_bytes(&withheld),
+            Err(Errno::OutOfRange),
+            "a withheld record has no title to show"
         );
     }
 

@@ -479,7 +479,7 @@ mod program {
             WindowEvent::RedrawRequested { .. } if surface.window.content_released() => {
                 Acted::Relaid
             }
-            WindowEvent::AppBarMenu { item } => menu_chosen(round, *item, damage),
+            WindowEvent::AppBarMenu { item, .. } => menu_chosen(round, *item, damage),
             WindowEvent::AppBarDefault => Acted::Open,
             // The size is the user's, already applied to the window: it is
             // adopted as given and never answered with one of our own, which
@@ -526,6 +526,7 @@ mod program {
             // content are handled by the caller, which owns the region and the
             // theme.
             WindowEvent::AlternateCloseRequested { .. }
+            | WindowEvent::AppBarEntered { .. }
             | WindowEvent::MenuClosed { .. }
             // The layer-surface feeds and a tool window's moves address
             // surfaces this application never opens, so none can arrive here.

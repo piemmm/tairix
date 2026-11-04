@@ -22,6 +22,8 @@ use super::{FormatOptions, Udf};
 #[path = "../../ext4/tests/support/sparse.rs"]
 mod sparse;
 
+mod label;
+
 // The records nodes are created with where a test is not about them.
 const FILE: NodeSecurity = NodeSecurity::new(0o644, 0, 0);
 const DIR: NodeSecurity = NodeSecurity::new(0o755, 0, 0);

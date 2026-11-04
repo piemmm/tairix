@@ -9,8 +9,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{
-    devices, set_control, streams, AudioTransport, ControlQueue, DeviceControl, NotifyDrain,
-    StreamClient,
+    devices, set_control, streams, AudioTransport, ControlQueue, DeviceControl, StreamClient,
 };
 use tairix_abi::audio::{
     encode_clock_reply, encode_enumerate_reply, encode_open_reply, encode_state_reply,
@@ -568,10 +567,9 @@ fn each_stream_of_a_process_reads_its_own_mailbox() {
         at: Frames::new(480),
     };
     service.post(first.grant().notify_endpoint, lost);
-    let mut drain = NotifyDrain::new(8);
-    assert_eq!(second.take_notify(&mut service, &mut drain), Ok(None));
+    assert_eq!(second.take_notify(&mut service), Ok(None));
     assert_eq!(second.state(), StreamState::Idle);
-    assert_eq!(first.take_notify(&mut service, &mut drain), Ok(Some(lost)));
+    assert_eq!(first.take_notify(&mut service), Ok(Some(lost)));
     assert_eq!(first.state(), StreamState::DeviceLost);
 }
 
@@ -610,9 +608,7 @@ fn a_malformed_notification_frame_is_refused() {
     let mut garbage = Garbage;
     let mut client = open(&mut MockService::new());
     assert!(client.await_notify(&mut garbage).is_err());
-    assert!(client
-        .take_notify(&mut garbage, &mut NotifyDrain::new(4))
-        .is_err());
+    assert!(client.take_notify(&mut garbage).is_err());
 }
 
 /// A transport that claims more bytes than it was given room for.
@@ -644,7 +640,7 @@ fn a_transport_claiming_more_than_its_buffer_is_refused_not_trusted() {
         Err(Errno::LengthOutOfRange)
     );
     assert_eq!(
-        client.take_notify(&mut overlong, &mut NotifyDrain::new(4)),
+        client.take_notify(&mut overlong),
         Err(Errno::LengthOutOfRange)
     );
 }
@@ -704,36 +700,13 @@ fn a_walk_refuses_an_id_that_does_not_ascend_and_ends_on_a_refusal() {
     );
 }
 
-/// Only a drain that took a whole mailbox's worth can follow a dropped
-/// notification, so only that one costs a read-back.
+/// Taking a stream's notifications adopts the state change among them and
+/// asks the service nothing, however many a drain takes: the service holds
+/// what a full mailbox has no room for rather than dropping it.
 #[test]
-fn a_drain_of_a_full_mailbox_and_only_that_reads_the_state_back() {
-    let mut drain = NotifyDrain::new(4);
-    for _ in 0..3 {
-        drain.took();
-    }
-    assert!(!drain.emptied(), "a mailbox never full dropped nothing");
-    for _ in 0..4 {
-        drain.took();
-    }
-    assert!(drain.emptied());
-    assert!(!drain.emptied(), "each drain is counted afresh");
-    for _ in 0..9 {
-        drain.took();
-    }
-    assert!(
-        drain.emptied(),
-        "more than a mailbox's worth arrived during the drain"
-    );
-}
-
-/// A full mailbox may have dropped the stream's last word, so the drain that
-/// empties it hands over the state the service reports, adopted.
-#[test]
-fn a_drain_that_emptied_a_full_mailbox_hands_over_the_reported_state() {
+fn taking_notifications_adopts_them_and_asks_the_service_nothing() {
     let mut service = MockService::new();
     let mut client = open(&mut service);
-    let mut drain = NotifyDrain::new(2);
     for position in [64, 128] {
         service
             .notifications
@@ -742,39 +715,17 @@ fn a_drain_that_emptied_a_full_mailbox_hands_over_the_reported_state() {
                 position: Frames::new(position),
             });
     }
-    let mut taken = Vec::new();
-    while let Some(notify) = client.take_notify(&mut service, &mut drain).expect("taken") {
-        taken.push(notify);
-    }
-    assert_eq!(
-        taken.last(),
-        Some(&AudioNotify::StateChanged {
-            stream_id: STREAM_ID,
-            state: StreamState::SeatInactive,
-            at: Frames::new(4_800),
-        })
-    );
-    assert_eq!(taken.len(), 3);
-    assert_eq!(client.state(), StreamState::SeatInactive);
-    assert_eq!(client.changed_at(), Frames::new(4_800));
-}
-
-#[test]
-fn a_drain_short_of_a_full_mailbox_asks_the_service_nothing() {
-    let mut service = MockService::new();
-    let mut client = open(&mut service);
-    let mut drain = NotifyDrain::new(3);
     service.notifications.push_back(AudioNotify::StateChanged {
         stream_id: STREAM_ID,
         state: StreamState::Running,
         at: Frames::new(16),
     });
     let asked = service.seen.len();
-    assert!(client
-        .take_notify(&mut service, &mut drain)
-        .expect("taken")
-        .is_some());
-    assert_eq!(client.take_notify(&mut service, &mut drain), Ok(None));
+    let mut taken = 0;
+    while client.take_notify(&mut service).expect("taken").is_some() {
+        taken += 1;
+    }
+    assert_eq!(taken, 3);
     assert_eq!(service.seen.len(), asked);
     assert_eq!(client.state(), StreamState::Running);
 }

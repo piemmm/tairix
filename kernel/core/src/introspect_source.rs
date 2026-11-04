@@ -1113,7 +1113,7 @@ impl Page {
 /// # Errors
 ///
 /// [`Errno::OutOfMemory`] when the page cannot be held.
-fn record_page<R, const N: usize>(
+pub(crate) fn record_page<R, const N: usize>(
     records: &[R],
     offset: u64,
     max_records: usize,

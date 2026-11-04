@@ -209,13 +209,28 @@ fn put_security(block: &mut [u8], record: &NodeSecurity, flags: u16) {
 
 impl<B: Block> Udf<B> {
     /// Write `bytes`, whole blocks, from `addr`.
-    fn write_block(&mut self, addr: LbAddr, bytes: &[u8]) -> Result<(), DriverError> {
+    pub(crate) fn write_block(&mut self, addr: LbAddr, bytes: &[u8]) -> Result<(), DriverError> {
         self.write.writes = self.write.writes.wrapping_add(1);
         self.write_sectors(addr, bytes)
     }
 
+    /// Write the descriptor `bytes` to the device's sector `sector`, outside
+    /// every partition, as part of a change.
+    pub(crate) fn write_descriptor(
+        &mut self,
+        sector: u64,
+        bytes: &[u8],
+    ) -> Result<(), DriverError> {
+        self.write.writes = self.write.writes.wrapping_add(1);
+        self.put_sectors(sector, bytes)
+    }
+
     fn write_sectors(&mut self, addr: LbAddr, bytes: &[u8]) -> Result<(), DriverError> {
         let sector = self.partitions.sector(addr)?;
+        self.put_sectors(sector, bytes)
+    }
+
+    fn put_sectors(&mut self, sector: u64, bytes: &[u8]) -> Result<(), DriverError> {
         let at = sector
             .checked_mul(u64::from(self.block_size))
             .ok_or(DriverError::DeviceFault)?;

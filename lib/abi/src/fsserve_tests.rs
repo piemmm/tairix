@@ -222,7 +222,16 @@ fn other_requests() -> Vec<Request<'static>> {
         Request::Release {
             span: Span::new(FSSERVE_WINDOW_LEN, 64 * 1024).unwrap(),
         },
+        Request::Label,
+        Request::SetLabel {
+            title: title("Workbench 3.1"),
+        },
     ]
+}
+
+/// `text` as a volume title.
+fn title(text: &str) -> crate::driver::filesystem::VolumeTitle {
+    crate::driver::filesystem::VolumeTitle::new(text).expect("a title")
 }
 
 /// One request of every operation, each argument away from its default.
@@ -296,7 +305,7 @@ fn a_request_frame_out_of_shape_is_refused() {
     let mut op = good.clone();
     op[2] = 0;
     assert_eq!(decode_request(&op), Err(Errno::OutOfRange));
-    op[2] = Op::Release as u8 + 1;
+    op[2] = Op::SetLabel as u8 + 1;
     assert_eq!(decode_request(&op), Err(Errno::OutOfRange));
     let mut flags = good.clone();
     flags[3] = 2;
@@ -600,7 +609,51 @@ fn other_answers() -> Vec<Case> {
             },
             Answer::Done,
         ),
+        (Request::Label, Answer::Label(title("Workbench 3.1"))),
+        (
+            Request::Label,
+            Answer::Label(crate::driver::filesystem::VolumeTitle::EMPTY),
+        ),
+        (
+            Request::SetLabel {
+                title: title("Ünïcode"),
+            },
+            Answer::Done,
+        ),
     ]
+}
+
+/// A title that is no title is refused at decode on either side: a control
+/// character, bytes that are not UTF-8, or more than its bound.
+#[test]
+fn a_title_out_of_its_bound_is_never_accepted() {
+    let set = Request::SetLabel {
+        title: title("Disc"),
+    };
+    let good = encoded(&set, AllocationClass::Ordinary);
+    // The title's length, then its bytes, follow the request header.
+    for byte in [0x07, 0xFF] {
+        let mut bad = good.clone();
+        bad[6] = byte;
+        assert_eq!(decode_request(&bad), Err(Errno::OutOfRange), "{byte:#x}");
+    }
+    let past = crate::driver::filesystem::VOLUME_TITLE_MAX + 1;
+    let mut long = good[..4].to_vec();
+    long.extend_from_slice(&u16::try_from(past).expect("a length").to_le_bytes());
+    long.resize(long.len() + past, b'x');
+    assert_eq!(decode_request(&long), Err(Errno::OutOfRange));
+    let label = Request::Label;
+    let reply = reply_bytes(
+        Op::Label,
+        ServerState::default(),
+        Ok(Answer::Label(title("Disc"))),
+    );
+    let mut bad = reply.clone();
+    bad[REPLY_HEAD_LEN + 2] = b'\n';
+    assert_eq!(decode_reply(&bad, &label), Err(Errno::OutOfRange));
+    let mut short = reply;
+    short.pop();
+    assert_eq!(decode_reply(&short, &label), Err(Errno::LengthOutOfRange));
 }
 
 #[test]

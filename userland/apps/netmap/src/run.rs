@@ -1001,7 +1001,7 @@ mod program {
         fn apply(&mut self, event: &WindowEvent, now_ns: u64) -> Acted {
             let changed = match *event {
                 WindowEvent::CloseRequested { .. } => return Acted::Close,
-                WindowEvent::AppBarMenu { item } if tairix_window::is_quit(item) => {
+                WindowEvent::AppBarMenu { item, .. } if tairix_window::is_quit(item) => {
                     return Acted::Quit
                 }
                 WindowEvent::AppBarDefault => return Acted::Open,
@@ -1037,6 +1037,7 @@ mod program {
                 // surfaces, so none of their answers can arrive for it.
                 WindowEvent::AlternateCloseRequested { .. }
                 | WindowEvent::AppBarMenu { .. }
+                | WindowEvent::AppBarEntered { .. }
                 | WindowEvent::TerrainChanged { .. }
                 | WindowEvent::AlertClosed { .. }
                 | WindowEvent::Authorised { .. }

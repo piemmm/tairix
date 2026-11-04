@@ -93,6 +93,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         (1u16..=u16::MAX, 1u16..=u16::MAX)
             .prop_map(|(top, bottom)| Op::SetScrollRegion { top, bottom }),
         Just(Op::ResetScrollRegion),
+        Just(Op::EraseSavedLines),
         prop_oneof![
             Just(EraseMode::ToEnd),
             Just(EraseMode::ToStart),

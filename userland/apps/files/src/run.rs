@@ -83,6 +83,7 @@ pub mod change;
 pub mod chrome;
 pub mod command;
 pub mod deferred;
+pub mod departed;
 pub mod gesture;
 pub mod icons;
 pub mod lanes;
@@ -123,16 +124,20 @@ mod program {
     use crate::route;
     use tairix_abi::discovery_ipc::DOORBELL_LEN;
     use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode, RefreshRate};
+    use tairix_abi::elevate::ElevateWords;
     use tairix_abi::fs::{
         FileId, FileKind, OpenFlags, FS_MODE_MASK, FS_NAME_MAX, FS_NEW_DIR_MODE, FS_NEW_FILE_MODE,
     };
     use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
     use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_abi::sysinfo::{MountAvailability, ViewBindingRecord};
+    use tairix_abi::sysinfo::{
+        MountAvailability, ViewBindingRecord, VolumeRemovalRecord, VOLUME_REMOVALS_KEPT,
+    };
     use tairix_abi::window_ipc::{
-        AlertOutcome, DialogModality, DocumentName, DragAt, DragItems, DropOperation, DropSite,
-        HandOverDocument, HandOverOutcome, HandOverTarget, MenuOutcome, PaneName, PointerAction,
-        WindowEvent, WindowRegion, WindowSizeState, WindowSizing,
+        AlertOutcome, AppMenuItemId, AuthorisedOutcome, DialogModality, DocumentName, DragAt,
+        DragItems, DragPicture, DropOperation, DropSite, HandOverDocument, HandOverOutcome,
+        HandOverTarget, IconAsset, MenuOutcome, PaneName, PointerAction, SystemTask, WindowEvent,
+        WindowRegion, WindowSizeState, WindowSizing, DRAG_SHOWN_MAX,
     };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, RenameFlags,
@@ -144,8 +149,8 @@ mod program {
     use tairix_browse::document;
     use tairix_browse::marquee::{self, report_band};
     use tairix_browse::mount::{
-        lost_eject_question, EjectAsked, MountAct, MountDone, MountWorker, Projection,
-        LOST_EJECT_INDEX,
+        lost_eject_question, EjectAsked, MountAct, MountDone, MountRefusal, MountWorker,
+        Projection, LOST_EJECT_INDEX,
     };
     use tairix_browse::render::{
         chooser_art, delete_alert, draw_open_with_chooser, draw_progress_window,
@@ -183,7 +188,7 @@ mod program {
     use tairix_discovery::walk::OpenSession;
     use tairix_discovery::{DiscoveryError, RtTransport, Session};
     use tairix_fsmeta::preset::acorn::Filetype;
-    use tairix_geometry::{Point, Rect, Region, Scale};
+    use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
     use tairix_icon::{
         artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
         ArtworkReader, ArtworkResolver, IconKind, IconRequest, InlineArtwork, Landed, Resolved,
@@ -312,28 +317,31 @@ mod program {
 
     /// Declare (or re-declare) this process's presence on the desktop's icon
     /// bar: its places, and none of the shared convention's rows
-    /// ([`appbar`]).
+    /// ([`appbar`]), under a fresh revision; once the session accepts it,
+    /// `declarations` keeps what its rows stood for.
     ///
     /// A refused declaration is an answer, not a death: the file manager
     /// says so and carries on, its windows still reachable through the slot
     /// the session derives from them — though with none open it has no slot,
     /// which is a desktop without its file manager: stated loudly, and still
-    /// not fatal.
+    /// not fatal. The session goes on showing what it accepted last, which is
+    /// what its answers are still resolved against.
     fn declare_app_bar(
         client: &mut WindowClient<app::RtWindowTransport>,
-        endpoint: u64,
+        (endpoint, viewer): (u64, Option<u32>),
         places: &Places,
+        declarations: &mut appbar::Declarations,
     ) {
-        let declared = appbar::component_declaration(endpoint, places).map(|(bar, skipped)| {
-            if skipped > 0 {
-                report_error(&alloc::format!(
-                    "{skipped} place(s) do not fit the icon-bar menu and are not shown"
-                ));
-            }
-            bar
-        });
-        if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
-            report_error(&alloc::format!("{refused}"));
+        let revision = declarations.next_revision();
+        let declared = appbar::component_declaration(endpoint, places, viewer, revision);
+        if let Ok((_, skipped @ 1..)) = declared {
+            report_error(&alloc::format!(
+                "{skipped} place(s) do not fit the icon-bar menu and are not shown"
+            ));
+        }
+        match tairix_window::declare_app_bar(client, declared.map(|(bar, _)| bar)) {
+            Ok(()) => declarations.accepted(revision, places),
+            Err(refused) => report_error(&alloc::format!("{refused}")),
         }
     }
 
@@ -590,6 +598,43 @@ mod program {
         chosen: Chosen,
         /// The network answer this window last showed.
         network_seen: u64,
+        /// A re-read of the folder shown that its device refused, held until
+        /// the mount table says whether its volume left with it.
+        doubt: Option<Doubt>,
+        /// Where the window is and since when, so of windows that come to show
+        /// one place the one there longest is kept.
+        arrival: Arrival,
+    }
+
+    /// A re-read refused by its device, held for a places read asked for after
+    /// it: one asked before could predate the volume leaving.
+    struct Doubt {
+        /// The number of the places read that decides it.
+        asked: u64,
+        /// What the re-read was refused with.
+        err: tairix_browse::BrowseError,
+        /// Its volume was being ridden out when a read last weighed it, so
+        /// one found back is read again rather than reported failed.
+        waited: bool,
+    }
+
+    /// Where a window came to, when on the monotonic clock, and whether by the
+    /// user's own move rather than a climb out of a place that went.
+    struct Arrival {
+        at: Location,
+        since: u64,
+        chosen: bool,
+        /// Not yet weighed against the other windows.
+        fresh: bool,
+    }
+
+    /// What converging the browser windows last left: how many there were,
+    /// and whether a set still waits on a busy one, so a turn in which nothing
+    /// moved weighs nothing.
+    #[derive(Default)]
+    struct Convergence {
+        windows: usize,
+        waiting: bool,
     }
 
     /// Which of a window's view and order the user chose for it, rather than
@@ -1169,6 +1214,95 @@ mod program {
             true
         }
 
+        /// The re-read of the folder shown was refused with `err`, answering
+        /// whether the window moved. A folder gone is left for the nearest one
+        /// above, as one the watch reports gone is. A refusal by its device
+        /// waits for the mount table to say whether its volume went too, so a
+        /// volume disconnected is stated once, not by every window showing it.
+        fn reread_refused(&mut self, err: tairix_browse::BrowseError, reads: &Reads) -> bool {
+            use tairix_browse::BrowseError;
+            match err {
+                BrowseError::NoSuchEntry
+                | BrowseError::NotADirectory
+                | BrowseError::Source(
+                    Errno::NotFound | Errno::NotADirectory | Errno::Stale | Errno::DeviceOffline,
+                ) => {
+                    self.lost = true;
+                    matches!(self.climb(), Repaint::Whole)
+                }
+                BrowseError::Source(Errno::DeviceFault | Errno::MediumError) => {
+                    // Read on the spot only while stopping, when nothing waits.
+                    let _ = reads.want_places();
+                    self.doubt = Some(Doubt {
+                        asked: reads.places_asked(),
+                        err,
+                        waited: false,
+                    });
+                    false
+                }
+                _ => self.listing_refused(err),
+            }
+        }
+
+        /// Leave `gone`, the place of a volume no longer offered that the window
+        /// shows or is on its way into, for the place above it.
+        fn leave(&mut self, gone: &[String]) -> Repaint {
+            self.doubt = None;
+            self.lost = true;
+            match self.browser.leave(gone) {
+                Ok(true) => self.landed(),
+                Ok(false) => {
+                    self.lost = false;
+                    Repaint::Nothing
+                }
+                Err(err) => {
+                    self.lost = false;
+                    self.listing_refused(err);
+                    Repaint::Nothing
+                }
+            }
+        }
+
+        /// Note that the window came to where it is now, by the user's own
+        /// move unless it was leaving a place that went.
+        fn arrive(&mut self) {
+            self.arrival = Arrival {
+                at: self.browser.location(),
+                since: tairix_rt::clock_get(),
+                chosen: !self.lost,
+                fresh: true,
+            };
+        }
+
+        /// Note where the window is at `now`, if it moved since it last came
+        /// somewhere without a landing that noted it — a move of the user's —
+        /// answering whether it came anywhere since it was last weighed.
+        fn note_arrival(&mut self, now: u64) -> bool {
+            if !self.browser.is_at(&self.arrival.at) {
+                self.arrival = Arrival {
+                    at: self.browser.location(),
+                    since: now,
+                    chosen: true,
+                    fresh: true,
+                };
+            }
+            core::mem::take(&mut self.arrival.fresh)
+        }
+
+        /// Whether closing it now would end something it holds: a gesture, a
+        /// question or notice, an operation or write it waits on, a held
+        /// clipboard, a navigation under way, a refusal not yet decided.
+        fn busy(&self) -> bool {
+            let overlays = &self.overlays;
+            self.is_occupied()
+                || self.browser.is_listing()
+                || self.doubt.is_some()
+                || overlays.starting.is_some()
+                || overlays.writing.is_some()
+                || overlays.clipboard.is_some()
+                || overlays.rename_on_arrival.is_some()
+        }
+
         /// When this window next needs the loop with no event to bring it, now
         /// it is `now` on a desktop refreshing at `refresh`: the band held over
         /// it steps the listing, a clicked name opens, or a held scrollbar
@@ -1347,7 +1481,7 @@ mod program {
             match reads.take_watch_update(self.listing) {
                 WatchUpdate::Quiet => Repaint::Nothing,
                 WatchUpdate::Changes(changes) => self.merge(changes, reads, canvas, damage),
-                WatchUpdate::Rescan => self.rescan(),
+                WatchUpdate::Rescan => self.rescan(reads),
                 WatchUpdate::Gone => {
                     drop(reads.unwatch(self.listing));
                     self.lost = true;
@@ -1361,13 +1495,10 @@ mod program {
 
         /// Read the folder again whole. A reload already under way may have
         /// begun before the change: asking again restamps it.
-        fn rescan(&mut self) -> Repaint {
+        fn rescan(&mut self, reads: &Reads) -> Repaint {
             match self.browser.refresh() {
                 Ok(()) => self.landed(),
-                Err(err) => {
-                    self.listing_refused(err);
-                    Repaint::Nothing
-                }
+                Err(err) => whole_if(self.reread_refused(err, reads)),
             }
         }
 
@@ -1397,7 +1528,7 @@ mod program {
                 toolbar,
             );
             let Ok(moved) = self.browser.apply_changes(changes) else {
-                return self.rescan();
+                return self.rescan(reads);
             };
             let marked = self.browser.mark_volume_roots(&self.places);
             let recued = cued && resolve_visible_occupancy(&mut self.browser, &self.places, canvas);
@@ -1436,6 +1567,7 @@ mod program {
             if self.browser.is_listing() {
                 return Repaint::Nothing;
             }
+            self.arrive();
             self.lost = false;
             self.browser.mark_volume_roots(&self.places);
             Repaint::Whole
@@ -1925,6 +2057,7 @@ mod program {
         // Asked before the first present, so no frame is shown unfrosted.
         apply_backdrop(client, pane.id(), grounds);
         let location = browser.location();
+        let browser_location = location.clone();
         let mut overlays = initial_overlays();
         if let Some(reason) = ladder.as_ref().and_then(Ladder::moved) {
             overlays
@@ -1958,6 +2091,13 @@ mod program {
                 settings_owed: None,
                 chosen: Chosen::default(),
                 network_seen: 0,
+                doubt: None,
+                arrival: Arrival {
+                    at: browser_location,
+                    since: tairix_rt::clock_get(),
+                    chosen: true,
+                    fresh: true,
+                },
             })),
         };
         if present_whole(&mut win, client, grounds, icons, desktop.scale()).is_err() {
@@ -2900,7 +3040,7 @@ mod program {
         windows: &mut [OpenWindow],
         (opening, kept): (&Opening, &RefCell<Kept>),
         client: &mut WindowClient<app::RtWindowTransport>,
-        places: &Places,
+        (places, declarations): (&Places, &appbar::Declarations),
         reads: &alloc::sync::Arc<Reads>,
         launcher: &RefCell<Launcher>,
         event: &WindowEvent,
@@ -2921,30 +3061,84 @@ mod program {
                 drain_open_targets(windows, (opening, launcher), client, reads, &settings);
                 BarRouted::Handled
             }
-            WindowEvent::AppBarMenu { item } if appbar::is_settings(item) => {
-                launcher.borrow_mut().open_settings(client);
-                BarRouted::Handled
-            }
-            WindowEvent::AppBarMenu { item } if appbar::is_network(item) => {
-                open_network(windows, opening, client, reads, &settings);
-                BarRouted::Handled
-            }
-            // The other rows are the places: open a window at the one chosen.
-            // A stale row — the rail was re-read since the menu was declared —
-            // names nothing and does nothing, rather than opening somewhere the
-            // user did not point at.
-            WindowEvent::AppBarMenu { item } => {
-                let location = appbar::place_of(item)
-                    .and_then(|index| places.rows().get(index))
-                    .map(|place| place.components().to_vec());
-                if location.is_some() {
-                    open_more(windows, opening, client, reads, (location, &settings));
+            // A row answers for what it stood for in the declaration its menu
+            // was copied from, so one answered after the rail moved acts
+            // there, or is refused saying why.
+            WindowEvent::AppBarMenu { item, revision } => {
+                let viewer = launcher.borrow().viewer;
+                match declarations.chosen((item, revision), places, viewer) {
+                    appbar::BarAnswer::Open(location) => {
+                        let location = Some(location.to_vec());
+                        open_more(windows, opening, client, reads, (location, &settings));
+                    }
+                    appbar::BarAnswer::Network => {
+                        open_network(windows, opening, client, reads, &settings);
+                    }
+                    appbar::BarAnswer::Settings => launcher.borrow_mut().open_settings(client),
+                    appbar::BarAnswer::Mount(eject) => launcher.borrow_mut().mount(eject),
+                    appbar::BarAnswer::Refused(refusal) => launcher.borrow_mut().refused(&refusal),
+                    appbar::BarAnswer::Nothing => {}
                 }
+                BarRouted::Handled
+            }
+            WindowEvent::AppBarEntered { item, revision } => {
+                if let Some(appbar::BarRow::Retitled(index)) = appbar::BarRow::of(item) {
+                    let field = (item, revision, index);
+                    retitle_from_bar(client, field, (places, declarations), launcher);
+                }
+                BarRouted::Handled
+            }
+            WindowEvent::Authorised {
+                window_id: None,
+                outcome,
+            } => {
+                launcher.borrow_mut().administrator_answered(outcome);
                 BarRouted::Handled
             }
             _ => BarRouted::NotMine,
         }
     }
+
+    /// Title the disk image the icon-bar field `item` was committed for — of
+    /// the place at `index` in the declaration made under `revision` — with
+    /// the text the desktop holds for it, taken once: what that asks is
+    /// [`appbar::Declarations::retitled`]'s, and a refusal, a take that
+    /// failed included, is stated.
+    fn retitle_from_bar(
+        client: &mut WindowClient<app::RtWindowTransport>,
+        (item, revision, index): (AppMenuItemId, u32, usize),
+        (places, declarations): (&Places, &appbar::Declarations),
+        launcher: &RefCell<Launcher>,
+    ) {
+        let text = match client.take_app_bar_text(item, revision) {
+            Ok(Some(text)) => text,
+            Ok(None) => return,
+            Err(err) => {
+                report_error(&alloc::format!("typed title refused ({err})"));
+                return;
+            }
+        };
+        let mut launcher = launcher.borrow_mut();
+        let viewer = launcher.viewer;
+        match declarations.retitled((index, revision), places, viewer, &text) {
+            Ok(Some(retitle)) => launcher.mount(retitle),
+            Ok(None) => {}
+            Err(refusal) => launcher.refused(&refusal),
+        }
+    }
+
+    /// Why an eject an administrator was to be asked for was refused: the
+    /// desktop is asking another question.
+    const ADMINISTRATOR_BUSY: &str =
+        "only an administrator may eject it, and another question is being answered";
+
+    /// Why an eject an administrator was to be asked for was refused: the
+    /// desktop would not ask.
+    const ADMINISTRATOR_UNASKED: &str =
+        "only an administrator may eject it, and none could be asked";
+
+    /// Why an administrator's eject failed: the command they allowed refused.
+    const ADMINISTRATOR_FAILED: &str = "it is in use, or it could not be ejected";
 
     /// Serve `event` where it is no listing's: one addressed to a Properties
     /// or progress window, or `Ctrl+,` asking for the settings in a listing's.
@@ -3044,7 +3238,7 @@ mod program {
         opening: &Opening,
         client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &mut Desktop,
-        places: &mut Places,
+        (places, declarations): (&mut Places, &appbar::Declarations),
         grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         launcher: &RefCell<Launcher>,
@@ -3059,7 +3253,7 @@ mod program {
             windows,
             (opening, kept),
             client,
-            places,
+            (places, declarations),
             reads,
             launcher,
             event,
@@ -3969,7 +4163,7 @@ mod program {
             Err(err) => {
                 report_error(&alloc::format!(
                     "the window showing that folder could not be brought forward ({err:?}); \
-                     opening another"
+                     opening it in front in that one's place"
                 ));
                 false
             }
@@ -4107,6 +4301,12 @@ mod program {
         /// its way, which may be of the very image: each is handed over once
         /// that unmount's answer lands. At most `ACTS_WAITING`.
         held: Vec<MountAct>,
+        /// The volumes the kernel says were disconnected, as far as they have
+        /// been taken in.
+        removals: crate::departed::Removals,
+        /// The volume an administrator is being asked to eject, by its
+        /// catalog name: at most one, as the desktop asks one at a time.
+        administering: Option<String>,
     }
 
     /// The folder a save dropped on a window goes into, for the reader to
@@ -4189,12 +4389,13 @@ mod program {
 
     impl Launcher {
         /// An idle launcher with no children in flight, opening documents on
-        /// `reads` for the applications `installed` declares and mounting
-        /// disk images on `mounts`.
+        /// `reads` for the applications `installed` declares, mounting disk
+        /// images on `mounts`, and acting for `viewer`.
         fn new(
             reads: alloc::sync::Arc<Reads>,
             installed: alloc::rc::Rc<Installed>,
             mounts: Option<alloc::sync::Arc<MountWorker>>,
+            viewer: Option<u32>,
         ) -> Self {
             Self {
                 in_flight: BTreeMap::new(),
@@ -4202,18 +4403,67 @@ mod program {
                 reads,
                 installed,
                 notices: Notices::default(),
-                viewer: tairix_rt::self_origin().ok().map(|origin| origin.uid()),
+                viewer,
                 mounts,
                 ejecting: Vec::new(),
                 opened: OpenedVolumes::new(),
                 attaching: 0,
                 held: Vec::new(),
+                removals: crate::departed::Removals::default(),
+                administering: None,
             }
         }
 
-        /// Mount a disk image or eject a volume, as `act` asks, off the loop:
-        /// what it came to lands with the loop's next turn. An eject waits for
-        /// the loop to let go of the volume first.
+        /// Ask an administrator, through the desktop's authorisation prompt,
+        /// to eject the volume `unmount` is to know as `named` — its durable
+        /// root, so the volume ejected is the one refused, whatever is put in
+        /// its place meanwhile — and the user knows as `name`, whose eject
+        /// `act` the kernel refused the user. Asked for the icon-bar slot,
+        /// which every eject's answer can reach whatever window asked; a
+        /// question the desktop will not put is stated as the eject's refusal.
+        fn ask_administrator(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            act: &MountAct,
+            (named, name): (&str, &str),
+        ) {
+            if self.administering.is_some() {
+                return self.refuse(act, ADMINISTRATOR_BUSY);
+            }
+            let asked = ElevateWords::new(&[named, name])
+                .map_err(|_| Errno::OutOfRange)
+                .and_then(|words| client.authorise(None, &SystemTask::Eject(words)));
+            match asked {
+                Ok(()) => self.administering = Some(String::from(name)),
+                Err(Errno::SeatBusy | Errno::AlreadyExists) => {
+                    self.refuse(act, ADMINISTRATOR_BUSY);
+                }
+                Err(_) => self.refuse(act, ADMINISTRATOR_UNASKED),
+            }
+        }
+
+        /// The administrator's eject this file manager asked for ended with
+        /// `outcome`: one that ran and failed is stated; one declined, or
+        /// done, says nothing, the mount table showing what happened.
+        fn administrator_answered(&mut self, outcome: AuthorisedOutcome) {
+            let Some(name) = self.administering.take() else {
+                return;
+            };
+            if !matches!(
+                outcome,
+                AuthorisedOutcome::Ran { exit_code: 0 } | AuthorisedOutcome::Declined
+            ) {
+                self.notices.refuse(
+                    NoticeSource::Mount,
+                    &refusal_headline(&name, "ejected"),
+                    ADMINISTRATOR_FAILED,
+                );
+            }
+        }
+
+        /// Mount a disk image, eject a volume or title one, as `act` asks, off
+        /// the loop: what it came to lands with the loop's next turn. An eject
+        /// waits for the loop to let go of the volume first.
         ///
         /// An attach never races an unmount the user did not ask for, which
         /// could take the volume it answers away: one asked for while such an
@@ -4223,7 +4473,7 @@ mod program {
             let queue = match act {
                 MountAct::Eject { .. } => &mut self.ejecting,
                 MountAct::Attach { .. } if self.opened.unmounting() => &mut self.held,
-                MountAct::Attach { .. } => return self.submit(act),
+                MountAct::Attach { .. } | MountAct::Retitle { .. } => return self.submit(act),
             };
             if queue.len() < tairix_browse::mount::ACTS_WAITING {
                 queue.push(act);
@@ -4265,16 +4515,21 @@ mod program {
                         self.attaching += usize::from(attach);
                         return;
                     }
-                    Err(act) => return self.refuse(&act, tairix_browse::mount::CROWDED),
+                    Err(act) => return self.refuse(&act, act.crowded()),
                 },
                 None => act,
             };
-            self.refuse(&act, tairix_browse::mount::UNSERVED);
+            self.refuse(&act, act.unserved());
         }
 
         /// State that `act` was not carried out, for `reason`.
         fn refuse(&mut self, act: &MountAct, reason: &'static str) {
-            let refusal = act.refused(reason);
+            self.refused(&act.refused(reason));
+        }
+
+        /// State that a mount, an eject or a title was not carried out, as
+        /// `refusal` says.
+        fn refused(&mut self, refusal: &MountRefusal) {
             self.notices
                 .refuse(NoticeSource::Mount, &refusal.headline, refusal.reason);
         }
@@ -4932,7 +5187,9 @@ mod program {
         bundles: tairix_util::defer::JobDesk<(), Vec<AppAssociation>>,
         /// The user's home components and the mounted volumes the places rail
         /// is built from, re-read when the kernel says the mount table moved.
-        places: tairix_util::defer::JobDesk<(), PlacesFound>,
+        places: tairix_util::defer::JobDesk<u64, PlacesFound>,
+        /// How many places reads have been asked for, numbering each.
+        places_asked: u64,
         /// The settings the desktop published as the generation asked for.
         settings: tairix_util::defer::JobDesk<u32, SettingsRead>,
         /// The network catalogue a window shows or is on its way to.
@@ -4952,8 +5209,13 @@ mod program {
         ejects: EjectDesk<MountAct, Vec<Projection>, MountDone>,
     }
 
-    /// State that a window's folder no longer follows its changes, and why.
+    /// State that a window's folder no longer follows its changes, and why. A
+    /// folder no volume records changes for — a namespace root, a mount point
+    /// under `/Storage` — is read again as the mount table moves instead.
     fn unfollowed(err: Errno) {
+        if err == Errno::NotImplemented {
+            return;
+        }
         report_error(&alloc::format!(
             "this folder will not refresh by itself ({err})"
         ));
@@ -5155,8 +5417,9 @@ mod program {
         Drive(u64, DriveJob),
         /// Walk the program stores for their declared file associations.
         Bundles,
-        /// Re-read the home components and the mounted volumes.
-        Places,
+        /// Re-read the home components and the mounted volumes, for the read
+        /// numbered so.
+        Places(u64),
         /// Read the settings the desktop published as this generation.
         Settings(u32),
         /// Collect from, or close, the network session.
@@ -5197,6 +5460,7 @@ mod program {
                     drives: DriveReads::new(),
                     bundles: tairix_util::defer::JobDesk::new(),
                     places: tairix_util::defer::JobDesk::new(),
+                    places_asked: 0,
                     settings: tairix_util::defer::JobDesk::new(),
                     network: tairix_util::defer::JobDesk::new(),
                     stopping: false,
@@ -5349,7 +5613,7 @@ mod program {
                     let found = scan_bundles();
                     self.work.lock().bundles.deliver(found)
                 }
-                Read::Places => self.read_places(),
+                Read::Places(asked) => self.read_places(asked),
                 Read::Network(ask) => {
                     let answer = self.browse_network(ask);
                     self.work.lock().network.deliver(answer)
@@ -5390,10 +5654,10 @@ mod program {
             owed
         }
 
-        /// Re-read the places and the lanes they route to, and deliver them,
-        /// answering whether the loop is owed a wake.
-        fn read_places(&self) -> bool {
-            let (found, routes) = places_source();
+        /// Re-read the places and the lanes they route to for the read numbered
+        /// `asked`, and deliver them, answering whether the loop is owed a wake.
+        fn read_places(&self, asked: u64) -> bool {
+            let (found, routes) = places_source(asked);
             let owed = {
                 let mut work = self.work.lock();
                 work.routes = routes;
@@ -5509,7 +5773,7 @@ mod program {
                 ReadKind::Places => services
                     .then(|| places.next_job())
                     .flatten()
-                    .map(|()| (Lane::Services, Read::Places)),
+                    .map(|asked| (Lane::Services, Read::Places(asked))),
                 ReadKind::Settings => services
                     .then(|| settings.next_job())
                     .flatten()
@@ -6037,13 +6301,15 @@ mod program {
         fn want_places(&self) -> Option<PlacesFound> {
             let submitted = {
                 let mut work = self.work.lock();
+                work.places_asked += 1;
+                let asked = work.places_asked;
                 if work.stopping {
                     drop(work);
-                    let (found, routes) = places_source();
+                    let (found, routes) = places_source(asked);
                     self.work.lock().routes = routes;
                     return Some(found);
                 }
-                work.places.submit(())
+                work.places.submit(asked)
             };
             if submitted.wake {
                 self.signal.notify_one();
@@ -6054,6 +6320,13 @@ mod program {
         /// Take a landed places read, if one has.
         fn take_places(&self) -> Option<PlacesFound> {
             self.work.lock().places.collect()
+        }
+
+        /// The number of the newest places read asked for: a read landing with
+        /// it or a later one was taken after anything that happened before
+        /// the ask.
+        fn places_asked(&self) -> u64 {
+            self.work.lock().places_asked
         }
 
         /// Ask for the settings the desktop published as `generation` to be
@@ -7439,8 +7712,9 @@ mod program {
         /// lands on chrome rather than an item, so a click through the toolbar
         /// or the places rail never pairs across it.
         double_click: DoubleClickTracker,
-        /// A primary press on a selected entry that may yet become a drag.
-        drag: Option<DragArm>,
+        /// A primary press on a selected entry that may yet become a drag, and
+        /// the entry it landed on.
+        drag: Option<(DragArm, usize)>,
         /// What this window handed the desktop to carry, until its drag ends.
         carrying: Option<Carrying>,
         /// The entry a press inside a multi-selection landed on, selected alone
@@ -7529,17 +7803,59 @@ mod program {
     }
 
     impl Carrying {
-        /// The selection as a drag, and what the desktop is told of it; `None`
-        /// with nothing selected.
-        fn of<S: DirectorySource>(browser: &Browser<S>) -> Option<(Self, DragItems)> {
-            let first = browser.entries().get(browser.selection().iter().next()?)?;
+        /// The selection as a drag led by the entry `pressed`, pressed at
+        /// `press`, and what the desktop is told of it: the lead's name as the
+        /// listing shows it, and each item shown — the lead, then the rest of
+        /// the selection in listing order — with where `frame` lays its picture
+        /// out; `None` with nothing selected.
+        fn of<S: DirectorySource>(
+            browser: &Browser<S>,
+            (pressed, press): (usize, Point),
+            frame: Frame<'_>,
+        ) -> Option<(Self, DragItems)> {
+            let mut shown = crate::gesture::drag_order(
+                browser.is_selected(pressed).then_some(pressed),
+                browser.selection().iter(),
+                DRAG_SHOWN_MAX,
+            )
+            .peekable();
+            let first = browser.entries().get(*shown.peek()?)?;
             let name = DocumentName::new(first.name()).ok()?;
             let sources = browser.listed_selection();
             let file = open_with_target(browser);
             let count = u32::try_from(sources.len()).ok()?;
-            let items = DragItems::new(name, count, file.is_some())
+            let parent = browser.folder().unwrap_or_default();
+            let mut pictures = Vec::new();
+            for index in shown {
+                let entry = browser.entries().get(index)?;
+                let kind = tairix_browse::media::icon_for_entry(entry, parent);
+                let from = tairix_browse::render::entry_target(
+                    browser,
+                    frame.scale,
+                    frame.theme,
+                    frame.viewport,
+                    frame.toolbar,
+                    index,
+                )
+                .map(|picture| {
+                    let centre = (
+                        picture.left() + to_i32(picture.width / 2),
+                        picture.top() + to_i32(picture.height / 2),
+                    );
+                    (centre.0 - press.x, centre.1 - press.y)
+                });
+                pictures.try_reserve(1).ok()?;
+                pictures.push(DragPicture {
+                    icon: IconAsset::new(kind.asset_id()).ok()?,
+                    from,
+                });
+            }
+            let hidden = browser.presentation().endings.hidden(first).len();
+            let items = DragItems::new(name, count, file.is_some(), pictures)
                 .ok()?
-                .with_filetype(first.filetype());
+                .with_filetype(first.filetype())
+                .with_hidden_ending(hidden)
+                .ok()?;
             Some((Self { sources, file }, items))
         }
     }
@@ -8293,9 +8609,9 @@ mod program {
             // repainted by the event loop itself (through `adopt_desktop`)
             // before `apply_event` is called; nothing here needs to react to
             // it a second time.
-            // Both icon-bar events were resolved before this dispatch, by
-            // the routing that owns the whole application's windows rather
-            // than by one of them.
+            // The icon bar's events, and the answer to what its slot asked,
+            // were resolved before this dispatch, by the routing that owns the
+            // whole application's windows rather than by one of them.
             //
             // A `MenuClosed` was resolved before this dispatch too, against the
             // open id the window is waiting on; one reaching here named no such
@@ -8303,6 +8619,7 @@ mod program {
             WindowEvent::Key { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::AppBarEntered { .. }
             | WindowEvent::MenuClosed { .. }
             // The layer-surface feeds and a tool window's moves address
             // surfaces this application never opens, so none can arrive here.
@@ -8340,6 +8657,160 @@ mod program {
     /// name what it changed.
     const fn whole(outcome: (bool, bool)) -> (Repaint, bool) {
         (whole_if(outcome.0), outcome.1)
+    }
+
+    /// Close every browser window showing the place another shows, as
+    /// [`crate::departed::duplicates`] chooses, each weighed where it is at
+    /// `now`: answering whether any closed. A turn in which no window came
+    /// anywhere, opened or closed, and no set waits on a busy one, weighs
+    /// nothing.
+    fn converge(
+        windows: &mut Vec<OpenWindow>,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        reads: &Reads,
+        (now, last): (u64, &mut Convergence),
+    ) -> bool {
+        let mut moved = false;
+        let mut count = 0;
+        for win in windows.iter_mut() {
+            if let WindowKind::Browser(state) = &mut win.kind {
+                count += 1;
+                moved |= state.note_arrival(now);
+            }
+        }
+        if !moved && !last.waiting && count == last.windows {
+            return false;
+        }
+        let owners: BTreeSet<u64> = windows
+            .iter()
+            .filter_map(|win| match &win.kind {
+                WindowKind::Progress(progress) => Some(progress.owner),
+                WindowKind::Browser(_) | WindowKind::Properties(_) => None,
+            })
+            .collect();
+        let mut indices = Vec::new();
+        let mut standing = Vec::new();
+        for (index, win) in windows.iter().enumerate() {
+            let WindowKind::Browser(state) = &win.kind else {
+                continue;
+            };
+            indices.push(index);
+            standing.push(crate::departed::Standing {
+                at: match &state.arrival.at {
+                    Location::Folder(components) => Some(components.as_slice()),
+                    Location::Network => None,
+                },
+                busy: state.busy() || owners.contains(&win.pane.id()),
+                focused: state.keyboard != Keyboard::Away,
+                chosen: state.arrival.chosen,
+                since: state.arrival.since,
+            });
+        }
+        let converged = crate::departed::duplicates(&standing);
+        drop(standing);
+        for &at in converged.closing.iter().rev() {
+            close_window(windows, indices[at], client, reads);
+        }
+        *last = Convergence {
+            windows: count - converged.closing.len(),
+            waiting: converged.waiting,
+        };
+        !converged.closing.is_empty()
+    }
+
+    /// Take in a places read, `found`: the rail and every window's copy of it
+    /// rebuilt, one alert for the volumes the kernel says were disconnected
+    /// without being ejected, every window within a volume no longer offered
+    /// taken above it, and the re-reads its devices refused decided — stated
+    /// once a volume, where it is still attached.
+    fn adopt_places(
+        found: PlacesFound,
+        places: &mut Places,
+        windows: &mut [OpenWindow],
+        launcher: &mut Launcher,
+    ) {
+        let PlacesFound {
+            home,
+            volumes,
+            removals,
+            asked,
+        } = found;
+        launcher.opened.mounted(|volume_id| {
+            volumes
+                .iter()
+                .any(|volume| volume.facts.volume_id == *volume_id)
+        });
+        let removed = launcher.removals.take_in(removals.as_deref());
+        let named = crate::departed::named(removed, places, &volumes);
+        if let Some(alert) = crate::departed::disconnected(&named) {
+            let notices = &mut launcher.notices;
+            if alert.lost {
+                notices.refuse(NoticeSource::Disconnected, &alert.headline, alert.reason);
+            } else {
+                notices.warn(NoticeSource::Disconnected, &alert.headline, alert.reason);
+            }
+        }
+        let departed = crate::departed::departed(places, &volumes);
+        *places = Places::new(&home, &volumes);
+        let mut unreadable: Vec<&str> = Vec::new();
+        for win in windows.iter_mut() {
+            let Some(state) = win.browser() else {
+                continue;
+            };
+            sidebar::refresh_places(&mut state.places, places);
+            let gone = departed.iter().find(|root| {
+                tairix_browse::mount::holds_within(&state.browser, &[root.as_slice()])
+            });
+            if let Some(gone) = gone {
+                state.leave(gone);
+            } else if !state.browser.follows() && !state.browser.is_listing() {
+                // A listing no volume records changes for — the namespace's
+                // own roots, the mount points under `/Storage` — moves with
+                // the mount table.
+                if let Err(err) = state.browser.refresh() {
+                    report_error(&alloc::format!("listing refused ({err})"));
+                }
+            }
+            if let Some(doubt) = state.doubt.take_if(|doubt| asked >= doubt.asked) {
+                let holder = state
+                    .browser
+                    .folder()
+                    .and_then(|at| crate::departed::holding(places, at));
+                match holder {
+                    // Decided by the read its coming back brings.
+                    Some(place) if crate::departed::recovering(place) => {
+                        state.doubt = Some(Doubt {
+                            asked: asked.saturating_add(1),
+                            waited: true,
+                            ..doubt
+                        });
+                    }
+                    // Back: its refusal may have been the ride-out's alone.
+                    Some(_) if doubt.waited => {
+                        if let Err(err) = state.browser.refresh() {
+                            state.listing_refused(err);
+                        }
+                    }
+                    Some(place) => {
+                        if !unreadable.contains(&place.label()) {
+                            unreadable.push(place.label());
+                        }
+                    }
+                    None => {
+                        state.listing_refused(doubt.err);
+                    }
+                }
+            }
+            state.browser.mark_volume_roots(&state.places);
+            // Only a listing draws the rail.
+            win.owed.owe_whole();
+        }
+        if let Some((headline, reason)) = crate::departed::unreadable(&unreadable) {
+            report_error(&alloc::format!("{headline}: {reason}"));
+            launcher
+                .notices
+                .refuse(NoticeSource::Unreadable, &headline, reason);
+        }
     }
 
     /// The mounted volumes, read from the live mount table through the shared
@@ -8382,12 +8853,33 @@ mod program {
     ///
     /// The one place the rail's inputs are gathered, so the first build and
     /// every later refresh read exactly the same sources.
-    fn places_source() -> (PlacesFound, Routes) {
+    fn places_source(asked: u64) -> (PlacesFound, Routes) {
         let found = PlacesFound {
             home: home_components().unwrap_or_default(),
             volumes: mounted_volumes(),
+            // After the mount table, which the kernel moves only once a
+            // removal is recorded: a volume found gone is found removed too.
+            removals: volume_removals(),
+            asked,
         };
         (found, Routes::new(view_bindings()))
+    }
+
+    /// The kernel's record of the volumes whose device went away while they
+    /// were attached, oldest first, or `None` where it could not be read whole.
+    /// No more are taken than the kernel keeps.
+    fn volume_removals() -> Option<alloc::vec::Vec<VolumeRemovalRecord>> {
+        let mut removals = alloc::vec::Vec::new();
+        removals.try_reserve_exact(VOLUME_REMOVALS_KEPT).ok()?;
+        tairix_procinfo::for_each_volume_removal(&IpcTransport, |removal| {
+            if removals.len() == VOLUME_REMOVALS_KEPT {
+                return Err(Errno::LengthOutOfRange);
+            }
+            removals.push(*removal);
+            Ok(WalkStep::Continue)
+        })
+        .ok()?;
+        Some(removals)
     }
 
     /// The namespace's bindings, read from the live view list. A refused or
@@ -8427,6 +8919,10 @@ mod program {
     struct PlacesFound {
         home: Vec<String>,
         volumes: Vec<Volume>,
+        /// The kernel's removal record, read after the volumes.
+        removals: Option<Vec<VolumeRemovalRecord>>,
+        /// The number of the read this answers.
+        asked: u64,
     }
 
     /// Route one pointer event in navigation mode, reporting whether the view
@@ -8609,8 +9105,12 @@ mod program {
             return (Repaint::reported_if(repaint || moved), false);
         }
         if *action == PointerAction::Moved {
-            let travelled = overlays.drag.take_if(|arm| arm.travelled(point, scale));
-            if let Some((carrying, items)) = travelled.and_then(|_| Carrying::of(browser)) {
+            let travelled = overlays
+                .drag
+                .take_if(|(arm, _)| arm.travelled(point, scale));
+            let carried = travelled
+                .and_then(|(arm, pressed)| Carrying::of(browser, (pressed, arm.at), frame));
+            if let Some((carrying, items)) = carried {
                 // A drag the desktop will not carry stays the press it was.
                 if acts.menu.client.begin_drag(acts.menu.window, items).is_ok() {
                     overlays.carrying = Some(carrying);
@@ -10023,7 +10523,9 @@ mod program {
             }
         };
         let moved = mark.report(browser, frame, damage);
-        overlays.drag = browser.is_selected(index).then_some(DragArm { at: point });
+        overlays.drag = browser
+            .is_selected(index)
+            .then_some((DragArm { at: point }, index));
         (Repaint::reported_if(applied.is_ok() && moved), false)
     }
 
@@ -12758,7 +13260,14 @@ mod program {
         // from that window meanwhile — one that opens no menu and does nothing
         // when clicked. For a component that is the whole point: its slot is
         // all it has until the user asks for a window.
-        declare_app_bar(&mut client, event_endpoint, &places);
+        let viewer = tairix_rt::self_origin().ok().map(|origin| origin.uid());
+        let mut declarations = appbar::Declarations::default();
+        declare_app_bar(
+            &mut client,
+            (event_endpoint, viewer),
+            &places,
+            &mut declarations,
+        );
 
         // --- The grid's icon artwork: the decode cache and the resolver its
         // misses go to — budgeted from one window's frame size and shared by
@@ -12885,6 +13394,7 @@ mod program {
             alloc::sync::Arc::clone(&reads),
             alloc::rc::Rc::clone(&installed),
             mounts.clone(),
+            viewer,
         ));
         if let Some(image) = start.image {
             launcher.borrow_mut().mount(MountAct::Attach {
@@ -12901,6 +13411,7 @@ mod program {
         // clean close ends it at zero.
         let desktop_moved = Cell::new(false);
         let places_read: PlacesRead = RefCell::new(reads.want_places());
+        let mut convergence = Convergence::default();
         let due = Cell::new(None);
         let network_rung = Cell::new(false);
         let mut browse = Browse::default();
@@ -12971,7 +13482,7 @@ mod program {
                     &opening,
                     &mut client,
                     &mut desktop,
-                    &mut places,
+                    (&mut places, &declarations),
                     themes.grounds(MANAGER_WINDOW_GROUND),
                     &icons,
                     &launcher,
@@ -13042,31 +13553,14 @@ mod program {
                 .borrow_mut()
                 .take()
                 .or_else(|| reads.take_places());
-            if let Some(PlacesFound { home, volumes }) = landed {
-                launcher.borrow_mut().opened.mounted(|volume_id| {
-                    volumes
-                        .iter()
-                        .any(|volume| volume.facts.volume_id == *volume_id)
-                });
-                places = Places::new(&home, &volumes);
-                for win in &mut windows {
-                    let Some(state) = win.browser() else {
-                        continue;
-                    };
-                    sidebar::refresh_places(&mut state.places, &places);
-                    // A listing no volume records changes for — the
-                    // namespace's own roots, the mount points under
-                    // `/Storage` — moves with the mount table.
-                    if !state.browser.follows() && !state.browser.is_listing() {
-                        if let Err(err) = state.browser.refresh() {
-                            report_error(&alloc::format!("listing refused ({err})"));
-                        }
-                    }
-                    state.browser.mark_volume_roots(&state.places);
-                    // Only a listing draws the rail.
-                    win.owed.owe_whole();
-                }
-                declare_app_bar(&mut client, event_endpoint, &places);
+            if let Some(found) = landed {
+                adopt_places(found, &mut places, &mut windows, &mut launcher.borrow_mut());
+                declare_app_bar(
+                    &mut client,
+                    (event_endpoint, viewer),
+                    &places,
+                    &mut declarations,
+                );
                 moved = true;
             }
             // A bundle scan the reader has answered is taken into the one
@@ -13168,7 +13662,14 @@ mod program {
                             .landed(*volume_id, answer, tairix_rt::clock_get());
                     }
                 }
-                let _ = land_mount(done, &mut held.notices);
+                match done.for_an_administrator(&places) {
+                    Some((named, name)) => {
+                        held.ask_administrator(&mut client, &done.act, (&named, name));
+                    }
+                    None => {
+                        let _ = land_mount(done, &mut held.notices);
+                    }
+                }
                 moved = true;
             }
             // Each opened volume no window shows any more, and no operation
@@ -13229,9 +13730,13 @@ mod program {
                     .settings_owed
                     .take()
                     .is_some_and(|settings| state.adopt_settings(&settings, canvas));
+                let rereading =
+                    state.browser.listing_target().is_some() && !state.browser.listing_elsewhere();
                 let replaced = match state.browser.resume() {
                     Ok(true) => {
+                        state.arrive();
                         state.lost = false;
+                        state.doubt = None;
                         state.browser.mark_volume_roots(&state.places);
                         state.overlays.double_click.reset();
                         state.rename_arrived(canvas);
@@ -13241,6 +13746,7 @@ mod program {
                     // A folder gone from its path is left for the nearest one
                     // above rather than shown as it was.
                     Err(_) if state.lost => matches!(state.climb(), Repaint::Whole),
+                    Err(err) if rereading => state.reread_refused(err, &reads),
                     Err(err) => state.listing_refused(err),
                 };
                 if replaced {
@@ -13273,6 +13779,12 @@ mod program {
                 moved |= repaint != Repaint::Nothing;
                 owe(win, repaint, &damage);
             }
+            moved |= converge(
+                &mut windows,
+                &mut client,
+                &reads,
+                (tairix_rt::clock_get(), &mut convergence),
+            );
             // A node's description the reader has answered, adopted by the
             // window that asked for it. Each window collects its own answer,
             // so one window's read never lands in another.
