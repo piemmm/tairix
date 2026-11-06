@@ -2338,7 +2338,10 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   no app has to implement the handshake, and an app that wants to render
   genuinely fresh pixels still sees the event. The seam is two traits:
   `EventDrain` (`try_next`, never waits) and `EventSource: EventDrain`
-  (`park`), with `next` defaulted as drain-then-park over the pair. An app
+  (`park`). `WindowEvents::wait` alternates them and takes in every answer
+  to a posted request before each park, since the wait-set's reply member
+  stays ready until the answer is taken and a park reporting it again would
+  return at once, ahead of any deadline the loop gave it. An app
   with work of its own — decoding a folder's icon artwork, rendering a
   gallery of wallpapers — drains with `WindowEvents::try_wait` so input is
   served ahead of that work and the loop parks only when neither has

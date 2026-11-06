@@ -13,7 +13,9 @@ use tairix_fuzzseed::meter::{metered, refusing_after, Metered};
 use tairix_kernel_ipc::audit::AuditEvent;
 use tairix_kernel_ipc::port::{EndpointId, Port};
 use tairix_kernel_ipc::senders::SenderIndex;
-use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, PortRegistry, RecvCall, ReplyOutcome};
+use tairix_kernel_ipc::{
+    CallEndpoint, CallEndpointLimits, Collector, PortRegistry, RecvCall, ReplyOutcome,
+};
 use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_log::{set_max_level, Event, Level, Sink};
@@ -255,8 +257,17 @@ fn a_call_allocates_for_what_its_caller_can_take() {
     )
     .expect("unrestricted endpoint");
     let caller = task(7);
-    let (posted, metering) =
-        metered(|| ep.post_within(&caller, 0, b"q", 16, u64::MAX, RLIMIT_INFINITY, &sink));
+    let (posted, metering) = metered(|| {
+        ep.post_within(
+            &caller,
+            (0, Collector::Poster),
+            b"q",
+            16,
+            u64::MAX,
+            RLIMIT_INFINITY,
+            &sink,
+        )
+    });
     posted.expect("posted");
     assert!(metering.largest < 4096, "{metering:?}");
 }

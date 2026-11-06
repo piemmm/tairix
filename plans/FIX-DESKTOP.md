@@ -915,9 +915,8 @@ Each stage is independently reviewable and must leave the whole-project
 - Tests: the `work` suite (`lib/rt/src/work.rs`) — a stopped worker running the
   job on its caller and leaving the answer to collect, a running one deferring
   it, the guard stopping what it holds, and a start with no wake leaving the
-  work on the caller; and the interrupted-park pair
-  (`lib/window/src/tests.rs`) — a wait ending with no event, and parking once
-  rather than spinning.
+  work on the caller; and the interrupted park (`lib/window/src/tests.rs`) — a
+  wait ending with no event after parking once rather than spinning.
 
 ### DESK-15 — Statistics are handed over, never awaited
 
@@ -1141,8 +1140,9 @@ Each stage is independently reviewable and must leave the whole-project
   (`call_post`/`call_reap`), and `WindowClient` posts `Resize`, `SetCursor`,
   `SetTooltip`, `DragVerdict`, `SetTitle` and `SetSizing`. The shared binding
   adds the window endpoint's `CallReply` source (`REPLY_TOKEN`, woken as
-  `Wake::Event`), and `WindowEvents::try_wait` reaps before it drains, so no
-  worker is involved.
+  `Wake::Event`), and `WindowEvents::try_wait` reaps before it drains —
+  `WindowEvents::wait` runs it before every park, since the member stays
+  ready until the answer is reaped — so no worker is involved.
 - **Order.** The kernel call endpoint is first-in first-out
   (`CallEndpoint::recv_call` dequeues the oldest,
   `recv_call_is_fifo_and_empty_yields_none`) and the session serves one

@@ -116,8 +116,8 @@ use tairix_caps::CapabilitySet;
 use tairix_collections::RangeError;
 use tairix_inline::ArrayVec;
 use tairix_kernel_ipc::{
-    CallEndpoint, CallEndpointLimits, CallTicket, EndpointId, PortRegistry, ReplyOutcome, Room,
-    RoomWake,
+    CallEndpoint, CallEndpointLimits, CallTicket, Collector, EndpointId, PortRegistry,
+    ReplyOutcome, Room, RoomWake,
 };
 use tairix_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
@@ -1366,10 +1366,12 @@ where
     ) -> Result<CallTicket, Errno> {
         let sched_task = caller.task_id.0;
         let limit = self.soft_limit(caller, LimitKind::IpcQueueBytes);
+        // The caller takes the answer in this call, so no other thread of its
+        // process is woken for it.
         let post = || {
             ep.post_within(
                 caller.caps,
-                sched_task,
+                (sched_task, Collector::Poster),
                 request,
                 reply_cap,
                 CALL_DEADLINE_NONE,
@@ -10927,7 +10929,11 @@ where
         if timed {
             crate::waitq::rearm_timed_wakeup();
         }
-        let outcome = settled?;
+        let outcome = settled.inspect_err(|_| {
+            // Left untaken, the call is a reaper's again, who must hear of an
+            // answer already in.
+            crate::waitq::call_woken(&ep.abandon_await(claimant, CallTicket(ticket), sched_task));
+        })?;
         self.deliver_reply(caller, claimant, outcome, (reply, reply_cap))
     }
 
@@ -53961,136 +53967,25 @@ mod tests {
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
-    /// A `CallReply` wait-set member reports ready when the reply to a
-    /// request the caller posted arrives (a non-consuming peek `call_reap`
-    /// drains), and only for the caller's own reply — the async transport's
-    /// event-loop edge (`plans/FIX-IO.md` IO1/IO2).
-    #[test]
-    fn waitset_reports_a_call_reply_member_when_its_reply_lands() {
-        let _registry = crate::callreg::registry_guard();
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = call_aspace(b"ping");
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        let owner = crate::test_boot::claim_task();
-        aspaces
-            .write()
-            .register(ProcessId(owner), space, physmap)
-            .expect("registration succeeds");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let caps = make_caps_record(owner, &[], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(owner),
-            caps: &caps,
-        };
-
-        // An unrestricted endpoint the client may post to.
-        let id = 0xCA11_5009;
-        let ep = register_call_endpoint(id, sink);
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        );
-
-        // Post (no deadline) and add a CallReply member observing this
-        // endpoint's replies.
-        assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
-        let ticket = {
-            let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(ProcessId(owner)).expect("aspace present");
-            read_ticket(physmap)
-        };
-        let set = h.waitset_create(&ctx).expect("create");
-        let call_reply_kind = tairix_abi::WaitSourceKind::CallReply as u32;
-        h.waitset_ctl(&ctx, set, WS_OP_ADD, call_reply_kind, id, 0x99)
-            .expect("add call-reply member");
-
-        // No reply yet and no deadline: the member is not ready, so the wait
-        // times out rather than reporting a phantom completion.
-        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
-
-        // The server answers the call. The member is now ready and the wait
-        // reports its token (a non-consuming peek).
-        match ep.recv_call(usize::MAX) {
-            RecvCall::Received(call) => {
-                let _ = ep.reply(call.ticket, b"pong", sink).expect("reply");
-            }
-            other => panic!("expected a received call, got {other:?}"),
-        }
-        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
-        let token_bytes = read_reply_page(
-            aspaces
-                .read()
-                .resolve(ProcessId(owner))
-                .expect("registered")
-                .1,
-            8,
-        );
-        assert_eq!(
-            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
-            0x99
-        );
-
-        // The wait only peeked; `call_reap` is what drains the reply.
-        assert_eq!(h.call_reap(&ctx, id, ticket, 0x2000, 64), Ok(4));
-
-        crate::callreg::unregister(EndpointId(id));
-        assert_eq!(crate::waitset::release_owned_by(owner), 1);
-    }
-
-    /// A wait with a `CallReply` member looks its endpoint up once, however
-    /// many times it records, scans and forgets its watch.
-    #[test]
-    fn a_call_reply_wait_looks_its_endpoint_up_once() {
-        let _registry = crate::callreg::registry_guard();
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = call_aspace(b"ping");
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        let owner = crate::test_boot::claim_task();
-        aspaces
-            .write()
-            .register(ProcessId(owner), space, physmap)
-            .expect("registration succeeds");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let caps = make_caps_record(owner, &[], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(owner),
-            caps: &caps,
-        };
-        let id = 0xCA11_500C;
-        let _ep = register_call_endpoint(id, sink);
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        );
-        let set = h.waitset_create(&ctx).expect("create");
-        let call_reply_kind = tairix_abi::WaitSourceKind::CallReply as u32;
-        h.waitset_ctl(&ctx, set, WS_OP_ADD, call_reply_kind, id, 0x99)
-            .expect("add call-reply member");
-        let before = crate::callreg::lookups_made();
-        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
-        assert_eq!(crate::callreg::lookups_made() - before, 1);
-        crate::callreg::unregister(EndpointId(id));
-        assert_eq!(crate::waitset::release_owned_by(owner), 1);
-    }
-
-    /// A `CallReply` member also reports ready when its request's per-request
-    /// deadline elapses with no reply, so a wedged device wakes the parked
-    /// reaper exactly like a real completion; the reap then fails closed
-    /// `TimedOut` (`plans/FIX-IO.md` IO1).
-    #[test]
-    fn waitset_reports_a_call_reply_member_when_its_deadline_elapses() {
+    /// The fixture every `CallReply` test here shares: a caller no scheduler
+    /// can park — a claimed host task id rather than a booted one, so a wait
+    /// that must park is refused `NotImplemented` — its address space, the
+    /// call endpoint `id` it may post to, and a wait-set holding that
+    /// endpoint's `CallReply` member under `token`, on a clock reading zero.
+    /// `body` gets the handlers, the caller, the endpoint, the set, and a
+    /// reader of the word the last call wrote out: a posted ticket or a
+    /// reported token. The endpoint and the set go afterwards.
+    fn with_call_reply_member(
+        id: u64,
+        token: u64,
+        body: impl FnOnce(
+            &KernelSyscallHandlers<'_, TestArch>,
+            &CallerContext<'_>,
+            &Arc<CallEndpoint>,
+            u64,
+            &dyn Fn() -> u64,
+        ),
+    ) {
         let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
@@ -54114,39 +54009,157 @@ mod tests {
             task_id: SecTaskId(owner),
             caps: &caps,
         };
-        let id = 0xCA11_500A;
-        let _ep = register_call_endpoint(id, sink);
+        let ep = register_call_endpoint(id, sink);
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-
-        // A 100ns relative deadline; nobody ever replies.
-        assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, 100), Ok(0));
-        let ticket = {
+        let set = h.waitset_create(&ctx).expect("create");
+        let call_reply_kind = tairix_abi::WaitSourceKind::CallReply as u32;
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, call_reply_kind, id, token)
+            .expect("add call-reply member");
+        let written = || {
             let guard = aspaces.read();
             let (_s, physmap) = guard.resolve(ProcessId(owner)).expect("aspace present");
             read_ticket(physmap)
         };
-        let set = h.waitset_create(&ctx).expect("create");
-        let call_reply_kind = tairix_abi::WaitSourceKind::CallReply as u32;
-        h.waitset_ctl(&ctx, set, WS_OP_ADD, call_reply_kind, id, 0xAB)
-            .expect("add call-reply member");
-
-        // Inside the deadline the member is not ready.
-        arch.set_monotonic_ns(50);
-        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
-
-        // Past the deadline the member is ready (the timeout edge); the reap
-        // then reports the timeout and retires the ticket.
-        arch.set_monotonic_ns(200);
-        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
-        assert_eq!(
-            h.call_reap(&ctx, id, ticket, 0x2000, 64),
-            Err(Errno::TimedOut)
-        );
-
+        body(&h, &ctx, &ep, set, &written);
         crate::callreg::unregister(EndpointId(id));
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
+    }
+
+    /// Receive the next call on `ep` and answer it `reply`, returning whom the
+    /// answer wakes.
+    fn answer_next(ep: &CallEndpoint, reply: &[u8]) -> tairix_kernel_ipc::Woken {
+        let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
+            panic!("a call is waiting");
+        };
+        ep.reply(call.ticket, reply, &NULL_LOG_SINK).expect("reply")
+    }
+
+    /// A `CallReply` wait-set member reports ready when the reply to a
+    /// request the caller posted arrives (a non-consuming peek `call_reap`
+    /// drains) — the async transport's event-loop edge (`plans/FIX-IO.md`
+    /// IO1/IO2).
+    #[test]
+    fn waitset_reports_a_call_reply_member_when_its_reply_lands() {
+        with_call_reply_member(0xCA11_5009, 0x99, |h, ctx, ep, set, written| {
+            let id = ep.id().0;
+            assert_eq!(h.call_post(ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
+            let ticket = written();
+
+            // No reply yet and no deadline: the member is not ready, so the
+            // wait times out rather than reporting a phantom completion.
+            assert_eq!(h.waitset_wait(ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+            // The server answers the call. The member is now ready and the
+            // wait reports its token (a non-consuming peek).
+            let _ = answer_next(ep, b"pong");
+            assert_eq!(h.waitset_wait(ctx, set, 0, 0x2000), Ok(0));
+            assert_eq!(written(), 0x99);
+
+            // The wait only peeked; `call_reap` is what drains the reply.
+            assert_eq!(h.call_reap(ctx, id, ticket, 0x2000, 64), Ok(4));
+        });
+    }
+
+    /// A blocking call another of the caller's threads makes is that thread's
+    /// to answer: its reply leaves a `CallReply` member unready, so a loop
+    /// parked beside a worker's call sleeps through it.
+    ///
+    /// Regression: the member reported every reply in its process's lane, so
+    /// the parked loop woke for the worker's answer, found nothing it could
+    /// reap, and spun on the still-ready member until the worker took it.
+    #[test]
+    fn a_call_reply_member_sleeps_through_another_threads_blocking_call() {
+        /// The scheduler id of the caller's thread making the blocking call.
+        const WORKER: u64 = 0xB10C;
+        with_call_reply_member(0xCA11_500D, 0x99, |h, ctx, ep, set, _| {
+            let blocking = ep
+                .post_within(
+                    ctx.caps,
+                    (WORKER, Collector::Poster),
+                    b"q",
+                    16,
+                    CALL_DEADLINE_NONE,
+                    tairix_abi::RLIMIT_INFINITY,
+                    &NULL_LOG_SINK,
+                )
+                .expect("posted");
+            let woken = answer_next(ep, b"pong");
+            assert_eq!(woken.tasks().collect::<Vec<_>>(), [WORKER]);
+            assert_eq!(
+                h.waitset_wait(ctx, set, 0, 0x2000),
+                Err(Errno::TimedOut),
+                "the worker's answer is not this loop's to reap"
+            );
+            assert!(matches!(
+                ep.take_reply(ctx.caps.process().0, blocking, 0, &NULL_LOG_SINK),
+                ReplyOutcome::Ready(_)
+            ));
+        });
+    }
+
+    /// An await that ends without its answer — here a host fixture's refused
+    /// park — leaves the call a reaper's again, so the answer still wakes the
+    /// loop watching for the caller's replies rather than being held for an
+    /// awaiter that is gone.
+    #[test]
+    fn an_await_ended_unanswered_hands_the_call_back_to_its_reapers() {
+        with_call_reply_member(0xCA11_500E, 0x99, |h, ctx, ep, set, written| {
+            let id = ep.id().0;
+            assert_eq!(h.call_post(ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
+            let ticket = written();
+            assert_eq!(
+                h.call_await(ctx, id, ticket, 0x2000, 64),
+                Err(Errno::NotImplemented),
+                "a host fixture has no task to park"
+            );
+            let _ = answer_next(ep, b"pong");
+            assert_eq!(
+                h.waitset_wait(ctx, set, 0, 0x2000),
+                Ok(0),
+                "the reaper is told"
+            );
+            assert_eq!(h.call_reap(ctx, id, ticket, 0x2000, 64), Ok(4));
+        });
+    }
+
+    /// A wait with a `CallReply` member looks its endpoint up once, however
+    /// many times it records, scans and forgets its watch.
+    #[test]
+    fn a_call_reply_wait_looks_its_endpoint_up_once() {
+        with_call_reply_member(0xCA11_500C, 0x99, |h, ctx, _, set, _| {
+            let before = crate::callreg::lookups_made();
+            assert_eq!(h.waitset_wait(ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+            assert_eq!(crate::callreg::lookups_made() - before, 1);
+        });
+    }
+
+    /// A `CallReply` member also reports ready when its request's per-request
+    /// deadline elapses with no reply, so a wedged device wakes the parked
+    /// reaper exactly like a real completion; the reap then fails closed
+    /// `TimedOut` (`plans/FIX-IO.md` IO1).
+    #[test]
+    fn waitset_reports_a_call_reply_member_when_its_deadline_elapses() {
+        with_call_reply_member(0xCA11_500A, 0xAB, |h, ctx, ep, set, written| {
+            let id = ep.id().0;
+            // A 100ns relative deadline; nobody ever replies.
+            assert_eq!(h.call_post(ctx, id, 0x1000, 4, 0x2000, 100), Ok(0));
+            let ticket = written();
+
+            // Inside the deadline the member is not ready.
+            h.arch.set_monotonic_ns(50);
+            assert_eq!(h.waitset_wait(ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+            // Past the deadline the member is ready (the timeout edge); the
+            // reap then reports the timeout and retires the ticket.
+            h.arch.set_monotonic_ns(200);
+            assert_eq!(h.waitset_wait(ctx, set, 0, 0x2000), Ok(0));
+            assert_eq!(
+                h.call_reap(ctx, id, ticket, 0x2000, 64),
+                Err(Errno::TimedOut)
+            );
+        });
     }
 
     /// A `CallReply` member whose endpoint is torn down while a request is
@@ -54162,82 +54175,35 @@ mod tests {
     /// could never arrive.
     #[test]
     fn waitset_reports_a_call_reply_member_whose_endpoint_was_torn_down() {
-        let _registry = crate::callreg::registry_guard();
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        arch.set_monotonic_ns(0);
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = call_aspace(b"ping");
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        let owner = crate::test_boot::claim_task();
-        aspaces
-            .write()
-            .register(ProcessId(owner), space, physmap)
-            .expect("registration succeeds");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let caps = make_caps_record(owner, &[], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(owner),
-            caps: &caps,
-        };
-        let id = 0xCA11_500B;
-        let _ep = register_call_endpoint(id, sink);
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        );
+        with_call_reply_member(0xCA11_500B, 0xCD, |h, ctx, ep, set, written| {
+            let id = ep.id().0;
+            // Post with **no** deadline — the client means to wait as long as
+            // the membership lasts — and observe the endpoint's replies.
+            assert_eq!(h.call_post(ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
+            let ticket = written();
 
-        // Post with **no** deadline — the client means to wait as long as the
-        // membership lasts — and observe the endpoint's replies.
-        assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
-        let ticket = {
-            let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(ProcessId(owner)).expect("aspace present");
-            read_ticket(physmap)
-        };
-        let set = h.waitset_create(&ctx).expect("create");
-        let call_reply_kind = tairix_abi::WaitSourceKind::CallReply as u32;
-        h.waitset_ctl(&ctx, set, WS_OP_ADD, call_reply_kind, id, 0xCD)
-            .expect("add call-reply member");
+            // While the server is alive with nothing to say, the member is not
+            // ready: an unanswered call is exactly what the client waits for.
+            h.arch.set_monotonic_ns(1_000);
+            assert_eq!(h.waitset_wait(ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
-        // While the server is alive with nothing to say, the member is not
-        // ready: an unanswered call is exactly what the client is waiting for.
-        arch.set_monotonic_ns(1_000);
-        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+            // The server goes away. The member is ready at once, with no
+            // deadline anywhere to have produced that wake.
+            crate::callreg::unregister(EndpointId(id));
+            h.arch.set_monotonic_ns(2_000);
+            assert_eq!(
+                h.waitset_wait(ctx, set, u64::MAX, 0x2000),
+                Ok(0),
+                "a client waiting on a service that vanished must be woken, not left parked"
+            );
+            assert_eq!(written(), 0xCD);
 
-        // The server goes away. The member is ready at once, with no deadline
-        // anywhere to have produced that wake.
-        crate::callreg::unregister(EndpointId(id));
-        arch.set_monotonic_ns(2_000);
-        assert_eq!(
-            h.waitset_wait(&ctx, set, u64::MAX, 0x2000),
-            Ok(0),
-            "a client waiting on a service that vanished must be woken, not left parked"
-        );
-        let token_bytes = read_reply_page(
-            aspaces
-                .read()
-                .resolve(ProcessId(owner))
-                .expect("registered")
-                .1,
-            8,
-        );
-        assert_eq!(
-            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
-            0xCD
-        );
-
-        // And the reap tells it why: the server is gone.
-        assert_eq!(
-            h.call_reap(&ctx, id, ticket, 0x2000, 64),
-            Err(Errno::NotFound)
-        );
-
-        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+            // And the reap tells it why: the server is gone.
+            assert_eq!(
+                h.call_reap(ctx, id, ticket, 0x2000, 64),
+                Err(Errno::NotFound)
+            );
+        });
     }
 
     /// `port_bind` binds a port owned by the kernel-trusted caller, refuses

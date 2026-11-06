@@ -112,8 +112,10 @@ pub const TARGETS: &[Target] = &[
                       answer is stranded by the drain, answer or withdrawal \
                       racing its wait; a freed slot is held by the one thread \
                       it was handed to, and one left unused passes to a \
-                      sibling looking for room as it is let go of; and a wait \
-                      for budget never sleeps through the release it waits for",
+                      sibling looking for room as it is let go of; an answer \
+                      whose await is abandoned as it lands reaches the reapers \
+                      either way; and a wait for budget never sleeps through \
+                      the release it waits for",
     },
     Target {
         package: "tairix-kernel-sched-mlfq",

@@ -433,6 +433,16 @@ time, so a second thread awaiting the same call is refused `Busy` rather than
 left asleep when the first takes the answer. A call withdrawn with
 `call_cancel` wakes its awaiter, which then finds it gone.
 
+An awaited answer is its awaiting thread's alone: `call_await`'s, and a
+blocking `ipc_call`'s, whose poster awaits it in the call (`Collector::Poster`).
+It wakes no thread watching for its caller's answers and a `CallReply` member
+never reports it, nor its deadline, so a loop parked beside a worker making
+blocking calls on the same endpoint sleeps through them rather than waking to
+nothing it may take and finding the member still ready. An await that ends
+without the answer — the process being killed, a park refused — hands the
+call back to the reapers (`CallEndpoint::abandon_await`), waking the watchers
+if the answer is in already.
+
 `CallEndpoint` is the request/reply *state machine* only and never
 blocks — the caller parking until its ticket is replied and the server
 parking until a request arrives are layered above through the same
@@ -477,10 +487,10 @@ parked on the machine, and, once the cancelled calls' charges are back, every
 thread waiting for the budget of a caller whose calls it cancelled. A wait-set
 with a `CallReply` member resolves its endpoint once per wait and records its
 thread there before every scan, a record made and forgotten at one cost
-however many watch. An answer whose poster or awaiter watches for it wakes
-those alone; one neither watches for wakes every thread watching for its
-caller's answers, since a thread other than the one that posted may collect
-it. A destruction forgets the callers its
+however many watch. An awaited answer wakes no watcher; of the others, one
+whose poster watches for it wakes that poster alone, and one it does not
+wakes every thread watching for its caller's answers, since a thread other
+than the one that posted may collect it. A destruction forgets the callers its
 endpoint noted under one acquisition of the index's lock. An endpoint the kernel
 takes down under a live server, as a detached network volume's is
 (`callreg::take_down`), wakes the server too, and the server's `Endpoint`
@@ -514,8 +524,9 @@ else to do meanwhile: it posts and awaits that one call
 (`tairix_rt::call_await`, the `call_await` syscall), answering `TimedOut` once
 the deadline passes unanswered. The await parks on the call itself rather than
 on a wait-set's reply member, which is ready for any of the process's replies
-on the endpoint, so a client with several calls outstanding there is never
-woken for another's answer. A timed-out call says nothing of what the server
+on the endpoint that no thread awaits, so a client with several calls
+outstanding there is never woken for another's answer. A timed-out call says
+nothing of what the server
 did: one still queued at its deadline was never received, while one in
 service may have been carried out and its reply refused.
 

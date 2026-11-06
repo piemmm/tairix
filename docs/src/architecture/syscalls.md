@@ -1193,13 +1193,16 @@ member of kind `WaitSourceKind::CallReply` (added under the caller's *send*
 authority to the endpoint, ready when a reply the caller posted lands **or**
 its deadline elapses), so a caller multiplexes every device's completions and
 timeouts on one wait-set with no blocking thread per device. Such a member is
-ready for *any* of the process's replies on that endpoint, so a caller that
-wants one call's answer awaits it with `call_await` (no. 167) instead: the
-reap's outcomes, less `WouldBlock`, with the thread parked until that call
-alone is answered, its deadline passes, or the endpoint ends —
-`Interrupted` once the process is being killed. The reply wakes whichever of
-the process's threads awaits it, and its poster; a call is awaited by one
-thread at a time, so a second thread awaiting it is refused `Busy`. They carry
+ready for *any* of the process's replies on that endpoint that no thread
+awaits, so a caller that wants one call's answer awaits it with `call_await`
+(no. 167) instead: the reap's outcomes, less `WouldBlock`, with the thread
+parked until that call alone is answered, its deadline passes, or the endpoint
+ends — `Interrupted` once the process is being killed. The reply wakes
+whichever of the process's threads awaits it, and its poster; a call is
+awaited by one thread at a time, so a second thread awaiting it is refused
+`Busy`. An awaited answer, and a blocking `ipc_call`'s, wakes no other thread
+and makes no `CallReply` member ready; an await that ends without its answer
+hands the call back to the reapers. They carry
 the same endpoint
 send-capability and per-endpoint grant checks as `ipc_call` (no new
 authority); `call_post` is audited like `ipc_call`, `call_reap` /

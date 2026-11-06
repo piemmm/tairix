@@ -319,6 +319,8 @@ enum CallCmd {
         caller: u8,
         len: usize,
         reply_cap: usize,
+        /// Posted by a thread blocked in the call, whose answer it is.
+        blocking: bool,
     },
     Recv,
     Reply {
@@ -333,6 +335,14 @@ enum CallCmd {
         pick: u8,
         thread: u8,
     },
+    Abandon {
+        caller: u8,
+        pick: u8,
+        thread: u8,
+    },
+    Poll {
+        caller: u8,
+    },
     Cancel {
         caller: u8,
         pick: u8,
@@ -342,13 +352,17 @@ enum CallCmd {
 
 fn call_command() -> impl Strategy<Value = CallCmd> {
     prop_oneof![
-        5 => (0..CALLERS, 0usize..=10, 0usize..=10)
-            .prop_map(|(caller, len, reply_cap)| CallCmd::Post { caller, len, reply_cap }),
+        5 => (0..CALLERS, 0usize..=10, 0usize..=10, any::<bool>()).prop_map(
+            |(caller, len, reply_cap, blocking)| CallCmd::Post { caller, len, reply_cap, blocking }
+        ),
         3 => Just(CallCmd::Recv),
         3 => any::<u8>().prop_map(|pick| CallCmd::Reply { pick }),
         3 => (0..CALLERS, any::<u8>()).prop_map(|(caller, pick)| CallCmd::Take { caller, pick }),
         2 => (0..CALLERS, any::<u8>(), 0u8..2)
             .prop_map(|(caller, pick, thread)| CallCmd::Await { caller, pick, thread }),
+        1 => (0..CALLERS, any::<u8>(), 0u8..2)
+            .prop_map(|(caller, pick, thread)| CallCmd::Abandon { caller, pick, thread }),
+        2 => (0..CALLERS).prop_map(|caller| CallCmd::Poll { caller }),
         1 => (0..CALLERS, any::<u8>()).prop_map(|(caller, pick)| CallCmd::Cancel { caller, pick }),
         1 => Just(CallCmd::Destroy),
     ]
@@ -431,6 +445,11 @@ fn poster_of(caller: u8) -> u64 {
     0x500 + u64::from(caller)
 }
 
+/// The scheduler id of a caller's `thread` that awaits its calls.
+fn waiter_of(caller: u8, thread: u8) -> u64 {
+    0x900 + u64::from(caller) * 4 + u64::from(thread)
+}
+
 fn call_endpoint() -> tairix_kernel_ipc::CallEndpoint {
     let creator = task_with(1, &CapabilitySet::empty());
     tairix_kernel_ipc::CallEndpoint::create(
@@ -485,7 +504,8 @@ impl CallRun {
                 caller,
                 len,
                 reply_cap,
-            } => self.post(*caller, *len, *reply_cap)?,
+                blocking,
+            } => self.post(*caller, *len, *reply_cap, *blocking)?,
             CallCmd::Recv => self.recv()?,
             CallCmd::Reply { pick } => self.reply(*pick)?,
             CallCmd::Take { caller, pick } => self.take(*caller, *pick)?,
@@ -494,6 +514,12 @@ impl CallRun {
                 pick,
                 thread,
             } => self.await_call(*caller, *pick, *thread)?,
+            CallCmd::Abandon {
+                caller,
+                pick,
+                thread,
+            } => self.abandon(*caller, *pick, *thread)?,
+            CallCmd::Poll { caller } => self.poll(*caller)?,
             CallCmd::Cancel { caller, pick } => self.cancel(*caller, *pick)?,
             CallCmd::Destroy => {
                 drop(self.ep.destroy(&NullSink));
@@ -512,13 +538,25 @@ impl CallRun {
         Ok(())
     }
 
-    fn post(&mut self, caller: u8, len: usize, reply_cap: usize) -> Result<(), TestCaseError> {
+    fn post(
+        &mut self,
+        caller: u8,
+        len: usize,
+        reply_cap: usize,
+        blocking: bool,
+    ) -> Result<(), TestCaseError> {
+        use tairix_kernel_ipc::Collector;
         let request: Vec<u8> = (0..len)
             .map(|i| u8::try_from(i).unwrap_or(0) ^ caller)
             .collect();
+        let collector = if blocking {
+            Collector::Poster
+        } else {
+            Collector::Reaper
+        };
         let got = self.ep.post_within(
             &self.callers[usize::from(caller)],
-            poster_of(caller),
+            (poster_of(caller), collector),
             &request,
             reply_cap,
             u64::MAX,
@@ -543,7 +581,7 @@ impl CallRun {
                 ModelCall {
                     caller,
                     state: CallState::Pending(request),
-                    awaiter: None,
+                    awaiter: blocking.then(|| poster_of(caller)),
                     reply_cap: reply_cap.min(CALL_MAX as usize),
                 },
             );
@@ -656,7 +694,7 @@ impl CallRun {
 
     fn await_call(&mut self, caller: u8, pick: u8, thread: u8) -> Result<(), TestCaseError> {
         let ticket = self.model.ticket(pick, |call| call.caller == caller);
-        let waiter = 0x900 + u64::from(caller) * 4 + u64::from(thread);
+        let waiter = waiter_of(caller, thread);
         let got = self.ep.await_by(
             process(caller),
             tairix_kernel_ipc::CallTicket(ticket),
@@ -678,6 +716,37 @@ impl CallRun {
             }
             _ => prop_assert_eq!(got, Ok(u64::MAX)),
         }
+        Ok(())
+    }
+
+    fn abandon(&mut self, caller: u8, pick: u8, thread: u8) -> Result<(), TestCaseError> {
+        let ticket = self.model.ticket(pick, |call| call.caller == caller);
+        let waiter = waiter_of(caller, thread);
+        let woken = self.ep.abandon_await(
+            process(caller),
+            tairix_kernel_ipc::CallTicket(ticket),
+            waiter,
+        );
+        // The model records no watcher, which is all an abandon can wake.
+        prop_assert_eq!(woken.tasks().count(), 0);
+        if let Some(call) = self
+            .model
+            .calls
+            .get_mut(&ticket)
+            .filter(|call| call.caller == caller && call.awaiter == Some(waiter))
+        {
+            call.awaiter = None;
+        }
+        Ok(())
+    }
+
+    /// A reaper sees an answer no thread awaits, and nothing awaited.
+    fn poll(&mut self, caller: u8) -> Result<(), TestCaseError> {
+        let want = self.model.closed
+            || self.model.calls.values().any(|call| {
+                call.caller == caller && call.state.answered() && call.awaiter.is_none()
+            });
+        prop_assert_eq!(self.ep.has_ready_reply_for(process(caller), 0), want);
         Ok(())
     }
 
@@ -713,8 +782,10 @@ impl CallRun {
 /// uncollected answers never count; callers are served in turn, each oldest
 /// first; an answer goes only to its caller and wakes its poster and the one
 /// thread awaiting it, and one longer than its caller takes completes holding
-/// nothing; a second awaiter is refused `Busy`; a withdrawn call is gone; and
-/// a destroyed endpoint cancels everything.
+/// nothing; a second awaiter is refused `Busy`; a reaper is told of an answer
+/// no thread awaits and never of an awaited one, which an abandoned await
+/// hands back; a withdrawn call is gone; and a destroyed endpoint cancels
+/// everything.
 #[test]
 fn call_endpoint_lifecycle_tracks_reference_model() {
     set_max_level(Level::Error);

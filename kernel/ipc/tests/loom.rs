@@ -33,6 +33,9 @@
 //! > thread: naming before taking is what keeps a reply landing between the
 //! > two from waking only the poster.
 //!
+//! > An await abandoned while its call is answered hands the answer to the
+//! > reapers whichever lands first: the reply wakes them, or the abandon does.
+//!
 //! Each model keeps to two contending threads: loom cannot exhaust a schedule
 //! in which two threads spin on a lock whose holder it has preempted, since
 //! every spin adds a branch the search must then explore.
@@ -522,6 +525,64 @@ fn loom_an_awaited_reply_never_misses_its_awaiter() {
             taken || woken.tasks().any(|task| task == AWAITER),
             "an awaited reply was neither there to take nor woke its awaiter"
         );
+    });
+}
+
+/// The thread recorded watching for the caller's answers.
+const WATCHER: u64 = 0x77;
+
+/// An await abandoned while the call is answered: whichever lands first, the
+/// answer reaches the reapers — the reply wakes the watcher if the abandon
+/// came first, the abandon wakes it if the reply did — and the answer is no
+/// longer held for the awaiter that left.
+#[test]
+fn loom_an_abandoned_await_never_strands_the_answer() {
+    loom::model(|| {
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(8),
+                &make_creator(),
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 8,
+                    max_reply: 8,
+                    per_sender: 1,
+                },
+                RLIMIT_INFINITY,
+                &DiscardSink,
+            )
+            .expect("open"),
+        );
+        let ticket = ep
+            .post(
+                &make_sender(),
+                1,
+                b"q",
+                u64::MAX,
+                RLIMIT_INFINITY,
+                &DiscardSink,
+            )
+            .expect("posted");
+        assert_eq!(ep.await_by(7, ticket, AWAITER), Ok(u64::MAX));
+        ep.watch_replies(WATCHER, 7).expect("recorded");
+        let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
+            panic!("the posted call is received");
+        };
+        let server = {
+            let ep = ep.clone();
+            thread::spawn(move || ep.reply(call.ticket, b"r", &DiscardSink).expect("replied"))
+        };
+        let abandoned = ep.abandon_await(7, ticket, AWAITER);
+        let replied = server.join().expect("server joined");
+        assert!(
+            abandoned
+                .tasks()
+                .chain(replied.tasks())
+                .any(|task| task == WATCHER),
+            "an abandoned await kept its answer from the reapers"
+        );
+        assert!(ep.has_ready_reply_for(7, 0), "the answer is a reaper's");
     });
 }
 

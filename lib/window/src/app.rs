@@ -83,8 +83,10 @@ pub const PRESSURE_TOKEN: u64 = 2;
 pub const DESKTOP_TOKEN: u64 = 3;
 
 /// The wait-set token of the window-reply member: the kernel wakes the park
-/// when a request the client posted to the session is answered, which the
-/// event drain takes in ([`crate::client::WindowEvents::try_wait`]).
+/// when a request the client posted to the session is answered, and keeps it
+/// ready until the event drain takes the answer in
+/// ([`crate::client::WindowEvents::try_wait`], which
+/// [`crate::client::WindowEvents::wait`] runs before every park).
 pub const REPLY_TOKEN: u64 = 4;
 
 /// The lowest token an application may give a wait-set member of its own.

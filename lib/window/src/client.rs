@@ -2700,16 +2700,16 @@ pub trait EventDrain {
 /// The event-arrival seam: the app's own event mailbox, split into the drain
 /// that never waits and the park that only waits.
 ///
-/// A loop that has nothing else to do calls [`next`](EventSource::next) and is
-/// parked on its wait-set until the session delivers. A loop that interleaves
-/// input with work of its own — a thumbnail to render, an icon to decode —
-/// drains with [`try_next`](EventDrain::try_next) so queued input is served
-/// before the next unit of that work, and parks only once both are exhausted.
-/// Both halves are the mailbox's, so the polled path and the parked one cannot
-/// drift apart.
+/// A loop that has nothing else to do calls [`WindowEvents::wait`], which
+/// alternates the two. A loop that interleaves input with work of its own — a
+/// thumbnail to render, an icon to decode — drains with
+/// [`WindowEvents::try_wait`] so queued input is served before the next unit
+/// of that work, and parks only once both are exhausted. Both halves are the
+/// mailbox's, so the polled path and the parked one cannot drift apart.
 pub trait EventSource: EventDrain {
     /// Park the task until something the app waits on is ready — a delivered
-    /// event, or whatever else the implementation's wait-set carries.
+    /// event, an answer to a posted request, or whatever else the
+    /// implementation's wait-set carries.
     ///
     /// A wake is not a promise of an event, so the answer says whether the
     /// caller must regain control ([`Parked::Interrupted`]) or the source
@@ -2720,27 +2720,6 @@ pub trait EventSource: EventDrain {
     /// Any [`Errno`] the wait surfaces; the app treats it as the channel
     /// ending.
     fn park(&mut self) -> Result<Parked, Errno>;
-
-    /// Fill `event` with the next delivered event frame, parking the task
-    /// until one arrives or a park interrupts the wait.
-    ///
-    /// Defaulted as drain-then-park, so an implementation states its two
-    /// halves once and no app carries its own spelling of the loop between
-    /// them.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] either half surfaces.
-    fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
-        loop {
-            if self.try_next(event)? {
-                return Ok(true);
-            }
-            if self.park()? == Parked::Interrupted {
-                return Ok(false);
-            }
-        }
-    }
 }
 
 /// Why reading the next event failed.
@@ -2775,7 +2754,9 @@ pub enum EventError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Parked {
     /// The source dealt with the wake itself — a memory-pressure trim, a
-    /// reaped child. Nothing is owed to the loop, so the wait continues.
+    /// reaped child — or it is the event stream's to take: a delivered event,
+    /// or an answer to a posted request, which the wait takes in before it
+    /// parks again. Nothing is owed to the loop.
     Served,
     /// Something the loop owns woke it, and the source has consumed the
     /// readiness that reported it. The wait ends with no event so the loop can
@@ -2895,31 +2876,32 @@ impl<S: EventSource> WindowEvents<S> {
     /// its content genuinely (a live view whose last frame is already
     /// out of date) can act on it.
     ///
+    /// Every park is preceded by a [`try_wait`](Self::try_wait), so an answer
+    /// to a posted request is taken in before the wait parks again: the
+    /// wait-set's reply member stays ready until it is, and a park reporting
+    /// it again would return at once, for ever.
+    ///
     /// # Errors
     ///
-    /// [`EventError::Mailbox`] for a source failure, or
+    /// [`EventError::Mailbox`] for a source failure,
     /// [`EventError::Undecodable`] for a malformed frame — a corrupt event is
-    /// refused, never guessed at. Only the first ends the channel; the frame
+    /// refused, never guessed at — or [`EventError::Refused`] for a posted
+    /// request the session refused. Only the first ends the channel; a frame
     /// is already consumed either way.
     pub fn wait<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
     ) -> Result<Option<WindowEvent>, EventError> {
-        match client.take_owed() {
-            Some(Ok(event)) => return Ok(Some(event)),
-            Some(Err(refused)) => return Err(EventError::Refused(refused)),
-            None => {}
+        loop {
+            if let Some(event) = self.try_wait(client)? {
+                return Ok(Some(event));
+            }
+            match self.source.park().map_err(EventError::Mailbox)? {
+                Parked::Served => {}
+                // The loop owns what woke it and has no event to handle.
+                Parked::Interrupted => return Ok(None),
+            }
         }
-        let mut frame = [0u8; WindowEvent::WIRE_LEN];
-        if let Some(held) = self.read_ahead.take() {
-            frame = held;
-        } else if !self.source.next(&mut frame).map_err(EventError::Mailbox)? {
-            // A park the loop owns interrupted the wait; it has something of
-            // its own to do and no event to handle.
-            return Ok(None);
-        }
-        self.fold_resizes(&mut frame)?;
-        decode_delivered(client, &frame).map(Some)
     }
 }
 

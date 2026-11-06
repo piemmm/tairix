@@ -87,8 +87,10 @@ server and every app's client can never drift apart.
   mailbox seam — never a poll — decoding each delivered `WindowEvent`
   fail-closed. The seam states its two halves as two traits: `EventDrain`
   (`try_next`, which reads a queued frame and never waits) and
-  `EventSource: EventDrain` (`park`, the app's own wait-set park, with
-  `next` defaulted as drain-then-park over the pair). An app that
+  `EventSource: EventDrain` (`park`, the app's own wait-set park).
+  `WindowEvents::wait` alternates them, taking in every answer to a posted
+  request before each park: the wait-set's reply member stays ready until
+  the answer is taken, so parking again first would spin. An app that
   interleaves work of its own drains with `WindowEvents::try_wait`, serves
   input ahead of that work, and parks only when both are exhausted; an app
   whose loop dispatches several wake sources itself — the terminal

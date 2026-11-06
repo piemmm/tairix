@@ -411,8 +411,24 @@ enum Unanswered<E> {
     Unfilled(E),
 }
 
+/// Who takes a call's answer.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Collector {
+    /// The posting thread, blocked in the call until it is answered.
+    Poster,
+    /// Whichever of the caller's threads reaps it, as a thread watching for
+    /// the caller's answers learns — unless one comes to await it
+    /// ([`CallEndpoint::await_by`]).
+    Reaper,
+}
+
 /// The threads a call's answer wakes: the one awaiting it, and its poster,
 /// which may be watching for it some other way.
+///
+/// An awaited answer is its awaiter's alone, so it wakes no thread watching
+/// for the caller's answers and none of them sees it as theirs to reap: a
+/// watcher woken for it would find nothing it may take, and park again on a
+/// readiness only the awaiter can clear.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Wakes {
     poster: u64,
@@ -420,11 +436,18 @@ struct Wakes {
 }
 
 impl Wakes {
-    const fn posted_by(poster: u64) -> Self {
+    const fn posted(poster: u64, collector: Collector) -> Self {
         Self {
             poster,
-            awaiter: None,
+            awaiter: match collector {
+                Collector::Poster => Some(poster),
+                Collector::Reaper => None,
+            },
         }
+    }
+
+    const fn awaited(self) -> bool {
+        self.awaiter.is_some()
     }
 
     /// Make `waiter` the one thread awaiting the call.
@@ -549,6 +572,8 @@ struct InServiceCall {
 struct CompletedCall {
     ticket: u64,
     reply: CallPayload,
+    /// The thread awaiting the answer, whose alone it is.
+    awaiter: Option<u64>,
     _charge: Charge,
 }
 
@@ -666,12 +691,45 @@ impl CallLane {
         }
     }
 
-    /// The deadlines of the unanswered calls.
-    fn deadlines(&self) -> impl Iterator<Item = u64> + '_ {
+    /// The deadlines of the unanswered calls no thread awaits, which a reaper
+    /// learns of.
+    fn reaped_deadlines(&self) -> impl Iterator<Item = u64> + '_ {
+        self.unanswered_calls()
+            .filter(|(wakes, _)| !wakes.awaited())
+            .map(|(_, deadline)| deadline)
+    }
+
+    /// Who each unanswered call wakes, and its deadline.
+    fn unanswered_calls(&self) -> impl Iterator<Item = (Wakes, u64)> + '_ {
         self.pending
             .iter()
-            .map(|call| call.deadline)
-            .chain(self.in_service.iter().map(|call| call.deadline))
+            .map(|call| (call.wakes, call.deadline))
+            .chain(
+                self.in_service
+                    .iter()
+                    .map(|call| (call.wakes, call.deadline)),
+            )
+    }
+
+    /// Who the unanswered call `ticket` wakes, and its deadline.
+    fn unanswered_mut(&mut self, ticket: u64) -> Option<(&mut Wakes, u64)> {
+        self.pending
+            .iter_mut()
+            .find(|call| call.ticket == ticket)
+            .map(|call| (&mut call.wakes, call.deadline))
+            .or_else(|| {
+                self.in_service
+                    .iter_mut()
+                    .find(|call| call.ticket == ticket)
+                    .map(|call| (&mut call.wakes, call.deadline))
+            })
+    }
+
+    /// Whether a reaper would make progress as of `now`: an answer no thread
+    /// awaits is in, or such a call's deadline has passed.
+    fn reapable(&self, now: u64) -> bool {
+        self.completed.iter().any(|call| call.awaiter.is_none())
+            || (self.timed > 0 && self.reaped_deadlines().any(|deadline| deadline <= now))
     }
 }
 
@@ -1352,9 +1410,9 @@ impl CallEndpoint {
         cancelled
     }
 
-    /// [`Self::post_within`] for a caller that takes any answer the endpoint
-    /// allows: an in-kernel client, or a posted call whose answer is collected
-    /// into a buffer named only then.
+    /// [`Self::post_within`] for a reaped call whose caller takes any answer
+    /// the endpoint allows: an in-kernel client, or a posted call whose answer
+    /// is collected into a buffer named only then.
     ///
     /// # Errors
     ///
@@ -1370,7 +1428,7 @@ impl CallEndpoint {
     ) -> Result<CallTicket, Errno> {
         self.post_within(
             caller,
-            poster_sched,
+            (poster_sched, Collector::Reaper),
             request,
             usize::MAX,
             deadline,
@@ -1430,6 +1488,8 @@ impl CallEndpoint {
     /// the threads to wake so the syscall layer wakes exactly this caller
     /// rather than broadcasting to every parked one. An in-kernel poster with
     /// no scheduler identity passes `0`, which only the broadcast wake reaches.
+    /// `collector` says who takes the answer: a [`Collector::Poster`] blocked
+    /// in the call takes it alone.
     ///
     /// `deadline` is the absolute monotonic time (ns) after which an
     /// unanswered request is reaped as [`ReplyOutcome::TimedOut`] by
@@ -1448,7 +1508,7 @@ impl CallEndpoint {
     pub fn post_within<S: Sink + ?Sized>(
         &self,
         caller: &TaskCapabilities,
-        poster_sched: u64,
+        (poster_sched, collector): (u64, Collector),
         request: &[u8],
         reply_cap: usize,
         deadline: u64,
@@ -1539,7 +1599,7 @@ impl CallEndpoint {
             sender_limit,
             PendingCall {
                 ticket: 0,
-                wakes: Wakes::posted_by(poster_sched),
+                wakes: Wakes::posted(poster_sched, collector),
                 origin: caller.attest_origin(),
                 deadline,
                 answer_cap,
@@ -2084,13 +2144,19 @@ impl CallEndpoint {
         lane.completed.push(CompletedCall {
             ticket,
             reply: answer,
+            awaiter: wakes.awaiter,
             _charge: charge,
         });
         serving.remove(&ticket);
+        let watchers = if wakes.awaited() {
+            RoomWake::none()
+        } else {
+            watchers.take_answered(sender, wakes.tasks())
+        };
         let woken = Woken {
             answer: Some(wakes),
             room: waiters.hand_out(sender, free),
-            watchers: watchers.take_answered(sender, wakes.tasks()),
+            watchers,
         };
         Ok((woken, kept))
     }
@@ -2246,11 +2312,13 @@ impl CallEndpoint {
         }
     }
 
-    /// Whether a [`take_reply`](Self::take_reply) by `claimant` as of `now`
-    /// would make progress — a reply is ready, or one of the claimant's
-    /// tickets has timed out, or the endpoint is closed. The non-consuming
-    /// peek a [`tairix_abi::WaitSourceKind::CallReply`] wait-set member scans:
-    /// the woken owner drains with `take_reply`, never the wait.
+    /// Whether a reaper's [`take_reply`](Self::take_reply) for `claimant` as
+    /// of `now` would make progress — an answer no thread awaits is in, or
+    /// such a call of the claimant's has timed out, or the endpoint is closed.
+    /// The non-consuming peek a [`tairix_abi::WaitSourceKind::CallReply`]
+    /// wait-set member scans: the woken owner drains with `take_reply`, never
+    /// the wait. An awaited call is its awaiter's to take, so it is never
+    /// reported here.
     #[must_use]
     pub fn has_ready_reply_for(&self, claimant: u64, now: u64) -> bool {
         // A torn-down endpoint is "ready" so the parked reaper wakes and
@@ -2259,23 +2327,21 @@ impl CallEndpoint {
             return true;
         }
         let g = self.inner.lock();
-        g.lanes.get(claimant).is_some_and(|lane| {
-            !lane.completed.is_empty()
-                || (lane.timed > 0 && lane.deadlines().any(|deadline| deadline <= now))
-        })
+        g.lanes.get(claimant).is_some_and(|lane| lane.reapable(now))
     }
 
     /// The nearest (soonest) per-ticket deadline across every outstanding
-    /// call `claimant` posted, or [`u64::MAX`] if it has none (or all are
-    /// deadline-less). The wait-set layer folds this into its one-shot timer
-    /// arming so a wedged callee's deadline wakes the parked reaper.
+    /// call `claimant` posted that no thread awaits, or [`u64::MAX`] if it has
+    /// none (or all are deadline-less). The wait-set layer folds this into its
+    /// one-shot timer arming so a wedged callee's deadline wakes the parked
+    /// reaper; an awaited call's deadline is its awaiter's own.
     #[must_use]
     pub fn next_deadline_for(&self, claimant: u64) -> u64 {
         let g = self.inner.lock();
         g.lanes
             .get(claimant)
             .filter(|lane| lane.timed > 0)
-            .and_then(|lane| lane.deadlines().min())
+            .and_then(|lane| lane.reaped_deadlines().min())
             .unwrap_or(u64::MAX)
     }
 
@@ -2286,7 +2352,9 @@ impl CallEndpoint {
     ///
     /// A reply wakes the call's awaiter and its poster rather than every
     /// reaper, so a call awaited from a thread other than its poster must name
-    /// that thread instead.
+    /// that thread instead. From here the answer is the awaiter's alone: no
+    /// thread watching for the caller's answers is woken for it or sees it as
+    /// ready, until [`Self::abandon_await`] gives it back.
     ///
     /// # Errors
     ///
@@ -2294,25 +2362,50 @@ impl CallEndpoint {
     /// already: one answer wakes one awaiter.
     pub fn await_by(&self, claimant: u64, ticket: CallTicket, waiter: u64) -> Result<u64, Errno> {
         let mut g = self.inner.lock();
-        let Some(lane) = g.lanes.get_mut(claimant) else {
-            return Ok(u64::MAX);
-        };
-        let waiting = lane
-            .pending
-            .iter_mut()
-            .find(|call| call.ticket == ticket.0)
-            .map(|call| (&mut call.wakes, call.deadline))
-            .or_else(|| {
-                lane.in_service
-                    .iter_mut()
-                    .find(|call| call.ticket == ticket.0)
-                    .map(|call| (&mut call.wakes, call.deadline))
-            });
-        let Some((wakes, deadline)) = waiting else {
+        let Some((wakes, deadline)) = g
+            .lanes
+            .get_mut(claimant)
+            .and_then(|lane| lane.unanswered_mut(ticket.0))
+        else {
             return Ok(u64::MAX);
         };
         wakes.await_by(waiter)?;
         Ok(deadline)
+    }
+
+    /// End `waiter`'s await of `claimant`'s call `ticket` without taking its
+    /// answer, answering whom to wake: the call is a reaper's again, so an
+    /// answer already in wakes the threads watching for the caller's answers,
+    /// and one still to come wakes them when it lands. A watcher counts the
+    /// call's deadline from its next wait, which is when it reads deadlines.
+    /// A call `waiter` does not await is left as it is.
+    pub fn abandon_await(&self, claimant: u64, ticket: CallTicket, waiter: u64) -> Woken {
+        let mut g = self.inner.lock();
+        let Inner {
+            lanes, watchers, ..
+        } = &mut *g;
+        let Some(lane) = lanes.get_mut(claimant) else {
+            return Woken::none();
+        };
+        if let Some((wakes, _)) = lane.unanswered_mut(ticket.0) {
+            if wakes.awaiter == Some(waiter) {
+                wakes.awaiter = None;
+            }
+            return Woken::none();
+        }
+        let Some(answered) = lane
+            .completed
+            .iter_mut()
+            .find(|call| call.ticket == ticket.0 && call.awaiter == Some(waiter))
+        else {
+            return Woken::none();
+        };
+        answered.awaiter = None;
+        Woken {
+            answer: None,
+            room: RoomWake::none(),
+            watchers: watchers.take_watching_as(claimant),
+        }
     }
 
     /// Withdraw the single call `ticket` that `claimant` posted, wherever it
@@ -3798,7 +3891,10 @@ mod tests {
                 lane.completed.capacity() >= lane.completed.len() + lane.unanswered(),
                 "every call a caller is owed has its reply slot"
             );
-            let timed = lane.deadlines().filter(|&d| d != u64::MAX).count();
+            let timed = lane
+                .unanswered_calls()
+                .filter(|&(_, deadline)| deadline != u64::MAX)
+                .count();
             assert_eq!(timed, lane.timed, "every timed call is counted");
             for call in &lane.in_service {
                 assert_eq!(g.serving.get(&call.ticket), Some(&sender));
@@ -4441,8 +4537,16 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        ep.post_within(&caller, POSTER_SCHED, b"q", 16, u64::MAX, NO_LIMIT, &sink)
-            .expect("posted");
+        ep.post_within(
+            &caller,
+            (POSTER_SCHED, Collector::Poster),
+            b"q",
+            16,
+            u64::MAX,
+            NO_LIMIT,
+            &sink,
+        )
+        .expect("posted");
         let call = recv_one(&ep).expect("received");
         assert_eq!(call.request.room.capacity(), 16);
         assert_eq!(call.request.room.written(), 1);
@@ -4460,7 +4564,15 @@ mod tests {
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
         let ticket = ep
-            .post_within(&caller, POSTER_SCHED, b"q", 2, u64::MAX, NO_LIMIT, &sink)
+            .post_within(
+                &caller,
+                (POSTER_SCHED, Collector::Poster),
+                b"q",
+                2,
+                u64::MAX,
+                NO_LIMIT,
+                &sink,
+            )
             .expect("posted");
         ep.keep_room(recv_one(&ep).expect("received"));
         let _ = ep
@@ -4834,5 +4946,114 @@ mod tests {
         ep.note_senders_in(Arc::clone(&index));
         ep.watch_replies(0x77, 7).expect("recorded");
         assert_eq!(index.uses(7), [ep.id()]);
+    }
+
+    /// An answer a thread awaits — a blocking call's, or one a thread named
+    /// itself awaiting — wakes that thread alone and is never reported to a
+    /// reaper, whose watch stands for the next answer it may take.
+    ///
+    /// Regression: such an answer woke every watcher of its caller and kept
+    /// their reply members ready until the awaiting thread took it, so a loop
+    /// parked beside a worker making blocking calls spun for every one.
+    #[test]
+    fn an_awaited_answer_is_its_awaiters_alone() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        ep.watch_replies(0x77, 7).expect("recorded");
+
+        let blocking = ep
+            .post_within(
+                &caller,
+                (POSTER_SCHED, Collector::Poster),
+                b"q",
+                16,
+                u64::MAX,
+                NO_LIMIT,
+                &sink,
+            )
+            .expect("posted");
+        let call = recv_one(&ep).expect("received");
+        assert_eq!(replied(&ep, call.ticket, &sink), [POSTER_SCHED]);
+        assert!(!ep.has_ready_reply_for(7, 0), "the poster's alone");
+        let _ = ready_bytes(ep.take_reply(7, blocking, 0, &sink));
+
+        let named = ep
+            .post(&caller, POSTER_SCHED, b"q", u64::MAX, NO_LIMIT, &sink)
+            .expect("posted");
+        assert_eq!(ep.await_by(7, named, 0xA1), Ok(u64::MAX));
+        let call = recv_one(&ep).expect("received");
+        assert_eq!(replied(&ep, call.ticket, &sink), [POSTER_SCHED, 0xA1]);
+        assert!(!ep.has_ready_reply_for(7, 0), "the awaiter's alone");
+        let _ = ready_bytes(ep.take_reply(7, named, 0, &sink));
+
+        let reaped = ep
+            .post(&caller, 0x5F, b"q", u64::MAX, NO_LIMIT, &sink)
+            .expect("posted");
+        let call = recv_one(&ep).expect("received");
+        assert_eq!(
+            replied(&ep, call.ticket, &sink),
+            [0x5F, 0x77],
+            "the watch stood for an answer a reaper may take"
+        );
+        assert!(ep.has_ready_reply_for(7, 0));
+        let _ = ready_bytes(ep.take_reply(7, reaped, 0, &sink));
+    }
+
+    /// An await ended without its answer hands the call back to the reapers:
+    /// an answer already in wakes the caller's watchers and is reported to
+    /// them, and one still to come is theirs when it lands. Another thread's
+    /// abandon changes nothing.
+    #[test]
+    fn an_abandoned_await_hands_the_call_back_to_the_reapers() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        ep.watch_replies(0x77, 7).expect("recorded");
+        let answered = ep
+            .post(&caller, POSTER_SCHED, b"a", u64::MAX, NO_LIMIT, &sink)
+            .expect("posted");
+        assert_eq!(ep.await_by(7, answered, 0xA1), Ok(u64::MAX));
+        let call = recv_one(&ep).expect("received");
+        assert_eq!(replied(&ep, call.ticket, &sink), [POSTER_SCHED, 0xA1]);
+
+        assert!(tasks(&ep.abandon_await(7, answered, 0xB2)).is_empty());
+        assert!(!ep.has_ready_reply_for(7, 0), "still the awaiter's");
+        assert_eq!(tasks(&ep.abandon_await(7, answered, 0xA1)), [0x77]);
+        assert!(ep.has_ready_reply_for(7, 0), "a reaper's again");
+        let _ = ready_bytes(ep.take_reply(7, answered, 0, &sink));
+
+        ep.watch_replies(0x77, 7).expect("recorded");
+        let unanswered = ep
+            .post(&caller, POSTER_SCHED, b"b", u64::MAX, NO_LIMIT, &sink)
+            .expect("posted");
+        assert_eq!(ep.await_by(7, unanswered, 0xA1), Ok(u64::MAX));
+        assert!(
+            tasks(&ep.abandon_await(7, unanswered, 0xA1)).is_empty(),
+            "nothing is in to take"
+        );
+        let call = recv_one(&ep).expect("received");
+        assert_eq!(replied(&ep, call.ticket, &sink), [POSTER_SCHED, 0x77]);
+        assert!(ep.has_ready_reply_for(7, 0));
+        let _ = ready_bytes(ep.take_reply(7, unanswered, 0, &sink));
+    }
+
+    /// An awaited call's deadline is its awaiter's to keep: a reaper is
+    /// neither woken for it nor told of its passing.
+    #[test]
+    fn an_awaited_calls_deadline_is_not_a_reapers() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        ep.post(&caller, POSTER_SCHED, b"a", 300, NO_LIMIT, &sink)
+            .expect("a");
+        let awaited = ep
+            .post(&caller, POSTER_SCHED, b"b", 150, NO_LIMIT, &sink)
+            .expect("b");
+        assert_eq!(ep.next_deadline_for(7), 150);
+        assert_eq!(ep.await_by(7, awaited, 0xA1), Ok(150));
+        assert_eq!(ep.next_deadline_for(7), 300, "the reaped call's alone");
+        assert!(!ep.has_ready_reply_for(7, 200), "the awaited one passed");
+        assert!(ep.has_ready_reply_for(7, 300), "the reaped one passed");
     }
 }

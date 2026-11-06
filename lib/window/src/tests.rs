@@ -10,7 +10,7 @@ use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
 use tairix_abi::desktop::{Appearance, DesktopInfo};
 use tairix_abi::driver::display::{
@@ -1310,8 +1310,9 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
 /// tried first and that a park happened at all.
 struct QueueSource {
     queue: VecDeque<[u8; WindowEvent::WIRE_LEN]>,
-    /// How many times the source has been parked.
-    parked: usize,
+    /// How many times the source has been parked, shared so a test can read
+    /// it once a waiter owns the source.
+    parked: Rc<Cell<usize>>,
 }
 
 impl QueueSource {
@@ -1319,7 +1320,7 @@ impl QueueSource {
     fn new(frames: impl IntoIterator<Item = [u8; WindowEvent::WIRE_LEN]>) -> Self {
         Self {
             queue: frames.into_iter().collect(),
-            parked: 0,
+            parked: Rc::default(),
         }
     }
 }
@@ -1336,16 +1337,17 @@ impl EventDrain for QueueSource {
 
 impl EventSource for QueueSource {
     fn park(&mut self) -> Result<Parked, Errno> {
-        self.parked += 1;
+        self.parked.set(self.parked.get() + 1);
         Err(Errno::WouldBlock)
     }
 }
 
 /// A source whose park is interrupted by something the loop owns — a worker's
 /// answer — rather than by an event.
+#[derive(Default)]
 struct InterruptingSource {
     /// How many times the source has been parked.
-    parked: usize,
+    parked: Rc<Cell<usize>>,
 }
 
 impl EventDrain for InterruptingSource {
@@ -1356,7 +1358,7 @@ impl EventDrain for InterruptingSource {
 
 impl EventSource for InterruptingSource {
     fn park(&mut self) -> Result<Parked, Errno> {
-        self.parked += 1;
+        self.parked.set(self.parked.get() + 1);
         Ok(Parked::Interrupted)
     }
 }
@@ -1364,23 +1366,80 @@ impl EventSource for InterruptingSource {
 /// The regression the answer type exists for. A worker's wake is level-
 /// triggered, so a wait that treated it as "no event yet" would park again on
 /// a source that is *still* ready — a spin, not a wait, and the answer would
-/// never reach the loop. One interrupted park ends the wait with no event.
+/// never reach the loop. One interrupted park ends the wait with no event,
+/// and it is the only park: the wait returns to the loop rather than going
+/// round again.
 #[test]
 fn an_interrupted_park_ends_the_wait_without_an_event() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let mut waiter = WindowEvents::new(InterruptingSource { parked: 0 });
+    let source = InterruptingSource::default();
+    let parked = Rc::clone(&source.parked);
+    let mut waiter = WindowEvents::new(source);
     assert_eq!(waiter.wait(&mut client), Ok(None));
+    assert_eq!(parked.get(), 1);
 }
 
-/// And it parks exactly once: the wait returns to the loop rather than
-/// spinning round the drain-park pair.
+/// More parks than any wait in these tests takes; one past it is a spin.
+const SPIN_BOUND: usize = 16;
+
+/// An app's wait-set as the kernel keeps it: the reply member is ready while
+/// an answer to a posted request lies untaken, and the first park is where
+/// the desktop shows the frame that releases a held answer. With nothing
+/// ready the park ends at the loop's own deadline.
+struct ReplyWakeSource {
+    loopback: Rc<RefCell<Loopback>>,
+    parked: Rc<Cell<usize>>,
+}
+
+impl EventDrain for ReplyWakeSource {
+    fn try_next(&mut self, _event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
+        Ok(false)
+    }
+}
+
+impl EventSource for ReplyWakeSource {
+    fn park(&mut self) -> Result<Parked, Errno> {
+        let parks = self.parked.get() + 1;
+        self.parked.set(parks);
+        if parks > SPIN_BOUND {
+            return Err(Errno::Busy);
+        }
+        let mut loopback = self.loopback.borrow_mut();
+        if parks == 1 {
+            loopback.latch();
+        }
+        // A reply wakes the park as an event does: it is the stream's to take.
+        if loopback.answered.is_empty() {
+            Ok(Parked::Interrupted)
+        } else {
+            Ok(Parked::Served)
+        }
+    }
+}
+
+/// An answer landing while the app is parked wakes it, and the wait takes the
+/// answer in before parking again. Parked again with the answer untaken, the
+/// reply member stays ready and every park returns at once, ahead of any
+/// deadline the loop gave it: the spin that left Settings unable to adopt its
+/// resized extent, and Patience's deal frozen until the pointer moved.
 #[test]
-fn an_interrupted_wait_parks_once_rather_than_spinning() {
-    let mut source = InterruptingSource { parked: 0 };
-    let mut frame = [0u8; WindowEvent::WIRE_LEN];
-    assert_eq!(source.next(&mut frame), Ok(false), "no event was delivered");
-    assert_eq!(source.parked, 1);
+fn an_answer_landing_during_the_park_is_taken_in_before_the_next() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_frames = true;
+    hold_a_present(&mut client, window);
+
+    let parked = Rc::default();
+    let mut waiter = WindowEvents::new(ReplyWakeSource {
+        loopback: Rc::clone(&loopback),
+        parked: Rc::clone(&parked),
+    });
+    assert_eq!(waiter.wait(&mut client), Ok(None), "the deadline ends it");
+    assert_eq!(parked.get(), 2, "woken by the answer, then by the deadline");
+    assert!(!client.present_in_flight(window), "the answer was taken in");
+    assert!(loopback.borrow().answered.is_empty());
 }
 
 /// Full damage over SURFACE.
@@ -2902,27 +2961,31 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
     );
 }
 
-/// The defaulted `next` drains before it parks: a loop that has queued input
-/// must never be made to wait for a wake that has already been consumed.
+/// The parked wait drains before it parks: a loop that has queued input must
+/// never be made to wait for a wake that has already been consumed.
 ///
 /// The park is what a loop interleaving decode work with input has to avoid
 /// entering while input is queued, so the ordering is asserted rather than
 /// assumed.
 #[test]
 fn the_parked_wait_drains_before_it_parks() {
-    let a = 11;
-    let queued = WindowEvent::CloseRequested { window_id: a };
-    let mut source = QueueSource::new([queued.to_le_bytes()]);
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let queued = WindowEvent::CloseRequested { window_id: 11 };
+    let source = QueueSource::new([queued.to_le_bytes()]);
+    let parked = Rc::clone(&source.parked);
+    let mut waiter = WindowEvents::new(source);
 
-    let mut frame = [0u8; WindowEvent::WIRE_LEN];
-    assert_eq!(source.next(&mut frame), Ok(true));
-    assert_eq!(WindowEvent::from_bytes(&frame), Ok(queued));
-    assert_eq!(source.parked, 0, "a queued event must not cost a park");
+    assert_eq!(waiter.wait(&mut client), Ok(Some(queued)));
+    assert_eq!(parked.get(), 0, "a queued event must not cost a park");
 
     // Nothing left: the drain reports empty and the park is entered, which is
     // how a genuinely idle loop stops running.
-    assert_eq!(source.next(&mut frame), Err(Errno::WouldBlock));
-    assert_eq!(source.parked, 1);
+    assert_eq!(
+        waiter.wait(&mut client),
+        Err(EventError::Mailbox(Errno::WouldBlock))
+    );
+    assert_eq!(parked.get(), 1);
 }
 
 /// `try_wait` reports an empty mailbox as `None` without parking, and hands
